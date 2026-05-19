@@ -34,7 +34,7 @@ async function freePort() {
       const address = server.address()
       if (!address || typeof address === "string") {
         server.close()
-        reject(new Error("no pude encontrar un puerto libre"))
+        reject(new Error("couldn't find a free port"))
         return
       }
       const port = address.port

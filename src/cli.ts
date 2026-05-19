@@ -32,7 +32,7 @@ export async function parseCommand(argv: string[]): Promise<CliCommand> {
   }
 
   if (!prompt && !parsed.resumeRunID) {
-    throw new Error("hace falta un prompt (posicional o --prompt-file) o --resume <id>")
+    throw new Error("need a prompt (positional or --prompt-file) or --resume <id>")
   }
 
   const { help: _help, prompt: _parsedPrompt, promptFile: _promptFile, ...options } = parsed
@@ -69,7 +69,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     const takeValue = () => {
       if (value !== undefined) return value
       const next = argv[++i]
-      if (!next) throw new Error(`${flag} requiere un valor`)
+      if (!next) throw new Error(`${flag} requires a value`)
       return next
     }
 
@@ -107,7 +107,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
       case "--max-attempts":
         parsed.maxAttempts = parseInt(takeValue(), 10)
         if (!Number.isInteger(parsed.maxAttempts) || parsed.maxAttempts < 1) {
-          throw new Error("--max-attempts debe ser un entero positivo")
+          throw new Error("--max-attempts must be a positive integer")
         }
         break
       case "--base":
@@ -117,7 +117,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
         parsed.targetDir = resolve(process.cwd(), takeValue())
         break
       default:
-        throw new Error(`flag desconocido: ${flag}`)
+        throw new Error(`unknown flag: ${flag}`)
     }
   }
 
@@ -141,23 +141,23 @@ function listValue(value: string) {
 function help() {
   return `archer [prompt]
 
-Pipeline secuencial de agentes OpenCode para implementar features.
+Sequential OpenCode agent pipeline for implementing features.
 
-Uso:
-  archer "Añade onboarding"
+Usage:
+  archer "Add onboarding"
   archer --prompt-file prd.md --file lib/onboarding --file test/onboarding_test.dart
 
 Flags:
-  --prompt-file <path>     Lee el PRD/prompt desde un archivo
-  --file, -f <path>        Adjunta un archivo o directorio a todas las fases (repetible)
-  --only <fases>           Ejecuta solo estas fases (implementer,patterns,security,design,tests)
-  --skip <fases>           Salta estas fases
-  --resume <id>            Retoma un run previo por su ID
-  --keep-run-dir           No borra el run dir al terminar
-  --include-dirty          Incluye cambios existentes en el primer commit (requiere --max-attempts 1)
-  --model <provider/model> Fuerza un modelo para todas las fases
-  --max-attempts <n>       Intentos por fase antes de fallar (default: 2)
-  --base <ref>             Rama/base para calcular diffs (default: main)
-  --dir <path>             Repo target (default: cwd)
+  --prompt-file <path>     Read the PRD/prompt from a file
+  --file, -f <path>        Attach a file or directory to all phases (repeatable)
+  --only <phases>          Run only these phases (implementer,patterns,security,design,tests)
+  --skip <phases>          Skip these phases
+  --resume <id>            Resume a previous run by its ID
+  --keep-run-dir           Don't delete the run dir when done
+  --include-dirty          Include existing changes in the first commit (requires --max-attempts 1)
+  --model <provider/model> Force a model for all phases
+  --max-attempts <n>       Attempts per phase before failing (default: 2)
+  --base <ref>             Branch/base for calculating diffs (default: main)
+  --dir <path>             Target repo (default: cwd)
 `
 }

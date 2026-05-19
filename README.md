@@ -1,88 +1,88 @@
 # archer
 
-Pipeline secuencial de agentes [OpenCode](https://opencode.ai) para implementar features sobre un repo Flutter. Recibe un PRD, ejecuta 5 agentes en cadena y deja un commit por fase.
+Sequential [OpenCode](https://opencode.ai) agent pipeline for implementing features on a Flutter repo. Takes a PRD, runs 5 agents in chain, and leaves one commit per phase.
 
-Archer esta escrito en Bun + TypeScript y usa `@opencode-ai/sdk` para controlar OpenCode. El SDK arranca/controla el server de OpenCode; Archer ya no llama manualmente a `opencode run` ni parsea stdout.
+Archer is written in Bun + TypeScript and uses `@opencode-ai/sdk` to control OpenCode. The SDK starts/controls the OpenCode server; Archer no longer manually calls `opencode run` nor parses stdout.
 
-## El Pipeline
+## The Pipeline
 
 ```
 PRD ──► implementer ──► pattern-auditor ──► security-auditor ──► design-polisher ──► test-engineer
-                │              │                    │                    │                  │
-                └──────────────┴────────────────────┴────────────────────┴──────────────────┘
-                                          commit por fase
+         │              │                    │                    │                  │
+         └──────────────┴────────────────────┴────────────────────┴──────────────────┘
+                                 commit per phase
 ```
 
-| Fase | Modelo | Qué hace |
+| Phase | Model | What it does |
 |---|---|---|
-| `implementer` | `claude-opus-4-7` | Implementa la feature respetando patrones del repo |
-| `patterns` | `claude-opus-4-7` | Refactor sin cambiar comportamiento, alinea con el resto del código |
-| `security` | `claude-sonnet-4-6` | Audita y arregla problemas de seguridad |
-| `design` | `claude-sonnet-4-6` | Pule UI siguiendo el design system del repo |
-| `tests` | `claude-sonnet-4-6` | Unit/widget tests verdes + flows Maestro |
+| `implementer` | `claude-opus-4-7` | Implements the feature respecting repo patterns |
+| `patterns` | `claude-opus-4-7` | Refactors without changing behavior, aligns with the rest of the code |
+| `security` | `claude-sonnet-4-6` | Audits and fixes security issues |
+| `design` | `claude-sonnet-4-6` | Polishes UI following the repo's design system |
+| `tests` | `claude-sonnet-4-6` | Unit/widget tests green + Maestro flows |
 
-## Requisitos
+## Requirements
 
 - Bun 1.0+
-- `opencode` instalado y autenticado (`opencode auth login`)
+- `opencode` installed and authenticated (`opencode auth login`)
 - `git`
 
-## Instalación
+## Installation
 
 ```bash
-git clone <este-repo> archer
+git clone <this-repo> archer
 cd archer
 bun install
 make install
 ```
 
-Eso deja `archer` en `~/.local/bin/archer`. Asegúrate de que está en tu `PATH`.
+This leaves `archer` in `~/.local/bin/archer`. Make sure it's in your `PATH`.
 
-## Uso
+## Usage
 
-Desde la raíz del repo target, idealmente en una rama de trabajo:
+From the root of the target repo, ideally on a working branch:
 
 ```bash
-# prompt inline
-archer "Añade pantalla de onboarding con 3 pasos y persistencia local del progreso"
+# inline prompt
+archer "Add onboarding screen with 3 steps and local persistence of progress"
 
-# prompt desde archivo
+# prompt from file
 archer --prompt-file prd.md
 
-# adjuntar archivos o directorios a todas las fases
+# attach files or directories to all phases
 archer --prompt-file prd.md --file lib/features/onboarding --file test/onboarding_test.dart
 
-# solo una fase
+# only one phase
 archer --prompt-file prd.md --only implementer
 
-# saltar fases
+# skip phases
 archer --prompt-file prd.md --skip security,design
 
-# forzar un modelo distinto para todas las fases
+# force a different model for all phases
 archer --prompt-file prd.md --model anthropic/claude-sonnet-4-6
 
-# retomar un run que falló
+# resume a failed run
 archer --resume 20260519-103045-x7q2
 
-# preservar el run dir tras terminar
+# preserve run dir after completion
 archer --prompt-file prd.md --keep-run-dir
 
-# cambiar la rama base usada para calcular diffs entre fases
+# change the base branch used to calculate diffs between phases
 archer --prompt-file prd.md --base develop
 
-# incluir cambios locales existentes en el primer commit del pipeline
+# include existing local changes in the first commit of the pipeline
 archer --prompt-file prd.md --include-dirty --max-attempts 1
 ```
 
-## Adjuntos Eficientes
+## Efficient Attachments
 
-`--file` es repetible y acepta archivos o directorios. Las rutas relativas se resuelven contra el repo target.
+`--file` is repeatable and accepts files or directories. Relative paths are resolved against the target repo.
 
-Archer no pega esos contenidos en el prompt. Los envia al SDK como `FilePartInput` con URL `file://`, igual que el `--file` de OpenCode. Lo mismo hace internamente con `prd.md`, reports previos y diffs de fase.
+Archer doesn't paste those contents into the prompt. It sends them to the SDK as `FilePartInput` with `file://` URL, just like OpenCode's `--file`. It does the same internally with `prd.md`, previous reports, and phase diffs.
 
-## Anatomía De Un Run
+## Anatomy of a Run
 
-Cada invocación crea `~/.archer/runs/<run-id>/`:
+Each invocation creates `~/.archer/runs/<run-id>/`:
 
 ```
 ~/.archer/runs/20260519-103045-x7q2/
@@ -104,11 +104,11 @@ Cada invocación crea `~/.archer/runs/<run-id>/`:
 └── SUMMARY.md
 ```
 
-El run dir se borra al terminar correctamente salvo `--keep-run-dir`. Si falla, se preserva para inspeccionar reports, diffs y logs.
+The run dir is deleted on successful completion unless `--keep-run-dir`. If it fails, it's preserved for inspecting reports, diffs, and logs.
 
-El repo target solo ve commits con prefijo `archer(<fase>): ...`, hechos en la rama actual. Ningún archivo del CLI queda en el proyecto.
+The target repo only sees commits with prefix `archer(<phase>): ...`, made on the current branch. No CLI files are left in the project.
 
-## Desarrollo
+## Development
 
 ```bash
 bun install
@@ -117,21 +117,21 @@ bun test
 bun run build
 ```
 
-## Estructura
+## Structure
 
 ```
 archer/
 ├── src/
 │   ├── main.ts          # entrypoint
-│   ├── cli.ts           # parseo de flags
-│   ├── runner.ts        # orquestación del pipeline
-│   ├── opencode.ts      # arranque/control via SDK
-│   ├── agents.ts        # prompts y config inline de agentes
-│   ├── attachments.ts   # FilePartInput para --file y adjuntos internos
-│   ├── git.ts           # diff y commit
+│   ├── cli.ts           # flag parsing
+│   ├── runner.ts        # pipeline orchestration
+│   ├── opencode.ts      # startup/control via SDK
+│   ├── agents.ts        # inline prompts and agent config
+│   ├── attachments.ts   # FilePartInput for --file and internal attachments
+│   ├── git.ts           # diff and commit
 │   ├── workspace.ts     # run dir
-│   └── phases.ts        # definicion declarativa de fases
-├── test/                # tests unitarios de CLI/orquestación
+│   └── phases.ts        # declarative phase definition
+├── test/                # unit tests for CLI/orchestration
 ├── package.json
 ├── tsconfig.json
 └── Makefile

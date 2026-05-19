@@ -26,14 +26,14 @@ export async function run(options: RunOptions) {
     log.info(`Run ${workspace.runID} - dir: ${workspace.dir}`)
 
     const extraFiles = await fileParts(options.files, options.targetDir, "error")
-    if (extraFiles.length > 0) log.info(`Adjuntos de usuario: ${extraFiles.map((file) => file.filename).join(", ")}`)
+    if (extraFiles.length > 0) log.info(`User attachments: ${extraFiles.map((file) => file.filename).join(", ")}`)
 
     opencode = await startOpencode(opencodeConfig(workspace.dir))
-    log.info(`opencode SDK listo en ${opencode.url}`)
+    log.info(`opencode SDK ready at ${opencode.url}`)
 
     for (const phase of phases) {
       if (shouldSkip(phase.name, options)) {
-        log.warn(`[${phase.name}] saltada por flag`)
+        log.warn(`[${phase.name}] skipped by flag`)
         continue
       }
       await runPhase(opencode.client, workspace, phase, options, extraFiles)
@@ -47,9 +47,9 @@ export async function run(options: RunOptions) {
     opencode?.close()
 
     if (runErr || options.keepRunDir) {
-      log.warn(`Run dir preservado en ${workspace.dir}`)
+      log.warn(`Run dir preserved at ${workspace.dir}`)
     } else {
-      await cleanupWorkspace(workspace).catch((error) => log.warn(`no pude limpiar ${workspace.dir}: ${String(error)}`))
+      await cleanupWorkspace(workspace).catch((error) => log.warn(`couldn't clean ${workspace.dir}: ${String(error)}`))
     }
   }
 }
@@ -105,18 +105,18 @@ async function runPhaseWithRetries(
   baseline: RepoSnapshot | undefined,
 ) {
   if (!baseline && prepared.maxAttempts > 1) {
-    throw new Error(`[${phase.name}] no puedo reintentar con working tree sucio; usa --max-attempts 1 o limpia el repo`)
+    throw new Error(`[${phase.name}] can't retry with dirty working tree; use --max-attempts 1 or clean the repo`)
   }
 
   let lastError: unknown
 
   for (let attempt = 1; attempt <= prepared.maxAttempts; attempt++) {
-    log.info(`[${phase.name}] intento ${attempt}/${prepared.maxAttempts} con ${prepared.model.providerID}/${prepared.model.modelID}`)
+    log.info(`[${phase.name}] attempt ${attempt}/${prepared.maxAttempts} with ${prepared.model.providerID}/${prepared.model.modelID}`)
     try {
       return await runPhaseAttempt(client, workspace, phase, targetDir, prepared, attempt)
     } catch (error) {
       lastError = error
-      log.warn(`[${phase.name}] intento ${attempt} fallo: ${formatSdkError(error)}`)
+      log.warn(`[${phase.name}] attempt ${attempt} failed: ${formatSdkError(error)}`)
       if (!(error instanceof LoggedAttemptError)) {
         await writeAttemptLog(workspace, phase, attempt, { error: formatSdkError(error) })
       }
@@ -173,7 +173,7 @@ async function persistPhaseReport(workspace: Workspace, phase: Phase, assistantT
   }
 
   if (!(await exists(reportAbs))) {
-    log.warn(`[${phase.name}] el agente no escribio el reporte esperado en ${reportAbs}`)
+    log.warn(`[${phase.name}] agent didn't write the expected report at ${reportAbs}`)
   }
 
   return reportAbs
@@ -183,7 +183,7 @@ async function commitPhase(phase: Phase, reportAbs: string, targetDir: string) {
   const message = `archer(${phase.name}): ${await summaryFromReport(reportAbs)}`
   const committed = await addAllAndCommit(message, targetDir)
   if (!committed) {
-    log.info(`[${phase.name}] sin cambios - sin commit`)
+    log.info(`[${phase.name}] no changes - no commit`)
   } else {
     log.info(`[${phase.name}] commit: ${message}`)
   }
@@ -195,7 +195,7 @@ async function restorePhaseBaseline(phase: Phase, baseline: RepoSnapshot | undef
     await restoreRepoSnapshot(baseline, targetDir)
   } catch (restoreError) {
     throw new Error(
-      `[${phase.name}] fallo y no pude restaurar el snapshot git: ${formatSdkError(restoreError)}; error original: ${formatSdkError(
+      `[${phase.name}] failed and couldn't restore git snapshot: ${formatSdkError(restoreError)}; original error: ${formatSdkError(
         originalError,
       )}`,
     )
@@ -218,7 +218,7 @@ async function promptPhase(
     title: `archer ${input.workspace.runID} ${input.phase.name}`,
   })
   if (session.error) throw new Error(formatSdkError(session.error))
-  if (!session.data?.id) throw new Error("opencode no devolvio session id")
+  if (!session.data?.id) throw new Error("opencode didn't return session id")
 
   const response = await client.session.prompt({
     sessionID: session.data.id,
@@ -229,38 +229,38 @@ async function promptPhase(
   })
 
   if (response.error) throw new Error(formatSdkError(response.error))
-  if (!response.data) throw new Error("opencode no devolvio respuesta")
+  if (!response.data) throw new Error("opencode didn't return response")
   return response.data
 }
 
 function buildPhasePrompt(workspace: Workspace, phase: Phase) {
   return [
-    `# Fase del pipeline: ${phase.name}`,
+    `# Pipeline phase: ${phase.name}`,
     "",
     phase.description,
     "",
-    "## Contexto del run",
+    "## Run context",
     `- Run dir: ${workspace.dir}`,
-    `- Escribe tu reporte final en: ${join(workspace.dir, phase.reportPath)}`,
-    "- Working directory: el directorio donde se invoco `archer` (raiz del repo target).",
+    `- Write your final report to: ${join(workspace.dir, phase.reportPath)}`,
+    "- Working directory: the directory where `archer` was invoked (root of the target repo).",
     "",
-    "## Adjuntos",
-    "Recibiras como ficheros adjuntos: el PRD original, los reportes de fases previas, el diff acumulado contra la rama base y cualquier `--file` pasado por el usuario. Leelos antes de actuar.",
+    "## Attachments",
+    "You will receive as file attachments: the original PRD, previous phase reports, the cumulative diff against the base branch, and any `--file` passed by the user. Read them before acting.",
     "",
-    "## Cierre",
-    "Antes de terminar, asegurate de:",
-    "1. Haber aplicado los cambios necesarios al codigo del repo.",
-    "2. Haber escrito el reporte (markdown, max ~80 lineas) en la ruta absoluta indicada arriba. Si no puedes escribirlo, responde con el contenido exacto del reporte y Archer lo guardara.",
-    "3. Dejar el arbol en estado compilable.",
+    "## Closing",
+    "Before finishing, make sure to:",
+    "1. Have applied necessary changes to the repo code.",
+    "2. Have written the report (markdown, max ~80 lines) at the absolute path indicated above. If you can't write it, respond with the exact report content and Archer will save it.",
+    "3. Leave the tree in a compilable state.",
     "",
-    "Sigue las instrucciones de tu system prompt para lo demas.",
+    "Follow your system prompt instructions for everything else.",
   ].join("\n")
 }
 
 export function parseModel(value: string) {
   const [providerID, ...rest] = value.split("/")
   const modelID = rest.join("/")
-  if (!providerID || !modelID) throw new Error(`modelo invalido: ${value}`)
+  if (!providerID || !modelID) throw new Error(`invalid model: ${value}`)
   return { providerID, modelID }
 }
 
@@ -289,9 +289,9 @@ async function summaryFromReport(path: string) {
       return line
     }
   } catch {
-    return "sin resumen"
+    return "no summary"
   }
-  return "sin resumen"
+  return "no summary"
 }
 
 async function writeAttemptLog(workspace: Workspace, phase: Phase, attempt: number, payload: unknown) {

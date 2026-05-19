@@ -14,7 +14,7 @@ export async function fileParts(paths: string[], baseDir: string, missing: Missi
     try {
       info = await stat(path)
     } catch {
-      if (missing === "error") throw new Error(`archivo no encontrado para --file: ${input}`)
+      if (missing === "error") throw new Error(`file not found for --file: ${input}`)
       continue
     }
 

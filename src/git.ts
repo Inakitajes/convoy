@@ -43,23 +43,23 @@ async function execFile(command: string, args: string[], options: ExecOptions): 
 export async function ensureRepoReady(cwd: string, options: { includeDirty?: boolean; maxAttempts?: number } = {}) {
   const rootResult = await execFile("git", ["rev-parse", "--show-toplevel"], { cwd, allowFailure: true })
   if (rootResult.exitCode !== 0) {
-    throw new Error("archer debe ejecutarse en la raiz de un repo git")
+    throw new Error("archer must be run at the root of a git repo")
   }
 
   const root = resolve(rootResult.stdout.trim())
   if (root !== resolve(cwd)) {
-    throw new Error(`archer debe ejecutarse en la raiz del repo git (${root})`)
+    throw new Error(`archer must be run at the root of the git repo (${root})`)
   }
 
   const status = await execFile("git", ["status", "--porcelain"], { cwd })
   if (status.stdout.trim() !== "") {
     if (!options.includeDirty) {
-      throw new Error("working tree no esta limpio; haz commit/stash o usa --include-dirty para incluir esos cambios")
+      throw new Error("working tree is not clean; do commit/stash or use --include-dirty to include those changes")
     }
     if ((options.maxAttempts ?? 1) > 1) {
-      throw new Error("--include-dirty no se puede combinar con --max-attempts > 1; usa --max-attempts 1")
+      throw new Error("--include-dirty can't be combined with --max-attempts > 1; use --max-attempts 1")
     }
-    log.warn("working tree no esta limpio; --include-dirty incluira esos cambios en el primer commit del pipeline")
+    log.warn("working tree is not clean; --include-dirty will include those changes in the first commit of the pipeline")
   }
 }
 

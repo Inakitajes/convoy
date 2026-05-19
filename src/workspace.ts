@@ -26,7 +26,7 @@ export async function resumeWorkspace(runID: string): Promise<Workspace> {
   try {
     await stat(dir)
   } catch {
-    throw new Error(`no existe el run ${runID} en ${dir}`)
+    throw new Error(`run ${runID} doesn't exist at ${dir}`)
   }
   return { dir, runID }
 }
@@ -37,14 +37,14 @@ export async function cleanupWorkspace(workspace: Workspace) {
 }
 
 export async function writeSummary(workspace: Workspace, phaseNames: string[]) {
-  const chunks: string[] = [`# archer run ${workspace.runID} - resumen`, ""]
+  const chunks: string[] = [`# archer run ${workspace.runID} - summary`, ""]
 
   for (const name of phaseNames) {
     chunks.push(`## ${name}`, "")
     try {
       chunks.push(await readFile(join(workspace.dir, "reports", `${name}.md`), "utf8"))
     } catch {
-      chunks.push("_(sin reporte)_")
+      chunks.push("_(no report)_")
     }
     chunks.push("")
   }
@@ -66,7 +66,7 @@ export function isValidRunID(runID: string) {
 }
 
 function validateRunID(runID: string) {
-  if (!isValidRunID(runID)) throw new Error(`run id invalido: ${runID}`)
+  if (!isValidRunID(runID)) throw new Error(`invalid run id: ${runID}`)
 }
 
 function newRunID() {
@@ -92,13 +92,13 @@ function childPath(root: string, child: string) {
   const resolvedPath = resolve(resolvedRoot, child)
   const pathFromRoot = relative(resolvedRoot, resolvedPath)
   if (pathFromRoot.startsWith("..") || isAbsolute(pathFromRoot)) {
-    throw new Error(`ruta fuera de ${resolvedRoot}: ${resolvedPath}`)
+    throw new Error(`path outside ${resolvedRoot}: ${resolvedPath}`)
   }
   return resolvedPath
 }
 
 function assertInsideRunsRoot(path: string) {
   const pathFromRoot = relative(resolve(runsRoot()), resolve(path))
-  if (!pathFromRoot) throw new Error(`ruta fuera de un run concreto: ${path}`)
+  if (!pathFromRoot) throw new Error(`path outside a specific run: ${path}`)
   childPath(runsRoot(), pathFromRoot)
 }
