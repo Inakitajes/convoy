@@ -1,5 +1,5 @@
 import { stat } from "node:fs/promises"
-import { basename, isAbsolute, resolve } from "node:path"
+import { basename, extname, isAbsolute, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
 
 import type { FilePartInput } from "@opencode-ai/sdk/v2"
@@ -29,5 +29,56 @@ export async function fileParts(paths: string[], baseDir: string, missing: Missi
 }
 
 function guessMime(path: string) {
-  return Bun.file(path).type || "text/plain"
+  const mime = Bun.file(path).type
+  if (isTextAttachment(path, mime)) return "text/plain"
+  return mime || "text/plain"
+}
+
+const textExtensions = new Set([
+  ".c",
+  ".cc",
+  ".cpp",
+  ".cs",
+  ".css",
+  ".dart",
+  ".diff",
+  ".go",
+  ".gradle",
+  ".h",
+  ".hpp",
+  ".html",
+  ".java",
+  ".js",
+  ".json",
+  ".jsonc",
+  ".jsx",
+  ".kt",
+  ".lock",
+  ".md",
+  ".patch",
+  ".php",
+  ".properties",
+  ".py",
+  ".rb",
+  ".rs",
+  ".sh",
+  ".swift",
+  ".toml",
+  ".ts",
+  ".tsx",
+  ".txt",
+  ".xml",
+  ".yaml",
+  ".yml",
+])
+
+const textFilenames = new Set(["dockerfile", "makefile", "readme", "license"])
+const textMimes = new Set(["application/json", "application/javascript", "application/xml", "application/x-ndjson"])
+
+function isTextAttachment(path: string, mime: string) {
+  const baseMime = mime.split(";")[0]?.toLowerCase() ?? ""
+  if (baseMime.startsWith("text/")) return true
+  if (textMimes.has(baseMime)) return true
+  if (textExtensions.has(extname(path).toLowerCase())) return true
+  return textFilenames.has(basename(path).toLowerCase())
 }
