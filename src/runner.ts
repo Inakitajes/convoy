@@ -1,7 +1,7 @@
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 
-import type { FilePartInput, OpencodeClient, Part } from "@opencode-ai/sdk/v2"
+import type { AssistantMessage, FilePartInput, OpencodeClient, Part } from "@opencode-ai/sdk/v2"
 
 import { opencodeConfig } from "./agents"
 import { fileParts } from "./attachments"
@@ -11,7 +11,18 @@ import { log } from "./log"
 import { startOpencode } from "./opencode"
 import { startPermissionGate, type PermissionGate } from "./permissions"
 import { phases } from "./phases"
-import { createProgressUI, noopProgress, type ProgressPhase, type ProgressStepUsage, type ProgressTokens, type ProgressUI, type ProgressUsage } from "./progress"
+import {
+  createProgressUI,
+  noopProgress,
+  type ActivityKind,
+  type ProgressDiffSummary,
+  type ProgressPhase,
+  type ProgressStepUsage,
+  type ProgressTodo,
+  type ProgressTokens,
+  type ProgressUI,
+  type ProgressUsage,
+} from "./progress"
 import { discoverProjectContextFiles } from "./project-context"
 import type { Phase, RunOptions } from "./types"
 import { cleanupWorkspace, createWorkspace, resumeWorkspace, type Workspace, writeSummary } from "./workspace"
@@ -113,7 +124,9 @@ class RunShutdown {
 }
 
 function installShutdownSignals(shutdown: RunShutdown) {
-  const handler = (signal: NodeJS.Signals) => shutdown.request(signal)
+  // Bun delivers the numeric signal value to handlers; normalize for logs.
+  const handler = (signal: NodeJS.Signals | number) =>
+    shutdown.request(typeof signal === "number" ? (signal === 15 ? "SIGTERM" : "SIGINT") : signal)
   process.on("SIGINT", handler)
   process.on("SIGTERM", handler)
   return () => {
@@ -146,7 +159,17 @@ export async function run(options: RunOptions) {
     const projectContextFiles = await discoverProjectContextFiles(options.targetDir)
     if (projectContextFiles.length > 0) log.info(`Project context: ${projectContextFiles.join(", ")}`)
 
-    opencode = await startOpencode(opencodeConfig(workspace.dir, options.targetDir), shutdown.signal)
+    // The signal must only cover the boot wait: the SDK binds it to the server
+    // process and would kill opencode the instant Ctrl+C lands, breaking the
+    // graceful session-abort that runs during shutdown.
+    const boot = new AbortController()
+    const abortBoot = () => boot.abort(shutdown.signal.reason)
+    shutdown.signal.addEventListener("abort", abortBoot, { once: true })
+    try {
+      opencode = await startOpencode(opencodeConfig(workspace.dir, options.targetDir), boot.signal)
+    } finally {
+      shutdown.signal.removeEventListener("abort", abortBoot)
+    }
     progress.serverReady(opencode.url)
     log.info(`opencode SDK ready at ${opencode.url}`)
 
@@ -154,6 +177,7 @@ export async function run(options: RunOptions) {
       client: opencode.client,
       progress,
       interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY),
+      directory: options.targetDir,
     })
 
     for (const phase of phases) {
@@ -178,7 +202,6 @@ export async function run(options: RunOptions) {
     if (shutdown.aborted) await shutdown.abortActiveSession(progress)
     await permissions?.stop()
     progress.stop()
-    opencode?.close()
     shutdown.dispose()
 
     if (runErr || options.keepRunDir) {
@@ -186,6 +209,11 @@ export async function run(options: RunOptions) {
     } else {
       await cleanupWorkspace(workspace).catch((error) => log.warn(`couldn't clean ${workspace.dir}: ${String(error)}`))
     }
+
+    // Kill the server last and return immediately: once it dies, any event
+    // stream still held open by the SDK starts failing, and those failures
+    // must not get a chance to surface mid-cleanup.
+    opencode?.close()
   }
 }
 
@@ -391,7 +419,7 @@ async function promptPhase(
     progress: ProgressUI
     shutdown: RunShutdown
   },
-) {
+): Promise<SessionResult> {
   input.shutdown.throwIfRequested()
   const session = await client.session.create({
     directory: input.targetDir,
@@ -404,10 +432,24 @@ async function promptPhase(
   input.shutdown.setActiveSession({ client, sessionID: session.data.id, directory: input.targetDir, phaseName: input.phase.name })
   log.info(`[${input.phase.name}] session: ${session.data.id}`)
 
-  const activity = await startSessionActivityMonitor(client, input.targetDir, input.phase.name, session.data.id, input.progress)
+  // The prompt is fired asynchronously and completion is detected through the
+  // event stream plus status polling. A single blocking HTTP request can't
+  // survive a phase that runs for an hour (Bun kills idle sockets after 5min).
+  const watcher = watchSession(client, {
+    directory: input.targetDir,
+    phaseName: input.phase.name,
+    sessionID: session.data.id,
+    progress: input.progress,
+    signal: input.shutdown.signal,
+  })
 
   try {
-    const response = await client.session.prompt({
+    // Don't fire the prompt until the event stream is listening, or the first
+    // events of a fast-failing session are lost.
+    await Promise.race([watcher.ready, sleep(3_000)])
+    input.shutdown.throwIfRequested()
+
+    const accepted = await client.session.promptAsync({
       sessionID: session.data.id,
       directory: input.targetDir,
       agent: input.phase.agentName,
@@ -415,24 +457,37 @@ async function promptPhase(
       variant: input.model.variant,
       parts: [...input.attachments, { type: "text", text: input.prompt }],
     }, { signal: input.shutdown.signal })
-
+    if (accepted.error) throw new Error(formatSdkError(accepted.error))
+    const result = await watcher.result
     input.shutdown.throwIfRequested()
-    if (response.error) throw new Error(formatSdkError(response.error))
-    if (!response.data) throw new Error("opencode didn't return response")
-    const usage = assistantUsage(response.data.info, session.data.id)
+
+    const usage = combinedAssistantUsage(result.assistantInfos, session.data.id)
     if (usage) {
       input.progress.phaseUsageTotal(input.phase.name, usage)
       log.info(`[${input.phase.name}] usage: ${formatUsageForLog(usage)}`)
     }
-    return response.data
+    return result
+  } catch (error) {
+    if (!input.shutdown.aborted && !isUserAbortError(error)) {
+      await abortSessionQuietly(client, session.data.id, input.targetDir, input.phase.name)
+    }
+    throw error
   } finally {
     if (input.shutdown.aborted) await input.shutdown.abortActiveSession(input.progress)
     input.shutdown.clearActiveSession(session.data.id)
-    await activity.stop()
+    await watcher.stop()
   }
 }
 
-type SessionActivityMonitor = {
+type SessionResult = {
+  info: AssistantMessage
+  parts: Part[]
+  assistantInfos: AssistantMessage[]
+}
+
+type SessionWatcher = {
+  result: Promise<SessionResult>
+  ready: Promise<void>
   stop(): Promise<void>
 }
 
@@ -446,22 +501,28 @@ type ActivityState = {
   lastServerEvent: number
 }
 
-type ActivityDescription =
-  | string
-  | {
-      message: string
-      stepUsage?: ProgressStepUsage
-    }
+type SessionSignal =
+  | { type: "activity"; kind: ActivityKind; message: string; stepUsage?: ProgressStepUsage }
+  | { type: "todos"; todos: ProgressTodo[]; message: string }
+  | { type: "diff"; summary: ProgressDiffSummary }
+  | { type: "idle" }
+  | { type: "error"; error: string }
 
-const serverHeartbeatMs = 30_000
+const sessionPollMs = 30_000
+const maxConsecutivePollFailures = 10
+const reconnectBaseMs = 1_000
+const reconnectMaxMs = 15_000
 
-async function startSessionActivityMonitor(
+function watchSession(
   client: OpencodeClient,
-  directory: string,
-  phaseName: string,
-  sessionID: string,
-  progress: ProgressUI,
-): Promise<SessionActivityMonitor> {
+  input: {
+    directory: string
+    phaseName: string
+    sessionID: string
+    progress: ProgressUI
+    signal: AbortSignal
+  },
+): SessionWatcher {
   const controller = new AbortController()
   const state: ActivityState = {
     reasoningChars: 0,
@@ -473,65 +534,199 @@ async function startSessionActivityMonitor(
     lastServerEvent: Date.now(),
   }
 
-  try {
-    const stream = await client.event.subscribe({ directory }, { signal: controller.signal })
-    let heartbeatRunning = false
-    const heartbeat = setInterval(() => {
-      if (controller.signal.aborted || heartbeatRunning || Date.now() - state.lastServerEvent < serverHeartbeatMs) return
-      heartbeatRunning = true
-      void (async () => {
-        try {
-          const response = await client.session.get({ sessionID, directory })
-          if (controller.signal.aborted) return
-          if (response.error) {
-            progress.phaseActivity(phaseName, `server heartbeat failed: ${formatSdkError(response.error)}`)
+  let settled = false
+  let sawWork = false
+  let idlePollsWithoutResult = 0
+  let lastSessionError: string | undefined
+  let verifying: Promise<boolean> | undefined
+
+  let resolveResult!: (value: SessionResult) => void
+  let rejectResult!: (reason: unknown) => void
+  const result = new Promise<SessionResult>((resolve, reject) => {
+    resolveResult = resolve
+    rejectResult = reject
+  })
+  result.catch(() => {}) // the watcher may be stopped before anyone awaits the result
+
+  let resolveReady!: () => void
+  const ready = new Promise<void>((resolve) => {
+    resolveReady = resolve
+  })
+
+  const finish = (outcome: { value?: SessionResult; error?: unknown }) => {
+    if (settled) return
+    settled = true
+    controller.abort(new Error("session watcher finished"))
+    if (outcome.value) resolveResult(outcome.value)
+    else rejectResult(outcome.error)
+  }
+
+  const onExternalAbort = () => finish({ error: new UserAbortError() })
+  input.signal.addEventListener("abort", onExternalAbort, { once: true })
+  if (input.signal.aborted) onExternalAbort()
+
+  // A session is complete once its last assistant message either finished or
+  // carries a terminal error. Verified against the server, never assumed.
+  const verifyCompletion = () => {
+    if (settled) return Promise.resolve(true)
+    verifying ??= (async () => {
+      try {
+        const response = await client.session.messages({ sessionID: input.sessionID, directory: input.directory })
+        if (response.error || !response.data) return false
+        const assistant = response.data.filter(
+          (message): message is { info: AssistantMessage; parts: Part[] } => message.info.role === "assistant",
+        )
+        const last = assistant[assistant.length - 1]
+        if (!last || (!last.info.time.completed && !last.info.error)) return false
+        finish({
+          value: {
+            info: last.info,
+            parts: assistant.flatMap((message) => message.parts),
+            assistantInfos: assistant.map((message) => message.info),
+          },
+        })
+        return true
+      } catch {
+        return false
+      } finally {
+        verifying = undefined
+      }
+    })()
+    return verifying
+  }
+
+  const handleSignal = async (signal: SessionSignal) => {
+    switch (signal.type) {
+      case "activity":
+        if (signal.stepUsage) input.progress.phaseStepUsage(input.phaseName, signal.stepUsage)
+        input.progress.phaseActivity(input.phaseName, signal.message, signal.kind)
+        return
+      case "todos":
+        input.progress.phaseTodos(input.phaseName, signal.todos)
+        input.progress.phaseActivity(input.phaseName, signal.message, "todo")
+        return
+      case "diff":
+        input.progress.phaseDiff(input.phaseName, signal.summary)
+        return
+      case "error":
+        lastSessionError = signal.error
+        input.progress.phaseActivity(input.phaseName, `session error: ${signal.error}`, "error")
+        await verifyCompletion()
+        return
+      case "idle":
+        input.progress.phaseActivity(input.phaseName, "session idle; collecting results", "info")
+        if (!(await verifyCompletion()) && sawWork) {
+          finish({ error: new Error(lastSessionError ?? "session went idle without a completed response") })
+        }
+        return
+    }
+  }
+
+  const eventLoop = (async () => {
+    let reconnectDelay = reconnectBaseMs
+    while (!controller.signal.aborted && !settled) {
+      try {
+        const stream = await client.event.subscribe({ directory: input.directory }, { signal: controller.signal })
+        reconnectDelay = reconnectBaseMs
+        for await (const event of stream.stream) {
+          resolveReady() // any event (server.connected included) proves the stream is live
+          if (controller.signal.aborted || settled) return
+          const payload = eventPayload(event)
+          if (!payloadMatchesSession(payload, input.sessionID)) continue
+          state.lastServerEvent = Date.now()
+          const signal = describeSessionActivity(payload, state)
+          if (signal) {
+            if (signal.type !== "idle" && signal.type !== "error") sawWork = true
+            await handleSignal(signal)
+          }
+          if (settled) return
+        }
+      } catch (error) {
+        resolveReady()
+        if (controller.signal.aborted || settled) return
+        input.progress.phaseActivity(input.phaseName, `event stream dropped; reconnecting: ${formatSdkError(error)}`, "info")
+      }
+      if (controller.signal.aborted || settled) return
+      await sleep(reconnectDelay, controller.signal)
+      reconnectDelay = Math.min(reconnectDelay * 2, reconnectMaxMs)
+    }
+  })()
+
+  const pollLoop = (async () => {
+    let failures = 0
+    while (!controller.signal.aborted && !settled) {
+      await sleep(sessionPollMs, controller.signal)
+      if (controller.signal.aborted || settled) return
+      try {
+        const response = await client.session.status({ directory: input.directory })
+        if (response.error) throw new Error(formatSdkError(response.error))
+        failures = 0
+        const status = response.data?.[input.sessionID]
+        if (!status || status.type === "idle") {
+          if (await verifyCompletion()) return
+          idlePollsWithoutResult++
+          const limit = sawWork ? 2 : 4
+          if (idlePollsWithoutResult >= limit) {
+            finish({ error: new Error(lastSessionError ?? `session ${sawWork ? "went idle" : "never started"} without a completed response`) })
             return
           }
-          state.lastServerEvent = Date.now()
-          progress.phaseActivity(phaseName, "server heartbeat ok; OpenCode is still working")
-        } catch (error) {
-          if (!controller.signal.aborted) progress.phaseActivity(phaseName, `server heartbeat failed: ${formatSdkError(error)}`)
-        } finally {
-          heartbeatRunning = false
-        }
-      })()
-    }, serverHeartbeatMs)
-
-    const listenerDone = (async () => {
-      try {
-        for await (const event of stream.stream) {
-          if (controller.signal.aborted) return
-          const payload = eventPayload(event)
-          if (!payloadMatchesSession(payload, sessionID)) continue
-          state.lastServerEvent = Date.now()
-          const activity = describeSessionActivity(payload, state)
-          if (typeof activity === "string") {
-            progress.phaseActivity(phaseName, activity)
-          } else if (activity) {
-            if (activity.stepUsage) progress.phaseStepUsage(phaseName, activity.stepUsage)
-            progress.phaseActivity(phaseName, activity.message)
+        } else {
+          sawWork = true
+          idlePollsWithoutResult = 0
+          if (Date.now() - state.lastServerEvent >= sessionPollMs) {
+            const detail = status.type === "retry" ? `provider retry ${status.attempt}: ${status.message}` : "opencode is still working (no events)"
+            input.progress.phaseActivity(input.phaseName, detail, status.type === "retry" ? "retry" : "info")
           }
         }
       } catch (error) {
-        if (!controller.signal.aborted) progress.phaseActivity(phaseName, `event stream stopped: ${formatSdkError(error)}`)
-      }
-    })()
-
-    return {
-      async stop() {
-        controller.abort()
-        clearInterval(heartbeat)
-        try {
-          await listenerDone
-        } catch {
-          // ignore shutdown races
+        failures++
+        if (failures >= maxConsecutivePollFailures) {
+          finish({ error: new Error(`lost contact with the opencode server: ${formatSdkError(error)}`) })
+          return
         }
-      },
+        input.progress.phaseActivity(input.phaseName, `status check failed (${failures}/${maxConsecutivePollFailures}): ${formatSdkError(error)}`, "error")
+      }
     }
-  } catch (error) {
-    progress.phaseActivity(phaseName, `live events unavailable: ${formatSdkError(error)}`)
-    return { async stop() {} }
+  })()
+
+  return {
+    result,
+    ready,
+    async stop() {
+      settled = true
+      resolveReady()
+      controller.abort(new Error("session watcher stopped"))
+      input.signal.removeEventListener("abort", onExternalAbort)
+      // Aborting tears the subscription down promptly; the race is a safety
+      // net so a misbehaving stream can never hold the whole run hostage.
+      await Promise.race([Promise.allSettled([eventLoop, pollLoop]), sleep(3_000)])
+    },
   }
+}
+
+async function abortSessionQuietly(client: OpencodeClient, sessionID: string, directory: string, phaseName: string) {
+  try {
+    const response = await client.session.abort({ sessionID, directory })
+    if (response.error) log.warn(`[${phaseName}] couldn't abort session ${sessionID}: ${formatSdkError(response.error)}`)
+  } catch (error) {
+    log.warn(`[${phaseName}] couldn't abort session ${sessionID}: ${formatSdkError(error)}`)
+  }
+}
+
+function sleep(ms: number, signal?: AbortSignal) {
+  return new Promise<void>((resolve) => {
+    if (signal?.aborted) {
+      resolve()
+      return
+    }
+    const done = () => {
+      signal?.removeEventListener("abort", done)
+      clearTimeout(timer)
+      resolve()
+    }
+    const timer = setTimeout(done, ms)
+    signal?.addEventListener("abort", done, { once: true })
+  })
 }
 
 function eventPayload(event: unknown) {
@@ -561,7 +756,11 @@ function payloadMatchesSession(payload: unknown, sessionID: string) {
   return properties?.sessionID === sessionID
 }
 
-function describeSessionActivity(payload: unknown, state: ActivityState): ActivityDescription | undefined {
+function activity(kind: ActivityKind, message: string, stepUsage?: ProgressStepUsage): SessionSignal {
+  return { type: "activity", kind, message, stepUsage }
+}
+
+function describeSessionActivity(payload: unknown, state: ActivityState): SessionSignal | undefined {
   const type = payloadType(payload)
   const properties = payloadProperties(payload)
   if (!properties) return undefined
@@ -569,85 +768,126 @@ function describeSessionActivity(payload: unknown, state: ActivityState): Activi
 
   switch (type) {
     case "session.next.prompted":
-      return "prompt submitted"
+      return activity("info", "prompt submitted")
     case "session.next.step.started":
       state.currentStepModel = formatModelFromEvent(properties.model)
-      return `thinking with ${state.currentStepModel}`
+      return activity("step", `working with ${state.currentStepModel}`)
     case "session.next.step.ended": {
       const message = `step finished: ${pickString(properties, ["finish"]) || "complete"}${formatCost(properties)}`
-      const stepUsage = stepUsageFromEvent(payload, properties, state.currentStepModel)
-      return stepUsage ? { message, stepUsage } : message
+      return activity("step", message, stepUsageFromEvent(payload, properties, state.currentStepModel))
     }
     case "session.next.step.failed":
-      return `step failed: ${formatEventError(properties.error)}`
+      return activity("error", `step failed: ${formatEventError(properties.error)}`)
     case "session.status":
-      return formatSessionStatus(properties.status)
+      return describeSessionStatus(properties.status)
     case "session.idle":
-      return "session idle"
+      return { type: "idle" }
     case "session.next.reasoning.started":
       state.reasoningChars = 0
       state.lastReasoningUpdate = now
-      return "thinking..."
+      return activity("think", "thinking…")
     case "session.next.reasoning.delta":
       state.reasoningChars += pickString(properties, ["delta"]).length
       if (now - state.lastReasoningUpdate < 1000) return undefined
       state.lastReasoningUpdate = now
-      return `thinking (${state.reasoningChars} hidden chars)`
+      return activity("think", `thinking… ${formatCharCount(state.reasoningChars)} hidden chars`)
     case "session.next.reasoning.ended":
-      return "thinking complete"
+      return activity("think", "thinking complete")
     case "session.next.text.started":
       state.textChars = 0
       state.textTail = ""
       state.lastTextUpdate = now
-      return "writing response..."
+      return activity("write", "writing response…")
     case "session.next.text.delta": {
       const delta = pickString(properties, ["delta"])
       state.textChars += delta.length
       state.textTail = `${state.textTail}${delta}`.slice(-160)
       if (now - state.lastTextUpdate < 350) return undefined
       state.lastTextUpdate = now
-      return `writing response (${state.textChars} chars): ${state.textTail}`
+      return activity("write", `writing (${formatCharCount(state.textChars)}): ${state.textTail}`)
     }
     case "session.next.text.ended":
-      return `response complete (${pickString(properties, ["text"]).length || state.textChars} chars)`
+      return activity("write", `response complete (${formatCharCount(pickString(properties, ["text"]).length || state.textChars)})`)
     case "message.part.delta":
-      return `streaming ${pickString(properties, ["field"]) || "message"}`
+      return activity("write", `streaming ${pickString(properties, ["field"]) || "message"}`)
     case "session.next.tool.input.started":
-      return `preparing ${pickString(properties, ["name"]) || "tool"}`
+      return activity("tool", `preparing ${pickString(properties, ["name"]) || "tool"}`)
     case "session.next.tool.called":
-      return `tool ${describeToolCall(properties)}`
+      return activity("tool", describeToolCall(properties))
     case "session.next.tool.progress":
-      return `tool progress: ${describeToolContent(properties.content)}`
+      return activity("tool", `tool progress: ${describeToolContent(properties.content)}`)
     case "session.next.tool.success":
-      return `tool complete: ${describeToolContent(properties.content)}`
+      return activity("tool", `tool done: ${describeToolContent(properties.content)}`)
     case "session.next.tool.failed":
-      return `tool failed: ${formatEventError(properties.error)}`
+      return activity("error", `tool failed: ${formatEventError(properties.error)}`)
     case "session.next.shell.started":
-      return `bash: ${pickString(properties, ["command"])}`
+      return activity("bash", pickString(properties, ["command"]))
     case "session.next.shell.ended":
-      return `bash complete: ${firstLine(pickString(properties, ["output"]))}`
+      return activity("bash", `done: ${firstLine(pickString(properties, ["output"]))}`)
     case "session.next.retried":
-      return `provider retry ${properties.attempt ?? ""}: ${formatEventError(properties.error)}`
+      return activity("retry", `provider retry ${properties.attempt ?? ""}: ${formatEventError(properties.error)}`)
     case "session.next.compaction.started":
-      return `compacting context (${pickString(properties, ["reason"]) || "auto"})`
+      return activity("info", `compacting context (${pickString(properties, ["reason"]) || "auto"})`)
     case "session.next.compaction.delta":
-      return "compacting context..."
+      return activity("info", "compacting context…")
     case "session.next.compaction.ended":
-      return "context compaction complete"
+      return activity("info", "context compaction complete")
     case "permission.asked":
-      return `permission requested: ${pickString(properties, ["permission"])}`
+      return activity("permission", `permission requested: ${pickString(properties, ["permission"])}`)
     case "permission.replied":
-      return `permission ${pickString(properties, ["reply"])}`
-    case "todo.updated":
-      return `todo list updated (${Array.isArray(properties.todos) ? properties.todos.length : 0})`
+      return activity("permission", `permission ${pickString(properties, ["reply"])}`)
+    case "todo.updated": {
+      const todos = todosFromEvent(properties.todos)
+      const done = todos.filter((todo) => todo.status === "completed").length
+      return { type: "todos", todos, message: `todos updated (${done}/${todos.length} done)` }
+    }
     case "session.diff":
-      return `diff updated (${Array.isArray(properties.diff) ? properties.diff.length : 0} files)`
+      return { type: "diff", summary: diffSummaryFromEvent(properties.diff) }
     case "session.error":
-      return `session error: ${formatEventError(properties.error)}`
+      return { type: "error", error: formatEventError(properties.error) }
     default:
-      if (type.startsWith("session.next.")) return type.replace(/^session\.next\./, "")
+      if (type.startsWith("session.next.")) return activity("info", type.replace(/^session\.next\./, ""))
       return undefined
   }
+}
+
+function describeSessionStatus(value: unknown): SessionSignal | undefined {
+  if (!value || typeof value !== "object") return undefined
+  const status = value as { type?: unknown; attempt?: unknown; message?: unknown }
+  if (status.type === "busy") return activity("info", "provider busy")
+  if (status.type === "idle") return activity("info", "provider idle")
+  if (status.type === "retry") {
+    return activity("retry", `provider retry ${status.attempt ?? ""}: ${typeof status.message === "string" ? status.message : "waiting"}`)
+  }
+  return undefined
+}
+
+function todosFromEvent(value: unknown): ProgressTodo[] {
+  if (!Array.isArray(value)) return []
+  return value.flatMap((item) => {
+    if (!item || typeof item !== "object") return []
+    const todo = item as { content?: unknown; status?: unknown }
+    if (typeof todo.content !== "string") return []
+    return [{ content: todo.content, status: typeof todo.status === "string" ? todo.status : "pending" }]
+  })
+}
+
+function diffSummaryFromEvent(value: unknown): ProgressDiffSummary {
+  if (!Array.isArray(value)) return { files: 0, additions: 0, deletions: 0 }
+  let additions = 0
+  let deletions = 0
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue
+    const diff = item as { additions?: unknown; deletions?: unknown }
+    if (typeof diff.additions === "number") additions += diff.additions
+    if (typeof diff.deletions === "number") deletions += diff.deletions
+  }
+  return { files: value.length, additions, deletions }
+}
+
+function formatCharCount(value: number) {
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`
+  return String(value)
 }
 
 function formatModelFromEvent(value: unknown) {
@@ -678,22 +918,27 @@ function stepUsageFromEvent(payload: unknown, properties: Record<string, unknown
   }
 }
 
-function assistantUsage(info: unknown, fallbackSessionID: string): ProgressUsage | undefined {
-  if (!info || typeof info !== "object") return undefined
-  const values = info as Record<string, unknown>
-  const usage = usageFromRecord(values)
-  if (!usage) return undefined
-  const modelObject = values.model && typeof values.model === "object" ? (values.model as Record<string, unknown>) : {}
-  const provider = typeof values.providerID === "string" ? values.providerID : typeof modelObject.providerID === "string" ? modelObject.providerID : ""
-  const modelID = typeof values.modelID === "string" ? values.modelID : typeof modelObject.modelID === "string" ? modelObject.modelID : typeof modelObject.id === "string" ? modelObject.id : ""
-  const variantValue = typeof values.variant === "string" ? values.variant : typeof modelObject.variant === "string" ? modelObject.variant : ""
-  const variant = variantValue ? `#${variantValue}` : ""
-  const model = provider && modelID ? `${provider}/${modelID}${variant}` : usage.model
-  return {
-    ...usage,
-    sessionID: typeof values.sessionID === "string" ? values.sessionID : fallbackSessionID,
-    model,
+function combinedAssistantUsage(infos: AssistantMessage[], sessionID: string): ProgressUsage | undefined {
+  if (infos.length === 0) return undefined
+  let cost = 0
+  let tokens: ProgressTokens = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+  for (const info of infos) {
+    if (typeof info.cost === "number" && Number.isFinite(info.cost)) cost += info.cost
+    const messageTokens = tokensFromValue(info.tokens)
+    if (!messageTokens) continue
+    tokens = {
+      input: tokens.input + messageTokens.input,
+      output: tokens.output + messageTokens.output,
+      reasoning: tokens.reasoning + messageTokens.reasoning,
+      cacheRead: tokens.cacheRead + messageTokens.cacheRead,
+      cacheWrite: tokens.cacheWrite + messageTokens.cacheWrite,
+      total: tokens.total + messageTokens.total,
+    }
   }
+  const last = infos[infos.length - 1]!
+  const variant = last.variant ? `#${last.variant}` : ""
+  const model = last.providerID && last.modelID ? `${last.providerID}/${last.modelID}${variant}` : undefined
+  return { cost, tokens, sessionID, model }
 }
 
 function usageFromRecord(values: Record<string, unknown>): ProgressUsage | undefined {
@@ -731,15 +976,6 @@ function formatUsageForLog(usage: ProgressUsage) {
   const tokens = usage.tokens ? `tokens ${usage.tokens.input}/${usage.tokens.output}${usage.tokens.reasoning ? `/${usage.tokens.reasoning}` : ""}` : "tokens unavailable"
   const model = usage.model ? ` model ${usage.model}` : ""
   return `${cost}, ${tokens}${model}`
-}
-
-function formatSessionStatus(value: unknown) {
-  if (!value || typeof value !== "object") return "session status changed"
-  const status = value as { type?: unknown; attempt?: unknown; message?: unknown }
-  if (status.type === "busy") return "provider busy"
-  if (status.type === "idle") return "provider idle"
-  if (status.type === "retry") return `provider retry ${status.attempt ?? ""}: ${typeof status.message === "string" ? status.message : "waiting"}`
-  return "session status changed"
 }
 
 function describeToolCall(properties: Record<string, unknown>) {
@@ -856,6 +1092,7 @@ class LoggedAttemptError extends Error {}
 function extractAssistantText(parts: Part[]) {
   return parts
     .filter((part): part is Part & { type: "text"; text: string } => part.type === "text")
+    .filter((part) => !("synthetic" in part && part.synthetic) && !("ignored" in part && part.ignored))
     .map((part) => part.text.trim())
     .filter(Boolean)
     .join("\n\n")

@@ -1,7 +1,9 @@
+import "./polyfills"
+
 import { spawnSync } from "node:child_process"
 import { createServer } from "node:net"
 
-import { createOpencode } from "@opencode-ai/sdk/v2"
+import { createOpencodeClient, createOpencodeServer } from "@opencode-ai/sdk/v2"
 
 import type { Config, OpencodeClient } from "@opencode-ai/sdk/v2"
 
@@ -13,19 +15,28 @@ export type OpencodeHandle = {
 
 export async function startOpencode(config: Config, signal?: AbortSignal): Promise<OpencodeHandle> {
   const port = await freePort()
-  const { client, server } = await createOpencode({
+  const server = await createOpencodeServer({
     hostname: "127.0.0.1",
     port,
     timeout: 30_000,
     signal,
     config,
   })
+  const client = createOpencodeClient({ baseUrl: server.url, fetch: fetchWithoutIdleTimeout as typeof fetch })
 
   return {
     client,
     url: server.url,
     close: server.close,
   }
+}
+
+// Bun kills fetch sockets that stay quiet for 5 minutes by default; the SSE
+// event stream must outlive that during long tool runs. Bun honors the
+// non-standard `timeout: false` since 1.1; on older versions it's ignored,
+// which is why no single request is ever relied on for a whole phase.
+function fetchWithoutIdleTimeout(request: Request) {
+  return fetch(request, { timeout: false } as RequestInit)
 }
 
 export function openOpencodeSessionWindow(input: { url: string; targetDir: string; sessionID: string }) {

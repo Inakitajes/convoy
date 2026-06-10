@@ -104,9 +104,9 @@ archer --prompt-file prd.md --base develop
 archer --prompt-file prd.md --include-dirty --max-attempts 1
 ```
 
-In interactive terminals, Archer shows a full-screen OpenTUI dashboard with live harness progress across phases, including per-agent cost, step-level cost/tokens as OpenCode reports them, and the total run cost. Press `o`, or click the footer, to open the active OpenCode session in a new Terminal window attached to Archer's running OpenCode server. Press `Ctrl+C` once to abort the active OpenCode session and shut down Archer cleanly; press it again to force exit if cleanup hangs. Use `--no-tui` to fall back to plain logs.
+In interactive terminals, Archer shows a full-screen OpenTUI dashboard: pipeline progress with per-phase duration and cost, the live state of the active session (current tool/thinking/writing, the agent's todo list, files changed, step count, tokens, cost), and a compact color-coded activity feed. Press `o`, or click the footer, to open the active OpenCode session in a new Terminal window attached to Archer's running OpenCode server. Press `Ctrl+C` once to abort the active OpenCode session and shut down Archer cleanly; press it again to force exit if cleanup hangs. Use `--no-tui` to fall back to plain logs.
 
-Archer disables OpenCode's total provider request timeout for its default providers and keeps a 10-minute stream idle timeout instead, so long-running phases are not restarted just because they take more than a few minutes. The TUI also emits periodic server heartbeats while a phase is waiting on OpenCode.
+Phases run asynchronously: Archer fires the prompt with OpenCode's async API and detects completion through the event stream (`session.idle` / `session.error`), with a 30-second session-status poll as fallback and automatic event-stream reconnection. No HTTP request stays open for the duration of a phase, so long-running phases are immune to client-side socket timeouts. Archer also disables OpenCode's total provider request timeout for its default providers and keeps a 10-minute provider stream idle timeout instead.
 
 ## Permission gate
 
