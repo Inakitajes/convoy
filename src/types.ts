@@ -34,7 +34,7 @@ export type PermissionAdditions = {
 /**
  * An agent definition: who can run as a pipeline step. Built-ins ship with
  * archer; projects add their own (prompt at .archer/agents/<name>.md) or
- * override built-in model/temperature from .archer/config.yaml.
+ * config files override built-in model/temperature.
  */
 export type AgentSpec = {
   name: string

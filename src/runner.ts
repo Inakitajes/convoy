@@ -1211,7 +1211,7 @@ function ensureAgentsAvailable(pipeline: Pipeline, agents: readonly AgentSpec[])
   const available = new Set(agents.map((agent) => agent.name))
   for (const step of pipeline.steps) {
     if (step.type !== "agent" || available.has(step.agentName)) continue
-    throw new Error(`pipeline "${pipeline.name}" needs agent "${step.agentName}", which is not defined (removed from .archer/config.yaml?)`)
+    throw new Error(`pipeline "${pipeline.name}" needs agent "${step.agentName}", which is not defined (removed from Archer config?)`)
   }
 }
 

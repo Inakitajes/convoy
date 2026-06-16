@@ -54,13 +54,16 @@ bun install
 make install
 ```
 
-This leaves `archer` in `~/.local/bin/archer`. Make sure it's in your `PATH`.
+This leaves `archer` in `~/.local/bin/archer` and creates `~/.archer/config.yaml` plus `~/.archer/agents/*.md` with Archer's default configuration if they do not already exist. Make sure `~/.local/bin` is in your `PATH`.
 
 ## Usage
 
 From the root of the target repo, ideally on a working branch:
 
 ```bash
+# create project-local config and prompt files you can customize
+archer init
+
 # inline prompt
 archer "Add onboarding screen with 3 steps and local persistence of progress"
 
@@ -116,6 +119,28 @@ archer --prompt-file prd.md --base develop
 
 # include existing local changes in the first commit of the pipeline
 archer --prompt-file prd.md --include-dirty --max-attempts 1
+```
+
+## Configuration
+
+Archer reads configuration from two places:
+
+```text
+~/.archer/config.yaml      # user defaults, created by make install or archer init --global
+~/.archer/agents/*.md      # user default prompts loaded by matching agent name
+.archer/config.yaml        # project-local overrides, created by archer init
+.archer/agents/*.md        # project-local prompts loaded by matching agent name
+```
+
+Precedence is `CLI flags > project config > global config > built-in defaults`. Project config is useful for repo-specific pipelines, attachments, permissions, prompts, and model choices that should travel with the project.
+
+Useful commands:
+
+```bash
+archer init                # create .archer/config.yaml and .archer/agents/*.md in the current repo
+archer init --dir ../app   # create project config in another repo
+archer init --global       # create ~/.archer/config.yaml and ~/.archer/agents/*.md
+archer init --force        # overwrite the selected config
 ```
 
 In interactive terminals, Archer shows a full-screen OpenTUI dashboard: pipeline progress with per-phase duration and cost, plus an activity panel headed by a compact summary of the active session (current tool/thinking/writing, the agent's todo list, files changed, step count, tokens, cost) above a color-coded event feed. The dashboard never paints backgrounds: the canvas is your terminal's own background and panels are delineated by borders alone, derived as subtle elevations of the terminal's reported background color, with dark or light accents picked by its brightness (and a neutral fallback when the terminal doesn't answer); floating modals repaint the reported color exactly to mask the content beneath them. It follows live theme changes. Press `o`, or click the footer, to open the active OpenCode session in a new terminal window attached to Archer's running OpenCode server — clicking any pipeline row opens that phase's session, including phases that already finished. Ghostty is preferred when installed; Terminal.app is the fallback (`ARCHER_TERMINAL=ghostty|terminal` forces a backend). Press `Shift+Tab` to toggle auto-accept (see the permission gate below). Press `Ctrl+C` once to abort the active OpenCode session and shut down Archer cleanly; press it again to force exit if cleanup hangs. The dashboard suspends for the whole `human-review` checkpoint — the prompts, your app command's output, and interactive OpenCode iterations own the terminal — and resumes when the gate finishes. Use `--no-tui` to fall back to plain logs.
@@ -179,6 +204,17 @@ Built-in agent prompts live as Markdown files under `prompts/`. A project can fu
 
 When a project override exists, it replaces that agent's built-in prompt completely. Archer still appends its non-replaceable runtime safety guard rails from `prompts/runtime-safety.md`.
 
+Config entries and Markdown prompts are matched by name. `archer init` leaves this section commented as a format guide, but the generated `agents/*.md` prompts are still picked up by name:
+
+```yaml
+# agents:
+#   implementer: {}
+```
+
+The prompt for that entry lives at `agents/implementer.md` next to the config file.
+
+Prompt precedence is `.archer/agents/<name>.md > ~/.archer/agents/<name>.md > built-in prompt`.
+
 ## Efficient Attachments
 
 `--file` is repeatable and accepts files or directories. Relative paths are resolved against the target repo.
@@ -217,7 +253,7 @@ Each invocation creates `~/.archer/runs/<run-id>/`:
 
 The run dir is deleted on successful completion unless `--keep-run-dir`. If it fails, it's preserved for inspecting reports, diffs, and logs.
 
-The target repo only sees commits with prefix `archer(<phase>): ...`, made on the current branch. No CLI files are left in the project.
+The target repo only sees commits with prefix `archer(<phase>): ...`, made on the current branch. Normal runs leave no CLI files in the project; `archer init` intentionally creates `.archer/config.yaml` when you want project-local configuration.
 
 ## Development
 

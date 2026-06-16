@@ -1,10 +1,21 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import "./env"
+
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { afterAll, describe, expect, test } from "bun:test"
 
-import { buildAgentRegistry, loadArcherConfig, parseArcherConfig, selectPipelineSpec, ConfigError } from "../src/config"
+import { builtInAgents } from "../src/pipeline"
+import {
+  buildAgentRegistry,
+  loadArcherConfig,
+  parseArcherConfig,
+  selectPipelineSpec,
+  writeDefaultArcherConfig,
+  writeDefaultProjectConfig,
+  ConfigError,
+} from "../src/config"
 
 const dirs: string[] = []
 
@@ -29,6 +40,42 @@ describe("config loading", () => {
   test("no config file means no config", async () => {
     const dir = await projectDir()
     expect(await loadArcherConfig(dir)).toBeUndefined()
+  })
+
+  test("the default config template is valid and explicit", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "archer-default-config-"))
+    dirs.push(dir)
+    const path = join(dir, "config.yaml")
+    await writeDefaultArcherConfig(path)
+
+    const body = await readFile(path, "utf8")
+    const config = parseArcherConfig(body, path, dir)
+
+    expect(body).toContain("# maxAttempts: 2")
+    expect(body).toContain("# baseRef: main")
+    expect(body).toContain("# pipeline: default")
+    expect(body).toContain("# interactiveModel: openai/gpt-5.5#xhigh")
+    expect(body).toContain("# appRunCommand: pnpm dev")
+    expect(body).toContain("# agents:")
+    expect(body).toContain("#   implementer:")
+    expect(body).toContain("#   design-polisher:")
+    expect(body).toContain("#   api-reviewer:")
+    expect(config.defaults).toEqual({})
+    expect(config.agents).toEqual({})
+    for (const agent of builtInAgents) {
+      expect(await readFile(join(dir, "agents", `${agent.name}.md`), "utf8")).toContain("#")
+    }
+    expect(config.pipelines.default?.steps).toEqual([
+      { agent: "implementer", reports: "none" },
+      "human-review",
+      "patterns",
+      "security",
+      "design",
+      { agent: "tests", reports: "none" },
+      { agent: "adversarial", reports: "all" },
+    ])
+    expect(config.permissions).toEqual({ allow: [], deny: [] })
+    expect(config.attachments).toEqual([])
   })
 
   test("an empty file is a valid, empty config", () => {
@@ -90,6 +137,92 @@ describe("config loading", () => {
     expect(config.attachments).toEqual(["docs/architecture.md"])
   })
 
+  test("loads global config before project overrides", async () => {
+    const previousHome = process.env.ARCHER_HOME
+    const home = await mkdtemp(join(tmpdir(), "archer-config-home-"))
+    dirs.push(home)
+    process.env.ARCHER_HOME = home
+
+    try {
+      await writeFile(
+        join(home, "config.yaml"),
+        [
+          "defaults:",
+          "  maxAttempts: 4",
+          "  baseRef: trunk",
+          "  pipeline: global-only",
+          "pipelines:",
+          "  global-only:",
+          "    steps:",
+          "      - implementer",
+          "permissions:",
+          "  allow:",
+          '    - "global-check *"',
+          "attachments:",
+          "  - global.md",
+        ].join("\n"),
+      )
+      const dir = await projectDir(
+        [
+          "defaults:",
+          "  maxAttempts: 1",
+          "  pipeline: quick",
+          "pipelines:",
+          "  quick:",
+          "    steps:",
+          "      - tests",
+          "permissions:",
+          "  deny:",
+          '    - "local-danger *"',
+          "attachments:",
+          "  - local.md",
+        ].join("\n"),
+      )
+
+      const config = await loadArcherConfig(dir)
+
+      expect(config?.defaults).toEqual({ maxAttempts: 1, baseRef: "trunk", pipeline: "quick" })
+      expect(config?.permissions).toEqual({ allow: ["global-check *"], deny: ["local-danger *"] })
+      expect(config?.attachments).toEqual(["global.md", "local.md"])
+      expect(selectPipelineSpec(config, "global-only").steps).toEqual(["implementer"])
+      expect(selectPipelineSpec(config, "quick").steps).toEqual(["tests"])
+    } finally {
+      if (previousHome === undefined) delete process.env.ARCHER_HOME
+      else process.env.ARCHER_HOME = previousHome
+    }
+  })
+
+  test("writes default config without overwriting unless forced", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "archer-config-write-"))
+    dirs.push(dir)
+    const path = join(dir, "config.yaml")
+
+    expect(await writeDefaultArcherConfig(path)).toEqual({ path, created: true })
+    expect(await readFile(path, "utf8")).toContain("version: 1")
+    expect(await readFile(join(dir, "agents", "implementer.md"), "utf8")).toContain("# Implementer")
+
+    await writeFile(path, "version: 1\nattachments:\n  - custom.md\n")
+    await writeFile(join(dir, "agents", "implementer.md"), "# Custom Implementer\n")
+    expect(await writeDefaultArcherConfig(path)).toEqual({ path, created: false })
+    expect(await readFile(path, "utf8")).toContain("custom.md")
+    expect(await readFile(join(dir, "agents", "implementer.md"), "utf8")).toContain("# Custom Implementer")
+
+    expect(await writeDefaultArcherConfig(path, true)).toEqual({ path, created: true })
+    expect(await readFile(path, "utf8")).not.toContain("custom.md")
+    expect(await readFile(join(dir, "agents", "implementer.md"), "utf8")).toContain("# Implementer")
+  })
+
+  test("writes project default config under .archer", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "archer-project-config-"))
+    dirs.push(dir)
+    const path = join(dir, ".archer", "config.yaml")
+
+    expect(await writeDefaultProjectConfig(dir)).toEqual({ path, created: true })
+    expect(await writeDefaultProjectConfig(dir)).toEqual({ path, created: false })
+    expect(await readFile(path, "utf8")).toContain("pipelines:")
+    expect(await readFile(join(dir, ".archer", "agents", "implementer.md"), "utf8")).toContain("# Implementer")
+  })
+
   test("rejects configs with errors that point at the offending field", async () => {
     expect(() => parse("version: 2")).toThrow("version")
     expect(() => parse("defaults:\n  maxAttempts: 0")).toThrow("defaults.maxAttempts must be a positive integer")
@@ -107,10 +240,31 @@ describe("config loading", () => {
 
   test("project agents must bring a prompt file", async () => {
     const without = await projectDir()
-    expect(() => parse("agents:\n  ghost: {}", without)).toThrow("needs a prompt at .archer/agents/ghost.md")
+    expect(() => parse("agents:\n  ghost: {}", without)).toThrow("needs a prompt at agents/ghost.md next to the config")
 
     const withPrompt = await projectDir(undefined, ["ghost"])
     expect(() => parse("agents:\n  ghost: {}", withPrompt)).not.toThrow()
+  })
+
+  test("global project agents use same-name prompts next to global config", async () => {
+    const previousHome = process.env.ARCHER_HOME
+    const home = await mkdtemp(join(tmpdir(), "archer-global-custom-agent-"))
+    const target = await projectDir()
+    dirs.push(home)
+    process.env.ARCHER_HOME = home
+
+    try {
+      await mkdir(join(home, "agents"), { recursive: true })
+      await writeFile(join(home, "config.yaml"), "agents:\n  ghost: {}")
+      await writeFile(join(home, "agents", "ghost.md"), "# Ghost\n\nGlobal prompt.")
+
+      const config = await loadArcherConfig(target)
+
+      expect(config?.agents.ghost).toEqual({})
+    } finally {
+      if (previousHome === undefined) delete process.env.ARCHER_HOME
+      else process.env.ARCHER_HOME = previousHome
+    }
   })
 
   test("built-in overrides don't need a prompt, aliases and reserved names are rejected", async () => {

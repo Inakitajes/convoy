@@ -9,6 +9,7 @@ build:
 install: build
 	@mkdir -p $(INSTALL_DIR)
 	@install -m 755 $(BIN) $(INSTALL_DIR)/$(BIN)
+	@bun run src/main.ts init --global
 	@echo "✓ Instalado en $(INSTALL_DIR)/$(BIN)"
 	@echo "  Asegúrate de que $(INSTALL_DIR) está en tu PATH."
 

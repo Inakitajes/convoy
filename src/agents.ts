@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url"
 import type { AgentConfig, Config } from "@opencode-ai/sdk/v2"
 import { builtInAgents } from "./pipeline"
 import type { AgentSpec, PermissionAdditions } from "./types"
+import { archerRoot } from "./workspace"
 
 const sourceDir = dirname(fileURLToPath(import.meta.url))
 const builtInPromptsDir = join(sourceDir, "..", "prompts")
@@ -20,7 +21,7 @@ export function opencodeConfig(
 ): Config {
   const agent: Record<string, AgentConfig> = {}
   for (const spec of agents) {
-    agent[spec.name] = agentConfig(spec.description, spec.temperature, loadAgentPrompt(spec.name, targetDir), runDir, targetDir, false, permissions)
+    agent[spec.name] = agentConfig(spec.description, spec.temperature, loadAgentPrompt(spec, targetDir), runDir, targetDir, false, permissions)
   }
 
   return {
@@ -32,8 +33,11 @@ export function opencodeConfig(
   }
 }
 
-export function loadAgentPrompt(agentName: string, targetDir = process.cwd()) {
-  const agentPrompt = readProjectAgentPrompt(agentName, targetDir) ?? readBuiltInPrompt(agentName)
+export function loadAgentPrompt(agent: string | AgentSpec, targetDir = process.cwd()) {
+  const agentName = typeof agent === "string" ? agent : agent.name
+  const projectPrompt = readProjectAgentPrompt(agentName, targetDir)
+  const globalPrompt = readGlobalAgentPrompt(agentName)
+  const agentPrompt = projectPrompt ?? globalPrompt ?? readBuiltInPrompt(agentName)
   const safetyPrompt = readBuiltInPrompt(runtimeSafetyPrompt)
   return [agentPrompt.trimEnd(), "", "---", "", safetyPrompt.trim()].join("\n")
 }
@@ -42,12 +46,22 @@ export function projectAgentPromptPath(agentName: string, targetDir: string) {
   return join(targetDir, ".archer", "agents", `${agentName}.md`)
 }
 
+export function globalAgentPromptPath(agentName: string) {
+  return join(archerRoot(), "agents", `${agentName}.md`)
+}
+
 export function builtInPromptPath(promptName: string) {
   return join(builtInPromptsDir, `${promptName}.md`)
 }
 
 function readProjectAgentPrompt(agentName: string, targetDir: string) {
   const path = projectAgentPromptPath(agentName, targetDir)
+  if (!isFile(path)) return undefined
+  return readFileSync(path, "utf8")
+}
+
+function readGlobalAgentPrompt(agentName: string) {
+  const path = globalAgentPromptPath(agentName)
   if (!isFile(path)) return undefined
   return readFileSync(path, "utf8")
 }

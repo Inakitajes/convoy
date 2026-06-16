@@ -1,10 +1,12 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import "./env"
+
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { afterAll, describe, expect, test } from "bun:test"
 
-import { parseArgs, parseCommand } from "../src/cli"
+import { parseAndRun, parseArgs, parseCommand } from "../src/cli"
 import { stepNames } from "../src/pipeline"
 
 describe("cli parsing", () => {
@@ -121,6 +123,56 @@ describe("cli parsing", () => {
   })
 })
 
+describe("init command", () => {
+  const dirs: string[] = []
+
+  afterAll(async () => {
+    await Promise.all(dirs.map((dir) => rm(dir, { recursive: true, force: true })))
+  })
+
+  test("parses init options without requiring a prompt", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "archer-cli-init-"))
+    dirs.push(dir)
+
+    const local = await parseCommand(["init", "--dir", dir, "--force", "--quiet"])
+    expect(local.type).toBe("init")
+    if (local.type === "init") {
+      expect(local.options).toMatchObject({ targetDir: dir, global: false, force: true, quiet: true })
+    }
+
+    const global = await parseCommand(["init", "--global", "--force"])
+    expect(global.type).toBe("init")
+    if (global.type === "init") expect(global.options).toMatchObject({ global: true, force: true })
+  })
+
+  test("rejects incompatible init options", async () => {
+    await expect(parseCommand(["init", "--global", "--dir", "."])).rejects.toThrow("either --global or --dir")
+    await expect(parseCommand(["init", "extra"])).rejects.toThrow("usage: archer init")
+  })
+
+  test("creates project config without overwriting unless forced", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "archer-cli-init-write-"))
+    dirs.push(dir)
+    const path = join(dir, ".archer", "config.yaml")
+
+    await parseAndRun(["init", "--dir", dir, "--quiet"])
+    expect(await readFile(path, "utf8")).toContain("version: 1")
+    expect(await readFile(path, "utf8")).toContain("#   implementer:")
+    expect(await readFile(path, "utf8")).toContain("# maxAttempts: 2")
+    expect(await readFile(join(dir, ".archer", "agents", "implementer.md"), "utf8")).toContain("# Implementer")
+
+    await writeFile(path, "version: 1\nattachments:\n  - custom.md\n")
+    await writeFile(join(dir, ".archer", "agents", "implementer.md"), "# Custom Implementer\n")
+    await parseAndRun(["init", "--dir", dir, "--quiet"])
+    expect(await readFile(path, "utf8")).toContain("custom.md")
+    expect(await readFile(join(dir, ".archer", "agents", "implementer.md"), "utf8")).toContain("# Custom Implementer")
+
+    await parseAndRun(["init", "--dir", dir, "--force", "--quiet"])
+    expect(await readFile(path, "utf8")).not.toContain("custom.md")
+    expect(await readFile(join(dir, ".archer", "agents", "implementer.md"), "utf8")).toContain("# Implementer")
+  })
+})
+
 describe("config precedence", () => {
   const dirs: string[] = []
 
@@ -165,6 +217,45 @@ describe("config precedence", () => {
     expect(command.options.pipeline.name).toBe("quick")
     expect(stepNames(command.options.pipeline)).toEqual(["implementer", "tests"])
     expect(command.options.files).toEqual(["docs.md"])
+  })
+
+  test("global config applies when project config is absent", async () => {
+    const previousHome = process.env.ARCHER_HOME
+    const home = await mkdtemp(join(tmpdir(), "archer-cli-home-"))
+    const dir = await mkdtemp(join(tmpdir(), "archer-cli-target-"))
+    dirs.push(home, dir)
+    process.env.ARCHER_HOME = home
+
+    try {
+      await writeFile(
+        join(home, "config.yaml"),
+        [
+          "defaults:",
+          "  maxAttempts: 4",
+          "  baseRef: trunk",
+          "  pipeline: lean",
+          "pipelines:",
+          "  lean:",
+          "    steps:",
+          "      - implementer",
+          "attachments:",
+          "  - global.md",
+        ].join("\n"),
+      )
+
+      const command = await parseCommand(["--dir", dir, "prompt"])
+
+      expect(command.type).toBe("run")
+      if (command.type !== "run") return
+      expect(command.options.maxAttempts).toBe(4)
+      expect(command.options.baseRef).toBe("trunk")
+      expect(command.options.pipeline.name).toBe("lean")
+      expect(stepNames(command.options.pipeline)).toEqual(["implementer"])
+      expect(command.options.files).toEqual(["global.md"])
+    } finally {
+      if (previousHome === undefined) delete process.env.ARCHER_HOME
+      else process.env.ARCHER_HOME = previousHome
+    }
   })
 
   test("CLI flags always win over config defaults", async () => {

@@ -1,15 +1,17 @@
 import { statSync } from "node:fs"
-import { readFile } from "node:fs/promises"
-import { join } from "node:path"
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises"
+import { dirname, isAbsolute, join, resolve } from "node:path"
 
-import { projectAgentPromptPath } from "./agents"
+import { builtInPromptPath, globalAgentPromptPath, projectAgentPromptPath } from "./agents"
 import { log } from "./log"
 import { agentAliases, builtInAgents, builtInPipelines, humanReviewStep, splitModelVariant, type PipelineSpec, type StepSpec } from "./pipeline"
 import type { AgentSpec, PermissionAdditions } from "./types"
+import { archerRoot } from "./workspace"
 
 /**
- * Project configuration loaded from .archer/config.yaml. Everything is
- * optional: the file only declares what differs from archer's defaults.
+ * Configuration loaded from ~/.archer/config.yaml and .archer/config.yaml.
+ * Everything is optional: files only declare what differs from archer's
+ * built-in defaults.
  */
 export type ArcherConfig = {
   defaults: ArcherDefaults
@@ -45,21 +47,166 @@ export class ConfigError extends Error {
 
 const configFileNames = ["config.yaml", "config.yml"]
 
+export const defaultArcherConfig = `# Archer configuration.
+# Global default path: ~/.archer/config.yaml
+# Project override path: .archer/config.yaml
+
+version: 1
+
+defaults:
+  # maxAttempts: 2
+  # baseRef: main
+  # pipeline: default
+  # interactiveModel: openai/gpt-5.5#xhigh
+  # model: openai/gpt-5.5#xhigh # optional: unset by default; uncomment to force every agent unless a step/agent overrides it
+  # appRunCommand: pnpm dev # optional: unset by default; used during human-review
+  # emulator: Pixel_8 # optional: unset by default; used during human-review
+
+# Agents are matched by name with Markdown prompts next to this config:
+#   agents/<name>.md
+# Uncomment entries to override metadata/model/temperature or to add custom agents.
+# Custom agents must have a matching agents/<name>.md prompt file.
+# agents:
+#   implementer:
+#     description: Implements the feature described in the PRD respecting repo patterns
+#     model: openai/gpt-5.5#xhigh
+#   design-polisher:
+#     description: Polishes new UI following the repo's design system, without redesigning
+#     model: anthropic/claude-opus-4-7
+#     temperature: 0.2
+#   api-reviewer:
+#     description: Reviews API consistency
+#     model: openai/gpt-5.5#xhigh
+
+pipelines:
+  default:
+    description: Implementation, pattern/security audits, design polish, tests, and adversarial review
+    steps:
+      - agent: implementer
+        reports: none
+      - human-review
+      - patterns
+      - security
+      - design
+      - agent: tests
+        reports: none
+      - agent: adversarial
+        reports: all
+
+permissions:
+  allow: []
+  deny: []
+
+attachments: []
+`
+
+export type ConfigWriteResult = {
+  path: string
+  created: boolean
+}
+
+export function globalConfigPath() {
+  return join(archerRoot(), "config.yaml")
+}
+
+export function projectConfigPath(targetDir: string) {
+  return join(targetDir, ".archer", "config.yaml")
+}
+
 export async function loadArcherConfig(targetDir: string): Promise<ArcherConfig | undefined> {
+  const configs: ArcherConfig[] = []
+  const global = await readConfigFile(globalConfigPath(), globalConfigPath(), targetDir)
+  if (global) configs.push(global)
+
+  const local = await loadProjectArcherConfig(targetDir)
+  if (local) configs.push(local)
+
+  return configs.length > 0 ? mergeArcherConfigs(configs) : undefined
+}
+
+export async function loadProjectArcherConfig(targetDir: string): Promise<ArcherConfig | undefined> {
   for (const fileName of configFileNames) {
     const path = join(targetDir, ".archer", fileName)
-    let body: string
-    try {
-      body = await readFile(path, "utf8")
-    } catch {
-      continue
-    }
-    return parseArcherConfig(body, `.archer/${fileName}`, targetDir)
+    const config = await readConfigFile(path, `.archer/${fileName}`, targetDir)
+    if (config) return config
   }
   return undefined
 }
 
-export function parseArcherConfig(body: string, source: string, targetDir: string): ArcherConfig {
+export function mergeArcherConfigs(configs: readonly ArcherConfig[]): ArcherConfig {
+  const merged: ArcherConfig = { defaults: {}, agents: {}, pipelines: {}, permissions: { allow: [], deny: [] }, attachments: [] }
+
+  for (const config of configs) {
+    merged.defaults = { ...merged.defaults, ...config.defaults }
+    for (const [name, agent] of Object.entries(config.agents)) {
+      merged.agents[name] = { ...merged.agents[name], ...agent }
+    }
+    for (const [name, pipeline] of Object.entries(config.pipelines)) merged.pipelines[name] = pipeline
+    merged.permissions.allow.push(...config.permissions.allow)
+    merged.permissions.deny.push(...config.permissions.deny)
+    merged.attachments.push(...config.attachments)
+  }
+
+  return merged
+}
+
+export async function writeDefaultGlobalConfig(force = false): Promise<ConfigWriteResult> {
+  return writeDefaultArcherConfig(globalConfigPath(), force)
+}
+
+export async function writeDefaultProjectConfig(targetDir: string, force = false): Promise<ConfigWriteResult> {
+  await assertDirectory(targetDir)
+  return writeDefaultArcherConfig(projectConfigPath(targetDir), force)
+}
+
+export async function writeDefaultArcherConfig(path: string, force = false): Promise<ConfigWriteResult> {
+  await mkdir(dirname(path), { recursive: true })
+  await writeDefaultAgentPrompts(path, force)
+  try {
+    await writeFile(path, defaultArcherConfig, { flag: force ? "w" : "wx" })
+    return { path, created: true }
+  } catch (error) {
+    if (!force && isErrno(error, "EEXIST")) return { path, created: false }
+    throw error
+  }
+}
+
+async function writeDefaultAgentPrompts(configPath: string, force: boolean) {
+  const agentsDir = join(dirname(configPath), "agents")
+  await mkdir(agentsDir, { recursive: true })
+  for (const agent of builtInAgents) {
+    const target = join(agentsDir, `${agent.name}.md`)
+    const body = await readFile(builtInPromptPath(agent.name), "utf8")
+    try {
+      await writeFile(target, body, { flag: force ? "w" : "wx" })
+    } catch (error) {
+      if (!force && isErrno(error, "EEXIST")) continue
+      throw error
+    }
+  }
+}
+
+async function readConfigFile(path: string, source: string, targetDir: string): Promise<ArcherConfig | undefined> {
+  let body: string
+  try {
+    body = await readFile(path, "utf8")
+  } catch {
+    return undefined
+  }
+  return parseArcherConfig(body, source, targetDir, dirname(path))
+}
+
+async function assertDirectory(path: string) {
+  let info: Awaited<ReturnType<typeof stat>>
+  try {
+    info = await stat(path)
+  } catch {
+    throw new Error(`target directory does not exist: ${path}`)
+  }
+  if (!info.isDirectory()) throw new Error(`target path is not a directory: ${path}`)
+}
+
+export function parseArcherConfig(body: string, source: string, targetDir: string, configDir = configDirectory(source, targetDir)): ArcherConfig {
   let raw: unknown
   try {
     raw = Bun.YAML.parse(body)
@@ -78,8 +225,8 @@ export function parseArcherConfig(body: string, source: string, targetDir: strin
 
   if (root.version !== undefined && root.version !== 1) v.fail("version", `unsupported value ${JSON.stringify(root.version)}; this archer reads version 1`)
 
-  if (root.defaults !== undefined) config.defaults = validateDefaults(v, root.defaults)
-  if (root.agents !== undefined) config.agents = validateAgents(v, root.agents, targetDir)
+  if (root.defaults !== undefined && root.defaults !== null) config.defaults = validateDefaults(v, root.defaults)
+  if (root.agents !== undefined) config.agents = validateAgents(v, root.agents, targetDir, configDir)
   if (root.pipelines !== undefined) config.pipelines = validatePipelines(v, root.pipelines)
   if (root.permissions !== undefined) config.permissions = validatePermissions(v, root.permissions)
   if (root.attachments !== undefined) config.attachments = v.stringArray(root.attachments, "attachments")
@@ -102,7 +249,7 @@ function validateDefaults(v: Validator, raw: unknown): ArcherDefaults {
   return defaults
 }
 
-function validateAgents(v: Validator, raw: unknown, targetDir: string): Record<string, ConfigAgent> {
+function validateAgents(v: Validator, raw: unknown, targetDir: string, configDir: string): Record<string, ConfigAgent> {
   const record = v.record(raw, "agents")
   const agents: Record<string, ConfigAgent> = {}
 
@@ -122,8 +269,8 @@ function validateAgents(v: Validator, raw: unknown, targetDir: string): Record<s
     // Project agents bring their own prompt; built-in overrides keep theirs
     // (optionally replaced via the same path). Fail at load, not mid-run.
     const builtIn = builtInAgents.some((candidate) => candidate.name === name)
-    if (!builtIn && !isFile(projectAgentPromptPath(name, targetDir))) {
-      v.fail(path, `agent "${name}" needs a prompt at .archer/agents/${name}.md`)
+    if (!builtIn && !hasConfiguredAgentPrompt(name, targetDir, configDir)) {
+      v.fail(path, `agent "${name}" needs a prompt at agents/${name}.md next to the config`)
     }
 
     agents[name] = agent
@@ -282,4 +429,16 @@ function isFile(path: string) {
   } catch {
     return false
   }
+}
+
+function configDirectory(source: string, targetDir: string) {
+  return dirname(isAbsolute(source) ? source : resolve(targetDir, source))
+}
+
+function hasConfiguredAgentPrompt(agentName: string, targetDir: string, configDir: string) {
+  return isFile(join(configDir, "agents", `${agentName}.md`)) || isFile(projectAgentPromptPath(agentName, targetDir)) || isFile(globalAgentPromptPath(agentName))
+}
+
+function isErrno(error: unknown, code: string) {
+  return typeof error === "object" && error !== null && "code" in error && (error as { code?: unknown }).code === code
 }

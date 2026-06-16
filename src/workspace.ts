@@ -52,13 +52,17 @@ export async function writeSummary(workspace: Workspace, phaseNames: string[]) {
   await writeFile(join(workspace.dir, "SUMMARY.md"), chunks.join("\n"))
 }
 
+export function archerRoot() {
+  return process.env.ARCHER_HOME ? resolve(process.env.ARCHER_HOME) : join(homedir(), ".archer")
+}
+
 export function runDir(runID: string) {
   validateRunID(runID)
   return childPath(runsRoot(), runID)
 }
 
 export function runsRoot() {
-  return join(homedir(), ".archer", "runs")
+  return join(archerRoot(), "runs")
 }
 
 export function isValidRunID(runID: string) {

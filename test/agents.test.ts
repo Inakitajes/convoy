@@ -41,6 +41,49 @@ describe("opencode config", () => {
     }
   })
 
+  test("global agent prompts replace built-ins but keep runtime safety", async () => {
+    const previousHome = process.env.ARCHER_HOME
+    const home = await mkdtemp(join(tmpdir(), "archer-agent-global-home-"))
+    try {
+      process.env.ARCHER_HOME = home
+      await mkdir(join(home, "agents"), { recursive: true })
+      await writeFile(join(home, "agents", "implementer.md"), "# Global Implementer\n\nGlobal prompt.")
+
+      const prompt = loadAgentPrompt("implementer", "/tmp/non-existent-archer-target")
+
+      expect(prompt.startsWith("# Global Implementer")).toBe(true)
+      expect(prompt).toContain("Global prompt.")
+      expect(prompt).toContain("# Archer Runtime Safety")
+    } finally {
+      if (previousHome === undefined) delete process.env.ARCHER_HOME
+      else process.env.ARCHER_HOME = previousHome
+      await rm(home, { recursive: true, force: true })
+    }
+  })
+
+  test("project prompt path beats a global prompt path", async () => {
+    const previousHome = process.env.ARCHER_HOME
+    const dir = await mkdtemp(join(tmpdir(), "archer-agent-global-prompt-"))
+    const home = await mkdtemp(join(tmpdir(), "archer-agent-global-home-"))
+    try {
+      process.env.ARCHER_HOME = home
+      await mkdir(join(home, "agents"), { recursive: true })
+      await writeFile(join(home, "agents", "implementer.md"), "# Global Implementer\n\nGlobal prompt.")
+      await mkdir(join(dir, ".archer", "agents"), { recursive: true })
+      await writeFile(join(dir, ".archer", "agents", "implementer.md"), "# Local Implementer\n\nLocal prompt.")
+
+      const prompt = loadAgentPrompt("implementer", dir)
+
+      expect(prompt.startsWith("# Local Implementer")).toBe(true)
+      expect(prompt).not.toContain("# Global Implementer")
+    } finally {
+      if (previousHome === undefined) delete process.env.ARCHER_HOME
+      else process.env.ARCHER_HOME = previousHome
+      await rm(dir, { recursive: true, force: true })
+      await rm(home, { recursive: true, force: true })
+    }
+  })
+
   test("bash policy includes web checks and keeps dangerous operations denied", () => {
     const policy = bashPolicy()
 
