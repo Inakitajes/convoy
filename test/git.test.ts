@@ -1,6 +1,9 @@
-import { describe, expect, test } from "bun:test"
+import { afterAll, describe, expect, test } from "bun:test"
+import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 
-import { findSuspiciousStagedFiles } from "../src/git"
+import { ensureRepoReady, findSuspiciousStagedFiles } from "../src/git"
 
 describe("findSuspiciousStagedFiles", () => {
   test("flags common secret filenames", () => {
@@ -48,5 +51,39 @@ describe("findSuspiciousStagedFiles", () => {
   test("decodes C-quoted porcelain paths before matching", () => {
     const porcelain = ['A  "secret dir/.env"', 'A  "caf\\303\\251/.env"'].join("\n")
     expect(findSuspiciousStagedFiles(porcelain)).toEqual(["secret dir/.env", "cafÃ©/.env"])
+  })
+})
+
+describe("ensureRepoReady", () => {
+  const dirs: string[] = []
+  afterAll(async () => {
+    await Promise.all(dirs.map((dir) => rm(dir, { recursive: true, force: true })))
+  })
+
+  async function git(args: string[], cwd: string) {
+    const proc = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe", env: process.env })
+    if ((await proc.exited) !== 0) throw new Error(`git ${args.join(" ")}: ${await new Response(proc.stderr).text()}`)
+  }
+
+  async function dirtyRepo(): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), "archer-ensure-repo-"))
+    dirs.push(dir)
+    await git(["init", "-q"], dir)
+    await writeFile(join(dir, "dirty.txt"), "uncommitted\n")
+    // git reports the physical path; ensureRepoReady resolves symlinks too, but
+    // mkdtemp on macOS hands back a /var → /private/var symlink, so compare from there.
+    const proc = Bun.spawn(["git", "-C", dir, "rev-parse", "--show-toplevel"], { stdout: "pipe", stderr: "pipe" })
+    await proc.exited
+    return (await new Response(proc.stdout).text()).trim()
+  }
+
+  test("throws on a dirty tree without allowDirty", async () => {
+    const dir = await dirtyRepo()
+    await expect(ensureRepoReady(dir)).rejects.toThrow(/not clean/)
+  })
+
+  test("allowDirty defers the dirty-tree decision so resume can recover", async () => {
+    const dir = await dirtyRepo()
+    await expect(ensureRepoReady(dir, { allowDirty: true })).resolves.toBeUndefined()
   })
 })

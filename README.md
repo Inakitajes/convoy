@@ -97,7 +97,10 @@ archer --prompt-file prd.md --app-run-command "pnpm dev"
 archer --prompt-file prd.md --emulator Pixel_8 --app-run-command "flutter run -d emulator-5554"
 
 # resume a failed run (phases that already wrote their report are skipped,
-# and the dashboard restores their real duration, cost, and session)
+# and the dashboard restores their real duration, cost, and session).
+# If a phase was interrupted before its commit and left the working tree dirty,
+# an interactive resume asks whether to commit those changes as that phase and
+# continue with the following ones.
 archer --resume 20260519-103045-x7q2
 
 # browse run history in the dashboard TUI: a selectable list (newest first,
@@ -223,6 +226,7 @@ The rules:
 - **Project pipelines shadow built-ins**: defining `pipelines.default` replaces the built-in default.
 - **`--no-human-review`** (and non-TTY runs) drop every `human-review` gate from the pipeline.
 - **Resume is frozen**: the resolved pipeline is persisted in the run's `metadata.json`; `--resume` replays it even if the config changed since.
+- **Dirty-tree recovery**: a phase interrupted before its commit (Ctrl+C, a failed commit step, a killed process) leaves uncommitted work in the tree, which normally blocks `--resume`. In an interactive terminal, resume offers to commit that work as the interrupted phase (`archer(<phase>): …`), mark it done, and continue with the following phases. Decline (or a non-TTY resume) keeps the old "commit/stash first" behavior.
 - **Permissions are additive**: `permissions.deny` extends the hard denylist, `permissions.allow` extends the allowlist, deny always wins, and there is deliberately no way for a repo to grant itself `--yolo`.
 
 ## Global configuration

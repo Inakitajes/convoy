@@ -1,11 +1,13 @@
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
+import { stdin, stdout } from "node:process"
+import { createInterface } from "node:readline/promises"
 
 import type { AssistantMessage, FilePartInput, OpencodeClient, Part } from "@opencode-ai/sdk/v2"
 
 import { opencodeConfig } from "./agents"
 import { fileParts } from "./attachments"
-import { addAllAndCommit, createCleanRepoSnapshot, ensureRepoReady, restoreRepoSnapshot, type RepoSnapshot, writeDiff } from "./git"
+import { addAllAndCommit, createCleanRepoSnapshot, dirtyFilesPreview, dirtyTreeError, ensureRepoReady, restoreRepoSnapshot, type RepoSnapshot, statusPorcelain, writeDiff } from "./git"
 import { runHumanReviewGate } from "./human"
 import { log } from "./log"
 import { openRunMetadata, recordProgress, type RunMetadataStore } from "./metadata"
@@ -139,7 +141,12 @@ function installShutdownSignals(shutdown: RunShutdown) {
 }
 
 export async function run(options: RunOptions) {
-  await ensureRepoReady(options.targetDir, { includeDirty: options.includeDirty, maxAttempts: options.maxAttempts, baseRef: options.baseRef })
+  await ensureRepoReady(options.targetDir, {
+    includeDirty: options.includeDirty,
+    maxAttempts: options.maxAttempts,
+    baseRef: options.baseRef,
+    allowDirty: Boolean(options.resumeRunID),
+  })
 
   const workspace = options.resumeRunID
     ? await resumeWorkspace(options.resumeRunID)
@@ -162,6 +169,10 @@ export async function run(options: RunOptions) {
     const pipeline = metadata.pipeline
     validateStepFilters(pipeline, options)
     ensureAgentsAvailable(pipeline, options.agents)
+    // A run interrupted before its phase commit leaves the tree dirty; on resume
+    // offer to commit that work as the interrupted phase and continue. Runs here,
+    // before the TUI grabs the terminal, so the readline prompt stays visible.
+    await maybeRecoverDirtyTree(workspace, metadata, options)
     progress = recordProgress(
       await createProgressUI(progressPhases(pipeline), options.tui, () => shutdown.request("Ctrl+C"), autoAccept),
       metadata,
@@ -271,20 +282,118 @@ export async function restorePhaseFromPreviousRun(
   phase: AgentStep,
   progress: ProgressUI,
 ): Promise<boolean> {
-  const reportAbs = join(workspace.dir, phase.reportPath)
-  if (!(await exists(reportAbs))) return false
-
-  const snapshot = metadata.snapshot(phase.name)
-  if (snapshot?.status === "failed") {
-    await rm(reportAbs, { force: true })
-    log.info(`[${phase.name}] failed in the previous run; retrying`)
+  if (await phaseNeedsRun(workspace, metadata, phase)) {
+    // A failed phase can leave its report behind; drop it so persistPhaseReport
+    // writes a fresh one on the rerun instead of keeping the stale one.
+    const reportAbs = join(workspace.dir, phase.reportPath)
+    if (await exists(reportAbs)) {
+      await rm(reportAbs, { force: true })
+      log.info(`[${phase.name}] failed in the previous run; retrying`)
+    }
     return false
   }
 
+  const snapshot = metadata.snapshot(phase.name)
   if (snapshot) progress.phaseRestored(phase.name, snapshot)
   else progress.phaseCompleted(phase.name, "already completed in previous run")
   log.info(`[${phase.name}] report exists; skipping on resume`)
   return true
+}
+
+// A phase still needs to run on resume when its report is missing (it never
+// finished) or the metadata marks it failed (its report, if any, is stale).
+async function phaseNeedsRun(workspace: Workspace, metadata: RunMetadataStore, phase: AgentStep): Promise<boolean> {
+  if (!(await exists(join(workspace.dir, phase.reportPath)))) return true
+  return metadata.snapshot(phase.name)?.status === "failed"
+}
+
+// The agent phase a resume would run next: the first one still needing a run,
+// skipping human gates. The dirty tree belongs to whichever phase was
+// interrupted before its commit, which is exactly that phase.
+export async function selectInterruptedPhase(
+  workspace: Workspace,
+  metadata: RunMetadataStore,
+  pipeline: Pipeline,
+): Promise<AgentStep | undefined> {
+  for (const step of pipeline.steps) {
+    if (step.type !== "agent") continue
+    if (await phaseNeedsRun(workspace, metadata, step)) return step
+  }
+  return undefined
+}
+
+// On resume with a dirty tree, offer to commit the interrupted phase's leftover
+// work and continue. Runs before the TUI starts so the prompt owns the terminal.
+async function maybeRecoverDirtyTree(workspace: Workspace, metadata: RunMetadataStore, options: RunOptions) {
+  if (!options.resumeRunID) return
+  const porcelain = await statusPorcelain(options.targetDir)
+  if (porcelain.trim() === "") return
+
+  const dirty = () => dirtyTreeError(options.targetDir, porcelain, { resuming: true })
+  const phase = await selectInterruptedPhase(workspace, metadata, metadata.pipeline)
+  // No pending agent phase means the changes don't belong to an interrupted
+  // phase (stray edits); leave them for the user rather than guess.
+  if (!phase) throw dirty()
+  if (!(stdin.isTTY && stdout.isTTY)) throw dirty()
+  if (!(await confirmRecovery(phase.name, porcelain))) throw dirty()
+
+  await commitRecoveredPhase(workspace, metadata, phase, options.targetDir)
+}
+
+async function confirmRecovery(phaseName: string, porcelain: string): Promise<boolean> {
+  stdout.write(`Resume found uncommitted changes from interrupted phase "${phaseName}":\n${dirtyFilesPreview(porcelain)}\n`)
+  const rl = createInterface({ input: stdin, output: stdout })
+  const controller = new AbortController()
+  let interrupted = false
+  // Raw-mode readline swallows the process SIGINT and emits this event instead;
+  // without it Ctrl+C at the prompt would hang.
+  rl.on("SIGINT", () => {
+    interrupted = true
+    controller.abort()
+  })
+  try {
+    const answer = (await rl.question(`commit changes as '${phaseName}' and continue? [y/N] > `, { signal: controller.signal })).trim().toLowerCase()
+    return answer === "y" || answer === "yes"
+  } catch (error) {
+    if (interrupted) throw new UserAbortError("Ctrl+C received")
+    throw error
+  } finally {
+    rl.close()
+  }
+}
+
+// Treats the dirty tree as the interrupted phase's output: writes a recovery
+// report if the phase never wrote one, commits everything as that phase, and
+// marks it completed so the resume loop skips it and runs the rest.
+export async function commitRecoveredPhase(
+  workspace: Workspace,
+  metadata: RunMetadataStore,
+  phase: AgentStep,
+  targetDir: string,
+) {
+  const reportAbs = join(workspace.dir, phase.reportPath)
+  if (!(await exists(reportAbs))) {
+    await mkdir(dirname(reportAbs), { recursive: true })
+    await writeFile(reportAbs, recoveryReport(phase.name))
+  }
+
+  const committed = await addAllAndCommit(`archer(${phase.name}): ${await summaryFromReport(reportAbs)}`, targetDir)
+  if (committed) log.info(`[${phase.name}] recovered uncommitted changes into a commit; continuing from the next phase`)
+  else log.warn(`[${phase.name}] nothing to commit during recovery`)
+
+  metadata.phaseEnded(phase.name, "completed")
+  await metadata.flush()
+}
+
+function recoveryReport(phaseName: string) {
+  return [
+    "# Recovered uncommitted changes",
+    "",
+    `Phase "${phaseName}" was interrupted before archer committed its work. The`,
+    "uncommitted changes left in the working tree were committed as this phase during a",
+    "manual resume recovery, and the pipeline continued from the next phase.",
+    "",
+  ].join("\n")
 }
 
 async function runPhase(

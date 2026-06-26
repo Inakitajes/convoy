@@ -40,7 +40,7 @@ async function execFile(command: string, args: string[], options: ExecOptions): 
   return { stdout, stderr, exitCode }
 }
 
-export async function ensureRepoReady(cwd: string, options: { includeDirty?: boolean; maxAttempts?: number; baseRef?: string } = {}) {
+export async function ensureRepoReady(cwd: string, options: { includeDirty?: boolean; maxAttempts?: number; baseRef?: string; allowDirty?: boolean } = {}) {
   const rootResult = await execFile("git", ["rev-parse", "--show-toplevel"], { cwd, allowFailure: true })
   if (rootResult.exitCode !== 0) {
     throw new Error("archer must be run at the root of a git repo")
@@ -62,12 +62,11 @@ export async function ensureRepoReady(cwd: string, options: { includeDirty?: boo
 
   const status = await execFile("git", ["status", "--porcelain"], { cwd })
   if (status.stdout.trim() !== "") {
+    // A resumed run defers the dirty-tree decision to the recovery step, which
+    // can offer to commit an interrupted phase's leftover changes and continue.
+    if (options.allowDirty) return
     if (!options.includeDirty) {
-      // On resume the target dir comes from the run's metadata, not the user's
-      // cwd — name the repo and the files or the error is impossible to act on.
-      throw new Error(
-        `working tree at ${cwd} is not clean; do commit/stash or use --include-dirty to include those changes\n${dirtyFilesPreview(status.stdout)}`,
-      )
+      throw dirtyTreeError(cwd, status.stdout)
     }
     if ((options.maxAttempts ?? 1) > 1) {
       throw new Error("--include-dirty can't be combined with --max-attempts > 1; use --max-attempts 1")
@@ -76,9 +75,23 @@ export async function ensureRepoReady(cwd: string, options: { includeDirty?: boo
   }
 }
 
+export async function statusPorcelain(cwd: string): Promise<string> {
+  const status = await execFile("git", ["status", "--porcelain"], { cwd })
+  return status.stdout
+}
+
+// On resume the target dir comes from the run's metadata, not the user's cwd —
+// name the repo and the files or the error is impossible to act on.
+export function dirtyTreeError(cwd: string, porcelain: string, options: { resuming?: boolean } = {}) {
+  const hint = options.resuming
+    ? "resume in an interactive terminal to commit these changes as the interrupted phase and continue, or commit/stash them manually"
+    : "do commit/stash or use --include-dirty to include those changes"
+  return new Error(`working tree at ${cwd} is not clean; ${hint}\n${dirtyFilesPreview(porcelain)}`)
+}
+
 const maxDirtyPreview = 5
 
-function dirtyFilesPreview(porcelain: string) {
+export function dirtyFilesPreview(porcelain: string) {
   const lines = porcelain.split("\n").filter(Boolean)
   const shown = lines.slice(0, maxDirtyPreview).map((line) => `  ${line}`)
   if (lines.length > shown.length) shown.push(`  … and ${lines.length - shown.length} more`)

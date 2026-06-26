@@ -1,21 +1,53 @@
-import { describe, expect, test } from "bun:test"
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises"
+import { afterAll, describe, expect, test } from "bun:test"
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import type { RunMetadataStore } from "../src/metadata"
+import { openRunMetadata, type RunMetadataStore } from "../src/metadata"
 import { noopProgress, type ProgressPhaseSnapshot } from "../src/progress"
 import {
   UserAbortError,
+  commitRecoveredPhase,
   describeSessionActivity,
   newActivityState,
   parseModel,
   restorePhaseFromPreviousRun,
+  selectInterruptedPhase,
   shouldRetryAttempt,
   shouldSkip,
 } from "../src/runner"
-import type { AgentStep } from "../src/types"
+import type { AgentStep, Pipeline } from "../src/types"
 import type { Workspace } from "../src/workspace"
+
+const recoveryDirs: string[] = []
+
+afterAll(async () => {
+  await Promise.all(recoveryDirs.map((dir) => rm(dir, { recursive: true, force: true })))
+})
+
+async function git(args: string[], cwd: string) {
+  const proc = Bun.spawn(["git", ...args], {
+    cwd,
+    stdout: "pipe",
+    stderr: "pipe",
+    env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" },
+  })
+  const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited])
+  if (code !== 0) throw new Error(`git ${args.join(" ")} failed: ${await new Response(proc.stderr).text()}`)
+  return out
+}
+
+async function dirtyRepo(): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), "archer-recover-repo-"))
+  recoveryDirs.push(dir)
+  await git(["init", "-q"], dir)
+  await writeFile(join(dir, "keep.txt"), "base\n")
+  await git(["add", "-A"], dir)
+  await git(["commit", "-qm", "base"], dir)
+  // leave an uncommitted change behind, as an interrupted phase would
+  await writeFile(join(dir, "feature.txt"), "work in progress\n")
+  return dir
+}
 
 function messageUpdated(info: Record<string, unknown>) {
   return { type: "message.updated", properties: { sessionID: "ses_1", info } }
@@ -152,5 +184,73 @@ describe("runner helpers", () => {
     expect(shouldRetryAttempt(new Error("aborted fetch"), controller.signal, 1, 2)).toBe(false)
     expect(shouldRetryAttempt(new UserAbortError(), new AbortController().signal, 1, 2)).toBe(false)
     expect(shouldRetryAttempt(new Error("exhausted"), new AbortController().signal, 2, 2)).toBe(false)
+  })
+})
+
+describe("dirty-tree recovery", () => {
+  const agent = (name: string): AgentStep =>
+    ({ type: "agent", name, agentName: name, description: name, model: "openai/gpt-5.5", inputFiles: [], inputDiff: false, reportPath: `reports/${name}.md` })
+  const pipeline: Pipeline = {
+    name: "p",
+    steps: [agent("implementer"), { type: "human", name: "review", description: "review" }, agent("patterns"), agent("tests")],
+  }
+  const fakeMetadata = (statuses: Record<string, ProgressPhaseSnapshot | undefined>): RunMetadataStore =>
+    ({ snapshot: (name: string) => statuses[name] }) as unknown as RunMetadataStore
+
+  async function workspaceWithReports(reports: string[]): Promise<Workspace> {
+    const dir = await mkdtemp(join(tmpdir(), "archer-recover-ws-"))
+    recoveryDirs.push(dir)
+    await mkdir(join(dir, "reports"), { recursive: true })
+    for (const name of reports) await writeFile(join(dir, "reports", `${name}.md`), `# ${name}`)
+    return { dir, runID: "20260101-000000-test" }
+  }
+
+  test("selects the first agent phase a resume would re-run, skipping human gates", async () => {
+    // implementer done, patterns failed (stale report), tests never ran.
+    const ws = await workspaceWithReports(["implementer", "patterns"])
+    const metadata = fakeMetadata({ implementer: { status: "completed" }, patterns: { status: "failed" } })
+    const phase = await selectInterruptedPhase(ws, metadata, pipeline)
+    expect(phase?.name).toBe("patterns")
+  })
+
+  test("falls back to the first phase missing its report", async () => {
+    const ws = await workspaceWithReports(["implementer"])
+    const metadata = fakeMetadata({ implementer: { status: "completed" } })
+    const phase = await selectInterruptedPhase(ws, metadata, pipeline)
+    expect(phase?.name).toBe("patterns")
+  })
+
+  test("returns undefined when every agent phase is already done", async () => {
+    const ws = await workspaceWithReports(["implementer", "patterns", "tests"])
+    const metadata = fakeMetadata({ implementer: { status: "completed" }, patterns: { status: "completed" }, tests: { status: "completed" } })
+    expect(await selectInterruptedPhase(ws, metadata, pipeline)).toBeUndefined()
+  })
+
+  test("commits the dirty tree as the phase, writes a recovery report, and marks it completed", async () => {
+    const repo = await dirtyRepo()
+    const ws = await workspaceWithReports([])
+    const metadata = await openRunMetadata(ws, repo, pipeline)
+
+    await commitRecoveredPhase(ws, metadata, agent("implementer"), repo)
+
+    // working tree is clean and the leftover work is in a new archer commit
+    expect((await git(["status", "--porcelain"], repo)).trim()).toBe("")
+    expect(await git(["log", "-1", "--pretty=%s"], repo)).toContain("archer(implementer):")
+    expect((await git(["show", "--name-only", "--pretty=", "HEAD"], repo)).trim()).toBe("feature.txt")
+
+    // a recovery report was written and the phase is marked completed
+    expect(await readFile(join(ws.dir, "reports", "implementer.md"), "utf8")).toContain("Recovered uncommitted changes")
+    expect(metadata.snapshot("implementer")?.status).toBe("completed")
+  })
+
+  test("keeps an existing report instead of overwriting it", async () => {
+    const repo = await dirtyRepo()
+    const ws = await workspaceWithReports(["implementer"])
+    const metadata = await openRunMetadata(ws, repo, pipeline)
+
+    await commitRecoveredPhase(ws, metadata, agent("implementer"), repo)
+
+    expect(await readFile(join(ws.dir, "reports", "implementer.md"), "utf8")).toBe("# implementer")
+    expect(await git(["log", "-1", "--pretty=%s"], repo)).toContain("archer(implementer): implementer")
   })
 })
