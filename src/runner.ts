@@ -1264,6 +1264,11 @@ function buildPhasePrompt(workspace: Workspace, phase: AgentStep) {
     `- Write your final report to: ${join(workspace.dir, phase.reportPath)}`,
     "- Working directory: the directory where `archer` was invoked (root of the target repo).",
     "",
+    "## Access mode",
+    phase.readOnly
+      ? "This phase is configured read-only. Archer disables write/edit/bash tools for this agent. Do not attempt to modify the target repository; return your final report in the assistant response if you cannot write it directly."
+      : "This phase may edit the target repository when the phase-specific instructions call for it.",
+    "",
     "## Attachments",
     "You will receive as file attachments: project context files when present, the original PRD, previous phase reports, the cumulative diff against the base branch, and any `--file` passed by the user. Read them before acting.",
     "",
@@ -1273,7 +1278,7 @@ function buildPhasePrompt(workspace: Workspace, phase: AgentStep) {
     "",
     "## Closing",
     "Before finishing, make sure to:",
-    "1. Have applied necessary changes to the repo code.",
+    phase.readOnly ? "1. Have not modified the target repository." : "1. Have applied necessary changes to the repo code.",
     "2. Have written the report (markdown, max ~80 lines) at the absolute path indicated above. If you can't write it, respond with the exact report content and Archer will save it.",
     "3. Leave the tree in a compilable state.",
     "",

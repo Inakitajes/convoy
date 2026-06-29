@@ -38,7 +38,7 @@ export type PermissionAdditions = {
 /**
  * An agent definition: who can run as a pipeline step. Built-ins ship with
  * archer; projects add their own (prompt at .archer/agents/<name>.md) or
- * override built-in model/temperature from .archer/config.yaml.
+ * override built-in model/temperature/readOnly from .archer/config.yaml.
  */
 export type AgentSpec = {
   name: string
@@ -48,6 +48,8 @@ export type AgentSpec = {
   /** Built-in preference (e.g. opus for design); loses to defaults.model. */
   defaultModel?: string
   temperature?: number
+  /** When true, Archer disables write/edit/bash tools for this agent. */
+  readOnly?: boolean
   builtIn: boolean
 }
 
@@ -61,6 +63,8 @@ export type AgentStep = {
   inputFiles: readonly string[]
   inputDiff: boolean
   reportPath: string
+  /** True when the underlying agent is configured as read-only. */
+  readOnly?: boolean
   /** Per-step override; falls back to --max-attempts when absent. */
   maxAttempts?: number
 }

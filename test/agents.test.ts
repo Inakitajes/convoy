@@ -66,4 +66,26 @@ describe("opencode config", () => {
       await rm(dir, { recursive: true, force: true })
     }
   })
+
+  test("read-only agents cannot write, edit, or run shell commands", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "archer-readonly-agent-"))
+    try {
+      await mkdir(join(dir, ".archer", "agents"), { recursive: true })
+      await writeFile(join(dir, ".archer", "agents", "audit-only.md"), "# Audit Only\n\nReview without editing.")
+
+      const config = opencodeConfig("/tmp/archer-run", dir, [{ name: "audit-only", description: "Audits only", readOnly: true, builtIn: false }])
+
+      const audit = config.agent?.["audit-only"]
+      expect(audit?.tools?.read).toBe(true)
+      expect(audit?.tools?.glob).toBe(true)
+      expect(audit?.tools?.grep).toBe(true)
+      expect(audit?.tools?.list).toBe(true)
+      expect(audit?.tools?.write).toBe(false)
+      expect(audit?.tools?.edit).toBe(false)
+      expect(audit?.tools?.bash).toBe(false)
+      expect(audit?.permission).toMatchObject({ edit: "deny", bash: "deny", task: "deny", question: "deny" })
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
 })

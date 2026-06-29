@@ -42,11 +42,13 @@ export type ArcherDefaults = {
   autoAcceptJudgeModel?: string
 }
 
-/** A project agent definition, or model/temperature overrides for a built-in one. */
+/** A project agent definition, or model/temperature/readOnly overrides for a built-in one. */
 export type ConfigAgent = {
   description?: string
   model?: string
   temperature?: number
+  /** Disable write/edit/bash tools for this agent. */
+  readOnly?: boolean
 }
 
 export class ConfigError extends Error {
@@ -172,12 +174,13 @@ function validateAgents(v: Validator, raw: unknown, targetDir: string): Record<s
     if (agentAliases[name]) v.fail(path, `"${name}" is an alias of the built-in agent "${agentAliases[name]}"; use that name to override it`)
 
     const entry = v.record(value, path)
-    v.knownKeys(entry, path, ["description", "model", "temperature"])
+    v.knownKeys(entry, path, ["description", "model", "temperature", "readOnly"])
 
     const agent: ConfigAgent = {}
     if (entry.description !== undefined) agent.description = v.nonEmptyString(entry.description, `${path}.description`)
     if (entry.model !== undefined) agent.model = v.model(entry.model, `${path}.model`)
     if (entry.temperature !== undefined) agent.temperature = v.temperature(entry.temperature, `${path}.temperature`)
+    if (entry.readOnly !== undefined) agent.readOnly = v.boolean(entry.readOnly, `${path}.readOnly`)
 
     // Project agents bring their own prompt; built-in overrides keep theirs
     // (optionally replaced via the same path). Fail at load, not mid-run.
@@ -259,6 +262,7 @@ export function buildAgentRegistry(config?: ArcherConfig): AgentSpec[] {
       if (agent.description !== undefined) existing.description = agent.description
       if (agent.model !== undefined) existing.model = agent.model
       if (agent.temperature !== undefined) existing.temperature = agent.temperature
+      if (agent.readOnly !== undefined) existing.readOnly = agent.readOnly
       continue
     }
     registry.push({
@@ -266,6 +270,7 @@ export function buildAgentRegistry(config?: ArcherConfig): AgentSpec[] {
       description: agent.description ?? `Project agent ${name}`,
       ...(agent.model !== undefined ? { model: agent.model } : {}),
       ...(agent.temperature !== undefined ? { temperature: agent.temperature } : {}),
+      ...(agent.readOnly !== undefined ? { readOnly: agent.readOnly } : {}),
       builtIn: false,
     })
   }

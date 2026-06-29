@@ -66,6 +66,7 @@ describe("config loading", () => {
         "    description: Reviews API consistency",
         "    model: anthropic/claude-opus-4-7",
         "    temperature: 0.1",
+        "    readOnly: true",
         "pipelines:",
         "  quick:",
         "    description: Implementation plus tests",
@@ -92,6 +93,7 @@ describe("config loading", () => {
       description: "Reviews API consistency",
       model: "anthropic/claude-opus-4-7",
       temperature: 0.1,
+      readOnly: true,
     })
     expect(config.pipelines.quick?.steps).toEqual([
       "implementer",
@@ -107,6 +109,7 @@ describe("config loading", () => {
     expect(() => parse("version: 2")).toThrow("version")
     expect(() => parse("defaults:\n  maxAttempts: 0")).toThrow("defaults.maxAttempts must be a positive integer")
     expect(() => parse("defaults:\n  model: gpt-5.5")).toThrow("defaults.model must look like provider/model")
+    expect(() => parse("agents:\n  implementer:\n    readOnly: sometimes")).toThrow("agents.implementer.readOnly must be true or false")
     expect(() => parse("pipelines:\n  broken:\n    steps: []")).toThrow("pipelines.broken.steps must be a non-empty list")
     expect(() => parse("pipelines:\n  broken:\n    steps:\n      - agent: tests\n        reports: previous-two")).toThrow(
       'pipelines.broken.steps[0].reports must be "previous", "all", "none", or a list',
@@ -138,18 +141,27 @@ describe("agent registry", () => {
   test("merges built-in overrides and appends project agents", async () => {
     const dir = await projectDir(undefined, ["api-reviewer"])
     const config = parse(
-      ["agents:", "  design-polisher:", "    model: openai/gpt-5.5#xhigh", "    temperature: 0.5", "  api-reviewer:", "    description: Reviews APIs"].join("\n"),
+      [
+        "agents:",
+        "  design-polisher:",
+        "    model: openai/gpt-5.5#xhigh",
+        "    temperature: 0.5",
+        "    readOnly: true",
+        "  api-reviewer:",
+        "    description: Reviews APIs",
+        "    readOnly: true",
+      ].join("\n"),
       dir,
     )
 
     const registry = buildAgentRegistry(config)
     const design = registry.find((agent) => agent.name === "design-polisher")
-    expect(design).toMatchObject({ model: "openai/gpt-5.5#xhigh", temperature: 0.5, builtIn: true })
+    expect(design).toMatchObject({ model: "openai/gpt-5.5#xhigh", temperature: 0.5, readOnly: true, builtIn: true })
     // The built-in preference survives underneath the override.
     expect(design?.defaultModel).toBe("anthropic/claude-opus-4-7")
 
     const custom = registry.find((agent) => agent.name === "api-reviewer")
-    expect(custom).toMatchObject({ description: "Reviews APIs", builtIn: false })
+    expect(custom).toMatchObject({ description: "Reviews APIs", readOnly: true, builtIn: false })
   })
 
   test("without config the registry is exactly the built-ins", () => {

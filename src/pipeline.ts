@@ -171,6 +171,7 @@ export function resolvePipeline(input: ResolvePipelineInput): Pipeline {
       inputFiles: ["prd.md", ...reportInputs(input.name, name, spec.reports ?? "previous", agentSteps)],
       inputDiff: spec.diff ?? agentSteps.length > 0,
       reportPath: `reports/${name}.md`,
+      ...(agent.readOnly ? { readOnly: true } : {}),
       ...(spec.maxAttempts !== undefined ? { maxAttempts: spec.maxAttempts } : {}),
     }
     steps.push(step)

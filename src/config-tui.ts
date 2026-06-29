@@ -746,7 +746,8 @@ export class ConfigEditor {
     for (const agent of buildAgentRegistry(config)) {
       const model = config.agents[agent.name]?.model
       const temp = config.agents[agent.name]?.temperature
-      const value = (model ?? "(inherits)") + (temp !== undefined ? `  ·  temp ${temp}` : "")
+      const readOnly = config.agents[agent.name]?.readOnly
+      const value = (model ?? "(inherits)") + (temp !== undefined ? `  ·  temp ${temp}` : "") + (readOnly ? "  ·  read-only" : "")
       rows.push(fieldRow(agent.name, value, { t: "agent", name: agent.name }))
     }
 
@@ -853,8 +854,8 @@ export class ConfigEditor {
         break
       case "agent":
         push([fg(theme.text)(`agent: ${meta.name}`)])
-        push([fg(theme.faint)("Model override for this agent.")])
-        push([fg(theme.faint)("Empty = inherit defaults.model.")])
+        push([fg(theme.faint)("Model, temperature, or readOnly override.")])
+        push([fg(theme.faint)("Toggle readOnly by editing YAML directly.")])
         lines.push(plain(""))
         push([fg(theme.accent)("enter"), fg(theme.dim)(" pick model   "), fg(theme.accent)("t"), fg(theme.dim)(" temperature")])
         break

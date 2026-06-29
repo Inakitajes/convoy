@@ -149,6 +149,13 @@ describe("pipeline resolution", () => {
     expect(design).toMatchObject({ model: "openai/gpt-5.5", variant: "xhigh" })
   })
 
+  test("resolved steps keep read-only agent enforcement metadata", () => {
+    const agents = builtInAgents.map((agent) => (agent.name === "security-auditor" ? { ...agent, readOnly: true } : agent))
+    const [security] = resolvePipeline({ name: "test", spec: { steps: ["security"] }, agents }).steps as AgentStep[]
+
+    expect(security).toMatchObject({ agentName: "security-auditor", readOnly: true })
+  })
+
   test("numbers repeated human gates and threads per-step attempts", () => {
     const pipeline = resolve({
       steps: ["implementer", "human-review", { agent: "tests", maxAttempts: 3 }, "human-review"],

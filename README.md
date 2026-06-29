@@ -192,12 +192,13 @@ defaults:
   autoAcceptJudgeModel: anthropic/claude-haiku-4-5   # model for smart auto-accept (--smart); defaults to the run's model
 
 # Project agents: the prompt lives at .archer/agents/<name>.md (required).
-# Naming a built-in agent here overrides its model/temperature instead.
+# Naming a built-in agent here overrides its model/temperature/readOnly instead.
 agents:
   api-reviewer:
     description: Reviews public API consistency
     model: anthropic/claude-opus-4-7
     temperature: 0.1
+    readOnly: true               # disables write/edit/bash tools for this agent
 
 pipelines:
   quick:
@@ -233,6 +234,7 @@ The rules:
 - **Precedence**: CLI flag > project config > global config > built-in default. Within a config, for models specifically: step `model` > agent `model` > `defaults.model` > the agent's built-in preference (opus for design/adversarial) > `openai/gpt-5.5#xhigh`. `--model` overrides everything.
 - **Conventions over wiring**: every agent step gets the PRD, the cumulative diff against the base branch (except the first step; opt out with `diff: false`), and the previous step's report (`reports: previous|all|none|[names]`). Its report lands at `reports/<step>.md` and its commit is `archer(<step>): …`.
 - **Aliases**: the built-in agents answer to their short names in steps — `patterns`, `security`, `design`, `tests`, `adversarial` — as well as their full names.
+- **Read-only agents**: set `agents.<name>.readOnly: true` to enforce audit-only behavior. Archer disables the agent's write/edit/bash tools, denies edit/bash/task permissions, and saves the phase report from the assistant response if the agent cannot write it directly.
 - **Project pipelines shadow built-ins**: defining `pipelines.default` replaces the built-in default.
 - **`--no-human-review`** (and non-TTY runs) drop every `human-review` gate from the pipeline.
 - **Resume is frozen**: the resolved pipeline is persisted in the run's `metadata.json`; `--resume` replays it even if the config changed since.
@@ -250,7 +252,7 @@ Both files are merged before a run, with the project winning: `defaults`, `agent
 `archer config` opens a TUI to view and edit both configs without hand-editing YAML — two tabs, **Global** (`~/.archer/config.yaml`) and **Project** (the current repo's `.archer/config.yaml`):
 
 - Pick models from an autocompleting list: it queries OpenCode for the models your enabled providers expose (including reasoning variants like `#xhigh`), falling back to the full [models.dev](https://models.dev) catalog when OpenCode can't answer, and always accepts a free-typed `provider/model[#variant]`.
-- Edit `defaults` (model, interactiveModel, autoAcceptJudgeModel, maxAttempts, baseRef, pipeline, app command, emulator) and each agent's model/temperature override.
+- Edit `defaults` (model, interactiveModel, autoAcceptJudgeModel, maxAttempts, baseRef, pipeline, app command, emulator) and each agent's model/temperature override. Agent `readOnly` is displayed when set; edit it in YAML.
 - Browse pipelines and their steps; add, delete, reorder steps, set a per-step model or max-attempts, and add new pipelines. Permissions and attachments are shown read-only (edit those in the YAML).
 - When a tab has no file yet, `initialize` writes a starter config (the built-in `default` pipeline, expanded and ready to edit).
 

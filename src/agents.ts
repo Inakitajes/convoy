@@ -20,7 +20,7 @@ export function opencodeConfig(
 ): Config {
   const agent: Record<string, AgentConfig> = {}
   for (const spec of agents) {
-    agent[spec.name] = agentConfig(spec.description, spec.temperature, loadAgentPrompt(spec.name, targetDir), runDir, targetDir, false, permissions)
+    agent[spec.name] = agentConfig(spec.description, spec.temperature, spec.readOnly, loadAgentPrompt(spec.name, targetDir), runDir, targetDir, false, permissions)
   }
 
   return {
@@ -94,12 +94,50 @@ function providerTimeouts(): Config["provider"] {
 function agentConfig(
   description: string,
   temperature: number | undefined,
+  readOnly: boolean | undefined,
   prompt: string,
   runDir: string,
   targetDir: string,
   webfetch: boolean,
   permissions: PermissionAdditions,
 ): AgentConfig {
+  if (readOnly) {
+    return {
+      description,
+      mode: "primary",
+      ...(temperature === undefined ? {} : { temperature }),
+      tools: {
+        read: true,
+        list: true,
+        glob: true,
+        grep: true,
+        write: false,
+        edit: false,
+        bash: false,
+        task: false,
+        webfetch,
+        websearch: false,
+      },
+      permission: {
+        read: "allow",
+        list: "allow",
+        glob: "allow",
+        grep: "allow",
+        edit: "deny",
+        bash: "deny",
+        task: "deny",
+        question: "deny",
+        webfetch: webfetch ? "allow" : "deny",
+        websearch: "deny",
+        external_directory: {
+          "*": "deny",
+          [join(runDir, "**")]: "allow",
+        },
+      },
+      prompt,
+    }
+  }
+
   return {
     description,
     mode: "primary",

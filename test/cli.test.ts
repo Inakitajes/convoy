@@ -2,10 +2,30 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import { afterAll, describe, expect, test } from "bun:test"
+import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test"
 
 import { parseArgs, parseCommand } from "../src/cli"
 import { stepNames } from "../src/pipeline"
+
+const homeDirs: string[] = []
+let savedHome: string | undefined
+
+beforeEach(async () => {
+  savedHome = process.env.ARCHER_HOME
+  const root = await mkdtemp(join(tmpdir(), "archer-cli-home-"))
+  homeDirs.push(root)
+  await mkdir(join(root, ".archer"), { recursive: true })
+  process.env.ARCHER_HOME = root
+})
+
+afterEach(() => {
+  if (savedHome === undefined) delete process.env.ARCHER_HOME
+  else process.env.ARCHER_HOME = savedHome
+})
+
+afterAll(async () => {
+  await Promise.all(homeDirs.map((dir) => rm(dir, { recursive: true, force: true })))
+})
 
 describe("cli parsing", () => {
   test("parses pipeline flags without side effects", () => {
