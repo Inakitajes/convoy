@@ -1,6 +1,8 @@
 # archer
 
-Sequential [OpenCode](https://opencode.ai) agent pipeline for implementing features on software repos. It works with Flutter, web, backend, CLI, and mixed projects by detecting the repo's existing stack and conventions. Takes a PRD, runs agents in chain, and leaves one commit per step.
+Archer is a higher-level orchestration harness for [OpenCode](https://opencode.ai) that turns a PRD into a structured, reviewable implementation workflow. It coordinates specialized agents across implementation, human review, pattern alignment, security, design polish, tests, and adversarial review; adapts to the target repo's stack and conventions; and leaves one commit per phase.
+
+Rather than being only a sequential agent chain, Archer owns the operational layer around OpenCode: repo context attachment, runtime guard rails, permission gates, phase reports, diff tracking, and human-in-the-loop checkpoints.
 
 Pipelines are data, not code: archer ships a built-in `default` pipeline, and a project can define its own — any number of steps, its own agents, its own models, with `human-review` gates anywhere — in `.archer/config.yaml`.
 
@@ -12,7 +14,7 @@ Archer is written in Bun + TypeScript and uses `@opencode-ai/sdk` to control Ope
 PRD ──► implementer ──► human-review ──► patterns ──► security ──► design ──► tests ──► adversarial
          │                                │            │            │          │         │
          └────────────────────────────────┴────────────┴────────────┴──────────┴─────────┘
-                                                              commit per step
+                                                              commit per phase
 ```
 
 | Step | Agent | Model | What it does |
