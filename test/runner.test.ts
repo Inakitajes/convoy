@@ -250,6 +250,15 @@ describe("planBatches", () => {
     const steps: Step[] = [before, human("human-review"), after]
     expect(planBatches(steps)).toEqual([[before], [human("human-review")], [after]])
   })
+
+  test("consecutive agent steps with an undefined groupId never batch together", () => {
+    // Legacy metadata.json from before groupId existed (schemaVersion 1-2)
+    // loads steps missing the field entirely; guard against undefined === undefined.
+    const a = { ...agentStep("a"), groupId: undefined } as unknown as AgentStep
+    const b = { ...agentStep("b"), groupId: undefined } as unknown as AgentStep
+    const steps: Step[] = [a, b]
+    expect(planBatches(steps)).toEqual([[a], [b]])
+  })
 })
 
 describe("RunShutdown multi-session tracking", () => {

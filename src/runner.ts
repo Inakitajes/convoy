@@ -160,7 +160,7 @@ export function planBatches(steps: readonly Step[]): Step[][] {
   for (const step of steps) {
     const last = batches[batches.length - 1]
     const lastFirst = last?.[0]
-    if (step.type === "agent" && lastFirst?.type === "agent" && lastFirst.groupId === step.groupId) {
+    if (step.type === "agent" && lastFirst?.type === "agent" && step.groupId !== undefined && lastFirst.groupId === step.groupId) {
       last.push(step)
     } else {
       batches.push([step])
