@@ -82,6 +82,10 @@ function kindStyle(kind: ActivityKind): { icon: string; color: string } {
 
 const pipelineWidth = 32
 const feedLimit = 100
+// Concurrently-running phases (a parallel block, or a step fanned out across
+// models) each get their own live-detail pane, up to this many at once; extra
+// running phases beyond this are folded into the last pane's title.
+const maxPanes = 4
 
 const permissionChoices: ReadonlyArray<{ reply: PermissionReply; label: string; color: PaletteColor }> = [
   { reply: "once", label: "allow once", color: "green" },
@@ -167,7 +171,12 @@ export class TuiProgress implements ProgressUI {
   private runID = ""
   private targetDir = ""
   private serverUrl = ""
+  // Fallback focus for single-phase rendering: the phase that most recently
+  // had activity, kept updated by every progress callback exactly as before.
   private activePhase = ""
+  // Explicit user focus among concurrently-running phases (Tab / pane click);
+  // unlike activePhase, this only ever changes on direct user action.
+  private focusedPhaseName = ""
   private lastActivityAt = Date.now()
   private readonly startedAt = Date.now()
   private readonly phases: PhaseState[]
@@ -178,6 +187,12 @@ export class TuiProgress implements ProgressUI {
   private readonly pipelineText: TextRenderable
   private readonly stepBox: BoxRenderable
   private readonly stepText: TextRenderable
+  // Extra live-detail panes for additional concurrently-running phases beyond
+  // the first (which reuses stepBox); hidden whenever at most one phase runs.
+  private readonly extraPanes: { box: BoxRenderable; text: TextRenderable }[] = []
+  // Slot index -> phase name currently assigned there, rebuilt every render
+  // so pane clicks resolve against exactly what's on screen.
+  private paneAssignment: (string | undefined)[] = []
   private readonly todosBox: BoxRenderable
   private readonly todosText: TextRenderable
   private readonly feedBox: BoxRenderable
@@ -250,6 +265,15 @@ export class TuiProgress implements ProgressUI {
     }
     if (this.permissionQueue.length > 0) {
       this.handlePermissionKey(key)
+      return
+    }
+    // Plain Tab cycles focus among concurrently-running phases; a no-op when
+    // at most one is running. Checked after the permission modal, which
+    // already claims plain Tab for cycling its own choices.
+    if (key.name === "tab" && !key.ctrl && !key.meta && !key.option) {
+      key.preventDefault()
+      key.stopPropagation()
+      this.cycleFocusedPhase()
       return
     }
     if (key.name !== "o" || key.ctrl || key.meta || key.option) return
@@ -347,11 +371,12 @@ export class TuiProgress implements ProgressUI {
       gap: 0,
     })
 
-    const openFromStep = (event: { preventDefault(): void; stopPropagation(): void }) => {
+    const paneClickHandler = (index: number) => (event: { preventDefault(): void; stopPropagation(): void }) => {
       event.preventDefault()
       event.stopPropagation()
-      this.openActiveSessionWindow("click")
+      this.focusPaneAndOpen(index)
     }
+    const openFromStep = paneClickHandler(0)
 
     const step = this.panel({
       id: "archer-step",
@@ -365,8 +390,31 @@ export class TuiProgress implements ProgressUI {
     })
     step.text.onMouseDown = openFromStep
 
+    // Extra panes for additional concurrently-running phases (a parallel
+    // block, or a step fanned out across models); hidden until more than one
+    // phase is running at once. Pane 0 is the step panel above.
+    for (let index = 1; index < maxPanes; index++) {
+      const openFromThisPane = paneClickHandler(index)
+      const pane = this.panel({
+        id: `archer-step-${index}`,
+        width: "100%",
+        height: 3,
+        borderColor: theme.borderDim,
+        backgroundColor: theme.bg,
+        title: " ",
+        titleAlignment: "left",
+        visible: false,
+        onMouseDown: openFromThisPane,
+      })
+      pane.text.onMouseDown = openFromThisPane
+      this.extraPanes.push(pane)
+      this.paletteTargets.push({ box: pane.box, background: "bg", border: "borderDim" })
+    }
+
     // Todos live in their own panel below the step meta; its border is the
-    // divider between session usage above and the todo list itself.
+    // divider between session usage above and the todo list itself. Only
+    // shown when exactly one phase is running - concurrent phases fold their
+    // todos into their own compact pane instead.
     const todos = this.panel({
       id: "archer-todos",
       width: "100%",
@@ -428,6 +476,7 @@ export class TuiProgress implements ProgressUI {
 
     body.add(pipeline.box)
     right.add(step.box)
+    for (const pane of this.extraPanes) right.add(pane.box)
     right.add(todos.box)
     right.add(feed.box)
     body.add(right)
@@ -875,13 +924,33 @@ export class TuiProgress implements ProgressUI {
   private openActiveSessionWindow(source: "click" | "key") {
     const active = this.finished
       ? this.phases[this.finished.selected]
-      : (this.findPhase(this.activePhase) ?? this.phases.find((phase) => phase.status === "running"))
+      : (this.findPhase(this.focusedPhaseName) ?? this.findPhase(this.activePhase) ?? this.phases.find((phase) => phase.status === "running"))
     if (!active) {
       this.addEvent("archer", "system", "no active opencode session to open yet")
       this.render()
       return
     }
     this.openSessionWindowForPhase(active.name, source)
+  }
+
+  // Clicking a specific pane both focuses it (so [o]/Tab agree with what was
+  // clicked) and opens its session immediately, matching the single-pane
+  // click-to-open behavior this replaces.
+  private focusPaneAndOpen(index: number) {
+    const name = this.paneAssignment[index]
+    if (name) this.focusedPhaseName = name
+    this.openActiveSessionWindow("click")
+  }
+
+  // Cycles explicit focus among currently-running phases; a no-op with zero
+  // or one running phase (nothing to choose between).
+  private cycleFocusedPhase() {
+    const running = this.phases.filter((phase) => phase.status === "running")
+    if (running.length === 0) return
+    const currentIndex = running.findIndex((phase) => phase.name === this.focusedPhaseName)
+    const next = running[(currentIndex + 1) % running.length]!
+    this.focusedPhaseName = next.name
+    this.render()
   }
 
   private openSessionWindowForPhase(name: string, source: "click" | "key") {
@@ -954,39 +1023,31 @@ export class TuiProgress implements ProgressUI {
   private render() {
     if (this.renderer.isDestroyed) return
     const now = Date.now()
-    // While running, the right column follows the live phase; on the finish
-    // screen it follows the browsed selection instead.
-    const focus = this.finished
-      ? this.phases[this.finished.selected]
-      : (this.findPhase(this.activePhase) ?? this.phases.find((phase) => phase.status === "running"))
     const innerWidth = Math.max(40, this.renderer.width - 6)
     const rightWidth = Math.max(40, this.renderer.width - pipelineWidth - 9)
-
     // Body rows left after the dir line (1), header (3), and footer (3); the
-    // step and todos panels grow with their content but never starve the logs.
+    // step/pane panels grow with their content but never starve the logs.
     const bodyHeight = Math.max(8, this.renderer.height - 7)
-    const stepLines = this.finished ? this.finishedPhaseContent(focus, now, rightWidth) : this.stepContent(focus, now, rightWidth)
-    this.stepBox.title = this.finished ? " phase " : " current step "
-    this.stepBox.height = stepLines.length + 2
 
-    const todoRows =
-      focus && focus.todos.length > 0
-        ? todoLines(focus.todos, Math.max(3, Math.floor(bodyHeight * 0.6) - stepLines.length - 4), rightWidth)
-        : []
-    this.todosBox.visible = todoRows.length > 0
-    if (focus && todoRows.length > 0) {
-      const completed = focus.todos.filter((todo) => todo.status === "completed").length
-      this.todosBox.height = todoRows.length + 2
-      this.todosBox.title = ` todos ${completed}/${focus.todos.length} `
-      this.todosText.content = joinLines(todoRows)
-    }
-    const todosHeight = this.todosBox.visible ? todoRows.length + 2 : 0
+    // A finished run always browses one phase at a time (its live-run
+    // concurrency is over); a live run with more than one phase running at
+    // once shows each in its own pane instead of following a single focus.
+    const running = this.finished ? [] : this.runningPhasesByFocus()
+    const focus = this.finished ? this.phases[this.finished.selected] : (this.findPhase(this.activePhase) ?? running[0])
 
-    const feedRows = Math.max(3, bodyHeight - stepLines.length - todosHeight - 4)
+    const multi = running.length > 1
+    const usedHeight = multi ? this.renderPanes(running, now, rightWidth, bodyHeight) : this.renderSinglePane(focus, now, rightWidth, bodyHeight)
+
+    // usedHeight already counts every pane's own border, so the feed box only
+    // needs its own 2 rows subtracted. Single mode keeps a floor of 3 (its
+    // content is small and bounded, so there's always room); multi mode
+    // can't assume that - several full-height panes can legitimately leave
+    // nothing over, so it floors at 0 instead of asking for lines the feed
+    // box has no room to show (which would bleed into its own border).
+    const feedRows = Math.max(multi ? 0 : 3, bodyHeight - usedHeight - 2)
     this.dirText.content = this.dirContent(innerWidth)
     this.headerText.content = this.headerContent(now, innerWidth)
     this.pipelineText.content = this.pipelineContent(now)
-    this.stepText.content = joinLines(stepLines)
     if (this.finished) {
       this.reportPageRows = feedRows
       // Content first: it computes the scroll indicator the title shows.
@@ -999,6 +1060,78 @@ export class TuiProgress implements ProgressUI {
     this.footerText.content = this.footerContent(now, innerWidth)
     this.renderPermissionModal()
     this.renderer.requestRender()
+  }
+
+  // Running phases ordered for pane assignment: the explicitly-focused one
+  // (if still running) first so it's always visible even under overflow,
+  // then the rest oldest-first so pane assignment stays stable frame to frame.
+  private runningPhasesByFocus(): PhaseState[] {
+    const running = this.phases.filter((phase) => phase.status === "running").sort((a, b) => (a.startedAt ?? 0) - (b.startedAt ?? 0))
+    const focusedIndex = running.findIndex((phase) => phase.name === this.focusedPhaseName)
+    if (focusedIndex <= 0) return running
+    return [running[focusedIndex]!, ...running.slice(0, focusedIndex), ...running.slice(focusedIndex + 1)]
+  }
+
+  // Single-phase mode: identical to archer's original one-pane layout (step
+  // panel plus a separate todos panel), used whenever at most one phase is
+  // running - i.e. every ordinary sequential pipeline, unchanged.
+  private renderSinglePane(focus: PhaseState | undefined, now: number, width: number, bodyHeight: number): number {
+    for (const pane of this.extraPanes) pane.box.visible = false
+    this.paneAssignment = [focus?.name]
+
+    const stepLines = this.finished ? this.finishedPhaseContent(focus, now, width) : this.stepContent(focus, now, width)
+    this.stepBox.title = this.finished ? " phase " : " current step "
+    this.stepBox.height = stepLines.length + 2
+    this.stepText.content = joinLines(stepLines)
+
+    const todoRows =
+      focus && focus.todos.length > 0
+        ? todoLines(focus.todos, Math.max(3, Math.floor(bodyHeight * 0.6) - stepLines.length - 4), width)
+        : []
+    this.todosBox.visible = todoRows.length > 0
+    if (focus && todoRows.length > 0) {
+      const completed = focus.todos.filter((todo) => todo.status === "completed").length
+      this.todosBox.height = todoRows.length + 2
+      this.todosBox.title = ` todos ${completed}/${focus.todos.length} `
+      this.todosText.content = joinLines(todoRows)
+    }
+    return stepLines.length + 2 + (this.todosBox.visible ? todoRows.length + 2 : 0)
+  }
+
+  // Multi-phase mode: one compact pane per concurrently-running phase (step
+  // content plus a condensed todo summary), up to maxPanes; the separate
+  // todos panel is hidden since each pane already carries its own.
+  private renderPanes(running: PhaseState[], now: number, width: number, bodyHeight: number): number {
+    this.todosBox.visible = false
+    const { visibleCount, overflow, perPaneBudget } = paneLayout(running.length, bodyHeight, maxPanes)
+    const visible = running.slice(0, visibleCount)
+    const focusedName = this.focusedPhaseName || visible[0]!.name
+    this.paneAssignment = []
+
+    let usedHeight = 0
+    visible.forEach((phase, index) => {
+      const pane = index === 0 ? { box: this.stepBox, text: this.stepText } : this.extraPanes[index - 1]!
+      const stepLines = this.stepContent(phase, now, width).slice(0, perPaneBudget)
+      const todoCap = Math.max(0, Math.min(2, perPaneBudget - stepLines.length))
+      const lines = todoCap > 0 && phase.todos.length > 0 ? [...stepLines, ...todoLines(phase.todos, todoCap, width)] : stepLines
+
+      const focused = phase.name === focusedName
+      const overflowSuffix = overflow > 0 && index === visible.length - 1 ? ` · +${overflow} more running` : ""
+      pane.box.visible = true
+      pane.box.title = ` ${focused ? "▸ " : "  "}${phase.name}${overflowSuffix} `
+      pane.box.height = lines.length + 2
+      pane.text.content = joinLines(lines)
+      this.paneAssignment[index] = phase.name
+      usedHeight += lines.length + 2
+    })
+
+    for (let index = visible.length; index < maxPanes; index++) {
+      const pane = index === 0 ? this.stepBox : this.extraPanes[index - 1]!.box
+      pane.visible = false
+      this.paneAssignment[index] = undefined
+    }
+
+    return usedHeight
   }
 
   // Header owns the session-wide totals in a single row: clock, elapsed time,
@@ -1216,6 +1349,12 @@ export class TuiProgress implements ProgressUI {
   }
 
   private feedLines(width: number, visible: number): StyledText[] {
+    // No room at all (several full-height panes left nothing over): render
+    // nothing rather than a placeholder line that would bleed into the
+    // feed box's own border.
+    if (visible <= 0) return []
+    // Array.slice(-0) is slice(0) - the whole array, not empty - already
+    // ruled out above, but keep the guard explicit for any future caller.
     const events = this.feed.slice(-visible).reverse()
     if (events.length === 0) return [t`${fg(theme.dim)("no activity yet…")}`]
 
@@ -1284,6 +1423,9 @@ export class TuiProgress implements ProgressUI {
       fg(theme.yellow)("ctrl+c"),
       fg(theme.dim)(" abort"),
     ]
+    if (this.phases.filter((phase) => phase.status === "running").length > 1) {
+      left.push(fg(theme.dim)(" · ["), fg(theme.accent)("tab"), fg(theme.dim)("] focus"))
+    }
     if (this.autoAccept) {
       left.push(fg(theme.dim)(" · "), fg(theme.accent)("shift+tab"))
       left.push(autoAcceptStatusChunk(this.autoAccept.mode))
@@ -1379,6 +1521,26 @@ function todoRow(todo: ProgressTodo, width: number): StyledText {
     default:
       return new StyledText([fg(theme.dim)("  ○ "), fg(theme.text)(text)])
   }
+}
+
+/**
+ * How many concurrently-running phases get their own pane, and how much
+ * content-line budget each one gets, for a given body height. Pure and
+ * exported so the height math that caused real overflow/corruption bugs
+ * during development can be unit tested without spinning up OpenTUI.
+ */
+export function paneLayout(runningCount: number, bodyHeight: number, cap: number): { visibleCount: number; overflow: number; perPaneBudget: number } {
+  // A pane needs at least 3 content lines plus its border (5 rows) to be
+  // worth showing; a terminal too short for `cap` panes at that floor folds
+  // the rest into overflow instead of overflowing the terminal itself.
+  const minPaneHeight = 5
+  const fitCount = Math.max(1, Math.floor(bodyHeight / minPaneHeight))
+  const visibleCount = Math.max(1, Math.min(cap, fitCount, runningCount))
+  const overflow = Math.max(0, runningCount - visibleCount)
+  // An equal share of the body per pane (minus its own border); callers trim
+  // content to this budget rather than letting it overflow the terminal.
+  const perPaneBudget = Math.max(3, Math.floor(bodyHeight / visibleCount) - 2)
+  return { visibleCount, overflow, perPaneBudget }
 }
 
 function runningFraction(phase: PhaseState) {

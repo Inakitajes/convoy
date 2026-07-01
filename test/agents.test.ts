@@ -67,6 +67,32 @@ describe("opencode config", () => {
     }
   })
 
+  test("a synthesized forced-read-only agent (__ro suffix) loads the base agent's prompt, not its own", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "archer-ro-variant-"))
+    try {
+      await mkdir(join(dir, ".archer", "agents"), { recursive: true })
+      await writeFile(join(dir, ".archer", "agents", "clean-code.md"), "# Clean Code\n\nLook for unnecessary complexity.")
+
+      // Only "clean-code" has a prompt file on disk; "clean-code__ro" is
+      // synthesized by synthesizeReadOnlyAgents and must not need its own.
+      const config = opencodeConfig("/tmp/archer-run", dir, [
+        { name: "clean-code", description: "Clean code review", builtIn: false },
+        { name: "clean-code__ro", description: "Clean code review", readOnly: true, builtIn: false },
+      ])
+
+      const forced = config.agent?.["clean-code__ro"]
+      expect(forced?.prompt).toContain("# Clean Code")
+      expect(forced?.prompt).toContain("Look for unnecessary complexity.")
+      expect(forced?.tools?.write).toBe(false)
+      expect(forced?.tools?.edit).toBe(false)
+      expect(forced?.tools?.bash).toBe(false)
+      // The base agent's own config is untouched: still writable.
+      expect(config.agent?.["clean-code"]?.tools?.write).toBe(true)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
   test("read-only agents cannot write, edit, or run shell commands", async () => {
     const dir = await mkdtemp(join(tmpdir(), "archer-readonly-agent-"))
     try {

@@ -11,7 +11,9 @@ import {
   defaultGptModel,
   defaultGptVariant,
   humanReviewStep,
+  readOnlyAgentSuffix,
   splitModelVariant,
+  type AgentStepSpec,
   type PipelineSpec,
   type StepSpec,
 } from "./pipeline"
@@ -303,6 +305,7 @@ function validateAgents(v: Validator, raw: unknown, targetDir: string): Record<s
     const path = `agents.${name}`
     if (name === humanReviewStep) v.fail(path, `"${humanReviewStep}" is a reserved step keyword, not an agent`)
     if (agentAliases[name]) v.fail(path, `"${name}" is an alias of the built-in agent "${agentAliases[name]}"; use that name to override it`)
+    if (name.endsWith(readOnlyAgentSuffix)) v.fail(path, `agent names can't end in "${readOnlyAgentSuffix}"; that suffix is reserved for archer's forced-read-only variants`)
 
     const entry = v.record(value, path)
     v.knownKeys(entry, path, ["description", "model", "temperature", "readOnly"])
@@ -345,20 +348,41 @@ function validatePipelines(v: Validator, raw: unknown): Record<string, PipelineS
   return pipelines
 }
 
-function validateStep(v: Validator, raw: unknown, path: string): StepSpec {
+function validateStep(v: Validator, raw: unknown, path: string, context: { insideParallel?: boolean } = {}): StepSpec {
   if (typeof raw === "string") {
     if (!raw.trim()) v.fail(path, "step name can't be empty")
+    if (context.insideParallel && raw.trim() === humanReviewStep) v.fail(path, `"${humanReviewStep}" can't run inside a parallel block`)
     return raw
   }
 
   const record = v.record(raw, path)
-  v.knownKeys(record, path, ["agent", "name", "model", "maxAttempts", "reports", "diff"])
+
+  if ("parallel" in record) {
+    if (context.insideParallel) v.fail(path, "parallel blocks can't be nested")
+    v.knownKeys(record, path, ["parallel"])
+    if (!Array.isArray(record.parallel) || record.parallel.length === 0) v.fail(`${path}.parallel`, "must be a non-empty list of steps")
+    const members = (record.parallel as unknown[]).map((step, index) => validateStep(v, step, `${path}.parallel[${index}]`, { insideParallel: true }))
+    return { parallel: members as (string | AgentStepSpec)[] }
+  }
+
+  v.knownKeys(record, path, ["agent", "name", "model", "models", "maxAttempts", "reports", "diff"])
 
   const agent = v.nonEmptyString(record.agent, `${path}.agent`)
+  if (context.insideParallel && agent === humanReviewStep) v.fail(path, `"${humanReviewStep}" can't run inside a parallel block`)
+  if (record.model !== undefined && record.models !== undefined) v.fail(path, `set either "model" or "models", not both`)
+
+  let models: string[] | undefined
+  if (record.models !== undefined) {
+    models = v.stringArray(record.models, `${path}.models`)
+    if (models.length < 2) v.fail(`${path}.models`, `must have at least 2 entries; use "model" for a single model`)
+    models.forEach((model, index) => v.model(model, `${path}.models[${index}]`))
+  }
+
   return {
     agent,
     ...(record.name !== undefined ? { name: v.nonEmptyString(record.name, `${path}.name`) } : {}),
     ...(record.model !== undefined ? { model: v.model(record.model, `${path}.model`) } : {}),
+    ...(models !== undefined ? { models } : {}),
     ...(record.maxAttempts !== undefined ? { maxAttempts: v.positiveInt(record.maxAttempts, `${path}.maxAttempts`) } : {}),
     ...(record.reports !== undefined ? { reports: validateReports(v, record.reports, `${path}.reports`) } : {}),
     ...(record.diff !== undefined ? { diff: v.boolean(record.diff, `${path}.diff`) } : {}),
@@ -469,16 +493,21 @@ export function defaultConfigTemplate(): ArcherConfig {
 }
 
 function templatePipeline(spec: PipelineSpec, globalModel: string): PipelineSpec {
-  const steps = spec.steps.map<StepSpec>((raw) => {
-    const step = typeof raw === "string" ? { agent: raw } : { ...raw }
-    if (step.agent === humanReviewStep) return step.agent
-    const agent = builtInAgents.find((candidate) => candidate.name === (agentAliases[step.agent] ?? step.agent))
-    const preferred = agent?.defaultModel
-    const withModel = preferred && preferred !== globalModel ? { ...step, model: preferred } : step
-    // Collapse a bare { agent } back to its string shorthand for clean YAML.
-    return Object.keys(withModel).length === 1 ? withModel.agent : withModel
-  })
+  const steps = spec.steps.map<StepSpec>((raw) => templateStep(raw, globalModel))
   return { ...(spec.description ? { description: spec.description } : {}), steps }
+}
+
+function templateStep(raw: StepSpec, globalModel: string): StepSpec {
+  if (typeof raw === "object" && raw !== null && "parallel" in raw) {
+    return { parallel: raw.parallel.map((inner) => templateStep(inner, globalModel) as string | AgentStepSpec) }
+  }
+  const step = typeof raw === "string" ? { agent: raw } : { ...raw }
+  if (step.agent === humanReviewStep) return step.agent
+  const agent = builtInAgents.find((candidate) => candidate.name === (agentAliases[step.agent] ?? step.agent))
+  const preferred = agent?.defaultModel
+  const withModel = preferred && preferred !== globalModel ? { ...step, model: preferred } : step
+  // Collapse a bare { agent } back to its string shorthand for clean YAML.
+  return Object.keys(withModel).length === 1 ? withModel.agent : withModel
 }
 
 class Validator {

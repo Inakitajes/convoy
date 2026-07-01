@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url"
 
 import type { AgentConfig, Config } from "@opencode-ai/sdk/v2"
 import { bashPolicy, noAdditions } from "./bash-policy"
-import { builtInAgents } from "./pipeline"
+import { builtInAgents, readOnlyAgentSuffix } from "./pipeline"
 import type { AgentSpec, PermissionAdditions } from "./types"
 import { globalAgentsDir } from "./workspace"
 
@@ -20,7 +20,11 @@ export function opencodeConfig(
 ): Config {
   const agent: Record<string, AgentConfig> = {}
   for (const spec of agents) {
-    agent[spec.name] = agentConfig(spec.description, spec.temperature, spec.readOnly, loadAgentPrompt(spec.name, targetDir), runDir, targetDir, false, permissions)
+    // Synthesized forced-read-only variants (name suffixed "__ro", see
+    // synthesizeReadOnlyAgents in pipeline.ts) have no prompt file of their
+    // own; they share the base agent's prompt under its real name.
+    const promptName = spec.name.endsWith(readOnlyAgentSuffix) ? spec.name.slice(0, -readOnlyAgentSuffix.length) : spec.name
+    agent[spec.name] = agentConfig(spec.description, spec.temperature, spec.readOnly, loadAgentPrompt(promptName, targetDir), runDir, targetDir, false, permissions)
   }
 
   return {

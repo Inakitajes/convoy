@@ -13,7 +13,7 @@ import { log } from "./log"
 import { openRunMetadata, recordProgress, type RunMetadataStore } from "./metadata"
 import { startOpencode } from "./opencode"
 import { startPermissionGate, type PermissionGate } from "./permissions"
-import { splitModelVariant, validateStepFilters } from "./pipeline"
+import { splitModelVariant, synthesizeReadOnlyAgents, validateStepFilters } from "./pipeline"
 import {
   createProgressUI,
   noopProgress,
@@ -29,11 +29,11 @@ import {
   type RunOutcome,
 } from "./progress"
 import { discoverProjectContextFiles } from "./project-context"
-import type { AgentSpec, AgentStep, Pipeline, RunOptions } from "./types"
+import type { AgentSpec, AgentStep, Pipeline, RunOptions, Step } from "./types"
 import { addTokens, emptyTokens, tokensFromValue } from "./usage"
 import { cleanupWorkspace, createWorkspace, resumeWorkspace, type Workspace, writeSummary } from "./workspace"
 
-type ActiveSession = {
+export type ActiveSession = {
   client: OpencodeClient
   sessionID: string
   directory: string
@@ -70,10 +70,10 @@ export function shouldRetryAttempt(error: unknown, signal: AbortSignal, attempt:
   return !signal.aborted && !isUserAbortError(error) && attempt < maxAttempts
 }
 
-class RunShutdown {
+export class RunShutdown {
   private readonly controller = new AbortController()
-  private activeSession: ActiveSession | undefined
-  private abortingSession: Promise<void> | undefined
+  private readonly activeSessions = new Map<string, ActiveSession>()
+  private abortingSessions: Promise<void> | undefined
   private requests = 0
   private forceTimer: ReturnType<typeof setTimeout> | undefined
 
@@ -92,7 +92,7 @@ class RunShutdown {
       process.exit(130)
     }
 
-    log.warn(`${source} received; aborting active OpenCode session and shutting down`)
+    log.warn(`${source} received; aborting active OpenCode session(s) and shutting down`)
     this.controller.abort(new UserAbortError(`${source} received`))
     this.forceTimer = setTimeout(() => {
       log.warn("Shutdown cleanup timed out; forcing exit")
@@ -112,35 +112,92 @@ class RunShutdown {
   }
 
   setActiveSession(session: ActiveSession) {
-    this.activeSession = session
+    this.activeSessions.set(session.phaseName, session)
   }
 
-  clearActiveSession(sessionID: string) {
-    if (this.activeSession?.sessionID === sessionID) this.activeSession = undefined
+  clearActiveSession(phaseName: string, sessionID: string) {
+    if (this.activeSessions.get(phaseName)?.sessionID === sessionID) this.activeSessions.delete(phaseName)
   }
 
-  async abortActiveSession(progress?: ProgressUI) {
-    if (this.abortingSession) return this.abortingSession
-    const session = this.activeSession
-    if (!session) return
+  async abortActiveSessions(progress?: ProgressUI) {
+    if (this.abortingSessions) return this.abortingSessions
+    const sessions = [...this.activeSessions.values()]
+    if (sessions.length === 0) return
 
-    this.abortingSession = (async () => {
-      progress?.phaseActivity(session.phaseName, "aborting active OpenCode session")
-      try {
-        const response = await session.client.session.abort({ sessionID: session.sessionID, directory: session.directory })
-        if (response.error) log.warn(`couldn't abort OpenCode session ${session.sessionID}: ${formatSdkError(response.error)}`)
-      } catch (error) {
-        log.warn(`couldn't abort OpenCode session ${session.sessionID}: ${formatSdkError(error)}`)
-      }
+    this.abortingSessions = (async () => {
+      await Promise.allSettled(
+        sessions.map(async (session) => {
+          progress?.phaseActivity(session.phaseName, "aborting active OpenCode session")
+          try {
+            const response = await session.client.session.abort({ sessionID: session.sessionID, directory: session.directory })
+            if (response.error) log.warn(`couldn't abort OpenCode session ${session.sessionID}: ${formatSdkError(response.error)}`)
+          } catch (error) {
+            log.warn(`couldn't abort OpenCode session ${session.sessionID}: ${formatSdkError(error)}`)
+          }
+        }),
+      )
     })().finally(() => {
-      this.abortingSession = undefined
+      this.abortingSessions = undefined
     })
 
-    return this.abortingSession
+    return this.abortingSessions
   }
 
   dispose() {
     if (this.forceTimer) clearTimeout(this.forceTimer)
+  }
+}
+
+/**
+ * Groups the flat step list into batches the runner executes together: a
+ * human gate is always its own batch, and consecutive agent steps sharing a
+ * groupId (a `parallel:` block, or one step fanned out across `models:`) form
+ * one batch that runs concurrently. Validation guarantees group members are
+ * always contiguous, so a linear scan suffices.
+ */
+export function planBatches(steps: readonly Step[]): Step[][] {
+  const batches: Step[][] = []
+  for (const step of steps) {
+    const last = batches[batches.length - 1]
+    const lastFirst = last?.[0]
+    if (step.type === "agent" && lastFirst?.type === "agent" && lastFirst.groupId === step.groupId) {
+      last.push(step)
+    } else {
+      batches.push([step])
+    }
+  }
+  return batches
+}
+
+/** Every group member runs to completion before the pipeline fails; this aggregates their failures into one error. */
+export class PhaseGroupError extends Error {
+  readonly failures: { name: string; error: unknown }[]
+
+  constructor(failures: { name: string; error: unknown }[]) {
+    super(failures.map((failure) => `[${failure.name}] ${formatSdkError(failure.error)}`).join("; "))
+    this.name = "PhaseGroupError"
+    this.failures = failures
+  }
+}
+
+type GitLock = <T>(job: () => Promise<T>) => Promise<T>
+
+/**
+ * Serializes git operations across concurrently-running phases in the same
+ * group: their agent sessions run fully in parallel, but git.ts's mutating
+ * calls (`git add`, `git commit`, `git reset --hard`) would otherwise race on
+ * `.git/index.lock`. Forced-read-only group members never actually change the
+ * tree, so this only ever arbitrates housekeeping, not real content conflicts.
+ */
+export function createGitLock(): GitLock {
+  let tail: Promise<unknown> = Promise.resolve()
+  return function withGitLock<T>(job: () => Promise<T>): Promise<T> {
+    const run = tail.then(job, job)
+    tail = run.then(
+      () => undefined,
+      () => undefined,
+    )
+    return run
   }
 }
 
@@ -187,7 +244,11 @@ export async function run(options: RunOptions) {
     // (and thus --only/--skip names and required agents) come from there.
     const pipeline = metadata.pipeline
     validateStepFilters(pipeline, options)
-    ensureAgentsAvailable(pipeline, options.agents)
+    // Parallel/multi-model steps are forced read-only and point at a synthesized
+    // "<agent>__ro" variant when their base agent isn't already read-only;
+    // register those variants alongside the normal registry for this run.
+    const agents = [...options.agents, ...synthesizeReadOnlyAgents(pipeline, options.agents)]
+    ensureAgentsAvailable(pipeline, agents)
     // A run interrupted before its phase commit leaves the tree dirty; on resume
     // offer to commit that work as the interrupted phase and continue. Runs here,
     // before the TUI grabs the terminal, so the readline prompt stays visible.
@@ -218,7 +279,7 @@ export async function run(options: RunOptions) {
     const abortBoot = () => boot.abort(shutdown.signal.reason)
     shutdown.signal.addEventListener("abort", abortBoot, { once: true })
     try {
-      opencode = await startOpencode(opencodeConfig(workspace.dir, options.targetDir, options.agents, options.permissions), boot.signal)
+      opencode = await startOpencode(opencodeConfig(workspace.dir, options.targetDir, agents, options.permissions), boot.signal)
     } finally {
       shutdown.signal.removeEventListener("abort", abortBoot)
     }
@@ -235,21 +296,50 @@ export async function run(options: RunOptions) {
     })
 
     const resuming = Boolean(options.resumeRunID)
-    for (const step of pipeline.steps) {
+    const gitLock = createGitLock()
+    // Narrow once, outside any closure: opencode/metadata are `let`s assigned
+    // above, and TS won't retain that narrowing inside the batch's nested
+    // arrow functions, but a `const` alias captured here stays narrowed.
+    const client = opencode.client
+    const runMetadata = metadata
+
+    for (const batch of planBatches(pipeline.steps)) {
       shutdown.throwIfRequested()
-      if (shouldSkip(step.name, options)) {
-        progress.phaseSkipped(step.name)
-        log.warn(`[${step.name}] skipped by flag`)
+      const [first] = batch
+
+      if (batch.length === 1 && first?.type === "human") {
+        if (shouldSkip(first, options)) {
+          progress.phaseSkipped(first.name)
+          log.warn(`[${first.name}] skipped by flag`)
+          continue
+        }
+        await runHumanReviewGate(workspace, options, opencode.url, progress, permissions, first.name)
         continue
       }
-      if (step.type === "human") {
-        await runHumanReviewGate(workspace, options, opencode.url, progress, permissions, step.name)
-        continue
-      }
-      const restored = resuming && (await restorePhaseFromPreviousRun(workspace, metadata, step, progress))
-      if (!restored) {
-        await runPhase(opencode.client, workspace, step, options, extraFiles, projectContextFiles, progress, shutdown)
-      }
+
+      const agentBatch = batch as AgentStep[]
+      const results = await Promise.allSettled(
+        agentBatch.map(async (step) => {
+          if (shouldSkip(step, options)) {
+            progress.phaseSkipped(step.name)
+            log.warn(`[${step.name}] skipped by flag`)
+            return
+          }
+          const restored = resuming && (await restorePhaseFromPreviousRun(workspace, runMetadata, step, progress))
+          if (!restored) {
+            await runPhase(client, workspace, step, options, extraFiles, projectContextFiles, progress, shutdown, gitLock)
+          }
+        }),
+      )
+
+      // Every batch member runs to completion (Promise.allSettled, not
+      // fail-fast) since forced-read-only siblings can't corrupt each other's
+      // work; a user abort takes priority and propagates unwrapped so the
+      // existing isUserAbortError handling below keeps working.
+      const userAbort = results.find((result): result is PromiseRejectedResult => result.status === "rejected" && isUserAbortError(result.reason))
+      if (userAbort) throw userAbort.reason
+      const failures = results.flatMap((result, index) => (result.status === "rejected" ? [{ name: agentBatch[index]!.name, error: result.reason }] : []))
+      if (failures.length > 0) throw new PhaseGroupError(failures)
     }
 
     progress.message("writing run summary")
@@ -263,7 +353,7 @@ export async function run(options: RunOptions) {
     throw error
   } finally {
     removeSignalHandlers()
-    if (shutdown.aborted) await shutdown.abortActiveSession(progress)
+    if (shutdown.aborted) await shutdown.abortActiveSessions(progress)
     await permissions?.stop()
     await metadata?.flush().catch((error) => log.warn(`couldn't flush run metadata: ${String(error)}`))
     progress.stop()
@@ -428,17 +518,18 @@ async function runPhase(
   projectContextFiles: string[],
   progress: ProgressUI,
   shutdown: RunShutdown,
+  gitLock: GitLock,
 ) {
   progress.phaseStarted(phase.name, phase.description)
   log.section(`${phase.name} - ${phase.description}`)
 
   try {
     const prepared = await preparePhaseRun(workspace, phase, options, extraFiles, projectContextFiles)
-    const baseline = await createCleanRepoSnapshot(options.targetDir)
-    const assistantText = await runPhaseWithRetries(client, workspace, phase, options.targetDir, prepared, baseline, progress, shutdown)
+    const baseline = await gitLock(() => createCleanRepoSnapshot(options.targetDir))
+    const assistantText = await runPhaseWithRetries(client, workspace, phase, options.targetDir, prepared, baseline, progress, shutdown, gitLock)
 
     const reportAbs = await persistPhaseReport(workspace, phase, assistantText)
-    await commitPhase(phase, reportAbs, options.targetDir)
+    await gitLock(() => commitPhase(phase, reportAbs, options.targetDir))
     progress.phaseCompleted(phase.name, "report saved and commit checked")
   } catch (error) {
     progress.phaseFailed(phase.name, formatSdkError(error))
@@ -498,6 +589,7 @@ async function runPhaseWithRetries(
   baseline: RepoSnapshot | undefined,
   progress: ProgressUI,
   shutdown: RunShutdown,
+  gitLock: GitLock,
 ) {
   if (!baseline && prepared.maxAttempts > 1) {
     throw new Error(`[${phase.name}] can't retry with dirty working tree; use --max-attempts 1 or clean the repo`)
@@ -521,12 +613,12 @@ async function runPhaseWithRetries(
       if (!(error instanceof LoggedAttemptError)) {
         await writeAttemptLog(workspace, phase, attempt, { error: formatSdkError(error) })
       }
-      if (shouldRetryAttempt(error, shutdown.signal, attempt, prepared.maxAttempts)) await restorePhaseBaseline(phase, baseline, targetDir, error)
+      if (shouldRetryAttempt(error, shutdown.signal, attempt, prepared.maxAttempts)) await gitLock(() => restorePhaseBaseline(phase, baseline, targetDir, error))
     }
   }
 
   if (lastError) {
-    await restorePhaseBaseline(phase, baseline, targetDir, lastError)
+    await gitLock(() => restorePhaseBaseline(phase, baseline, targetDir, lastError))
     throw lastError
   }
 
@@ -676,8 +768,8 @@ async function promptPhase(
     }
     throw error
   } finally {
-    if (input.shutdown.aborted) await input.shutdown.abortActiveSession(input.progress)
-    input.shutdown.clearActiveSession(session.data.id)
+    if (input.shutdown.aborted) await input.shutdown.abortActiveSessions(input.progress)
+    input.shutdown.clearActiveSession(input.phase.name, session.data.id)
     await watcher.stop()
   }
 }
@@ -1311,9 +1403,13 @@ function formatModel(model: ModelSelection) {
   return model.variant ? `${base}#${model.variant}` : base
 }
 
-export function shouldSkip(name: string, options: Pick<RunOptions, "onlySteps" | "skipSteps">) {
-  if (options.onlySteps.length > 0) return !options.onlySteps.includes(name)
-  return options.skipSteps.includes(name)
+// A fanned-out step (name "clean-code__anthropic-claude-opus-4-7") matches
+// --only/--skip by its full name or by its shared stepName ("clean-code"),
+// so a filter can target one variant or every variant of a fanned-out step.
+export function shouldSkip(step: Step, options: Pick<RunOptions, "onlySteps" | "skipSteps">) {
+  const names = step.type === "agent" ? [step.name, step.stepName] : [step.name]
+  if (options.onlySteps.length > 0) return !names.some((name) => options.onlySteps.includes(name))
+  return names.some((name) => options.skipSteps.includes(name))
 }
 
 // A resumed run can outlive its config: the frozen pipeline may reference a

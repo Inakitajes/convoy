@@ -227,6 +227,19 @@ pipelines:
       - agent: adversarial
         name: final-check          # step name (report file, commit prefix, --only/--skip)
         reports: [implementer, security]
+  audit:
+    steps:
+      - implementer
+      - parallel:                  # runs its steps concurrently; every one is forced read-only
+          - patterns
+          - security
+          - agent: clean-code
+            models:                # fans this one step out across models, one read-only run per model
+              - anthropic/claude-opus-4-7
+              - openai/gpt-5.5#xhigh
+      - agent: adversarial
+        name: triage
+        reports: all               # every parallel/fan-out report from above, in one attachment set
 
 permissions:                       # additive only; a config allow can never undo a deny
   allow:
@@ -244,6 +257,7 @@ The rules:
 - **Conventions over wiring**: every agent step gets the PRD, the cumulative diff against the base branch (except the first step; opt out with `diff: false`), and the previous step's report (`reports: previous|all|none|[names]`). Its report lands at `reports/<step>.md` and its commit is `archer(<step>): …`.
 - **Aliases**: the built-in agents answer to their short names in steps — `patterns`, `security`, `design`, `tests`, `adversarial` — as well as their full names.
 - **Read-only agents**: set `agents.<name>.readOnly: true` to enforce audit-only behavior. Archer disables the agent's write/edit/bash tools, denies edit/bash/task permissions, and saves the phase report from the assistant response if the agent cannot write it directly.
+- **Parallel steps and model fan-out**: wrap steps in `parallel: [...]` to run them concurrently, and/or give one step a `models: [...]` list (instead of `model:`) to run it once per model. Both are always forced read-only, regardless of the underlying agent's own `readOnly` setting, so concurrent runs can never step on each other's changes to the tree — there's no per-step way to opt out. A `models:` step's variants get disambiguated names (`<step>__<model-slug>`) and reports; `reports: previous` after a parallel block attaches every member's report, and `reports: [<step-name>]` on a fanned-out step's un-suffixed name attaches every one of its model variants. `parallel:` can't nest and can't contain `human-review`.
 - **Project pipelines shadow built-ins**: defining `pipelines.default` replaces the built-in default.
 - **`--no-human-review`** (and non-TTY runs) drop every `human-review` gate from the pipeline.
 - **Resume is frozen**: the resolved pipeline is persisted in the run's `metadata.json`; `--resume` replays it even if the config changed since.

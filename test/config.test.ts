@@ -16,10 +16,11 @@ import {
   parseArcherConfig,
   selectPipelineSpec,
   serializeArcherConfig,
+  writeArcherConfig,
   writeDefaultArcherConfig,
   writeDefaultProjectConfig,
 } from "../src/config"
-import { builtInAgents, defaultGptModel, defaultGptVariant, defaultOpusModel } from "../src/pipeline"
+import { builtInAgents, defaultGptModel, defaultGptVariant, defaultOpusModel, isParallelSpec } from "../src/pipeline"
 
 const dirs: string[] = []
 
@@ -139,6 +140,113 @@ describe("config loading", () => {
   })
 })
 
+describe("parallel steps and model fan-out", () => {
+  test("parses a parallel block with a models fan-out member", async () => {
+    const dir = await projectDir(undefined, ["clean-code"])
+    const config = parse(
+      [
+        "pipelines:",
+        "  audit:",
+        "    steps:",
+        "      - implementer",
+        "      - parallel:",
+        "          - patterns",
+        "          - security",
+        "          - agent: clean-code",
+        "            models:",
+        "              - anthropic/claude-opus-4-7",
+        "              - openai/gpt-5.5#xhigh",
+        "      - agent: adversarial",
+        "        name: triage",
+        "        reports: all",
+      ].join("\n"),
+      dir,
+    )
+
+    expect(config.pipelines.audit?.steps).toEqual([
+      "implementer",
+      {
+        parallel: [
+          "patterns",
+          "security",
+          { agent: "clean-code", models: ["anthropic/claude-opus-4-7", "openai/gpt-5.5#xhigh"] },
+        ],
+      },
+      { agent: "adversarial", name: "triage", reports: "all" },
+    ])
+  })
+
+  test("rejects nested parallel blocks", () => {
+    expect(() =>
+      parse("pipelines:\n  p:\n    steps:\n      - implementer\n      - parallel:\n          - parallel:\n              - patterns"),
+    ).toThrow("nested")
+  })
+
+  test("rejects human-review inside a parallel block, string and object form", () => {
+    expect(() => parse("pipelines:\n  p:\n    steps:\n      - implementer\n      - parallel:\n          - patterns\n          - human-review")).toThrow(
+      "can't run inside a parallel block",
+    )
+    expect(() =>
+      parse("pipelines:\n  p:\n    steps:\n      - implementer\n      - parallel:\n          - patterns\n          - agent: human-review"),
+    ).toThrow("can't run inside a parallel block")
+  })
+
+  test("rejects an empty parallel block", () => {
+    expect(() => parse("pipelines:\n  p:\n    steps:\n      - implementer\n      - parallel: []")).toThrow("must be a non-empty list of steps")
+  })
+
+  test("rejects models with fewer than 2 entries", () => {
+    expect(() =>
+      parse("pipelines:\n  p:\n    steps:\n      - agent: implementer\n        models:\n          - anthropic/claude-opus-4-7"),
+    ).toThrow("at least 2 entries")
+  })
+
+  test("rejects setting both model and models", () => {
+    expect(() =>
+      parse(
+        [
+          "pipelines:",
+          "  p:",
+          "    steps:",
+          "      - agent: implementer",
+          "        model: anthropic/claude-opus-4-7",
+          "        models:",
+          "          - anthropic/claude-opus-4-7",
+          "          - openai/gpt-5.5#xhigh",
+        ].join("\n"),
+      ),
+    ).toThrow('set either "model" or "models"')
+  })
+
+  test("rejects agent names ending in the reserved read-only suffix", () => {
+    expect(() => parse("agents:\n  clean-code__ro:\n    model: anthropic/claude-opus-4-7")).toThrow('reserved for archer\'s forced-read-only variants')
+  })
+
+  test("a config with parallel/models round-trips through serialize + reparse", async () => {
+    const dir = await projectDir(undefined, ["clean-code"])
+    const config = parse(
+      [
+        "pipelines:",
+        "  audit:",
+        "    steps:",
+        "      - implementer",
+        "      - parallel:",
+        "          - patterns",
+        "          - agent: clean-code",
+        "            models:",
+        "              - anthropic/claude-opus-4-7",
+        "              - openai/gpt-5.5#xhigh",
+      ].join("\n"),
+      dir,
+    )
+
+    const path = join(dir, ".archer", "config.yaml")
+    await writeArcherConfig(path, config, dir)
+    const reparsed = parse(await readFile(path, "utf8"), dir)
+    expect(reparsed.pipelines).toEqual(config.pipelines)
+  })
+})
+
 describe("agent registry", () => {
   test("merges built-in overrides and appends project agents", async () => {
     const dir = await projectDir(undefined, ["api-reviewer"])
@@ -251,7 +359,7 @@ describe("serialization", () => {
     const template = defaultConfigTemplate()
     expect(template.defaults.model).toBe(`${defaultGptModel}#${defaultGptVariant}`)
     const steps = template.pipelines.default!.steps
-    expect(steps.find((step) => typeof step !== "string" && step.agent === "design")).toEqual({ agent: "design", model: defaultOpusModel })
+    expect(steps.find((step) => typeof step !== "string" && !isParallelSpec(step) && step.agent === "design")).toEqual({ agent: "design", model: defaultOpusModel })
     const reparsed = parse(serializeArcherConfig(template))
     expect(reparsed.defaults).toEqual(template.defaults)
     expect(reparsed.pipelines).toEqual(template.pipelines)

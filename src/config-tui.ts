@@ -14,7 +14,7 @@ import {
   type ConfigAgent,
 } from "./config"
 import { listModels, type ModelChoice } from "./model-catalog"
-import { humanReviewStep, type PipelineSpec, type StepSpec } from "./pipeline"
+import { humanReviewStep, isParallelSpec, type AgentStepSpec, type ParallelStepSpec, type PipelineSpec, type StepSpec } from "./pipeline"
 import {
   joinLines,
   padBetween,
@@ -512,7 +512,7 @@ export class ConfigEditor {
   private editStepModel(pipelineName: string, index: number) {
     const steps = this.tab().config?.pipelines[pipelineName]?.steps
     const spec = steps?.[index]
-    if (!steps || spec === undefined || agentOf(spec) === humanReviewStep) return
+    if (!steps || spec === undefined || isParallelSpec(spec) || agentOf(spec) === humanReviewStep) return
     const obj = asStepObject(spec)
     this.openModelPicker(`${pipelineName}[${index + 1}].model`, obj.model, (value) => {
       const next = { ...obj }
@@ -528,7 +528,7 @@ export class ConfigEditor {
     if (meta?.t !== "step") return
     const steps = this.tab().config?.pipelines[meta.pipeline]?.steps
     const spec = steps?.[meta.index]
-    if (!steps || spec === undefined || agentOf(spec) === humanReviewStep) return
+    if (!steps || spec === undefined || isParallelSpec(spec) || agentOf(spec) === humanReviewStep) return
     const obj = asStepObject(spec)
     this.openInput(`${meta.pipeline}[${meta.index + 1}].maxAttempts`, obj.maxAttempts === undefined ? "" : String(obj.maxAttempts), "positive integer, empty to clear", {
       validate: (value) => (value.trim() === "" || isPositiveInt(value) ? undefined : "must be a positive integer"),
@@ -570,8 +570,8 @@ export class ConfigEditor {
     if (meta?.t !== "step") return
     const steps = this.tab().config?.pipelines[meta.pipeline]?.steps
     if (!steps) return
-    const agentSteps = steps.filter((step) => agentOf(step) !== humanReviewStep).length
-    if (agentSteps <= 1 && agentOf(steps[meta.index]!) !== humanReviewStep) {
+    const agentSteps = steps.filter((step) => !isHumanReviewStep(step)).length
+    if (agentSteps <= 1 && !isHumanReviewStep(steps[meta.index]!)) {
       this.message("Can't delete", "A pipeline needs at least one agent step.")
       return
     }
@@ -1020,7 +1020,21 @@ function pipelineRow(name: string, spec: PipelineSpec, open: boolean): Row {
   }
 }
 
+// Parallel blocks aren't authorable here yet (no visual editor for `parallel:`
+// steps) - render a non-editable summary row instead of crashing on them.
 function stepRow(pipeline: string, index: number, spec: StepSpec): Row {
+  if (isParallelSpec(spec)) {
+    const label = `parallel (${spec.parallel.length} step${spec.parallel.length === 1 ? "" : "s"})`
+    return {
+      meta: { t: "step", pipeline, index },
+      chunks: (selected) => [
+        selected ? fg(theme.accent)("    ▸ ") : raw("      "),
+        fg(theme.faint)(`${index + 1}. `),
+        selected ? bold(fg(theme.text)(label)) : fg(theme.dim)(label),
+      ],
+    }
+  }
+
   const agent = agentOf(spec)
   const model = typeof spec === "string" ? undefined : spec.model
   const human = agent === humanReviewStep
@@ -1046,15 +1060,20 @@ function setDefault(defaults: ArcherDefaults, key: keyof ArcherDefaults, value: 
   else record[key] = value
 }
 
-function agentOf(spec: StepSpec): string {
+function isHumanReviewStep(spec: StepSpec): boolean {
+  return !isParallelSpec(spec) && agentOf(spec) === humanReviewStep
+}
+
+/** Only meaningful for non-parallel steps; callers must guard with isParallelSpec first. */
+function agentOf(spec: Exclude<StepSpec, ParallelStepSpec>): string {
   return typeof spec === "string" ? spec : spec.agent
 }
 
-function asStepObject(spec: StepSpec): Exclude<StepSpec, string> {
+function asStepObject(spec: Exclude<StepSpec, ParallelStepSpec>): AgentStepSpec {
   return typeof spec === "string" ? { agent: spec } : { ...spec }
 }
 
-function collapseStep(spec: Exclude<StepSpec, string>): StepSpec {
+function collapseStep(spec: AgentStepSpec): StepSpec {
   return Object.keys(spec).length === 1 ? spec.agent : spec
 }
 

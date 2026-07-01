@@ -6,18 +6,22 @@ import { join } from "node:path"
 import { openRunMetadata, type RunMetadataStore } from "../src/metadata"
 import { noopProgress, type ProgressPhaseSnapshot } from "../src/progress"
 import {
+  RunShutdown,
   UserAbortError,
   commitRecoveredPhase,
+  createGitLock,
   describeSessionActivity,
   isIgnorableRejection,
   newActivityState,
   parseModel,
+  planBatches,
   restorePhaseFromPreviousRun,
   selectInterruptedPhase,
   shouldRetryAttempt,
   shouldSkip,
+  type ActiveSession,
 } from "../src/runner"
-import type { AgentStep, Pipeline } from "../src/types"
+import type { AgentStep, HumanStep, Pipeline, Step } from "../src/types"
 import type { Workspace } from "../src/workspace"
 
 const recoveryDirs: string[] = []
@@ -50,6 +54,21 @@ async function dirtyRepo(): Promise<string> {
   return dir
 }
 
+function agentStep(name: string): AgentStep {
+  return {
+    type: "agent",
+    name,
+    agentName: name,
+    description: name,
+    model: "openai/gpt-5.5",
+    inputFiles: [],
+    inputDiff: false,
+    reportPath: `reports/${name}.md`,
+    groupId: `g-${name}`,
+    stepName: name,
+  }
+}
+
 function messageUpdated(info: Record<string, unknown>) {
   return { type: "message.updated", properties: { sessionID: "ses_1", info } }
 }
@@ -78,10 +97,17 @@ describe("runner helpers", () => {
   })
 
   test("applies only and skip phase filters", () => {
-    expect(shouldSkip("security", { onlySteps: ["implementer"], skipSteps: [] })).toBe(true)
-    expect(shouldSkip("implementer", { onlySteps: ["implementer"], skipSteps: ["implementer"] })).toBe(false)
-    expect(shouldSkip("design", { onlySteps: [], skipSteps: ["design"] })).toBe(true)
-    expect(shouldSkip("tests", { onlySteps: [], skipSteps: [] })).toBe(false)
+    expect(shouldSkip(agentStep("security"), { onlySteps: ["implementer"], skipSteps: [] })).toBe(true)
+    expect(shouldSkip(agentStep("implementer"), { onlySteps: ["implementer"], skipSteps: ["implementer"] })).toBe(false)
+    expect(shouldSkip(agentStep("design"), { onlySteps: [], skipSteps: ["design"] })).toBe(true)
+    expect(shouldSkip(agentStep("tests"), { onlySteps: [], skipSteps: [] })).toBe(false)
+  })
+
+  test("only/skip also match a fanned-out step's shared stepName", () => {
+    const variant = { ...agentStep("clean-code__anthropic-claude-opus-4-7"), stepName: "clean-code" }
+    expect(shouldSkip(variant, { onlySteps: ["clean-code"], skipSteps: [] })).toBe(false)
+    expect(shouldSkip(variant, { onlySteps: ["some-other-step"], skipSteps: [] })).toBe(true)
+    expect(shouldSkip(variant, { onlySteps: [], skipSteps: ["clean-code"] })).toBe(true)
   })
 
   test("turns assistant message updates into live cumulative usage", () => {
@@ -203,9 +229,117 @@ describe("runner helpers", () => {
   })
 })
 
+describe("planBatches", () => {
+  const human = (name: string): HumanStep => ({ type: "human", name, description: name })
+
+  test("sequential steps and human gates are each their own batch", () => {
+    const steps: Step[] = [agentStep("implementer"), human("human-review"), agentStep("tests")]
+    expect(planBatches(steps)).toEqual([[steps[0]], [steps[1]], [steps[2]]])
+  })
+
+  test("consecutive agent steps sharing a groupId batch together", () => {
+    const patterns = { ...agentStep("patterns"), groupId: "g2" }
+    const security = { ...agentStep("security"), groupId: "g2" }
+    const steps: Step[] = [agentStep("implementer"), patterns, security, agentStep("triage")]
+    expect(planBatches(steps)).toEqual([[steps[0]], [patterns, security], [steps[3]]])
+  })
+
+  test("a groupId doesn't merge across a human gate between them", () => {
+    const before = { ...agentStep("a"), groupId: "shared" }
+    const after = { ...agentStep("b"), groupId: "shared" }
+    const steps: Step[] = [before, human("human-review"), after]
+    expect(planBatches(steps)).toEqual([[before], [human("human-review")], [after]])
+  })
+})
+
+describe("RunShutdown multi-session tracking", () => {
+  function fakeSession(phaseName: string, sessionID: string, aborted: string[]): ActiveSession {
+    return {
+      sessionID,
+      directory: "/tmp/target",
+      phaseName,
+      client: {
+        session: {
+          abort: async ({ sessionID }: { sessionID: string; directory: string }) => {
+            aborted.push(sessionID)
+            return { error: undefined }
+          },
+        },
+      } as unknown as ActiveSession["client"],
+    }
+  }
+
+  test("tracks one active session per phase independently", () => {
+    const shutdown = new RunShutdown()
+    const aborted: string[] = []
+    shutdown.setActiveSession(fakeSession("patterns", "ses_1", aborted))
+    shutdown.setActiveSession(fakeSession("security", "ses_2", aborted))
+
+    // Clearing one phase's session doesn't touch the other's.
+    shutdown.clearActiveSession("patterns", "ses_1")
+    shutdown.clearActiveSession("security", "ses_wrong-id")
+    return shutdown.abortActiveSessions().then(() => {
+      expect(aborted).toEqual(["ses_2"])
+    })
+  })
+
+  test("abortActiveSessions aborts every currently-tracked session", async () => {
+    const shutdown = new RunShutdown()
+    const aborted: string[] = []
+    shutdown.setActiveSession(fakeSession("patterns", "ses_1", aborted))
+    shutdown.setActiveSession(fakeSession("security", "ses_2", aborted))
+    shutdown.setActiveSession(fakeSession("clean-code", "ses_3", aborted))
+
+    await shutdown.abortActiveSessions()
+    expect(aborted.sort()).toEqual(["ses_1", "ses_2", "ses_3"])
+  })
+
+  test("concurrent callers share the same in-flight abort", async () => {
+    const shutdown = new RunShutdown()
+    const aborted: string[] = []
+    shutdown.setActiveSession(fakeSession("patterns", "ses_1", aborted))
+
+    const [a, b] = await Promise.all([shutdown.abortActiveSessions(), shutdown.abortActiveSessions()])
+    expect(a).toBe(b)
+    expect(aborted).toEqual(["ses_1"])
+  })
+})
+
+describe("createGitLock", () => {
+  test("serializes concurrent jobs in enqueue order, regardless of individual duration", async () => {
+    const gitLock = createGitLock()
+    const order: number[] = []
+    const job = (id: number, delayMs: number) =>
+      gitLock(async () => {
+        await new Promise((resolve) => setTimeout(resolve, delayMs))
+        order.push(id)
+      })
+
+    // Job 1 is slowest but enqueued first; it must still finish before 2 and 3 start.
+    await Promise.all([job(1, 30), job(2, 10), job(3, 0)])
+    expect(order).toEqual([1, 2, 3])
+  })
+
+  test("a rejected job doesn't break the chain for jobs queued after it", async () => {
+    const gitLock = createGitLock()
+    const order: string[] = []
+
+    const first = gitLock(async () => {
+      order.push("first")
+      throw new Error("boom")
+    })
+    const second = gitLock(async () => {
+      order.push("second")
+    })
+
+    await expect(first).rejects.toThrow("boom")
+    await second
+    expect(order).toEqual(["first", "second"])
+  })
+})
+
 describe("dirty-tree recovery", () => {
-  const agent = (name: string): AgentStep =>
-    ({ type: "agent", name, agentName: name, description: name, model: "openai/gpt-5.5", inputFiles: [], inputDiff: false, reportPath: `reports/${name}.md` })
+  const agent = agentStep
   const pipeline: Pipeline = {
     name: "p",
     steps: [agent("implementer"), { type: "human", name: "review", description: "review" }, agent("patterns"), agent("tests")],

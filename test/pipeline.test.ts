@@ -4,8 +4,10 @@ import {
   builtInAgents,
   defaultPipeline,
   resolvePipeline,
+  slugifyModel,
   splitModelVariant,
   stepNames,
+  synthesizeReadOnlyAgents,
   validateStepFilters,
   type PipelineSpec,
 } from "../src/pipeline"
@@ -186,5 +188,163 @@ describe("step filters", () => {
 
     const headless = { ...pipeline, steps: pipeline.steps.filter((step) => step.type !== "human") }
     expect(() => validateStepFilters(headless, { onlySteps: [], skipSteps: ["human-review"] })).not.toThrow()
+  })
+
+  test("accepts a fanned-out step's shared stepName alongside its full disambiguated name", () => {
+    const pipeline = resolve({
+      steps: ["implementer", { agent: "adversarial", name: "clean-code", models: ["anthropic/claude-opus-4-7", "openai/gpt-5.5#xhigh"] }],
+    })
+    expect(() => validateStepFilters(pipeline, { onlySteps: ["clean-code"], skipSteps: [] })).not.toThrow()
+    expect(() => validateStepFilters(pipeline, { onlySteps: ["clean-code__anthropic-claude-opus-4-7"], skipSteps: [] })).not.toThrow()
+  })
+})
+
+describe("parallel groups", () => {
+  test("resolves a parallel block into steps sharing one groupId, forced read-only with a synthesized agent name", () => {
+    const [, patterns, security] = agentSteps({ steps: ["implementer", { parallel: ["patterns", "security"] }] })
+
+    expect(patterns?.groupId).toBeDefined()
+    expect(patterns?.groupId).toBe(security?.groupId)
+    expect(patterns?.readOnly).toBe(true)
+    expect(security?.readOnly).toBe(true)
+    // pattern-auditor/security-auditor aren't read-only by default, so parallel execution synthesizes a "__ro" variant
+    expect(patterns?.agentName).toBe("pattern-auditor__ro")
+    expect(security?.agentName).toBe("security-auditor__ro")
+  })
+
+  test("doesn't double-suffix an agent that's already configured read-only", () => {
+    const agents = builtInAgents.map((agent) => (agent.name === "security-auditor" ? { ...agent, readOnly: true } : agent))
+    const [security] = resolvePipeline({ name: "test", spec: { steps: [{ parallel: ["security"] }] }, agents }).steps as AgentStep[]
+    expect(security?.agentName).toBe("security-auditor")
+    expect(security?.readOnly).toBe(true)
+  })
+
+  test("a step inside a parallel block never sees its own siblings' reports, only earlier groups'", () => {
+    const [, patterns, security] = agentSteps({ steps: ["implementer", { parallel: ["patterns", "security"] }] })
+    expect(patterns?.inputFiles).toEqual(["prd.md", "reports/implementer.md"])
+    expect(security?.inputFiles).toEqual(["prd.md", "reports/implementer.md"])
+  })
+
+  test("reports: previous after a group expands to every member of that group", () => {
+    const steps = agentSteps({
+      steps: ["implementer", { parallel: ["patterns", "security"] }, { agent: "adversarial", name: "triage" }],
+    })
+    const triage = steps.find((step) => step.name === "triage")
+    expect(triage?.inputFiles).toEqual(["prd.md", "reports/patterns.md", "reports/security.md"])
+  })
+
+  test("reports: all includes every member of every earlier group", () => {
+    const steps = agentSteps({
+      steps: ["implementer", { parallel: ["patterns", "security"] }, { agent: "adversarial", name: "triage", reports: "all" }],
+    })
+    const triage = steps.find((step) => step.name === "triage")
+    expect(triage?.inputFiles).toEqual(["prd.md", "reports/implementer.md", "reports/patterns.md", "reports/security.md"])
+  })
+
+  test("empty parallel block is rejected", () => {
+    expect(() => resolve({ steps: ["implementer", { parallel: [] }] })).toThrow("empty parallel block")
+  })
+
+  test("nested parallel blocks are rejected", () => {
+    // Nesting isn't representable in StepSpec's types; simulate config-loaded data that bypassed validation.
+    const nested = { parallel: ["patterns"] } as unknown as string
+    expect(() => resolve({ steps: ["implementer", { parallel: [nested, "security"] }] })).toThrow("nest a parallel block")
+  })
+
+  test("human-review can't run inside a parallel block", () => {
+    expect(() => resolve({ steps: ["implementer", { parallel: ["patterns", "human-review"] }] })).toThrow("inside a parallel block")
+    expect(() => resolve({ steps: ["implementer", { parallel: ["patterns", { agent: "human-review" }] }] })).toThrow("inside a parallel block")
+  })
+})
+
+describe("model fan-out", () => {
+  test("slugifies provider/model#variant into a filesystem-safe suffix", () => {
+    expect(slugifyModel("anthropic/claude-opus-4-7")).toBe("anthropic-claude-opus-4-7")
+    expect(slugifyModel("openai/gpt-5.5#xhigh")).toBe("openai-gpt-5-5-xhigh")
+  })
+
+  test("fans a step out across models, one forced-read-only invocation per model, sharing groupId/stepName", () => {
+    const [clean1, clean2] = agentSteps({
+      steps: [{ agent: "implementer", name: "clean-code", models: ["anthropic/claude-opus-4-7", "openai/gpt-5.5#xhigh"] }],
+    })
+
+    expect(clean1?.stepName).toBe("clean-code")
+    expect(clean2?.stepName).toBe("clean-code")
+    expect(clean1?.groupId).toBe(clean2?.groupId)
+    expect(clean1?.name).toBe("clean-code__anthropic-claude-opus-4-7")
+    expect(clean2?.name).toBe("clean-code__openai-gpt-5-5-xhigh")
+    expect(clean1).toMatchObject({ model: "anthropic/claude-opus-4-7" })
+    expect(clean2).toMatchObject({ model: "openai/gpt-5.5", variant: "xhigh" })
+    expect(clean1?.reportPath).toBe("reports/clean-code__anthropic-claude-opus-4-7.md")
+    expect(clean1?.readOnly).toBe(true)
+    expect(clean2?.readOnly).toBe(true)
+    expect(clean1?.agentName).toBe("implementer__ro")
+  })
+
+  test("reports: [stepName] on a fanned-out step expands to every model variant", () => {
+    const steps = agentSteps({
+      steps: [
+        { agent: "implementer", name: "clean-code", models: ["anthropic/claude-opus-4-7", "openai/gpt-5.5#xhigh"] },
+        { agent: "adversarial", name: "triage", reports: ["clean-code"] },
+      ],
+    })
+    const triage = steps.find((step) => step.name === "triage")
+    expect(triage?.inputFiles).toEqual(["prd.md", "reports/clean-code__anthropic-claude-opus-4-7.md", "reports/clean-code__openai-gpt-5-5-xhigh.md"])
+  })
+
+  test("a fanned-out step can also be targeted by one specific variant's full name", () => {
+    const steps = agentSteps({
+      steps: [
+        { agent: "implementer", name: "clean-code", models: ["anthropic/claude-opus-4-7", "openai/gpt-5.5#xhigh"] },
+        { agent: "adversarial", name: "triage", reports: ["clean-code__anthropic-claude-opus-4-7"] },
+      ],
+    })
+    const triage = steps.find((step) => step.name === "triage")
+    expect(triage?.inputFiles).toEqual(["prd.md", "reports/clean-code__anthropic-claude-opus-4-7.md"])
+  })
+
+  test("models needs at least 2 entries", () => {
+    expect(() => resolve({ steps: [{ agent: "implementer", models: ["anthropic/claude-opus-4-7"] }] })).toThrow("at least 2 entries")
+  })
+
+  test("can't set both model and models", () => {
+    expect(() =>
+      resolve({
+        steps: [{ agent: "implementer", model: "anthropic/claude-opus-4-7", models: ["anthropic/claude-opus-4-7", "openai/gpt-5.5#xhigh"] }],
+      }),
+    ).toThrow('both "model" and "models"')
+  })
+
+  test("models inside a parallel block compose: fan-out members join the block's shared group", () => {
+    const steps = agentSteps({
+      steps: [
+        "implementer",
+        {
+          parallel: ["patterns", { agent: "implementer", name: "clean-code", models: ["anthropic/claude-opus-4-7", "openai/gpt-5.5#xhigh"] }],
+        },
+      ],
+    })
+    expect(steps.length).toBe(4) // implementer + patterns + 2 clean-code variants
+    const groupIds = new Set(steps.slice(1).map((step) => step.groupId))
+    expect(groupIds.size).toBe(1)
+  })
+})
+
+describe("synthesizeReadOnlyAgents", () => {
+  test("builds one forced-read-only agent spec per distinct base agent referenced, deduped", () => {
+    const pipeline = resolve({
+      steps: [
+        "implementer",
+        { parallel: ["patterns", "security"] },
+        { agent: "implementer", name: "clean-code", models: ["anthropic/claude-opus-4-7", "openai/gpt-5.5#xhigh"] },
+      ],
+    })
+    const synthesized = synthesizeReadOnlyAgents(pipeline, builtInAgents)
+    expect(synthesized.map((agent) => agent.name).sort()).toEqual(["implementer__ro", "pattern-auditor__ro", "security-auditor__ro"])
+    expect(synthesized.every((agent) => agent.readOnly)).toBe(true)
+  })
+
+  test("returns nothing when no step needed a synthesized variant", () => {
+    expect(synthesizeReadOnlyAgents(defaultPipeline(), builtInAgents)).toEqual([])
   })
 })

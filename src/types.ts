@@ -63,10 +63,14 @@ export type AgentStep = {
   inputFiles: readonly string[]
   inputDiff: boolean
   reportPath: string
-  /** True when the underlying agent is configured as read-only. */
+  /** True when the underlying agent is configured as read-only, or forced read-only for parallel/multi-model execution. */
   readOnly?: boolean
   /** Per-step override; falls back to --max-attempts when absent. */
   maxAttempts?: number
+  /** Shared by every step produced from the same top-level pipeline entry; the runner batches same-groupId steps to run concurrently. */
+  groupId: string
+  /** Pre-fan-out logical name; equals `name` unless this step was produced by a `models:` fan-out. */
+  stepName: string
 }
 
 export type HumanStep = {

@@ -34,6 +34,8 @@ const quick: Pipeline = {
       inputFiles: ["prd.md"],
       inputDiff: false,
       reportPath: "reports/implementer.md",
+      groupId: "g1",
+      stepName: "implementer",
     },
   ],
 }
