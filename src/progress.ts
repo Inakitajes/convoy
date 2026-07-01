@@ -1,7 +1,17 @@
 import { log } from "./log"
-import type { Step } from "./types"
 
-export type ProgressPhase = Pick<Step, "name" | "description">
+export type ProgressPhase = {
+  name: string
+  description: string
+  /** Shared by every member of a concurrent group (a `parallel:` block, or a step fanned out across `models:`); absent on human gates. */
+  groupId?: string
+  /** Pre-fan-out logical name; equals `name` unless this step was produced by a `models:` fan-out. Absent on human gates. */
+  stepName?: string
+  /** The model this step is configured to run, so a fanned-out member can be labelled by its model before it starts. */
+  plannedModel?: string
+  /** The variant paired with `plannedModel`, when the model shorthand carried one. */
+  plannedVariant?: string
+}
 
 export type ProgressTokens = {
   input: number

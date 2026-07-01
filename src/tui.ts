@@ -857,6 +857,10 @@ export class TuiProgress implements ProgressUI {
       fg: theme.text,
       width: "100%",
       height: "100%",
+      // Every panel manages its own wrapping/truncation to a known width; a
+      // stray over-long line must clip at the panel edge, never wrap onto a
+      // second row (which would desync the pipeline's click row mapping).
+      wrapMode: "none",
     })
     box.add(text)
     return { box, text }
@@ -1052,7 +1056,7 @@ export class TuiProgress implements ProgressUI {
       this.reportPageRows = feedRows
       // Content first: it computes the scroll indicator the title shows.
       this.feedText.content = joinLines(this.reportPanelLines(focus, rightWidth, feedRows))
-      this.feedBox.title = ` report · ${focus?.name ?? "—"}${this.reportPosition ? ` · ${this.reportPosition}` : ""} `
+      this.feedBox.title = ` report · ${focus ? phaseDisplayName(focus) : "—"}${this.reportPosition ? ` · ${this.reportPosition}` : ""} `
     } else {
       this.feedBox.title = " logs "
       this.feedText.content = joinLines(this.feedLines(rightWidth, feedRows))
@@ -1118,7 +1122,7 @@ export class TuiProgress implements ProgressUI {
       const focused = phase.name === focusedName
       const overflowSuffix = overflow > 0 && index === visible.length - 1 ? ` · +${overflow} more running` : ""
       pane.box.visible = true
-      pane.box.title = ` ${focused ? "▸ " : "  "}${phase.name}${overflowSuffix} `
+      pane.box.title = ` ${focused ? "▸ " : "  "}${phaseDisplayName(phase)}${overflowSuffix} `
       pane.box.height = lines.length + 2
       pane.text.content = joinLines(lines)
       this.paneAssignment[index] = phase.name
@@ -1174,8 +1178,11 @@ export class TuiProgress implements ProgressUI {
     return Math.min(1, done / total)
   }
 
-  // The pipeline owns run progress: the overall bar plus one row per phase
-  // (status, elapsed, and final cost once a phase ends).
+  // The pipeline owns run progress: the overall bar plus the phase list. A
+  // sequential step is one flat row (unchanged); a concurrent group (a
+  // `parallel:` block, or a step fanned out across `models:`) renders as an
+  // indented sub-tree under a group header, so the nesting is visible instead
+  // of a flat list of `step__model` names all sitting at the same level.
   private pipelineContent(now: number) {
     const width = pipelineWidth - 4
     const done = this.phases.filter((phase) => phase.status === "completed" || phase.status === "skipped").length
@@ -1191,24 +1198,121 @@ export class TuiProgress implements ProgressUI {
       ]),
       plain(""),
     ]
+    // Rebuilt in lockstep with `out`: one entry per rendered line so a click
+    // resolves against exactly what is on screen. Group headers point at their
+    // first member so a click still opens (or, on the finish screen, browses)
+    // something sensible.
     const rows: (string | undefined)[] = [undefined, undefined]
-    for (const [index, phase] of this.phases.entries()) {
-      const selected = this.finished?.selected === index
-      const name =
-        selected || phase.status === "running"
-          ? bold(fg(theme.text)(phase.name))
-          : phase.status === "pending"
-            ? fg(theme.dim)(phase.name)
-            : phase.status === "skipped"
-              ? fg(theme.faint)(phase.name)
-              : fg(theme.text)(phase.name)
-      const left: TextChunk[] = [statusIcon(phase.status, now), raw(" "), name]
-      // The selection marker only exists on the finish screen, where the
-      // pipeline doubles as the phase browser.
-      if (this.finished) left.unshift(selected ? fg(theme.accent)("▸ ") : raw("  "))
-      rows.push(phase.name)
-      out.push(padBetween(left, phaseMetaChunks(phase, now), width))
+    const emit = (left: TextChunk[], right: TextChunk[], rowPhase: string | undefined) => {
+      out.push(padBetween(left, right, width))
+      rows.push(rowPhase)
     }
+    // The selection marker (▸) only exists on the finish screen, where the
+    // pipeline doubles as the phase browser; emitLine draws it at column 0,
+    // before the tree prefix, so it stays aligned across every depth.
+    const isSelected = (phase: PhaseState) => this.finished !== undefined && this.phases[this.finished.selected] === phase
+
+    // One rendered line, sized so it never wraps: the marker, tree prefix and
+    // status icon are fixed, the right-aligned meta is preserved whole, and
+    // the label (name or model) is truncated to whatever budget is left
+    // between them. Deep nesting eats into the name, never into the layout —
+    // which keeps `rows` one-to-one with the visible lines (clicks resolve).
+    const emitLine = (args: {
+      rowPhase: string | undefined
+      selectedPhase?: PhaseState
+      lasts: boolean[]
+      icon: TextChunk
+      labelText: string
+      labelStatus: PhaseStatus
+      color?: (text: string) => TextChunk
+      suffix?: TextChunk[]
+      right: TextChunk[]
+    }) => {
+      const selected = args.selectedPhase !== undefined && isSelected(args.selectedPhase)
+      const left: TextChunk[] = []
+      if (this.finished) left.push(selected ? fg(theme.accent)("▸ ") : raw("  "))
+      const prefix = treePrefix(args.lasts)
+      if (prefix) left.push(fg(theme.faint)(prefix))
+      left.push(args.icon, raw(" "))
+      const suffix = args.suffix ?? []
+      // -1 reserves the single-column gap padBetween keeps before the meta.
+      // Floored at 1 (not higher) so a very deep row shrinks its name to fit
+      // rather than forcing extra columns that would push the meta off-panel.
+      const budget = Math.max(1, width - plainLen(left) - plainLen(suffix) - plainLen(args.right) - 1)
+      const label = truncate(args.labelText, budget)
+      left.push(args.color ? args.color(label) : phaseNameChunk(label, args.labelStatus, selected))
+      left.push(...suffix)
+      emit(left, args.right, args.rowPhase)
+    }
+
+    // A leaf row: a single phase (sequential step, human gate, or one member
+    // of a concurrent group) labelled by `labelText`.
+    const emitRow = (phase: PhaseState, lasts: boolean[], labelText: string, right: TextChunk[]) =>
+      emitLine({ rowPhase: phase.name, selectedPhase: phase, lasts, icon: statusIcon(phase.status, now), labelText, labelStatus: phase.status, right })
+
+    // A fanned-out member, labelled by its model with the variant (if any) as
+    // a faint suffix.
+    const emitModelRow = (phase: PhaseState, lasts: boolean[]) =>
+      emitLine({
+        rowPhase: phase.name,
+        selectedPhase: phase,
+        lasts,
+        icon: statusIcon(phase.status, now),
+        labelText: modelLabel(phase),
+        labelStatus: phase.status,
+        suffix: phase.plannedVariant ? [fg(theme.faint)(`#${phase.plannedVariant}`)] : undefined,
+        right: phaseMetaChunks(phase, now),
+      })
+
+    // A group / sub-group header: the aggregate status icon, a label, and an
+    // `×N` count, carrying the group's aggregate elapsed/cost. `count` is the
+    // number of visible branches — distinct steps under a `parallel:` header,
+    // models under a fan-out header — not always the raw member total.
+    const emitHeader = (members: PhaseState[], labelText: string, kind: "step" | "parallel", count: number, lasts: boolean[]) => {
+      const status = groupStatus(members)
+      emitLine({
+        rowPhase: members[0]!.name,
+        lasts,
+        icon: statusIcon(status, now),
+        labelText,
+        labelStatus: status,
+        color: kind === "parallel" ? (text) => fg(theme.teal)(text) : undefined,
+        suffix: [fg(theme.faint)(` ×${count}`)],
+        right: groupMetaChunks(members, now),
+      })
+    }
+
+    for (const group of groupPhases(this.phases)) {
+      if (group.length === 1) {
+        const phase = group[0]!
+        emitRow(phase, [], phase.name, phaseMetaChunks(phase, now))
+        continue
+      }
+
+      const stepGroups = chunkByStepName(group)
+      if (stepGroups.length === 1) {
+        // A single step fanned out across models: the header names the step,
+        // each member names just its model.
+        emitHeader(group, stepLabel(group[0]!), "step", group.length, [])
+        group.forEach((phase, index) => emitModelRow(phase, [index === group.length - 1]))
+        continue
+      }
+
+      // A `parallel:` block of distinct steps; the header counts the steps,
+      // and any step that is itself fanned out across models nests one level
+      // deeper under its own ×N sub-header.
+      emitHeader(group, "parallel", "parallel", stepGroups.length, [])
+      stepGroups.forEach((members, stepIndex) => {
+        const lastStep = stepIndex === stepGroups.length - 1
+        if (members.length === 1) {
+          emitRow(members[0]!, [lastStep], stepLabel(members[0]!), phaseMetaChunks(members[0]!, now))
+          return
+        }
+        emitHeader(members, stepLabel(members[0]!), "step", members.length, [lastStep])
+        members.forEach((phase, index) => emitModelRow(phase, [lastStep, index === members.length - 1]))
+      })
+    }
+
     this.pipelineRowPhases = rows
     return joinLines(out)
   }
@@ -1220,10 +1324,11 @@ export class TuiProgress implements ProgressUI {
     if (!active) return [t`${fg(theme.dim)("waiting for the first phase to start…")}`]
 
     const out: StyledText[] = []
+    const title = phaseDisplayName(active)
     const head: TextChunk[] =
       active.status === "running"
-        ? [fg(theme.accent)(`${spinnerFrame(now)} `), bold(fg(theme.text)(active.name))]
-        : [statusIcon(active.status, now), raw(" "), bold(fg(theme.text)(active.name))]
+        ? [fg(theme.accent)(`${spinnerFrame(now)} `), bold(fg(theme.text)(title))]
+        : [statusIcon(active.status, now), raw(" "), bold(fg(theme.text)(title))]
     // Live activity sits to the right of the name; truncation reserves room
     // for the name, the separators, and a possible quiet indicator.
     if (active.now.message) {
@@ -1231,7 +1336,7 @@ export class TuiProgress implements ProgressUI {
       head.push(
         fg(theme.faint)("  ·  "),
         fg(style.color)(`${style.icon} `),
-        fg(theme.text)(truncate(active.now.message, Math.max(10, width - active.name.length - 28))),
+        fg(theme.text)(truncate(active.now.message, Math.max(10, width - title.length - 28))),
       )
     } else {
       head.push(fg(theme.faint)("  ·  "), fg(theme.dim)("waiting for opencode events…"))
@@ -1280,14 +1385,15 @@ export class TuiProgress implements ProgressUI {
     if (!phase) return [t`${fg(theme.dim)("no phases to show")}`]
     const out: StyledText[] = []
 
-    const head: TextChunk[] = [statusIcon(phase.status, now), raw(" "), bold(fg(theme.text)(phase.name))]
+    const title = phaseDisplayName(phase)
+    const head: TextChunk[] = [statusIcon(phase.status, now), raw(" "), bold(fg(theme.text)(title))]
     if (phase.description) {
-      head.push(fg(theme.faint)("  ·  "), fg(theme.dim)(truncate(phase.description, Math.max(10, width - phase.name.length - 8))))
+      head.push(fg(theme.faint)("  ·  "), fg(theme.dim)(truncate(phase.description, Math.max(10, width - title.length - 8))))
     }
     out.push(new StyledText(head))
 
     const meta: TextChunk[] = []
-    const elapsed = phase.restoredDurationMs ?? (phase.startedAt !== undefined ? (phase.endedAt ?? now) - phase.startedAt : undefined)
+    const elapsed = phaseElapsed(phase, now)
     if (elapsed !== undefined) meta.push(fg(theme.faint)("took "), fg(theme.dim)(formatElapsed(elapsed)))
     const model = phase.lastStepModel || phase.model
     if (model) {
@@ -1363,7 +1469,8 @@ export class TuiProgress implements ProgressUI {
       // Newest-first list: blank the phase label when the older neighbour
       // repeats it, so each phase shows once at the start of its group.
       const older = events[index + 1]
-      const phaseLabel = older && older.phase === entry.phase ? raw(" ".repeat(12)) : fg(theme.dim)(entry.phase.padEnd(12).slice(0, 12))
+      const label = this.feedLabel(entry.phase)
+      const phaseLabel = older && older.phase === entry.phase ? raw(" ".repeat(12)) : fg(theme.dim)(label.padEnd(12).slice(0, 12))
       return new StyledText([
         fg(theme.faint)(formatTime(entry.time)),
         raw(" "),
@@ -1374,6 +1481,16 @@ export class TuiProgress implements ProgressUI {
         fg(entry.kind === "error" ? theme.red : theme.text)(truncate(entry.message, Math.max(20, width - 26))),
       ])
     })
+  }
+
+  // Feed rows are cross-phase and only 12 columns wide, so a fanned-out
+  // member reads by its model alone (`opus-4-7`) rather than its `step__slug`
+  // id; every other phase keeps its own name. "archer" and unknown phases pass
+  // through untouched.
+  private feedLabel(name: string): string {
+    const phase = this.findPhase(name)
+    if (phase && phase.stepName && phase.stepName !== phase.name) return modelLabel(phase)
+    return name
   }
 
   private footerContent(now: number, width: number) {
@@ -1483,13 +1600,114 @@ function phaseMetaChunks(phase: PhaseState, now: number): TextChunk[] {
   if (phase.status === "pending") return []
   if (phase.status === "skipped" && phase.restoredDurationMs === undefined) return [fg(theme.faint)("skipped")]
   const parts: TextChunk[] = []
-  const elapsed = phase.restoredDurationMs ?? (phase.startedAt !== undefined ? (phase.endedAt ?? now) - phase.startedAt : undefined)
+  const elapsed = phaseElapsed(phase, now)
   if (elapsed !== undefined) {
     parts.push(fg(phase.status === "failed" ? theme.red : theme.dim)(formatElapsed(elapsed)))
   }
   // Live cost belongs to the current-step panel; a phase's final cost lands here once it ends.
   if (phase.usageReported && phase.status !== "running") parts.push(fg(theme.faint)(` ${formatMoney(phase.cost)}`))
   return parts
+}
+
+function phaseElapsed(phase: PhaseState, now: number): number | undefined {
+  return phase.restoredDurationMs ?? (phase.startedAt !== undefined ? (phase.endedAt ?? now) - phase.startedAt : undefined)
+}
+
+// Consecutive phases sharing a defined groupId form one concurrent group; a
+// human gate (no groupId) or a plain sequential step is a group of one.
+function groupPhases(phases: readonly PhaseState[]): PhaseState[][] {
+  const groups: PhaseState[][] = []
+  for (const phase of phases) {
+    const last = groups[groups.length - 1]
+    if (phase.groupId && last && last[0]!.groupId === phase.groupId) last.push(phase)
+    else groups.push([phase])
+  }
+  return groups
+}
+
+// Splits a group into its distinct logical steps: a pure `models:` fan-out is
+// one step (every member shares a stepName), a `parallel:` block is several.
+function chunkByStepName(group: readonly PhaseState[]): PhaseState[][] {
+  const chunks: PhaseState[][] = []
+  for (const phase of group) {
+    const last = chunks[chunks.length - 1]
+    if (last && stepLabel(last[0]!) === stepLabel(phase)) last.push(phase)
+    else chunks.push([phase])
+  }
+  return chunks
+}
+
+// Column count of a chunk list. The pipeline tree uses only single-cell
+// glyphs (icons, box-drawing, ASCII), so a codepoint count is the cell width.
+function plainLen(chunks: readonly TextChunk[]): number {
+  let count = 0
+  for (const chunk of chunks) for (const _ of chunk.text) count++
+  return count
+}
+
+// Box-drawing prefix for a tree row: one entry per ancestor level, true when
+// that ancestor was its parent's last child (so its vertical line stops).
+function treePrefix(lasts: readonly boolean[]): string {
+  if (lasts.length === 0) return ""
+  let prefix = ""
+  for (let i = 0; i < lasts.length - 1; i++) prefix += lasts[i] ? "  " : "│ "
+  return `${prefix}${lasts[lasts.length - 1] ? "└ " : "├ "}`
+}
+
+// A concurrent group's aggregate status: running while any member is (or has
+// started but none have), then failed/skipped/completed once all have ended.
+function groupStatus(members: readonly PhaseState[]): PhaseStatus {
+  const allEnded = members.every((m) => m.status === "completed" || m.status === "skipped" || m.status === "failed")
+  if (!allEnded) return members.some((m) => m.status === "running" || m.startedAt !== undefined) ? "running" : "pending"
+  if (members.some((m) => m.status === "failed")) return "failed"
+  if (members.every((m) => m.status === "skipped")) return "skipped"
+  return "completed"
+}
+
+// Aggregate meta for a group header: wall-clock is the longest member (they
+// run concurrently), cost is their sum.
+function groupMetaChunks(members: readonly PhaseState[], now: number): TextChunk[] {
+  const status = groupStatus(members)
+  if (status === "pending") return []
+  const parts: TextChunk[] = []
+  const elapsed = members.map((m) => phaseElapsed(m, now)).filter((value): value is number => value !== undefined)
+  if (elapsed.length > 0) parts.push(fg(status === "failed" ? theme.red : theme.dim)(formatElapsed(Math.max(...elapsed))))
+  if (members.some((m) => m.usageReported) && status !== "running") {
+    parts.push(fg(theme.faint)(` ${formatMoney(members.reduce((sum, m) => sum + m.cost, 0))}`))
+  }
+  return parts
+}
+
+// The status-driven colouring a pipeline name (or model label) takes: bold
+// while running or selected, dimmed while pending, faint once skipped.
+function phaseNameChunk(text: string, status: PhaseStatus, selected: boolean): TextChunk {
+  if (selected || status === "running") return bold(fg(theme.text)(text))
+  if (status === "pending") return fg(theme.dim)(text)
+  if (status === "skipped") return fg(theme.faint)(text)
+  return fg(theme.text)(text)
+}
+
+// The logical (pre-fan-out) name of a phase; equals its own name for a plain
+// sequential step or a human gate.
+function stepLabel(phase: PhaseState): string {
+  return phase.stepName ?? phase.name
+}
+
+// A compact model label for a fanned-out member: provider prefix dropped, and
+// the redundant `claude-` vendor token trimmed, so `security__…opus-4-7`
+// reads as just `opus-4-7`. Falls back to the live/planned model once known.
+function modelLabel(phase: PhaseState): string {
+  const full = phase.lastStepModel || phase.model || phase.plannedModel || ""
+  if (!full) return stepLabel(phase)
+  const id = full.includes("/") ? full.slice(full.lastIndexOf("/") + 1) : full
+  return id.replace(/^claude-/, "")
+}
+
+// A phase's name for use outside the pipeline tree (pane titles, the feed):
+// a fanned-out member reads as `step · model` instead of its `step__slug` id.
+function phaseDisplayName(phase: PhaseState): string {
+  if (phase.stepName && phase.stepName !== phase.name) return `${phase.stepName} · ${modelLabel(phase)}`
+  return phase.name
 }
 
 // One row per todo, windowed around the first unfinished item when the list

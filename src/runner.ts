@@ -1424,7 +1424,18 @@ function ensureAgentsAvailable(pipeline: Pipeline, agents: readonly AgentSpec[])
 }
 
 function progressPhases(pipeline: Pipeline): ProgressPhase[] {
-  return pipeline.steps.map((step) => ({ name: step.name, description: step.description }))
+  return pipeline.steps.map((step) =>
+    step.type === "agent"
+      ? {
+          name: step.name,
+          description: step.description,
+          groupId: step.groupId,
+          stepName: step.stepName,
+          plannedModel: step.model,
+          ...(step.variant ? { plannedVariant: step.variant } : {}),
+        }
+      : { name: step.name, description: step.description },
+  )
 }
 
 class LoggedAttemptError extends Error {}
