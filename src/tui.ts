@@ -82,10 +82,10 @@ function kindStyle(kind: ActivityKind): { icon: string; color: string } {
 
 const pipelineWidth = 32
 const feedLimit = 100
-// Concurrently-running phases (a parallel block, or a step fanned out across
-// models) each get their own live-detail pane, up to this many at once; extra
-// running phases beyond this are folded into the last pane's title.
-const maxPanes = 4
+
+// The right-hand content panel is a three-tab view of the focused phase.
+type ContentTab = "logs" | "reports" | "session"
+const contentTabOrder: readonly ContentTab[] = ["logs", "reports", "session"]
 
 const permissionChoices: ReadonlyArray<{ reply: PermissionReply; label: string; color: PaletteColor }> = [
   { reply: "once", label: "allow once", color: "green" },
@@ -140,12 +140,11 @@ type PendingPermission = {
   resolve: (reply: PermissionReply) => void
 }
 
-// The post-run screen: the dashboard stays up, phases become a browsable list,
-// and the logs panel turns into the selected phase's report viewer.
+// The post-run screen keeps the very same dashboard: the pipeline is still the
+// phase selector and the content panel still carries its logs/reports/session
+// tabs. Only the run is over, so it becomes frozen-in-time browsing.
 type FinishState = RunOutcome & {
   at: number
-  selected: number
-  reportScroll: number
   resolve: () => void
 }
 
@@ -171,12 +170,18 @@ export class TuiProgress implements ProgressUI {
   private runID = ""
   private targetDir = ""
   private serverUrl = ""
-  // Fallback focus for single-phase rendering: the phase that most recently
-  // had activity, kept updated by every progress callback exactly as before.
+  // The phase whose work is most recent, kept updated by every progress
+  // callback; the focused tab auto-follows it until the user takes over.
   private activePhase = ""
-  // Explicit user focus among concurrently-running phases (Tab / pane click);
-  // unlike activePhase, this only ever changes on direct user action.
-  private focusedPhaseName = ""
+  // The focused phase — an index into `phases`, driven by the pipeline tab
+  // selector (↑/↓, j/k, click). It auto-follows `activePhase` until the user
+  // navigates, then `manualFocus` pins it so any step (past, present, or
+  // still-scheduled) stays open for inspection.
+  private selected = 0
+  private manualFocus = false
+  // Run workspace dir, where phase reports land; set at start so the reports
+  // tab reads them live, and refreshed from the outcome on the finish screen.
+  private runDir = ""
   private lastActivityAt = Date.now()
   private readonly startedAt = Date.now()
   private readonly phases: PhaseState[]
@@ -185,14 +190,11 @@ export class TuiProgress implements ProgressUI {
   private readonly dirText: TextRenderable
   private readonly headerText: TextRenderable
   private readonly pipelineText: TextRenderable
+  // The detail panel: header (name, status, model, cost, tokens, diff) of the
+  // one focused phase. A single pane now — concurrent phases are browsed via
+  // the pipeline tab selector rather than each getting their own live pane.
   private readonly stepBox: BoxRenderable
   private readonly stepText: TextRenderable
-  // Extra live-detail panes for additional concurrently-running phases beyond
-  // the first (which reuses stepBox); hidden whenever at most one phase runs.
-  private readonly extraPanes: { box: BoxRenderable; text: TextRenderable }[] = []
-  // Slot index -> phase name currently assigned there, rebuilt every render
-  // so pane clicks resolve against exactly what's on screen.
-  private paneAssignment: (string | undefined)[] = []
   private readonly todosBox: BoxRenderable
   private readonly todosText: TextRenderable
   private readonly feedBox: BoxRenderable
@@ -215,12 +217,20 @@ export class TuiProgress implements ProgressUI {
   // A subshell (lazygit / git log) owns the terminal while the renderer is
   // suspended; every key must reach it untouched.
   private inSubshell = false
-  // Phase reports read lazily from the run dir once the finish screen is up.
+  // Phase reports read lazily from the run dir; the cache entry is dropped when
+  // a phase finishes so a report written mid-run is picked up on the next view.
   private readonly reports = new Map<string, string[] | "loading" | "missing">()
-  // Visible rows of the report panel, captured at render time for paging keys.
+  // Visible rows of the reports tab, captured at render time for paging keys.
   private reportPageRows = 10
-  // Scroll indicator for the footer ("" while everything fits), set at render time.
+  // Scroll offset + indicator for the reports tab, shared across live/finished.
+  private reportScroll = 0
   private reportPosition = ""
+  // The content panel's active tab, scoped to the focused phase: its activity
+  // feed, the report it wrote (if any), or a read-only "follow along" view of
+  // its opencode session. [o] still opens the interactive session externally.
+  private contentTab: ContentTab = "logs"
+  // Click hit-regions for the tab strip, rebuilt every render: column span → tab.
+  private feedTabRegions: { tab: ContentTab; start: number; end: number }[] = []
   private readonly handleThemeMode = (mode: unknown) => {
     if (mode !== "dark" && mode !== "light") return
     setTheme(paletteForTerminal(mode, terminalBackgroundHex(this.renderer)))
@@ -245,18 +255,9 @@ export class TuiProgress implements ProgressUI {
       this.onAbort?.()
       return
     }
-    if (this.finished) {
-      // A permission can still arrive while the finish screen is up (e.g. the
-      // user iterates in a session opened with [o]); the modal keeps priority.
-      if (this.permissionQueue.length > 0) {
-        this.handlePermissionKey(key)
-        return
-      }
-      this.handleFinishedKey(key)
-      return
-    }
-    // Checked before the permission modal so the toggle also resolves an
-    // open prompt (enabling auto-accept flushes the whole queue).
+    // Checked before the permission modal so the toggle also resolves an open
+    // prompt (enabling auto-accept flushes the whole queue). Harmless on the
+    // finish screen, where nothing is queued.
     if (key.name === "tab" && key.shift) {
       key.preventDefault()
       key.stopPropagation()
@@ -267,19 +268,83 @@ export class TuiProgress implements ProgressUI {
       this.handlePermissionKey(key)
       return
     }
-    // Plain Tab cycles focus among concurrently-running phases; a no-op when
-    // at most one is running. Checked after the permission modal, which
-    // already claims plain Tab for cycling its own choices.
-    if (key.name === "tab" && !key.ctrl && !key.meta && !key.option) {
+    // Everything else is navigation, shared by the live dashboard and the
+    // finish screen: move the focused phase, switch the content tab, scroll a
+    // report, or open the external session.
+    this.handleNavKey(key)
+  }
+
+  // Unified navigation for both the live run and the finish screen. Vertical
+  // keys move the focused phase through the pipeline (the tab selector);
+  // horizontal keys / Tab / digits switch the content tab; page keys scroll the
+  // reports tab; [o] opens the external session. Finish-only keys come last.
+  private handleNavKey(key: KeyEvent) {
+    const finished = this.finished
+    const consume = () => {
       key.preventDefault()
       key.stopPropagation()
-      this.cycleFocusedPhase()
+    }
+    switch (key.name) {
+      case "up":
+      case "k":
+        consume()
+        this.moveSelection(-1)
+        return
+      case "down":
+      case "j":
+        consume()
+        this.moveSelection(1)
+        return
+      case "left":
+      case "h":
+        consume()
+        this.cycleContentTab(-1)
+        return
+      case "right":
+      case "l":
+      case "tab":
+        consume()
+        this.cycleContentTab(1)
+        return
+      case "pagedown":
+      case "space":
+        consume()
+        this.scrollReport(this.reportPageRows)
+        return
+      case "pageup":
+        consume()
+        this.scrollReport(-this.reportPageRows)
+        return
+      case "o":
+        consume()
+        this.openActiveSessionWindow("key")
+        return
+    }
+    // Digit keys jump straight to a content tab (1 logs · 2 reports · 3 session).
+    const digitTab: Record<string, ContentTab> = { "1": "logs", "2": "reports", "3": "session" }
+    const jump = digitTab[key.name] ?? digitTab[key.raw ?? ""]
+    if (jump) {
+      consume()
+      this.setContentTab(jump)
       return
     }
-    if (key.name !== "o" || key.ctrl || key.meta || key.option) return
-    key.preventDefault()
-    key.stopPropagation()
-    this.openActiveSessionWindow("key")
+    if (finished) {
+      if (key.name === "g") {
+        consume()
+        void this.openGitSubshell()
+      } else if (key.name === "q" || key.name === "escape") {
+        consume()
+        finished.resolve()
+      }
+      return
+    }
+    // On a live run, Escape hands focus back to auto-follow so the view tracks
+    // the active phase again.
+    if (key.name === "escape") {
+      consume()
+      this.manualFocus = false
+      this.render()
+    }
   }
 
   constructor(
@@ -341,14 +406,13 @@ export class TuiProgress implements ProgressUI {
       gap: 1,
     })
 
-    const openFromPipeline = (event: { y: number; preventDefault(): void; stopPropagation(): void }) => {
+    // A click on any pipeline row focuses that phase (the tab selector); it no
+    // longer opens the opencode session — [o] / a detail-panel click do that.
+    const focusFromPipeline = (event: { y: number; preventDefault(): void; stopPropagation(): void }) => {
       event.preventDefault()
       event.stopPropagation()
       const name = this.pipelineRowPhases[event.y - this.pipelineText.y]
-      if (!name) return
-      // On the finish screen a click browses; opening stays on [o].
-      if (this.finished) this.selectFinishedPhase(name)
-      else this.openSessionWindowForPhase(name, "click")
+      if (name) this.selectPhaseByName(name)
     }
 
     const pipeline = this.panel({
@@ -359,9 +423,9 @@ export class TuiProgress implements ProgressUI {
       backgroundColor: theme.bg,
       title: " pipeline ",
       titleAlignment: "left",
-      onMouseDown: openFromPipeline,
+      onMouseDown: focusFromPipeline,
     })
-    pipeline.text.onMouseDown = openFromPipeline
+    pipeline.text.onMouseDown = focusFromPipeline
 
     const right = new BoxRenderable(renderer, {
       id: "archer-right",
@@ -371,12 +435,13 @@ export class TuiProgress implements ProgressUI {
       gap: 0,
     })
 
-    const paneClickHandler = (index: number) => (event: { preventDefault(): void; stopPropagation(): void }) => {
+    // The detail panel shows the focused phase; a click on it opens that
+    // phase's opencode session externally (same as [o]).
+    const openFocusedSession = (event: { preventDefault(): void; stopPropagation(): void }) => {
       event.preventDefault()
       event.stopPropagation()
-      this.focusPaneAndOpen(index)
+      this.openActiveSessionWindow("click")
     }
-    const openFromStep = paneClickHandler(0)
 
     const step = this.panel({
       id: "archer-step",
@@ -384,37 +449,14 @@ export class TuiProgress implements ProgressUI {
       height: 8,
       borderColor: theme.borderDim,
       backgroundColor: theme.bg,
-      title: " current step ",
+      title: " step ",
       titleAlignment: "left",
-      onMouseDown: openFromStep,
+      onMouseDown: openFocusedSession,
     })
-    step.text.onMouseDown = openFromStep
+    step.text.onMouseDown = openFocusedSession
 
-    // Extra panes for additional concurrently-running phases (a parallel
-    // block, or a step fanned out across models); hidden until more than one
-    // phase is running at once. Pane 0 is the step panel above.
-    for (let index = 1; index < maxPanes; index++) {
-      const openFromThisPane = paneClickHandler(index)
-      const pane = this.panel({
-        id: `archer-step-${index}`,
-        width: "100%",
-        height: 3,
-        borderColor: theme.borderDim,
-        backgroundColor: theme.bg,
-        title: " ",
-        titleAlignment: "left",
-        visible: false,
-        onMouseDown: openFromThisPane,
-      })
-      pane.text.onMouseDown = openFromThisPane
-      this.extraPanes.push(pane)
-      this.paletteTargets.push({ box: pane.box, background: "bg", border: "borderDim" })
-    }
-
-    // Todos live in their own panel below the step meta; its border is the
-    // divider between session usage above and the todo list itself. Only
-    // shown when exactly one phase is running - concurrent phases fold their
-    // todos into their own compact pane instead.
+    // Todos live in their own panel below the detail meta, showing the focused
+    // phase's list whenever it has one.
     const todos = this.panel({
       id: "archer-todos",
       width: "100%",
@@ -424,9 +466,22 @@ export class TuiProgress implements ProgressUI {
       title: " todos ",
       titleAlignment: "left",
       visible: false,
-      onMouseDown: openFromStep,
+      onMouseDown: openFocusedSession,
     })
-    todos.text.onMouseDown = openFromStep
+    todos.text.onMouseDown = openFocusedSession
+
+    // A click on the tab strip (content row 0) selects that tab; clicks
+    // anywhere else in the panel fall through untouched. Works live and on the
+    // finish screen alike.
+    const switchTabFromFeed = (event: { x: number; y: number; preventDefault(): void; stopPropagation(): void }) => {
+      if (event.y - this.feedText.y !== 0) return
+      const col = event.x - this.feedText.x
+      const hit = this.feedTabRegions.find((region) => col >= region.start && col < region.end)
+      if (!hit) return
+      event.preventDefault()
+      event.stopPropagation()
+      this.setContentTab(hit.tab)
+    }
 
     const feed = this.panel({
       id: "archer-feed",
@@ -436,7 +491,9 @@ export class TuiProgress implements ProgressUI {
       backgroundColor: theme.bg,
       title: " logs ",
       titleAlignment: "left",
+      onMouseDown: switchTabFromFeed,
     })
+    feed.text.onMouseDown = switchTabFromFeed
 
     const openFromFooter = (event: { preventDefault(): void; stopPropagation(): void }) => {
       event.preventDefault()
@@ -476,7 +533,6 @@ export class TuiProgress implements ProgressUI {
 
     body.add(pipeline.box)
     right.add(step.box)
-    for (const pane of this.extraPanes) right.add(pane.box)
     right.add(todos.box)
     right.add(feed.box)
     body.add(right)
@@ -524,9 +580,10 @@ export class TuiProgress implements ProgressUI {
     this.render()
   }
 
-  start(runID: string, targetDir: string) {
+  start(runID: string, targetDir: string, runDir = "") {
     this.runID = runID
     this.targetDir = targetDir
+    this.runDir = runDir
     this.addEvent("archer", "system", `run ${runID} started`)
     this.render()
   }
@@ -626,6 +683,8 @@ export class TuiProgress implements ProgressUI {
 
   phaseCompleted(name: string, detail = "") {
     this.setPhase(name, "completed")
+    // Drop any cached "missing" so the report this phase just wrote loads.
+    this.reports.delete(name)
     this.addEvent(name, "system", detail || "phase completed")
   }
 
@@ -636,6 +695,7 @@ export class TuiProgress implements ProgressUI {
 
   phaseFailed(name: string, detail = "") {
     this.setPhase(name, "failed")
+    this.reports.delete(name)
     this.addEvent(name, "error", detail || "failed")
   }
 
@@ -692,14 +752,16 @@ export class TuiProgress implements ProgressUI {
   runFinished(outcome: RunOutcome): Promise<void> {
     if (this.renderer.isDestroyed) return Promise.resolve()
     return new Promise((resolve) => {
+      this.finished = { ...outcome, at: Date.now(), resolve }
+      if (outcome.runDir) this.runDir = outcome.runDir
+      // Jump the browser to the first failed phase (if any) so the failure is
+      // front and centre; otherwise keep whatever the user was looking at.
       const failed = this.phases.findIndex((phase) => phase.status === "failed")
-      this.finished = {
-        ...outcome,
-        at: Date.now(),
-        selected: failed >= 0 ? failed : 0,
-        reportScroll: 0,
-        resolve,
+      if (failed >= 0) {
+        this.selected = failed
+        this.manualFocus = true
       }
+      this.reportScroll = 0
       for (const pending of this.permissionQueue.splice(0)) pending.resolve("reject")
       this.addEvent(
         "archer",
@@ -710,55 +772,49 @@ export class TuiProgress implements ProgressUI {
     })
   }
 
-  private handleFinishedKey(key: KeyEvent) {
-    const finished = this.finished
-    if (!finished) return
-    key.preventDefault()
-    key.stopPropagation()
-    switch (key.name) {
-      case "down":
-      case "j":
-        this.moveFinishedSelection(1)
-        break
-      case "up":
-      case "k":
-        this.moveFinishedSelection(-1)
-        break
-      case "o":
-        this.openSessionWindowForPhase(this.phases[finished.selected]!.name, "key")
-        break
-      case "g":
-        void this.openGitSubshell()
-        break
-      case "pagedown":
-      case "space":
-        finished.reportScroll += this.reportPageRows
-        break
-      case "pageup":
-        finished.reportScroll = Math.max(0, finished.reportScroll - this.reportPageRows)
-        break
-      case "q":
-      case "escape":
-        finished.resolve()
-        return
+  // The focused phase, clamped to a valid index (the pipeline can be empty
+  // only in degenerate cases). Shared by rendering and [o].
+  private focusedPhase(): PhaseState | undefined {
+    if (this.phases.length === 0) return undefined
+    this.selected = Math.max(0, Math.min(this.phases.length - 1, this.selected))
+    return this.phases[this.selected]
+  }
+
+  // Moves the focused phase through the pipeline (the tab selector). The first
+  // move pins focus (manualFocus) so it no longer auto-follows live activity.
+  private moveSelection(delta: number) {
+    if (this.phases.length === 0) return
+    this.manualFocus = true
+    this.selected = Math.max(0, Math.min(this.phases.length - 1, this.selected + delta))
+    this.reportScroll = 0
+    this.render()
+  }
+
+  private selectPhaseByName(name: string) {
+    const index = this.phases.findIndex((phase) => phase.name === name)
+    if (index === -1) return
+    this.manualFocus = true
+    this.selected = index
+    this.reportScroll = 0
+    this.render()
+  }
+
+  private cycleContentTab(delta: number) {
+    const index = contentTabOrder.indexOf(this.contentTab)
+    this.setContentTab(contentTabOrder[(index + delta + contentTabOrder.length) % contentTabOrder.length]!)
+  }
+
+  private setContentTab(tab: ContentTab) {
+    if (this.contentTab !== tab) {
+      this.contentTab = tab
+      this.reportScroll = 0
     }
     this.render()
   }
 
-  private moveFinishedSelection(delta: number) {
-    const finished = this.finished
-    if (!finished || this.phases.length === 0) return
-    finished.selected = Math.max(0, Math.min(this.phases.length - 1, finished.selected + delta))
-    finished.reportScroll = 0
-  }
-
-  private selectFinishedPhase(name: string) {
-    const finished = this.finished
-    if (!finished) return
-    const index = this.phases.findIndex((phase) => phase.name === name)
-    if (index === -1) return
-    finished.selected = index
-    finished.reportScroll = 0
+  private scrollReport(delta: number) {
+    if (this.contentTab !== "reports") return
+    this.reportScroll = Math.max(0, this.reportScroll + delta)
     this.render()
   }
 
@@ -925,36 +981,16 @@ export class TuiProgress implements ProgressUI {
     this.render()
   }
 
+  // Opens the focused phase's opencode session in an external window; falls
+  // back to any running phase if focus somehow lands on one without a session.
   private openActiveSessionWindow(source: "click" | "key") {
-    const active = this.finished
-      ? this.phases[this.finished.selected]
-      : (this.findPhase(this.focusedPhaseName) ?? this.findPhase(this.activePhase) ?? this.phases.find((phase) => phase.status === "running"))
+    const active = this.focusedPhase() ?? this.phases.find((phase) => phase.status === "running")
     if (!active) {
       this.addEvent("archer", "system", "no active opencode session to open yet")
       this.render()
       return
     }
     this.openSessionWindowForPhase(active.name, source)
-  }
-
-  // Clicking a specific pane both focuses it (so [o]/Tab agree with what was
-  // clicked) and opens its session immediately, matching the single-pane
-  // click-to-open behavior this replaces.
-  private focusPaneAndOpen(index: number) {
-    const name = this.paneAssignment[index]
-    if (name) this.focusedPhaseName = name
-    this.openActiveSessionWindow("click")
-  }
-
-  // Cycles explicit focus among currently-running phases; a no-op with zero
-  // or one running phase (nothing to choose between).
-  private cycleFocusedPhase() {
-    const running = this.phases.filter((phase) => phase.status === "running")
-    if (running.length === 0) return
-    const currentIndex = running.findIndex((phase) => phase.name === this.focusedPhaseName)
-    const next = running[(currentIndex + 1) % running.length]!
-    this.focusedPhaseName = next.name
-    this.render()
   }
 
   private openSessionWindowForPhase(name: string, source: "click" | "key") {
@@ -1030,68 +1066,30 @@ export class TuiProgress implements ProgressUI {
     const innerWidth = Math.max(40, this.renderer.width - 6)
     const rightWidth = Math.max(40, this.renderer.width - pipelineWidth - 9)
     // Body rows left after the dir line (1), header (3), and footer (3); the
-    // step/pane panels grow with their content but never starve the logs.
+    // detail and todos panels grow with their content but never starve the
+    // content panel below them.
     const bodyHeight = Math.max(8, this.renderer.height - 7)
 
-    // A finished run always browses one phase at a time (its live-run
-    // concurrency is over); a live run with more than one phase running at
-    // once shows each in its own pane instead of following a single focus.
-    const running = this.finished ? [] : this.runningPhasesByFocus()
-    const focus = this.finished ? this.phases[this.finished.selected] : (this.findPhase(this.activePhase) ?? running[0])
-
-    const multi = running.length > 1
-    const usedHeight = multi ? this.renderPanes(running, now, rightWidth, bodyHeight) : this.renderSinglePane(focus, now, rightWidth, bodyHeight)
-
-    // usedHeight already counts every pane's own border, so the feed box only
-    // needs its own 2 rows subtracted. Single mode keeps a floor of 3 (its
-    // content is small and bounded, so there's always room); multi mode
-    // can't assume that - several full-height panes can legitimately leave
-    // nothing over, so it floors at 0 instead of asking for lines the feed
-    // box has no room to show (which would bleed into its own border).
-    const feedRows = Math.max(multi ? 0 : 3, bodyHeight - usedHeight - 2)
-    this.dirText.content = this.dirContent(innerWidth)
-    this.headerText.content = this.headerContent(now, innerWidth)
-    this.pipelineText.content = this.pipelineContent(now)
-    if (this.finished) {
-      this.reportPageRows = feedRows
-      // Content first: it computes the scroll indicator the title shows.
-      this.feedText.content = joinLines(this.reportPanelLines(focus, rightWidth, feedRows))
-      this.feedBox.title = ` report · ${focus ? phaseDisplayName(focus) : "—"}${this.reportPosition ? ` · ${this.reportPosition}` : ""} `
-    } else {
-      this.feedBox.title = " logs "
-      this.feedText.content = joinLines(this.feedLines(rightWidth, feedRows))
+    // Auto-follow the active phase until the user takes over navigation; after
+    // that the selection stays put so any step (past, present, scheduled) can
+    // be inspected without the live run yanking focus away.
+    if (!this.finished && !this.manualFocus) {
+      const activeIndex = this.phases.findIndex((phase) => phase.name === this.activePhase)
+      if (activeIndex >= 0) this.selected = activeIndex
     }
-    this.footerText.content = this.footerContent(now, innerWidth)
-    this.renderPermissionModal()
-    this.renderer.requestRender()
-  }
+    const focus = this.focusedPhase()
 
-  // Running phases ordered for pane assignment: the explicitly-focused one
-  // (if still running) first so it's always visible even under overflow,
-  // then the rest oldest-first so pane assignment stays stable frame to frame.
-  private runningPhasesByFocus(): PhaseState[] {
-    const running = this.phases.filter((phase) => phase.status === "running").sort((a, b) => (a.startedAt ?? 0) - (b.startedAt ?? 0))
-    const focusedIndex = running.findIndex((phase) => phase.name === this.focusedPhaseName)
-    if (focusedIndex <= 0) return running
-    return [running[focusedIndex]!, ...running.slice(0, focusedIndex), ...running.slice(focusedIndex + 1)]
-  }
+    // Detail panel: the focused phase's header — name, status, model, cost,
+    // tokens, diff — the same shape whether it's running, finished, or still
+    // scheduled (a future step reads as scheduled with zeroed usage).
+    const detailLines = this.detailContent(focus, now, rightWidth)
+    this.stepBox.title = " step "
+    this.stepBox.height = detailLines.length + 2
+    this.stepText.content = joinLines(detailLines)
 
-  // Single-phase mode: identical to archer's original one-pane layout (step
-  // panel plus a separate todos panel), used whenever at most one phase is
-  // running - i.e. every ordinary sequential pipeline, unchanged.
-  private renderSinglePane(focus: PhaseState | undefined, now: number, width: number, bodyHeight: number): number {
-    for (const pane of this.extraPanes) pane.box.visible = false
-    this.paneAssignment = [focus?.name]
-
-    const stepLines = this.finished ? this.finishedPhaseContent(focus, now, width) : this.stepContent(focus, now, width)
-    this.stepBox.title = this.finished ? " phase " : " current step "
-    this.stepBox.height = stepLines.length + 2
-    this.stepText.content = joinLines(stepLines)
-
-    const todoRows =
-      focus && focus.todos.length > 0
-        ? todoLines(focus.todos, Math.max(3, Math.floor(bodyHeight * 0.6) - stepLines.length - 4), width)
-        : []
+    // Todos panel: the focused phase's list, whenever it has one.
+    const todoBudget = Math.max(3, Math.floor(bodyHeight * 0.5) - detailLines.length - 4)
+    const todoRows = focus && focus.todos.length > 0 ? todoLines(focus.todos, todoBudget, rightWidth) : []
     this.todosBox.visible = todoRows.length > 0
     if (focus && todoRows.length > 0) {
       const completed = focus.todos.filter((todo) => todo.status === "completed").length
@@ -1099,43 +1097,38 @@ export class TuiProgress implements ProgressUI {
       this.todosBox.title = ` todos ${completed}/${focus.todos.length} `
       this.todosText.content = joinLines(todoRows)
     }
-    return stepLines.length + 2 + (this.todosBox.visible ? todoRows.length + 2 : 0)
+    const usedHeight = detailLines.length + 2 + (this.todosBox.visible ? todoRows.length + 2 : 0)
+
+    // The content panel fills the rest: a tab strip (row 0) over the active
+    // tab's body, all scoped to the focused phase.
+    const feedRows = Math.max(3, bodyHeight - usedHeight - 2)
+    const contentRows = feedRows - 1
+    this.reportPageRows = contentRows
+
+    this.dirText.content = this.dirContent(innerWidth)
+    this.headerText.content = this.headerContent(now, innerWidth)
+    this.pipelineText.content = this.pipelineContent(now)
+
+    // Body first: the reports tab computes the scroll indicator the title shows.
+    const body =
+      this.contentTab === "reports"
+        ? this.reportPanelLines(focus, rightWidth, contentRows)
+        : this.contentTab === "session"
+          ? this.sessionLines(focus, now, rightWidth, contentRows)
+          : this.phaseFeedLines(focus, rightWidth, contentRows)
+    this.feedText.content = joinLines([this.contentTabBar(rightWidth), ...body])
+    this.feedBox.title = this.contentPanelTitle()
+
+    this.footerText.content = this.footerContent(now, innerWidth)
+    this.renderPermissionModal()
+    this.renderer.requestRender()
   }
 
-  // Multi-phase mode: one compact pane per concurrently-running phase (step
-  // content plus a condensed todo summary), up to maxPanes; the separate
-  // todos panel is hidden since each pane already carries its own.
-  private renderPanes(running: PhaseState[], now: number, width: number, bodyHeight: number): number {
-    this.todosBox.visible = false
-    const { visibleCount, overflow, perPaneBudget } = paneLayout(running.length, bodyHeight, maxPanes)
-    const visible = running.slice(0, visibleCount)
-    const focusedName = this.focusedPhaseName || visible[0]!.name
-    this.paneAssignment = []
-
-    let usedHeight = 0
-    visible.forEach((phase, index) => {
-      const pane = index === 0 ? { box: this.stepBox, text: this.stepText } : this.extraPanes[index - 1]!
-      const stepLines = this.stepContent(phase, now, width).slice(0, perPaneBudget)
-      const todoCap = Math.max(0, Math.min(2, perPaneBudget - stepLines.length))
-      const lines = todoCap > 0 && phase.todos.length > 0 ? [...stepLines, ...todoLines(phase.todos, todoCap, width)] : stepLines
-
-      const focused = phase.name === focusedName
-      const overflowSuffix = overflow > 0 && index === visible.length - 1 ? ` · +${overflow} more running` : ""
-      pane.box.visible = true
-      pane.box.title = ` ${focused ? "▸ " : "  "}${phaseDisplayName(phase)}${overflowSuffix} `
-      pane.box.height = lines.length + 2
-      pane.text.content = joinLines(lines)
-      this.paneAssignment[index] = phase.name
-      usedHeight += lines.length + 2
-    })
-
-    for (let index = visible.length; index < maxPanes; index++) {
-      const pane = index === 0 ? this.stepBox : this.extraPanes[index - 1]!.box
-      pane.visible = false
-      this.paneAssignment[index] = undefined
-    }
-
-    return usedHeight
+  // The content panel's title reflects the active tab; the reports tab appends
+  // its scroll position when the report is longer than the panel.
+  private contentPanelTitle(): string {
+    if (this.contentTab === "reports") return ` reports${this.reportPosition ? ` · ${this.reportPosition}` : ""} `
+    return this.contentTab === "session" ? " session " : " logs "
   }
 
   // Header owns the session-wide totals in a single row: clock, elapsed time,
@@ -1207,10 +1200,10 @@ export class TuiProgress implements ProgressUI {
       out.push(padBetween(left, right, width))
       rows.push(rowPhase)
     }
-    // The selection marker (▸) only exists on the finish screen, where the
-    // pipeline doubles as the phase browser; emitLine draws it at column 0,
-    // before the tree prefix, so it stays aligned across every depth.
-    const isSelected = (phase: PhaseState) => this.finished !== undefined && this.phases[this.finished.selected] === phase
+    // The pipeline is the tab selector, live and finished alike: the focused
+    // phase carries a ▸ marker at column 0 (before the tree prefix, so it stays
+    // aligned across every depth).
+    const isSelected = (phase: PhaseState) => this.phases[this.selected] === phase
 
     // One rendered line, sized so it never wraps: the marker, tree prefix and
     // status icon are fixed, the right-aligned meta is preserved whole, and
@@ -1230,7 +1223,7 @@ export class TuiProgress implements ProgressUI {
     }) => {
       const selected = args.selectedPhase !== undefined && isSelected(args.selectedPhase)
       const left: TextChunk[] = []
-      if (this.finished) left.push(selected ? fg(theme.accent)("▸ ") : raw("  "))
+      left.push(selected ? fg(theme.accent)("▸ ") : raw("  "))
       const prefix = treePrefix(args.lasts)
       if (prefix) left.push(fg(theme.faint)(prefix))
       left.push(args.icon, raw(" "))
@@ -1317,92 +1310,47 @@ export class TuiProgress implements ProgressUI {
     return joinLines(out)
   }
 
-  // The current-step panel owns everything about the phase in flight: live
-  // activity, model, attempt, session usage, and diff. Todos render in their
-  // own panel below this one.
-  private stepContent(active: PhaseState | undefined, now: number, width: number): StyledText[] {
-    if (!active) return [t`${fg(theme.dim)("waiting for the first phase to start…")}`]
+  // The detail panel header for the focused phase — one shape for every state.
+  // Running: spinner, live activity, elapsed. Finished: outcome, duration, final
+  // usage, diff. Scheduled (a future step): the planned model, zeroed usage.
+  private detailContent(phase: PhaseState | undefined, now: number, width: number): StyledText[] {
+    if (!phase) return [t`${fg(theme.dim)("waiting for the first phase to start…")}`]
 
     const out: StyledText[] = []
-    const title = phaseDisplayName(active)
-    const head: TextChunk[] =
-      active.status === "running"
-        ? [fg(theme.accent)(`${spinnerFrame(now)} `), bold(fg(theme.text)(title))]
-        : [statusIcon(active.status, now), raw(" "), bold(fg(theme.text)(title))]
-    // Live activity sits to the right of the name; truncation reserves room
-    // for the name, the separators, and a possible quiet indicator.
-    if (active.now.message) {
-      const style = kindStyle(active.now.kind)
-      head.push(
-        fg(theme.faint)("  ·  "),
-        fg(style.color)(`${style.icon} `),
-        fg(theme.text)(truncate(active.now.message, Math.max(10, width - title.length - 28))),
-      )
-    } else {
-      head.push(fg(theme.faint)("  ·  "), fg(theme.dim)("waiting for opencode events…"))
-    }
-    const quiet = now - active.updatedAt
-    if (quiet > 10_000 && active.status === "running") {
-      head.push(fg(quiet > 60_000 ? theme.yellow : theme.faint)(`  ·  quiet ${Math.floor(quiet / 1000)}s`))
-    }
-    out.push(new StyledText(head))
-
-    const meta: TextChunk[] = []
-    const model = active.lastStepModel || active.model
-    if (model) meta.push(fg(theme.faint)("model "), fg(theme.dim)(truncate(model, 30)))
-    if (active.attempt > 0) {
-      if (meta.length > 0) meta.push(fg(theme.faint)(" · "))
-      meta.push(fg(theme.faint)("attempt "), fg(active.attempt > 1 ? theme.yellow : theme.dim)(`${active.attempt}/${active.maxAttempts}`))
-    }
-    if (active.sessionID) {
-      if (meta.length > 0) meta.push(fg(theme.faint)(" · "))
-      meta.push(fg(theme.faint)(shortID(active.sessionID)))
-    }
-    if (meta.length > 0) out.push(new StyledText(meta))
-
-    out.push(
-      new StyledText([
-        fg(theme.faint)("cost "),
-        fg(theme.dim)(active.usageReported ? formatMoney(active.cost) : "—"),
-        fg(theme.faint)(" · tokens "),
-        fg(theme.dim)(active.usageReported ? `↑${formatCount(active.tokens.input)} ↓${formatCount(active.tokens.output)}` : "—"),
-        fg(theme.faint)(" · steps "),
-        fg(theme.dim)(String(active.stepCount)),
-      ]),
-    )
-
-    if (active.diff && active.diff.files > 0) {
-      out.push(
-        t`${fg(theme.dim)("changes ")}${fg(theme.text)(`${active.diff.files} files`)} ${fg(theme.green)(`+${active.diff.additions}`)} ${fg(theme.red)(`−${active.diff.deletions}`)}`,
-      )
-    }
-    return out
-  }
-
-  // The phase panel on the finish screen: outcome, duration, model, session,
-  // usage, and diff of the browsed phase (there is no live activity anymore).
-  private finishedPhaseContent(phase: PhaseState | undefined, now: number, width: number): StyledText[] {
-    if (!phase) return [t`${fg(theme.dim)("no phases to show")}`]
-    const out: StyledText[] = []
-
+    const running = phase.status === "running"
     const title = phaseDisplayName(phase)
-    const head: TextChunk[] = [statusIcon(phase.status, now), raw(" "), bold(fg(theme.text)(title))]
-    if (phase.description) {
-      head.push(fg(theme.faint)("  ·  "), fg(theme.dim)(truncate(phase.description, Math.max(10, width - title.length - 8))))
-    }
+    const head: TextChunk[] = running
+      ? [fg(theme.accent)(`${spinnerFrame(now)} `), bold(fg(theme.text)(title))]
+      : [statusIcon(phase.status, now), raw(" "), bold(fg(theme.text)(title))]
+    // A one-glance status word right after the name — "ongoing or not".
+    head.push(fg(theme.faint)("  ·  "), statusWordChunk(phase, now))
     out.push(new StyledText(head))
+
+    // Second line: live activity while running, else the step's description.
+    if (running) {
+      if (phase.now.message) {
+        const style = kindStyle(phase.now.kind)
+        out.push(new StyledText([fg(style.color)(`${style.icon} `), fg(theme.text)(truncate(phase.now.message, Math.max(10, width - 4)))]))
+      } else {
+        out.push(t`${fg(theme.dim)("waiting for opencode events…")}`)
+      }
+    } else if (phase.description) {
+      out.push(t`${fg(theme.dim)(truncate(phase.description, Math.max(10, width - 2)))}`)
+    }
 
     const meta: TextChunk[] = []
     const elapsed = phaseElapsed(phase, now)
-    if (elapsed !== undefined) meta.push(fg(theme.faint)("took "), fg(theme.dim)(formatElapsed(elapsed)))
-    const model = phase.lastStepModel || phase.model
+    if (elapsed !== undefined) meta.push(fg(theme.faint)(running ? "elapsed " : "took "), fg(theme.dim)(formatElapsed(elapsed)))
+    // Falls back to the planned model so a scheduled step still shows what it
+    // will run on.
+    const model = phase.lastStepModel || phase.model || phase.plannedModel
     if (model) {
       if (meta.length > 0) meta.push(fg(theme.faint)(" · "))
       meta.push(fg(theme.faint)("model "), fg(theme.dim)(truncate(model, 30)))
     }
-    if (phase.attempt > 1) {
+    if (phase.attempt > 0) {
       if (meta.length > 0) meta.push(fg(theme.faint)(" · "))
-      meta.push(fg(theme.faint)("attempts "), fg(theme.yellow)(`${phase.attempt}/${phase.maxAttempts}`))
+      meta.push(fg(theme.faint)("attempt "), fg(phase.attempt > 1 ? theme.yellow : theme.dim)(`${phase.attempt}/${phase.maxAttempts}`))
     }
     if (phase.sessionID) {
       if (meta.length > 0) meta.push(fg(theme.faint)(" · "))
@@ -1432,73 +1380,161 @@ export class TuiProgress implements ProgressUI {
     return out
   }
 
+  // The reports tab: the markdown report the focused phase wrote, scrollable.
+  // Works live (the run dir is known from start) and on the finish screen; a
+  // step that hasn't finished yet — or wrote nothing — says so.
   private reportPanelLines(phase: PhaseState | undefined, width: number, visible: number): StyledText[] {
-    const finished = this.finished
     this.reportPosition = ""
-    if (!finished || !phase) return [t`${fg(theme.dim)("nothing to show")}`]
+    if (visible <= 0) return []
+    if (!phase) return [t`${fg(theme.dim)("no step selected")}`]
+    if (!this.runDir) return [t`${fg(theme.dim)("report directory not ready yet…")}`]
 
     const report = this.reports.get(phase.name)
     if (!report) {
-      this.loadReport(phase.name, finished.runDir)
+      this.loadReport(phase.name, this.runDir)
       return [t`${fg(theme.dim)("loading report…")}`]
     }
     if (report === "loading") return [t`${fg(theme.dim)("loading report…")}`]
-    if (report === "missing") return [t`${fg(theme.dim)("no report for this phase")}`]
+    if (report === "missing") {
+      const done = phase.status === "completed" || phase.status === "failed"
+      return [t`${fg(theme.dim)(done ? "this step wrote no report" : "no report yet — it appears once the step finishes")}`]
+    }
 
     const wrapped = wrapLines(report, Math.max(20, width))
     const maxScroll = Math.max(0, wrapped.length - visible)
-    finished.reportScroll = Math.max(0, Math.min(finished.reportScroll, maxScroll))
+    this.reportScroll = Math.max(0, Math.min(this.reportScroll, maxScroll))
     if (maxScroll > 0) {
-      this.reportPosition = `${Math.round(((finished.reportScroll + visible) / wrapped.length) * 100)}%`
+      this.reportPosition = `${Math.round(((this.reportScroll + visible) / wrapped.length) * 100)}%`
     }
-    return wrapped.slice(finished.reportScroll, finished.reportScroll + visible).map(styleSummaryLine)
+    return wrapped.slice(this.reportScroll, this.reportScroll + visible).map(styleSummaryLine)
   }
 
-  private feedLines(width: number, visible: number): StyledText[] {
-    // No room at all (several full-height panes left nothing over): render
-    // nothing rather than a placeholder line that would bleed into the
-    // feed box's own border.
+  // The logs tab: the focused phase's activity, newest first. Scoped to one
+  // phase (the tab selector picks it), so there's no cross-phase label column —
+  // just time, kind icon, and message, leaving more room for the message.
+  private phaseFeedLines(phase: PhaseState | undefined, width: number, visible: number): StyledText[] {
     if (visible <= 0) return []
-    // Array.slice(-0) is slice(0) - the whole array, not empty - already
-    // ruled out above, but keep the guard explicit for any future caller.
-    const events = this.feed.slice(-visible).reverse()
-    if (events.length === 0) return [t`${fg(theme.dim)("no activity yet…")}`]
+    if (!phase) return [t`${fg(theme.dim)("no step selected")}`]
+    const events = this.feed.filter((entry) => entry.phase === phase.name).slice(-visible).reverse()
+    if (events.length === 0) return [t`${fg(theme.dim)("no activity for this step yet…")}`]
 
-    return events.map((entry, index) => {
+    return events.map((entry) => {
       const style = kindStyle(entry.kind)
-      // Newest-first list: blank the phase label when the older neighbour
-      // repeats it, so each phase shows once at the start of its group.
-      const older = events[index + 1]
-      const label = this.feedLabel(entry.phase)
-      const phaseLabel = older && older.phase === entry.phase ? raw(" ".repeat(12)) : fg(theme.dim)(label.padEnd(12).slice(0, 12))
       return new StyledText([
         fg(theme.faint)(formatTime(entry.time)),
         raw(" "),
         fg(style.color)(style.icon),
         raw(" "),
-        phaseLabel,
-        raw(" "),
-        fg(entry.kind === "error" ? theme.red : theme.text)(truncate(entry.message, Math.max(20, width - 26))),
+        fg(entry.kind === "error" ? theme.red : theme.text)(truncate(entry.message, Math.max(20, width - 12))),
       ])
     })
   }
 
-  // Feed rows are cross-phase and only 12 columns wide, so a fanned-out
-  // member reads by its model alone (`opus-4-7`) rather than its `step__slug`
-  // id; every other phase keeps its own name. "archer" and unknown phases pass
-  // through untouched.
-  private feedLabel(name: string): string {
-    const phase = this.findPhase(name)
-    if (phase && phase.stepName && phase.stepName !== phase.name) return modelLabel(phase)
-    return name
+  // The tab strip that owns row 0 of the content panel: logs · reports ·
+  // session. Active tab is bold accent, inactive is dim — no painted chip,
+  // matching the theme's border-only delineation. Records each label's column
+  // span so a click on the strip resolves to the right tab.
+  private contentTabBar(width: number): StyledText {
+    this.feedTabRegions = []
+    const chunks: TextChunk[] = []
+    let col = 0
+    contentTabOrder.forEach((tab, index) => {
+      if (index > 0) {
+        chunks.push(fg(theme.faint)("  "))
+        col += 2
+      }
+      const label = ` ${tab} `
+      const active = this.contentTab === tab
+      chunks.push(active ? bold(fg(theme.accent)(label)) : fg(theme.dim)(label))
+      this.feedTabRegions.push({ tab, start: col, end: col + label.length })
+      col += label.length
+    })
+    if (col < width) chunks.push(fg(theme.faint)(" ".repeat(width - col)))
+    return new StyledText(chunks)
+  }
+
+  // Read-only "follow along" view of one phase's opencode session: a status
+  // header (what it's doing right now — reasoning, running a command, editing,
+  // applying a diff), the run meta and diff summary, then the tail of that
+  // phase's activity so the session reads top-to-bottom with the newest at the
+  // bottom. All from data the dashboard already holds; [o] remains the way in
+  // for full interactivity.
+  private sessionLines(phase: PhaseState | undefined, now: number, width: number, visible: number): StyledText[] {
+    if (!phase) return [t`${fg(theme.dim)("no active session yet — waiting for a phase to start…")}`]
+
+    const out: StyledText[] = []
+    const title = phaseDisplayName(phase)
+    const head: TextChunk[] =
+      phase.status === "running"
+        ? [fg(theme.accent)(`${spinnerFrame(now)} `), bold(fg(theme.text)(title))]
+        : [statusIcon(phase.status, now), raw(" "), bold(fg(theme.text)(title))]
+    if (phase.sessionID) head.push(fg(theme.faint)("  ·  "), fg(theme.faint)(shortID(phase.sessionID)))
+    out.push(new StyledText(head))
+
+    // The one-glance state line: what the session is doing this instant.
+    const state = sessionState(phase, now)
+    const stateChunks: TextChunk[] = [fg(state.color)("● "), fg(theme.text)(state.label)]
+    if (state.detail) {
+      stateChunks.push(fg(theme.faint)("  ·  "), fg(theme.dim)(truncate(state.detail, Math.max(10, width - state.label.length - 10))))
+    }
+    out.push(new StyledText(stateChunks))
+
+    const meta: TextChunk[] = []
+    const model = phase.lastStepModel || phase.model
+    if (model) meta.push(fg(theme.faint)("model "), fg(theme.dim)(truncate(model, 30)))
+    if (phase.attempt > 0) {
+      if (meta.length > 0) meta.push(fg(theme.faint)(" · "))
+      meta.push(fg(theme.faint)("attempt "), fg(phase.attempt > 1 ? theme.yellow : theme.dim)(`${phase.attempt}/${phase.maxAttempts}`))
+    }
+    if (meta.length > 0) out.push(new StyledText(meta))
+
+    out.push(
+      new StyledText([
+        fg(theme.faint)("cost "),
+        fg(theme.dim)(phase.usageReported ? formatMoney(phase.cost) : "—"),
+        fg(theme.faint)(" · tokens "),
+        fg(theme.dim)(phase.usageReported ? `↑${formatCount(phase.tokens.input)} ↓${formatCount(phase.tokens.output)}` : "—"),
+        fg(theme.faint)(" · steps "),
+        fg(theme.dim)(String(phase.stepCount)),
+      ]),
+    )
+
+    if (phase.diff && phase.diff.files > 0) {
+      out.push(
+        new StyledText([
+          fg(theme.dim)("changes "),
+          fg(theme.text)(`${phase.diff.files} files `),
+          fg(theme.green)(`+${phase.diff.additions}`),
+          raw(" "),
+          fg(theme.red)(`−${phase.diff.deletions}`),
+        ]),
+      )
+    }
+
+    // Whatever rows are left below the header become the activity tail.
+    const transcriptRows = visible - out.length - 1
+    if (transcriptRows <= 0) return out
+
+    // Drop archer's own scaffolding (phase started, session id…): it's
+    // redundant with the header and this transcript is about the model's work.
+    const entries = this.feed.filter((entry) => entry.phase === phase.name && entry.kind !== "system")
+    if (entries.length === 0) {
+      out.push(new StyledText([fg(theme.faint)("── "), fg(theme.dim)("no activity yet…")]))
+      return out
+    }
+    out.push(new StyledText([fg(theme.faint)(`── activity ${"─".repeat(Math.max(0, Math.min(width - 12, 40)))}`)]))
+    out.push(...sessionTranscript(entries, width).slice(-transcriptRows))
+    return out
   }
 
   private footerContent(now: number, width: number) {
     if (this.finished) {
       const left: TextChunk[] = [
         fg(theme.dim)("["),
-        fg(theme.accent)("j/k"),
-        fg(theme.dim)("] phases · ["),
+        fg(theme.accent)("↑↓"),
+        fg(theme.dim)("] step · ["),
+        fg(theme.accent)("←→"),
+        fg(theme.dim)("] tab · ["),
         fg(theme.accent)("o"),
         fg(theme.dim)("] session · ["),
         fg(theme.accent)("g"),
@@ -1535,13 +1571,17 @@ export class TuiProgress implements ProgressUI {
 
     const left: TextChunk[] = [
       fg(theme.dim)("["),
+      fg(theme.accent)("↑↓"),
+      fg(theme.dim)("] step · ["),
+      fg(theme.accent)("←→"),
+      fg(theme.dim)("] tab · ["),
       fg(theme.accent)("o"),
-      fg(theme.dim)("] open session · "),
+      fg(theme.dim)("] session · "),
       fg(theme.yellow)("ctrl+c"),
       fg(theme.dim)(" abort"),
     ]
-    if (this.phases.filter((phase) => phase.status === "running").length > 1) {
-      left.push(fg(theme.dim)(" · ["), fg(theme.accent)("tab"), fg(theme.dim)("] focus"))
+    if (this.contentTab === "reports") {
+      left.push(fg(theme.dim)(" · ["), fg(theme.accent)("pgdn"), fg(theme.dim)("] scroll"))
     }
     if (this.autoAccept) {
       left.push(fg(theme.dim)(" · "), fg(theme.accent)("shift+tab"))
@@ -1594,6 +1634,111 @@ export class TuiProgress implements ProgressUI {
     this.modal.height = lines.length + 4
     this.modalText.content = joinLines(lines)
   }
+}
+
+// The detail panel's status word — "ongoing or not" at a glance. A running
+// phase reads as ongoing (and flags a long silence); the rest map to their
+// terminal state, and a not-yet-started step reads as scheduled.
+function statusWordChunk(phase: PhaseState, now: number): TextChunk {
+  switch (phase.status) {
+    case "running": {
+      const quiet = now - phase.updatedAt
+      if (quiet > 60_000) return fg(theme.yellow)(`ongoing · quiet ${Math.floor(quiet / 1000)}s`)
+      return fg(theme.accent)("ongoing")
+    }
+    case "completed":
+      return fg(theme.green)("done")
+    case "failed":
+      return fg(theme.red)("failed")
+    case "skipped":
+      return fg(theme.faint)("skipped")
+    default:
+      return fg(theme.faint)("scheduled")
+  }
+}
+
+// The session view's headline state, derived from the phase status and its
+// live activity kind. Running phases read as a plain-language action
+// ("reasoning", "running a command"…); a long-quiet running phase reads as
+// idle so a stalled session is obvious at a glance.
+function sessionState(phase: PhaseState, now: number): { label: string; color: string; detail?: string } {
+  switch (phase.status) {
+    case "completed":
+      return { label: "done", color: theme.green }
+    case "failed":
+      return { label: "failed", color: theme.red }
+    case "skipped":
+      return { label: "skipped", color: theme.faint }
+    case "pending":
+      return { label: "pending", color: theme.faint }
+  }
+  const actions: Partial<Record<ActivityKind, { label: string; color: PaletteColor }>> = {
+    think: { label: "reasoning", color: "magenta" },
+    bash: { label: "running a command", color: "green" },
+    write: { label: "writing code", color: "accent" },
+    diff: { label: "applying changes", color: "orange" },
+    tool: { label: "using a tool", color: "cyan" },
+    todo: { label: "planning", color: "teal" },
+    permission: { label: "waiting for permission", color: "yellow" },
+    retry: { label: "retrying", color: "yellow" },
+    step: { label: "starting a step", color: "teal" },
+    error: { label: "error", color: "red" },
+  }
+  const action = actions[phase.now.kind] ?? { label: "working", color: "accent" as PaletteColor }
+  const quiet = now - phase.updatedAt
+  if (quiet > 15_000) return { label: action.label, color: theme.faint, detail: `idle ${Math.floor(quiet / 1000)}s` }
+  return { label: action.label, color: theme[action.color], detail: phase.now.message || undefined }
+}
+
+// One phase's activity, oldest-first, each entry wrapped under a time+icon
+// gutter with a hanging indent so multi-line messages stay aligned. The caller
+// keeps only the tail that fits, so the newest activity sits at the bottom.
+function sessionTranscript(entries: readonly FeedEntry[], width: number): StyledText[] {
+  const lines: StyledText[] = []
+  const gutter = formatTime(0).length + 3 // "HH:MM:SS" + space + icon + space
+  const bodyWidth = Math.max(12, width - gutter)
+  for (const entry of entries) {
+    const style = kindStyle(entry.kind)
+    const color = entry.kind === "error" ? theme.red : theme.text
+    const wrapped = wrapWords(entry.message, bodyWidth)
+    wrapped.forEach((segment, index) => {
+      if (index === 0) {
+        lines.push(
+          new StyledText([fg(theme.faint)(`${formatTime(entry.time)} `), fg(style.color)(`${style.icon} `), fg(color)(segment)]),
+        )
+      } else {
+        lines.push(new StyledText([raw(" ".repeat(gutter)), fg(color)(segment)]))
+      }
+    })
+  }
+  return lines
+}
+
+// Greedy word wrap; a single word longer than the width is hard-split so it
+// never overflows the panel (whose text renderer never wraps on its own).
+function wrapWords(text: string, width: number): string[] {
+  const words = text.replace(/\s+/g, " ").trim().split(" ")
+  const lines: string[] = []
+  let current = ""
+  for (let word of words) {
+    while (word.length > width) {
+      if (current) {
+        lines.push(current)
+        current = ""
+      }
+      lines.push(word.slice(0, width))
+      word = word.slice(width)
+    }
+    if (!word) continue
+    if (!current) current = word
+    else if (current.length + 1 + word.length <= width) current += ` ${word}`
+    else {
+      lines.push(current)
+      current = word
+    }
+  }
+  if (current) lines.push(current)
+  return lines.length > 0 ? lines : [""]
 }
 
 function phaseMetaChunks(phase: PhaseState, now: number): TextChunk[] {
@@ -1739,26 +1884,6 @@ function todoRow(todo: ProgressTodo, width: number): StyledText {
     default:
       return new StyledText([fg(theme.dim)("  ○ "), fg(theme.text)(text)])
   }
-}
-
-/**
- * How many concurrently-running phases get their own pane, and how much
- * content-line budget each one gets, for a given body height. Pure and
- * exported so the height math that caused real overflow/corruption bugs
- * during development can be unit tested without spinning up OpenTUI.
- */
-export function paneLayout(runningCount: number, bodyHeight: number, cap: number): { visibleCount: number; overflow: number; perPaneBudget: number } {
-  // A pane needs at least 3 content lines plus its border (5 rows) to be
-  // worth showing; a terminal too short for `cap` panes at that floor folds
-  // the rest into overflow instead of overflowing the terminal itself.
-  const minPaneHeight = 5
-  const fitCount = Math.max(1, Math.floor(bodyHeight / minPaneHeight))
-  const visibleCount = Math.max(1, Math.min(cap, fitCount, runningCount))
-  const overflow = Math.max(0, runningCount - visibleCount)
-  // An equal share of the body per pane (minus its own border); callers trim
-  // content to this budget rather than letting it overflow the terminal.
-  const perPaneBudget = Math.max(3, Math.floor(bodyHeight / visibleCount) - 2)
-  return { visibleCount, overflow, perPaneBudget }
 }
 
 function runningFraction(phase: PhaseState) {

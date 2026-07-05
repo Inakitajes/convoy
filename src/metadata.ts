@@ -160,7 +160,7 @@ export async function openRunMetadata(workspace: Workspace, targetDir: string, p
 /** Forwards every ProgressUI call unchanged while recording phase lifecycle and usage into the store. */
 export function recordProgress(progress: ProgressUI, store: RunMetadataStore): ProgressUI {
   const recorder: ProgressUI = {
-    start: (runID, targetDir) => progress.start(runID, targetDir),
+    start: (runID, targetDir, runDir) => progress.start(runID, targetDir, runDir),
     serverReady: (url) => progress.serverReady(url),
     phaseStarted(name, detail) {
       store.phaseStarted(name)

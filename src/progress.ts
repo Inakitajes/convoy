@@ -108,7 +108,8 @@ export type RunOutcome = {
 }
 
 export type ProgressUI = {
-  start(runID: string, targetDir: string): void
+  /** `runDir` is the run workspace (where phase reports land); passed early so the reports tab works during a live run, not just on the finish screen. */
+  start(runID: string, targetDir: string, runDir?: string): void
   serverReady(url: string): void
   phaseStarted(name: string, detail?: string): void
   phaseRunning(name: string, detail?: string): void

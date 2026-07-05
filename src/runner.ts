@@ -257,7 +257,7 @@ export async function run(options: RunOptions) {
       await createProgressUI(progressPhases(pipeline), options.tui, () => shutdown.request("Ctrl+C"), autoAccept),
       metadata,
     )
-    progress.start(workspace.runID, options.targetDir)
+    progress.start(workspace.runID, options.targetDir, workspace.dir)
     log.info(`Run ${workspace.runID} - dir: ${workspace.dir}`)
     if (options.yolo) {
       progress.message("YOLO enabled: ask-level permissions will be auto-allowed (denylist still applies); shift+tab toggles")
