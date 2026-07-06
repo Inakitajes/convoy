@@ -200,7 +200,6 @@ export class TuiProgress implements ProgressUI {
   private readonly stepText: TextRenderable
   private readonly todosBox: BoxRenderable
   private readonly todosText: TextRenderable
-  private readonly feedBox: BoxRenderable
   private readonly feedText: TextRenderable
   private readonly footerText: TextRenderable
   // Rebuilt on every pipeline render: panel row index → phase name, so clicks
@@ -476,11 +475,12 @@ export class TuiProgress implements ProgressUI {
     })
     todos.text.onMouseDown = openFocusedSession
 
-    // A click on the tab strip (content row 0) selects that tab; clicks
-    // anywhere else in the panel fall through untouched. Works live and on the
-    // finish screen alike.
+    // A click on the tab strip (content rows 0-1: labels or rail) selects
+    // that tab; clicks anywhere else in the panel fall through untouched.
+    // Works live and on the finish screen alike.
     const switchTabFromFeed = (event: { x: number; y: number; preventDefault(): void; stopPropagation(): void }) => {
-      if (event.y - this.feedText.y !== 0) return
+      const row = event.y - this.feedText.y
+      if (row !== 0 && row !== 1) return
       const col = event.x - this.feedText.x
       const hit = this.feedTabRegions.find((region) => col >= region.start && col < region.end)
       if (!hit) return
@@ -495,8 +495,6 @@ export class TuiProgress implements ProgressUI {
       flexGrow: 1,
       borderColor: theme.borderDim,
       backgroundColor: theme.bg,
-      title: " logs ",
-      titleAlignment: "left",
       onMouseDown: switchTabFromFeed,
     })
     feed.text.onMouseDown = switchTabFromFeed
@@ -523,7 +521,6 @@ export class TuiProgress implements ProgressUI {
     this.stepText = step.text
     this.todosBox = todos.box
     this.todosText = todos.text
-    this.feedBox = feed.box
     this.feedText = feed.text
     this.footerText = footer.text
 
@@ -1113,10 +1110,10 @@ export class TuiProgress implements ProgressUI {
     }
     const usedHeight = detailLines.length + 2 + (this.todosBox.visible ? todoRows.length + 2 : 0)
 
-    // The content panel fills the rest: a tab strip (row 0) over the active
-    // tab's body, all scoped to the focused phase.
+    // The content panel fills the rest: a two-row tab strip (labels, then a
+    // rail) over the active tab's body, all scoped to the focused phase.
     const feedRows = Math.max(3, bodyHeight - usedHeight - 2)
-    const contentRows = feedRows - 1
+    const contentRows = feedRows - 2
     this.reportPageRows = contentRows
 
     this.dirText.content = this.dirContent(innerWidth)
@@ -1130,19 +1127,11 @@ export class TuiProgress implements ProgressUI {
         : this.contentTab === "session"
           ? this.sessionLines(focus, now, rightWidth, contentRows)
           : this.phaseFeedLines(focus, rightWidth, contentRows)
-    this.feedText.content = joinLines([this.contentTabBar(rightWidth), ...body])
-    this.feedBox.title = this.contentPanelTitle()
+    this.feedText.content = joinLines([...this.contentTabBar(rightWidth), ...body])
 
     this.footerText.content = this.footerContent(now, innerWidth)
     this.renderPermissionModal()
     this.renderer.requestRender()
-  }
-
-  // The content panel's title reflects the active tab; the reports tab appends
-  // its scroll position when the report is longer than the panel.
-  private contentPanelTitle(): string {
-    if (this.contentTab === "reports") return ` reports${this.reportPosition ? ` · ${this.reportPosition}` : ""} `
-    return this.contentTab === "session" ? " session " : " logs "
   }
 
   // Header owns the session-wide totals in a single row: clock, elapsed time,
@@ -1444,27 +1433,52 @@ export class TuiProgress implements ProgressUI {
     })
   }
 
-  // The tab strip that owns row 0 of the content panel: logs · reports ·
-  // session. Active tab is bold accent, inactive is dim — no painted chip,
-  // matching the theme's border-only delineation. Records each label's column
-  // span so a click on the strip resolves to the right tab.
-  private contentTabBar(width: number): StyledText {
+  // The tab strip that owns rows 0-1 of the content panel: a label row
+  // (faint digit hint + name, bold accent when active) and a rail row below
+  // it where a thick accent segment sits under the active label — like a
+  // browser tab underline — with faint dashes elsewhere. Pure character
+  // styling, no painted chip. Records each label's column span (shared by
+  // both rows) so a click on either row resolves to the right tab. The
+  // reports tab's scroll position rides in faint text at the rail's tail.
+  private contentTabBar(width: number): StyledText[] {
     this.feedTabRegions = []
-    const chunks: TextChunk[] = []
+    const labelChunks: TextChunk[] = []
     let col = 0
     contentTabOrder.forEach((tab, index) => {
       if (index > 0) {
-        chunks.push(fg(theme.faint)("  "))
+        labelChunks.push(fg(theme.faint)("  "))
         col += 2
       }
-      const label = ` ${tab} `
+      const start = col
+      const digit = `${index + 1}`
       const active = this.contentTab === tab
-      chunks.push(active ? bold(fg(theme.accent)(label)) : fg(theme.dim)(label))
-      this.feedTabRegions.push({ tab, start: col, end: col + label.length })
-      col += label.length
+      labelChunks.push(fg(theme.faint)(` ${digit} `))
+      labelChunks.push(active ? bold(fg(theme.accent)(tab)) : fg(theme.dim)(tab))
+      labelChunks.push(fg(theme.faint)(" "))
+      col += digit.length + tab.length + 3
+      this.feedTabRegions.push({ tab, start, end: col })
     })
-    if (col < width) chunks.push(fg(theme.faint)(" ".repeat(width - col)))
-    return new StyledText(chunks)
+    if (col < width) labelChunks.push(fg(theme.faint)(" ".repeat(width - col)))
+
+    const active = this.feedTabRegions.find((region) => region.tab === this.contentTab) ?? { start: 0, end: 0 }
+    const railChunks: TextChunk[] = []
+    const pushRail = (text: string, color: string) => {
+      if (text.length > 0) railChunks.push(fg(color)(text))
+    }
+    const activeStart = Math.min(active.start, width)
+    const activeEnd = Math.min(Math.max(active.end, activeStart), width)
+    pushRail("╌".repeat(activeStart), theme.faint)
+    pushRail("━".repeat(activeEnd - activeStart), theme.accent)
+    const suffix = this.contentTab === "reports" ? this.reportPosition : ""
+    const remaining = width - activeEnd
+    if (suffix.length > 0 && suffix.length < remaining) {
+      pushRail("╌".repeat(remaining - suffix.length), theme.faint)
+      pushRail(suffix, theme.faint)
+    } else {
+      pushRail("╌".repeat(remaining), theme.faint)
+    }
+
+    return [new StyledText(labelChunks), new StyledText(railChunks)]
   }
 
   // Read-only "follow along" view of one phase's opencode session: a status
