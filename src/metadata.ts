@@ -189,6 +189,8 @@ export function recordProgress(progress: ProgressUI, store: RunMetadataStore): P
       progress.phaseSession(name, sessionID)
     },
     phaseActivity: (name, detail, kind, pulse) => progress.phaseActivity(name, detail, kind, pulse),
+    // The live transcript is UI-only (never persisted): just forward it.
+    phaseMessage: (name, message) => progress.phaseMessage(name, message),
     phaseStepUsage(name, usage) {
       store.phaseStepUsage(name, usage)
       progress.phaseStepUsage(name, usage)

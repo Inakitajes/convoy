@@ -50,6 +50,8 @@ import type {
   PermissionReply,
   ProgressAttempt,
   ProgressDiffSummary,
+  ProgressMessage,
+  ProgressMessageChannel,
   ProgressPhase,
   ProgressPhaseSnapshot,
   ProgressStepUsage,
@@ -135,6 +137,14 @@ type FeedEntry = {
   message: string
 }
 
+// One contiguous span of a phase's live transcript. Reasoning/response blocks
+// grow as their verbatim deltas arrive; tool/bash blocks are single markers.
+type TranscriptBlock = { channel: ProgressMessageChannel; text: string }
+
+// Keep only the newest slice of a phase's stream in memory: reasoning can run
+// to tens of thousands of characters, and the session tab only ever tails it.
+const transcriptCap = 24_000
+
 type PendingPermission = {
   info: PermissionPromptInfo
   resolve: (reply: PermissionReply) => void
@@ -189,6 +199,10 @@ export class TuiProgress implements ProgressUI {
   private readonly startedAt = Date.now()
   private readonly phases: PhaseState[]
   private readonly feed: FeedEntry[] = []
+  // The live model transcript per phase (the session tab): verbatim reasoning
+  // and response text, interleaved with tool/bash action markers. Streamed in
+  // via phaseMessage and repainted on the ticker, not per delta.
+  private readonly transcripts = new Map<string, TranscriptBlock[]>()
   private readonly ticker: ReturnType<typeof setInterval>
   private readonly dirText: TextRenderable
   private readonly headerText: TextRenderable
@@ -645,6 +659,29 @@ export class TuiProgress implements ProgressUI {
     if (pulse) this.lastActivityAt = Date.now()
     else this.addEvent(name, kind, detail)
     this.render()
+  }
+
+  // Appends a raw slice of the model's stream to the phase's transcript.
+  // Deliberately does NOT render: text deltas arrive many-per-second, so the
+  // 250ms ticker repaints the session tab instead of paying a layout pass per
+  // delta. Bumping updatedAt keeps the "idle" detector honest between the
+  // (throttled) activity summaries.
+  phaseMessage(name: string, message: ProgressMessage) {
+    const phase = this.findPhase(name)
+    if (!phase) return
+    let blocks = this.transcripts.get(name)
+    if (!blocks) {
+      blocks = []
+      this.transcripts.set(name, blocks)
+    }
+    const streaming = message.channel === "reasoning" || message.channel === "response"
+    const last = blocks[blocks.length - 1]
+    // Consecutive deltas of the same channel are one paragraph; anything else
+    // (a channel switch, or a tool/bash marker) starts a fresh block.
+    if (streaming && last && last.channel === message.channel) last.text += message.text
+    else blocks.push({ channel: message.channel, text: message.text })
+    capTranscript(blocks)
+    phase.updatedAt = Date.now()
   }
 
   phaseStepUsage(name: string, usage: ProgressStepUsage) {
@@ -1125,7 +1162,7 @@ export class TuiProgress implements ProgressUI {
       this.contentTab === "reports"
         ? this.reportPanelLines(focus, rightWidth, contentRows)
         : this.contentTab === "session"
-          ? this.sessionLines(focus, now, rightWidth, contentRows)
+          ? this.sessionLines(focus, rightWidth, contentRows)
           : this.phaseFeedLines(focus, rightWidth, contentRows)
     this.feedText.content = joinLines([...this.contentTabBar(rightWidth), ...body])
 
@@ -1492,72 +1529,37 @@ export class TuiProgress implements ProgressUI {
   // phase's activity so the session reads top-to-bottom with the newest at the
   // bottom. All from data the dashboard already holds; [o] remains the way in
   // for full interactivity.
-  private sessionLines(phase: PhaseState | undefined, now: number, width: number, visible: number): StyledText[] {
+  // The session tab: a live, verbatim stream of the model's own output —
+  // reasoning and response text as it types, with tool/bash markers inline.
+  // No status/model/cost header here: that all lives in the step panel above,
+  // so this whole pane is the transcript. Tails the newest rows, like a
+  // terminal, since streaming means the interesting end is the bottom.
+  private sessionLines(phase: PhaseState | undefined, width: number, visible: number): StyledText[] {
+    if (visible <= 0) return []
     if (!phase) return [t`${fg(theme.dim)("no active session yet — waiting for a phase to start…")}`]
 
-    const out: StyledText[] = []
-    const title = phaseDisplayName(phase)
-    const head: TextChunk[] =
-      phase.status === "running"
-        ? [fg(theme.accent)(`${spinnerFrame(now)} `), bold(fg(theme.text)(title))]
-        : [statusIcon(phase.status, now), raw(" "), bold(fg(theme.text)(title))]
-    if (phase.sessionID) head.push(fg(theme.faint)("  ·  "), fg(theme.faint)(shortID(phase.sessionID)))
-    out.push(new StyledText(head))
-
-    // The one-glance state line: what the session is doing this instant.
-    const state = sessionState(phase, now)
-    const stateChunks: TextChunk[] = [fg(state.color)("● "), fg(theme.text)(state.label)]
-    if (state.detail) {
-      stateChunks.push(fg(theme.faint)("  ·  "), fg(theme.dim)(truncate(state.detail, Math.max(10, width - state.label.length - 10))))
-    }
-    out.push(new StyledText(stateChunks))
-
-    const meta: TextChunk[] = []
-    const model = phase.lastStepModel || phase.model
-    if (model) meta.push(fg(theme.faint)("model "), fg(theme.dim)(truncate(model, 30)))
-    if (phase.attempt > 0) {
-      if (meta.length > 0) meta.push(fg(theme.faint)(" · "))
-      meta.push(fg(theme.faint)("attempt "), fg(phase.attempt > 1 ? theme.yellow : theme.dim)(`${phase.attempt}/${phase.maxAttempts}`))
-    }
-    if (meta.length > 0) out.push(new StyledText(meta))
-
-    out.push(
-      new StyledText([
-        fg(theme.faint)("cost "),
-        fg(theme.dim)(phase.usageReported ? formatMoney(phase.cost) : "—"),
-        fg(theme.faint)(" · tokens "),
-        fg(theme.dim)(phase.usageReported ? `↑${formatCount(phase.tokens.input)} ↓${formatCount(phase.tokens.output)}` : "—"),
-        fg(theme.faint)(" · steps "),
-        fg(theme.dim)(String(phase.stepCount)),
-      ]),
-    )
-
-    if (phase.diff && phase.diff.files > 0) {
-      out.push(
-        new StyledText([
-          fg(theme.dim)("changes "),
-          fg(theme.text)(`${phase.diff.files} files `),
-          fg(theme.green)(`+${phase.diff.additions}`),
-          raw(" "),
-          fg(theme.red)(`−${phase.diff.deletions}`),
-        ]),
-      )
+    const blocks = this.transcripts.get(phase.name) ?? []
+    if (blocks.length === 0) {
+      const hint =
+        phase.status === "running"
+          ? "waiting for the model to start streaming…"
+          : phase.status === "pending"
+            ? "this step hasn't started yet"
+            : "no streamed messages captured for this step"
+      return [t`${fg(theme.dim)(hint)}`]
     }
 
-    // Whatever rows are left below the header become the activity tail.
-    const transcriptRows = visible - out.length - 1
-    if (transcriptRows <= 0) return out
-
-    // Drop archer's own scaffolding (phase started, session id…): it's
-    // redundant with the header and this transcript is about the model's work.
-    const entries = this.feed.filter((entry) => entry.phase === phase.name && entry.kind !== "system")
-    if (entries.length === 0) {
-      out.push(new StyledText([fg(theme.faint)("── "), fg(theme.dim)("no activity yet…")]))
-      return out
-    }
-    out.push(new StyledText([fg(theme.faint)(`── activity ${"─".repeat(Math.max(0, Math.min(width - 12, 40)))}`)]))
-    out.push(...sessionTranscript(entries, width).slice(-transcriptRows))
-    return out
+    const running = phase.status === "running"
+    const lines: StyledText[] = []
+    blocks.forEach((block, index) => {
+      if (index > 0) lines.push(plain(""))
+      // A blinking-style cursor trails the final block only while it's still
+      // being written, so you can see the stream is live.
+      const live = running && index === blocks.length - 1
+      lines.push(...transcriptBlockLines(block, width, live))
+    })
+    // Newest at the bottom: keep only the rows that fit.
+    return lines.slice(-visible)
   }
 
   private footerContent(now: number, width: number) {
@@ -1690,61 +1692,64 @@ function statusWordChunk(phase: PhaseState, now: number): TextChunk {
   }
 }
 
-// The session view's headline state, derived from the phase status and its
-// live activity kind. Running phases read as a plain-language action
-// ("reasoning", "running a command"…); a long-quiet running phase reads as
-// idle so a stalled session is obvious at a glance.
-function sessionState(phase: PhaseState, now: number): { label: string; color: string; detail?: string } {
-  switch (phase.status) {
-    case "completed":
-      return { label: "done", color: theme.green }
-    case "failed":
-      return { label: "failed", color: theme.red }
-    case "skipped":
-      return { label: "skipped", color: theme.faint }
-    case "pending":
-      return { label: "pending", color: theme.faint }
+// Trims a phase's transcript back under the cap by dropping the oldest text
+// first (partial-trimming the head block, then shifting whole blocks), so the
+// tail the session tab shows always survives.
+function capTranscript(blocks: TranscriptBlock[]) {
+  let total = 0
+  for (const block of blocks) total += block.text.length
+  while (total > transcriptCap && blocks.length > 0) {
+    const first = blocks[0]!
+    const excess = total - transcriptCap
+    if (first.text.length > excess) {
+      first.text = first.text.slice(excess)
+      total -= excess
+    } else {
+      total -= first.text.length
+      blocks.shift()
+    }
   }
-  const actions: Partial<Record<ActivityKind, { label: string; color: PaletteColor }>> = {
-    think: { label: "reasoning", color: "magenta" },
-    bash: { label: "running a command", color: "green" },
-    write: { label: "writing code", color: "accent" },
-    diff: { label: "applying changes", color: "orange" },
-    tool: { label: "using a tool", color: "cyan" },
-    todo: { label: "planning", color: "teal" },
-    permission: { label: "waiting for permission", color: "yellow" },
-    retry: { label: "retrying", color: "yellow" },
-    step: { label: "starting a step", color: "teal" },
-    error: { label: "error", color: "red" },
-  }
-  const action = actions[phase.now.kind] ?? { label: "working", color: "accent" as PaletteColor }
-  const quiet = now - phase.updatedAt
-  if (quiet > 15_000) return { label: action.label, color: theme.faint, detail: `idle ${Math.floor(quiet / 1000)}s` }
-  return { label: action.label, color: theme[action.color], detail: phase.now.message || undefined }
 }
 
-// One phase's activity, oldest-first, each entry wrapped under a time+icon
-// gutter with a hanging indent so multi-line messages stay aligned. The caller
-// keeps only the tail that fits, so the newest activity sits at the bottom.
-function sessionTranscript(entries: readonly FeedEntry[], width: number): StyledText[] {
-  const lines: StyledText[] = []
-  const gutter = formatTime(0).length + 3 // "HH:MM:SS" + space + icon + space
-  const bodyWidth = Math.max(12, width - gutter)
-  for (const entry of entries) {
-    const style = kindStyle(entry.kind)
-    const color = entry.kind === "error" ? theme.red : theme.text
-    const wrapped = wrapWords(entry.message, bodyWidth)
-    wrapped.forEach((segment, index) => {
-      if (index === 0) {
-        lines.push(
-          new StyledText([fg(theme.faint)(`${formatTime(entry.time)} `), fg(style.color)(`${style.icon} `), fg(color)(segment)]),
-        )
-      } else {
-        lines.push(new StyledText([raw(" ".repeat(gutter)), fg(color)(segment)]))
-      }
-    })
+// Renders one transcript block. Tool/bash markers are a single labelled line;
+// reasoning/response are a channel label followed by the verbatim text,
+// wrapped under a two-space hang. Reasoning is dimmed so the model's actual
+// answer (response) stands out. `live` trails a cursor on the final line.
+function transcriptBlockLines(block: TranscriptBlock, width: number, live: boolean): StyledText[] {
+  const cursor: TextChunk[] = live ? [fg(theme.accent)("▌")] : []
+
+  if (block.channel === "tool" || block.channel === "bash") {
+    const marker = block.channel === "bash" ? { icon: "$", color: theme.green } : { icon: "⚒", color: theme.cyan }
+    return [new StyledText([fg(marker.color)(`${marker.icon} `), fg(theme.text)(truncate(block.text, Math.max(8, width - 2))), ...cursor])]
   }
+
+  const isReasoning = block.channel === "reasoning"
+  const lines: StyledText[] = [
+    new StyledText([fg(isReasoning ? theme.magenta : theme.accent)(isReasoning ? "✻ " : "✎ "), fg(theme.faint)(isReasoning ? "reasoning" : "response")]),
+  ]
+  const bodyColor = isReasoning ? theme.dim : theme.text
+  const wrapped = wrapMessageText(block.text, Math.max(12, width - 2))
+  if (wrapped.length === 0) {
+    if (live) lines.push(new StyledText([raw("  "), ...cursor]))
+    return lines
+  }
+  wrapped.forEach((segment, index) => {
+    const chunks: TextChunk[] = [raw("  "), fg(bodyColor)(segment)]
+    if (live && index === wrapped.length - 1) chunks.push(...cursor)
+    lines.push(new StyledText(chunks))
+  })
   return lines
+}
+
+// Word-wraps the model's text while preserving its own line breaks, so
+// paragraphs and lists in the stream read the way the model wrote them.
+function wrapMessageText(text: string, width: number): string[] {
+  const out: string[] = []
+  for (const line of text.split("\n")) {
+    if (line.length === 0) out.push("")
+    else out.push(...wrapWords(line, width))
+  }
+  return out
 }
 
 // Greedy word wrap; a single word longer than the width is hard-split so it

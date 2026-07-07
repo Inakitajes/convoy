@@ -21,6 +21,7 @@ import {
   type ActivityKind,
   type AutoAccept,
   type ProgressDiffSummary,
+  type ProgressMessage,
   type ProgressPhase,
   type ProgressStepUsage,
   type ProgressTodo,
@@ -983,6 +984,14 @@ export function watchSession(
             await handleSignal(signal)
           }
           if (settled) return
+          // The verbatim model stream for the session transcript, extracted
+          // separately so the summarized activity/status signals above are
+          // untouched. Appends only — the TUI repaints it on its own ticker.
+          const chunk = describeMessageChunk(payload)
+          if (chunk) {
+            sawWork = true
+            input.progress.phaseMessage(input.phaseName, chunk)
+          }
         }
       } catch (error) {
         resolveReady()
@@ -1213,6 +1222,43 @@ export function describeSessionActivity(payload: unknown, state: ActivityState):
       if (type.startsWith("session.next.")) return activity("info", type.replace(/^session\.next\./, ""))
       return undefined
   }
+}
+
+/**
+ * Extracts the verbatim model output for the live session transcript, kept
+ * separate from describeSessionActivity so the summarized activity/status/feed
+ * signals stay unchanged. Reasoning and response arrive as raw incremental
+ * deltas (uncapped, unlike pickString), and tool calls / shell commands become
+ * one-line action markers. Everything else — usage, todos, diffs, heartbeats —
+ * belongs to the activity path, not the transcript.
+ */
+export function describeMessageChunk(payload: unknown): ProgressMessage | undefined {
+  const type = payloadType(payload)
+  const properties = payloadProperties(payload)
+  if (!properties) return undefined
+
+  switch (type) {
+    case "session.next.reasoning.delta": {
+      const text = rawString(properties.delta)
+      return text ? { channel: "reasoning", text } : undefined
+    }
+    case "session.next.text.delta": {
+      const text = rawString(properties.delta)
+      return text ? { channel: "response", text } : undefined
+    }
+    case "session.next.tool.called":
+      return { channel: "tool", text: describeToolCall(properties) }
+    case "session.next.shell.started": {
+      const command = pickString(properties, ["command"])
+      return command ? { channel: "bash", text: command } : undefined
+    }
+    default:
+      return undefined
+  }
+}
+
+function rawString(value: unknown): string {
+  return typeof value === "string" ? value : ""
 }
 
 function describeSessionStatus(value: unknown): SessionSignal | undefined {

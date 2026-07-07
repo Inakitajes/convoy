@@ -58,6 +58,17 @@ export type ProgressTodo = {
   status: string
 }
 
+/** One raw slice of a phase's live session transcript (see ProgressUI.phaseMessage). */
+export type ProgressMessageChannel = "reasoning" | "response" | "tool" | "bash"
+
+/**
+ * A verbatim chunk of the model's output for the session transcript. For
+ * "reasoning"/"response" the `text` is an incremental delta appended to the
+ * open block of that channel; for "tool"/"bash" it is one complete action
+ * marker (a tool call or shell command) forming its own line.
+ */
+export type ProgressMessage = { channel: ProgressMessageChannel; text: string }
+
 export type ProgressDiffSummary = {
   files: number
   additions: number
@@ -118,6 +129,8 @@ export type ProgressUI = {
   phaseSession(name: string, sessionID: string): void
   /** `pulse` marks heartbeat noise (provider busy, streaming…) that updates the live status line but stays out of the activity feed. */
   phaseActivity(name: string, detail: string, kind?: ActivityKind, pulse?: boolean): void
+  /** Streams the model's real output into the phase's live session transcript: verbatim reasoning/response deltas plus one-line tool/bash action markers. Unlike phaseActivity, this is the raw stream, not a summarized log line. */
+  phaseMessage(name: string, message: ProgressMessage): void
   phaseStepUsage(name: string, usage: ProgressStepUsage): void
   phaseUsageTotal(name: string, usage: ProgressUsage): void
   phaseTodos(name: string, todos: ProgressTodo[]): void
@@ -145,6 +158,7 @@ export const noopProgress: ProgressUI = {
   phaseAttempt() {},
   phaseSession() {},
   phaseActivity() {},
+  phaseMessage() {},
   phaseStepUsage() {},
   phaseUsageTotal() {},
   phaseTodos() {},

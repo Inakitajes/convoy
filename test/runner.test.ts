@@ -10,6 +10,7 @@ import {
   UserAbortError,
   commitRecoveredPhase,
   createGitLock,
+  describeMessageChunk,
   describeSessionActivity,
   isIgnorableRejection,
   newActivityState,
@@ -155,6 +156,37 @@ describe("runner helpers", () => {
     const tool = describeSessionActivity({ type: "session.next.tool.called", properties: { sessionID: "ses_1", tool: "bash" } }, state)
     expect(tool).toMatchObject({ type: "activity", message: "bash" })
     expect((tool as { pulse?: boolean }).pulse).toBeUndefined()
+  })
+
+  test("extracts the verbatim model stream for the session transcript", () => {
+    const props = (properties: Record<string, unknown>) => properties
+
+    // Reasoning and response deltas come through untouched, tagged by channel —
+    // and uncapped, unlike the 220-char pickString the activity path uses.
+    const long = "x".repeat(500)
+    expect(describeMessageChunk({ type: "session.next.reasoning.delta", properties: props({ delta: "let me check " }) })).toEqual({
+      channel: "reasoning",
+      text: "let me check ",
+    })
+    expect(describeMessageChunk({ type: "session.next.text.delta", properties: props({ delta: long }) })).toEqual({
+      channel: "response",
+      text: long,
+    })
+
+    // Tool calls and shell commands become one-line action markers.
+    expect(describeMessageChunk({ type: "session.next.tool.called", properties: props({ tool: "read", input: { filePath: "src/x.ts" } }) })).toEqual({
+      channel: "tool",
+      text: "read: src/x.ts",
+    })
+    expect(describeMessageChunk({ type: "session.next.shell.started", properties: props({ command: "bun test" }) })).toEqual({
+      channel: "bash",
+      text: "bun test",
+    })
+
+    // Empty deltas and everything else (usage, todos, heartbeats) are not
+    // transcript content.
+    expect(describeMessageChunk({ type: "session.next.text.delta", properties: props({ delta: "" }) })).toBeUndefined()
+    expect(describeMessageChunk({ type: "session.status", properties: props({ status: { type: "busy" } }) })).toBeUndefined()
   })
 
   test("restores on resume only when the phase didn't fail", async () => {
