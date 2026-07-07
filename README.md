@@ -80,6 +80,9 @@ This leaves `archer` in `~/.local/bin/archer` and creates `~/.archer/config.yaml
 From the root of the target repo, ideally on a working branch:
 
 ```bash
+# interactive launcher: choose a pipeline, enter the prompt, then toggle options
+archer
+
 # inline prompt
 archer "Add onboarding screen with 3 steps and local persistence of progress"
 
@@ -263,6 +266,21 @@ pipelines:
         name: triage
         reports: all               # every parallel/fan-out report from above, in one attachment set
 
+hooks:                              # optional shell hooks; top-level = every pipeline
+  pre:
+    - pnpm lint
+  post:
+    - command: ./scripts/notify.sh
+      when: always                  # success | failure | always; post default is success
+      continueOnError: true         # don't fail the run if this hook fails
+  pipelines:                        # appended only for the named pipeline
+    quick:
+      post:
+        - name: open-pr
+          command: gh pr create --fill
+          cwd: target               # target (default) | run
+          timeoutSeconds: 120
+
 permissions:                       # additive only; a config allow can never undo a deny
   allow:
     - "supabase gen types*"
@@ -285,12 +303,13 @@ The rules:
 - **Resume is frozen**: the resolved pipeline is persisted in the run's `metadata.json`; `--resume` replays it even if the config changed since.
 - **Dirty-tree recovery**: a phase interrupted before its commit (Ctrl+C, a failed commit step, a killed process) leaves uncommitted work in the tree, which normally blocks `--resume`. In an interactive terminal, resume offers to commit that work as the interrupted phase (`archer(<phase>): …`), mark it done, and continue with the following phases. Decline (or a non-TTY resume) keeps the old "commit/stash first" behavior.
 - **Permissions are additive**: `permissions.deny` extends the hard denylist, `permissions.allow` extends the allowlist, deny always wins, and there is deliberately no way for a repo to grant itself `--yolo`.
+- **Hooks are trusted local shell commands**: `hooks.pre` runs after the run workspace/dashboard is initialized and before the pipeline starts (pre-hooks are skipped on `--resume`); `hooks.post` runs at the end according to `when`. Top-level hooks apply to every pipeline, and `hooks.pipelines.<name>` entries are appended for that pipeline. Hooks run via `$SHELL -lc` from the target repo by default, receive `ARCHER_RUN_ID`, `ARCHER_RUN_DIR`, `ARCHER_TARGET_DIR`, `ARCHER_PIPELINE`, `ARCHER_PROMPT_FILE`, and post-hooks also receive `ARCHER_RUN_STATUS`. A failing hook fails the run unless `continueOnError: true` is set.
 
 ## Global configuration
 
 `~/.archer/config.yaml` uses the exact same schema as the project file and sets your personal defaults across every repo — most usefully `defaults.model`, but also custom agents and pipelines. Global custom agents bring their prompt at `~/.archer/agents/<name>.md` (the same convention a project uses, relative to your home).
 
-Both files are merged before a run, with the project winning: `defaults`, `agents`, and `pipelines` merge by key/name (a project entry overrides the global one of the same name), while `permissions` and `attachments` concatenate (global first; `deny` still wins). The home directory archer reads can be relocated with `ARCHER_HOME` (it points at the directory that holds `.archer`, and also moves `~/.archer/runs`).
+Both files are merged before a run, with the project winning: `defaults`, `agents`, and `pipelines` merge by key/name (a project entry overrides the global one of the same name), while `permissions`, `hooks`, and `attachments` concatenate (global first; `deny` still wins). The home directory archer reads can be relocated with `ARCHER_HOME` (it points at the directory that holds `.archer`, and also moves `~/.archer/runs`).
 
 ## Editing config interactively (`archer config`)
 
@@ -298,7 +317,7 @@ Both files are merged before a run, with the project winning: `defaults`, `agent
 
 - Pick models from an autocompleting list: it queries OpenCode for the models your enabled providers expose (including reasoning variants like `#xhigh`), falling back to the full [models.dev](https://models.dev) catalog when OpenCode can't answer, and always accepts a free-typed `provider/model[#variant]`.
 - Edit `defaults` (model, interactiveModel, autoAcceptJudgeModel, maxAttempts, baseRef, pipeline, app command, emulator) and each agent's model/temperature override. Agent `readOnly` is displayed when set; edit it in YAML.
-- Browse pipelines and their steps; add, delete, reorder steps, set a per-step model or max-attempts, and add new pipelines. Permissions and attachments are shown read-only (edit those in the YAML).
+- Browse pipelines and their steps; add, delete, reorder steps, set a per-step model or max-attempts, and add new pipelines. Permissions, hooks, and attachments are shown read-only (edit those in the YAML).
 - When a tab has no file yet, `initialize` writes a starter config (the built-in `implement` pipeline, expanded and ready to edit).
 
 Keys: `↑/↓` move, `enter` edit/expand, `tab` switch tab, `a` add, `d` delete a step, `shift+↑/↓` reorder a step, `t` agent temperature, `m` step max-attempts, `s` save the active tab, `q` quit. Saving re-validates and rewrites clean YAML (comments are not preserved); the dashboard never paints backgrounds, like the run TUIs. Needs an interactive terminal.
@@ -332,7 +351,7 @@ Built-in agent prompts live as Markdown files under `prompts/`. A project can fu
 
 ```text
 .archer/
-├── config.yaml          # defaults, agents, pipelines, permissions, attachments
+├── config.yaml          # defaults, agents, pipelines, hooks, permissions, attachments
 └── agents/
     ├── implementer.md   # overrides the built-in implementer prompt
     ├── pattern-auditor.md

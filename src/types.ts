@@ -28,11 +28,42 @@ export type RunOptions = {
   agents: AgentSpec[]
   /** Project additions to the bash policy; deny always wins over allow. */
   permissions: PermissionAdditions
+  /** Shell hooks configured globally and/or per pipeline. */
+  hooks: HooksConfig
 }
 
 export type PermissionAdditions = {
   allow: string[]
   deny: string[]
+}
+
+export type HookWhen = "success" | "failure" | "always"
+
+export type HookCwd = "target" | "run"
+
+export type HookSpec = {
+  /** Optional display name; defaults to the command text. */
+  name?: string
+  /** Shell command executed through the user's shell (`$SHELL -lc`). */
+  command: string
+  /** Post-hooks only: run after successful pipelines, failed pipelines, or both. Defaults to success. */
+  when?: HookWhen
+  /** When true, a non-zero exit logs a warning but does not fail the run. */
+  continueOnError?: boolean
+  /** Optional timeout; timed-out hooks are terminated and treated as failures. */
+  timeoutSeconds?: number
+  /** Working directory for the hook. Defaults to the target repo. */
+  cwd?: HookCwd
+}
+
+export type HookSet = {
+  pre: HookSpec[]
+  post: HookSpec[]
+}
+
+export type HooksConfig = HookSet & {
+  /** Pipeline-specific hooks are appended to top-level hooks for matching pipeline names. */
+  pipelines: Record<string, HookSet>
 }
 
 /**

@@ -8,6 +8,7 @@ import type { AssistantMessage, FilePartInput, OpencodeClient, Part } from "@ope
 import { opencodeConfig } from "./agents"
 import { fileParts } from "./attachments"
 import { addAllAndCommit, createCleanRepoSnapshot, dirtyFilesPreview, dirtyTreeError, ensureRepoReady, restoreRepoSnapshot, type RepoSnapshot, statusPorcelain, writeDiff } from "./git"
+import { hooksForPipeline, runHooks } from "./hooks"
 import { runHumanReviewGate } from "./human"
 import { log } from "./log"
 import { openRunMetadata, recordProgress, type RunMetadataStore } from "./metadata"
@@ -230,6 +231,9 @@ export async function run(options: RunOptions) {
   let progress: ProgressUI = noopProgress
   let permissions: PermissionGate | undefined
   let metadata: RunMetadataStore | undefined
+  let hookSet = hooksForPipeline(options.hooks, options.pipeline.name)
+  let pipelineNameForHooks = options.pipeline.name
+  let postHooksStarted = false
   const shutdown = new RunShutdown()
   const removeSignalHandlers = installShutdownSignals(shutdown)
 
@@ -243,6 +247,8 @@ export async function run(options: RunOptions) {
     // Resumed runs replay the pipeline frozen in their metadata, so the steps
     // (and thus --only/--skip names and required agents) come from there.
     const pipeline = metadata.pipeline
+    pipelineNameForHooks = pipeline.name
+    hookSet = hooksForPipeline(options.hooks, pipeline.name)
     validateStepFilters(pipeline, options)
     // Parallel/multi-model steps are forced read-only and point at a synthesized
     // "<agent>__ro" variant when their base agent isn't already read-only;
@@ -265,6 +271,20 @@ export async function run(options: RunOptions) {
     } else if (options.smart) {
       progress.message(`smart auto-accept enabled: ${formatModel(judgeModel)} judges each request; risky ones still prompt (shift+tab toggles)`)
       log.warn(`smart auto-accept enabled: ${formatModel(judgeModel)} will auto-allow requests it judges safe`)
+    }
+
+    if (!options.resumeRunID) {
+      await runHooks("pre", hookSet.pre, {
+        workspace,
+        targetDir: options.targetDir,
+        pipelineName: pipeline.name,
+        prompt: options.prompt,
+        progress,
+        signal: shutdown.signal,
+      })
+    } else if (hookSet.pre.length > 0) {
+      progress.message("pre-hooks skipped while resuming an existing run")
+      log.info("pre-hooks skipped on resume")
     }
 
     const extraFiles = await fileParts(options.files, options.targetDir, "error")
@@ -344,13 +364,40 @@ export async function run(options: RunOptions) {
 
     progress.message("writing run summary")
     await writeSummary(workspace, pipeline.steps.map((step) => step.name))
+    postHooksStarted = true
+    await runHooks("post", hookSet.post, {
+      workspace,
+      targetDir: options.targetDir,
+      pipelineName: pipeline.name,
+      prompt: options.prompt,
+      status: "success",
+      progress,
+      signal: shutdown.signal,
+    })
     await holdFinishScreen(progress, shutdown, { status: "completed", runDir: workspace.dir })
   } catch (error) {
-    runErr = error
-    if (!isUserAbortError(error)) {
-      await holdFinishScreen(progress, shutdown, { status: "failed", error: formatSdkError(error), runDir: workspace.dir })
+    let failure = error
+    if (!postHooksStarted && !isUserAbortError(failure)) {
+      postHooksStarted = true
+      try {
+        await runHooks("post", hookSet.post, {
+          workspace,
+          targetDir: options.targetDir,
+          pipelineName: pipelineNameForHooks,
+          prompt: options.prompt,
+          status: "failure",
+          progress,
+          signal: shutdown.signal,
+        })
+      } catch (hookError) {
+        failure = new Error(`${formatSdkError(error)}; post-hook failed: ${formatSdkError(hookError)}`)
+      }
     }
-    throw error
+    runErr = failure
+    if (!isUserAbortError(failure)) {
+      await holdFinishScreen(progress, shutdown, { status: "failed", error: formatSdkError(failure), runDir: workspace.dir })
+    }
+    throw failure
   } finally {
     removeSignalHandlers()
     if (shutdown.aborted) await shutdown.abortActiveSessions(progress)

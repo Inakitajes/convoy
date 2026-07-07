@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises"
 import { resolve } from "node:path"
 
-import { buildAgentRegistry, loadMergedArcherConfig, selectPipelineSpec, writeDefaultGlobalConfig, writeDefaultProjectConfig, type ArcherDefaults } from "./config"
+import { buildAgentRegistry, emptyHooksConfig, loadMergedArcherConfig, selectPipelineSpec, writeDefaultGlobalConfig, writeDefaultProjectConfig, type ArcherDefaults } from "./config"
 import { defaultGptModel, defaultGptVariant, defaultPipeline, defaultPipelineName, resolvePipeline, splitModelVariant, validateStepFilters } from "./pipeline"
 import { parseModel, run } from "./runner"
 import { browseRuns } from "./runs"
@@ -54,6 +54,11 @@ export type CliCommand =
   | { type: "init"; options: InitOptions }
 
 export async function parseAndRun(argv: string[]) {
+  if (argv.length === 0 && process.stdin.isTTY && process.stdout.isTTY) {
+    await launchInteractiveRun(process.cwd())
+    return
+  }
+
   const command = await parseCommand(argv)
   if (command.type === "help") {
     process.stdout.write(command.text)
@@ -97,6 +102,28 @@ export async function parseAndRun(argv: string[]) {
   }
 
   await run(command.options)
+}
+
+async function launchInteractiveRun(targetDir: string) {
+  // Imported lazily so normal CLI invocations don't pull in OpenTUI until they
+  // explicitly ask for the zero-argument interactive launcher.
+  const { launchRunTui } = await import("./launch-tui")
+  const selection = await launchRunTui({ targetDir })
+  if (!selection) return
+
+  const parsed = parseArgs([])
+  parsed.targetDir = selection.targetDir
+  parsed.prompt = selection.prompt
+  parsed.pipeline = selection.pipeline
+  parsed.humanReview = selection.humanReview
+  parsed.tui = selection.tui
+  parsed.includeDirty = selection.includeDirty
+  parsed.keepRunDir = selection.keepRunDir
+  parsed.yolo = selection.yolo
+  parsed.smart = selection.smart
+  if (selection.includeDirty) parsed.maxAttempts = 1
+
+  await run({ ...(await resolveRunOptions(parsed)), prompt: selection.prompt })
 }
 
 // The browser resumes with default flags; metadata recovers both the repo the
@@ -257,6 +284,7 @@ export async function resolveRunOptions(parsed: ParsedArgs): Promise<Omit<RunOpt
     pipeline,
     agents,
     permissions: config?.permissions ?? { allow: [], deny: [] },
+    hooks: config?.hooks ?? emptyHooksConfig(),
   }
 
   // Fast feedback for typos; a resumed run validates again in the runner
@@ -418,6 +446,7 @@ function help() {
 Sequential OpenCode agent pipeline for implementing features.
 
 Usage:
+  archer
   archer "Add onboarding"
   archer --prompt-file prd.md --file lib/onboarding --file test/onboarding_test.dart
   archer --pipeline bug-fix --prompt-file bug.md
@@ -426,6 +455,8 @@ Usage:
   archer config
 
 Commands:
+  archer                   Open an interactive TUI launcher to pick a pipeline,
+                           enter a prompt, and toggle run options
   init                     Create .archer/config.yaml and .archer/agents/*.md in the target repo
   init --global            Create ~/.archer/config.yaml and ~/.archer/agents/*.md
   runs [run-id]            Browse run history: resume a run, read its summary/reports,
@@ -470,6 +501,7 @@ Config keys:
   agents:                  project agents or built-in overrides; prompts live at agents/<name>.md
   pipelines:               named step lists mixing agents and human-review gates
   permissions:             allow/deny additions to the bash policy (deny always wins)
+  hooks:                   pre/post shell commands, globally or per pipeline
   attachments:             files attached to every step
   The same schema lives globally at ~/.archer/config.yaml; project config merges on top.
   Precedence: CLI flags > project config > global config > built-in defaults.

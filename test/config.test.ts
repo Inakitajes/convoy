@@ -52,6 +52,7 @@ describe("config loading", () => {
     expect(config.defaults).toEqual({})
     expect(config.pipelines).toEqual({})
     expect(config.permissions).toEqual({ allow: [], deny: [] })
+    expect(config.hooks).toEqual({ pre: [], post: [], pipelines: {} })
   })
 
   test("parses a full project config", async () => {
@@ -85,6 +86,20 @@ describe("config loading", () => {
         '    - "supabase gen types*"',
         "  deny:",
         '    - "stripe *"',
+        "hooks:",
+        "  pre:",
+        "    - pnpm lint",
+        "  post:",
+        "    - command: ./scripts/notify.sh",
+        "      when: always",
+        "      continueOnError: true",
+        "  pipelines:",
+        "    quick:",
+        "      post:",
+        "        - name: open-pr",
+        "          command: gh pr create --fill",
+        "          cwd: target",
+        "          timeoutSeconds: 120",
         "attachments:",
         "  - docs/architecture.md",
       ].join("\n"),
@@ -105,6 +120,16 @@ describe("config loading", () => {
       { agent: "api-reviewer", reports: "all" },
     ])
     expect(config.permissions).toEqual({ allow: ["supabase gen types*"], deny: ["stripe *"] })
+    expect(config.hooks).toEqual({
+      pre: [{ command: "pnpm lint" }],
+      post: [{ command: "./scripts/notify.sh", when: "always", continueOnError: true }],
+      pipelines: {
+        quick: {
+          pre: [],
+          post: [{ name: "open-pr", command: "gh pr create --fill", cwd: "target", timeoutSeconds: 120 }],
+        },
+      },
+    })
     expect(config.attachments).toEqual(["docs/architecture.md"])
   })
 
@@ -117,6 +142,9 @@ describe("config loading", () => {
     expect(() => parse("pipelines:\n  broken:\n    steps:\n      - agent: tests\n        reports: previous-two")).toThrow(
       'pipelines.broken.steps[0].reports must be "previous", "all", "none", or a list',
     )
+    expect(() => parse("hooks:\n  pre: ./scripts/pre.sh")).toThrow("hooks.pre must be a list")
+    expect(() => parse("hooks:\n  post:\n    - command: ./scripts/post.sh\n      when: sometimes")).toThrow('hooks.post[0].when must be "success", "failure", or "always"')
+    expect(() => parse("hooks:\n  pre:\n    - command: ./scripts/pre.sh\n      timeoutSeconds: 0")).toThrow("hooks.pre[0].timeoutSeconds must be a positive integer")
     expect(() => parse("not yaml: [unclosed")).toThrow("invalid YAML")
   })
 
@@ -348,6 +376,18 @@ describe("config merging", () => {
     expect(merged.attachments).toEqual(["g.md", "p.md"])
   })
 
+  test("hooks concatenate globally and per pipeline, global first", () => {
+    const global = parse("hooks:\n  pre:\n    - g-pre\n  pipelines:\n    implement:\n      post:\n        - g-impl-post")
+    const project = parse("hooks:\n  post:\n    - p-post\n  pipelines:\n    implement:\n      pre:\n        - p-impl-pre\n      post:\n        - p-impl-post")
+    const merged = mergeArcherConfigs(global, project)!
+    expect(merged.hooks.pre).toEqual([{ command: "g-pre" }])
+    expect(merged.hooks.post).toEqual([{ command: "p-post" }])
+    expect(merged.hooks.pipelines.implement).toEqual({
+      pre: [{ command: "p-impl-pre" }],
+      post: [{ command: "g-impl-post" }, { command: "p-impl-post" }],
+    })
+  })
+
   test("a missing side passes the other through unchanged", () => {
     const only = parse("defaults:\n  model: openai/gpt-5.5")
     expect(mergeArcherConfigs(undefined, undefined)).toBeUndefined()
@@ -363,10 +403,29 @@ describe("serialization", () => {
     expect(yaml).toContain("version: 1")
     expect(yaml).not.toContain("agents")
     expect(yaml).not.toContain("permissions")
+    expect(yaml).not.toContain("hooks")
     expect(yaml).not.toContain("attachments")
     const reparsed = parse(yaml)
     expect(reparsed.defaults).toEqual(config.defaults)
     expect(reparsed.pipelines).toEqual(config.pipelines)
+  })
+
+  test("serializes hooks and round-trips through parse", () => {
+    const config = parse(
+      [
+        "hooks:",
+        "  pre:",
+        "    - pnpm lint",
+        "  pipelines:",
+        "    implement:",
+        "      post:",
+        "        - command: gh pr create --fill",
+        "          when: success",
+        "          continueOnError: true",
+      ].join("\n"),
+    )
+    const reparsed = parse(serializeArcherConfig(config))
+    expect(reparsed.hooks).toEqual(config.hooks)
   })
 
   test("defaultConfigTemplate inlines opus on design and round-trips", () => {
@@ -377,6 +436,7 @@ describe("serialization", () => {
     const reparsed = parse(serializeArcherConfig(template))
     expect(reparsed.defaults).toEqual(template.defaults)
     expect(reparsed.pipelines).toEqual(template.pipelines)
+    expect(reparsed.hooks).toEqual(template.hooks)
   })
 })
 
@@ -434,6 +494,8 @@ describe("default config init", () => {
     expect(body).toContain("# pipeline: implement")
     expect(body).toContain("# interactiveModel: openai/gpt-5.5#xhigh")
     expect(body).toContain("# appRunCommand: pnpm dev")
+    expect(body).toContain("# hooks:")
+    expect(body).toContain("#           command: gh pr create --fill")
     expect(body).toContain("# agents:")
     expect(body).toContain("#   implementer:")
     expect(body).toContain("#   design-polisher:")
@@ -452,6 +514,7 @@ describe("default config init", () => {
       { agent: "adversarial", reports: "all" },
     ])
     expect(config.permissions).toEqual({ allow: [], deny: [] })
+    expect(config.hooks).toEqual({ pre: [], post: [], pipelines: {} })
     expect(config.attachments).toEqual([])
   })
 

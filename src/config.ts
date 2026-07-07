@@ -18,7 +18,7 @@ import {
   type PipelineSpec,
   type StepSpec,
 } from "./pipeline"
-import type { AgentSpec, PermissionAdditions } from "./types"
+import type { AgentSpec, HookSet, HookSpec, HooksConfig, HookWhen, PermissionAdditions } from "./types"
 import { archerHome, archerRoot, globalConfigPath } from "./workspace"
 
 /**
@@ -30,6 +30,7 @@ export type ArcherConfig = {
   agents: Record<string, ConfigAgent>
   pipelines: Record<string, PipelineSpec>
   permissions: PermissionAdditions
+  hooks: HooksConfig
   attachments: string[]
 }
 
@@ -98,9 +99,9 @@ export async function loadGlobalArcherConfig(): Promise<ArcherConfig | undefined
 
 /**
  * Merges the global config under the project one: project keys win on
- * defaults/agents/pipelines (shallow, by key/name), and permissions/attachments
- * concatenate (global first). deny still wins over allow in bashPolicy, so the
- * concatenation order is irrelevant there.
+ * defaults/agents/pipelines (shallow, by key/name), and permissions/hooks/
+ * attachments concatenate (global first). deny still wins over allow in
+ * bashPolicy, so the concatenation order is irrelevant there.
  */
 export function mergeArcherConfigs(global: ArcherConfig | undefined, project: ArcherConfig | undefined): ArcherConfig | undefined {
   if (!global) return project
@@ -113,6 +114,7 @@ export function mergeArcherConfigs(global: ArcherConfig | undefined, project: Ar
       allow: [...global.permissions.allow, ...project.permissions.allow],
       deny: [...global.permissions.deny, ...project.permissions.deny],
     },
+    hooks: mergeHooksConfig(global.hooks, project.hooks),
     attachments: [...global.attachments, ...project.attachments],
   }
 }
@@ -121,6 +123,27 @@ export function mergeArcherConfigs(global: ArcherConfig | undefined, project: Ar
 export async function loadMergedArcherConfig(targetDir: string): Promise<ArcherConfig | undefined> {
   const [global, project] = await Promise.all([loadGlobalArcherConfig(), loadArcherConfig(targetDir)])
   return mergeArcherConfigs(global, project)
+}
+
+export function emptyHooksConfig(): HooksConfig {
+  return { pre: [], post: [], pipelines: {} }
+}
+
+function emptyHookSet(): HookSet {
+  return { pre: [], post: [] }
+}
+
+function mergeHooksConfig(global: HooksConfig, project: HooksConfig): HooksConfig {
+  const pipelineNames = new Set([...Object.keys(global.pipelines), ...Object.keys(project.pipelines)])
+  const pipelines: Record<string, HookSet> = {}
+  for (const name of pipelineNames) {
+    pipelines[name] = mergeHookSet(global.pipelines[name] ?? emptyHookSet(), project.pipelines[name] ?? emptyHookSet())
+  }
+  return { ...mergeHookSet(global, project), pipelines }
+}
+
+function mergeHookSet(global: HookSet, project: HookSet): HookSet {
+  return { pre: [...global.pre, ...project.pre], post: [...global.post, ...project.post] }
 }
 
 /**
@@ -180,6 +203,26 @@ pipelines:
         reports: none
       - agent: adversarial
         reports: all
+
+# Optional shell hooks. Top-level hooks run for every pipeline; hooks under
+# hooks.pipelines.<name> are appended only for that pipeline. Commands run from
+# the target repo by default with ARCHER_* environment variables available
+# (ARCHER_RUN_ID, ARCHER_RUN_DIR, ARCHER_TARGET_DIR, ARCHER_PIPELINE,
+# ARCHER_RUN_STATUS for post-hooks, etc.). Post-hook "when" defaults to success.
+# hooks:
+#   pre:
+#     - pnpm lint
+#   post:
+#     - command: ./scripts/notify.sh
+#       when: always          # success | failure | always
+#       continueOnError: true
+#   pipelines:
+#     implement:
+#       post:
+#         - name: open-pr
+#           command: gh pr create --fill
+#           cwd: target       # target | run
+#           timeoutSeconds: 120
 
 permissions:
   allow: []
@@ -268,14 +311,14 @@ export function parseArcherConfig(body: string, source: string, targetDir: strin
     throw new ConfigError(`${source}: invalid YAML: ${error instanceof Error ? error.message : String(error)}`)
   }
 
-  const config: ArcherConfig = { defaults: {}, agents: {}, pipelines: {}, permissions: { allow: [], deny: [] }, attachments: [] }
+  const config: ArcherConfig = { defaults: {}, agents: {}, pipelines: {}, permissions: { allow: [], deny: [] }, hooks: emptyHooksConfig(), attachments: [] }
   if (raw === null || raw === undefined) return config
 
   const v = new Validator(source)
   const root = v.record(raw, "")
   // Unknown keys warn instead of failing so configs written for a newer
   // archer still load; typos surface in the warning either way.
-  v.knownKeys(root, "", ["version", "defaults", "agents", "pipelines", "permissions", "attachments"])
+  v.knownKeys(root, "", ["version", "defaults", "agents", "pipelines", "permissions", "hooks", "attachments"])
 
   if (root.version !== undefined && root.version !== 1) v.fail("version", `unsupported value ${JSON.stringify(root.version)}; this archer reads version 1`)
 
@@ -283,6 +326,7 @@ export function parseArcherConfig(body: string, source: string, targetDir: strin
   if (root.agents !== undefined) config.agents = validateAgents(v, root.agents, targetDir)
   if (root.pipelines !== undefined) config.pipelines = validatePipelines(v, root.pipelines)
   if (root.permissions !== undefined) config.permissions = validatePermissions(v, root.permissions)
+  if (root.hooks !== undefined) config.hooks = validateHooks(v, root.hooks)
   if (root.attachments !== undefined) config.attachments = v.stringArray(root.attachments, "attachments")
 
   return config
@@ -413,6 +457,65 @@ function validatePermissions(v: Validator, raw: unknown): PermissionAdditions {
   }
 }
 
+function validateHooks(v: Validator, raw: unknown): HooksConfig {
+  const record = v.record(raw, "hooks")
+  v.knownKeys(record, "hooks", ["pre", "post", "pipelines"])
+
+  const hooks: HooksConfig = {
+    pre: record.pre !== undefined ? validateHookList(v, record.pre, "hooks.pre", "pre") : [],
+    post: record.post !== undefined ? validateHookList(v, record.post, "hooks.post", "post") : [],
+    pipelines: {},
+  }
+
+  if (record.pipelines !== undefined) {
+    const pipelines = v.record(record.pipelines, "hooks.pipelines")
+    for (const [pipeline, value] of Object.entries(pipelines)) {
+      if (!pipeline.trim()) v.fail("hooks.pipelines", "pipeline name can't be empty")
+      const path = `hooks.pipelines.${pipeline}`
+      hooks.pipelines[pipeline] = validateHookSet(v, value, path)
+    }
+  }
+
+  return hooks
+}
+
+function validateHookSet(v: Validator, raw: unknown, path: string): HookSet {
+  const record = v.record(raw, path)
+  v.knownKeys(record, path, ["pre", "post"])
+  return {
+    pre: record.pre !== undefined ? validateHookList(v, record.pre, `${path}.pre`, "pre") : [],
+    post: record.post !== undefined ? validateHookList(v, record.post, `${path}.post`, "post") : [],
+  }
+}
+
+function validateHookList(v: Validator, raw: unknown, path: string, stage: "pre" | "post"): HookSpec[] {
+  if (!Array.isArray(raw)) v.fail(path, "must be a list of hook commands")
+  return raw.map((entry, index) => validateHook(v, entry, `${path}[${index}]`, stage))
+}
+
+function validateHook(v: Validator, raw: unknown, path: string, stage: "pre" | "post"): HookSpec {
+  if (typeof raw === "string") return { command: v.nonEmptyString(raw, path) }
+
+  const record = v.record(raw, path)
+  v.knownKeys(record, path, stage === "post" ? ["name", "command", "when", "continueOnError", "timeoutSeconds", "cwd"] : ["name", "command", "continueOnError", "timeoutSeconds", "cwd"])
+
+  const hook: HookSpec = { command: v.nonEmptyString(record.command, `${path}.command`) }
+  if (record.name !== undefined) hook.name = v.nonEmptyString(record.name, `${path}.name`)
+  if (stage === "post" && record.when !== undefined) hook.when = validateHookWhen(v, record.when, `${path}.when`)
+  if (record.continueOnError !== undefined) hook.continueOnError = v.boolean(record.continueOnError, `${path}.continueOnError`)
+  if (record.timeoutSeconds !== undefined) hook.timeoutSeconds = v.positiveInt(record.timeoutSeconds, `${path}.timeoutSeconds`)
+  if (record.cwd !== undefined) {
+    if (record.cwd !== "target" && record.cwd !== "run") v.fail(`${path}.cwd`, 'must be "target" or "run"')
+    hook.cwd = record.cwd
+  }
+  return hook
+}
+
+function validateHookWhen(v: Validator, raw: unknown, path: string): HookWhen {
+  if (raw === "success" || raw === "failure" || raw === "always") return raw
+  return v.fail(path, 'must be "success", "failure", or "always"')
+}
+
 /** Built-in agents plus the project's additions and overrides. */
 export function buildAgentRegistry(config?: ArcherConfig): AgentSpec[] {
   const registry: AgentSpec[] = builtInAgents.map((agent) => ({ ...agent }))
@@ -470,8 +573,26 @@ export function serializeArcherConfig(config: ArcherConfig): string {
   if (config.permissions.allow.length > 0) permissions.allow = config.permissions.allow
   if (config.permissions.deny.length > 0) permissions.deny = config.permissions.deny
   if (Object.keys(permissions).length > 0) out.permissions = permissions
+  const hooks = serializeHooks(config.hooks)
+  if (hooks) out.hooks = hooks
   if (config.attachments.length > 0) out.attachments = config.attachments
   return Bun.YAML.stringify(out, null, 2)
+}
+
+function serializeHooks(hooks: HooksConfig): Record<string, unknown> | undefined {
+  const out: Record<string, unknown> = {}
+  if (hooks.pre.length > 0) out.pre = hooks.pre
+  if (hooks.post.length > 0) out.post = hooks.post
+
+  const pipelines: Record<string, unknown> = {}
+  for (const [name, set] of Object.entries(hooks.pipelines)) {
+    const entry: Record<string, unknown> = {}
+    if (set.pre.length > 0) entry.pre = set.pre
+    if (set.post.length > 0) entry.post = set.post
+    if (Object.keys(entry).length > 0) pipelines[name] = entry
+  }
+  if (Object.keys(pipelines).length > 0) out.pipelines = pipelines
+  return Object.keys(out).length > 0 ? out : undefined
 }
 
 /** Serializes, validates by re-parsing, then writes. Never persists YAML that wouldn't load back. */
@@ -495,6 +616,7 @@ export function defaultConfigTemplate(): ArcherConfig {
     agents: {},
     pipelines: { implement: templatePipeline(builtInPipelines[defaultPipelineName]!, globalModel) },
     permissions: { allow: [], deny: [] },
+    hooks: emptyHooksConfig(),
     attachments: [],
   }
 }

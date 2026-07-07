@@ -31,6 +31,7 @@ import { archerRoot, globalConfigPath } from "./workspace"
 
 import type { BoxOptions, CliRenderer, KeyEvent, TextChunk } from "@opentui/core"
 import type { PaletteColor } from "./tui-theme"
+import type { HookSpec } from "./types"
 
 export async function editConfigTui(options: { targetDir: string }): Promise<void> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
@@ -770,6 +771,14 @@ export class ConfigEditor {
     rows.push(blankRow(), sectionRow("Permissions  (read-only — edit in .archer/config.yaml)"))
     rows.push(infoRow(readonlyList("allow", config.permissions.allow)))
     rows.push(infoRow(readonlyList("deny", config.permissions.deny)))
+    rows.push(blankRow(), sectionRow("Hooks  (read-only — edit in .archer/config.yaml)"))
+    rows.push(infoRow(readonlyList("pre", config.hooks.pre.map(describeHook))))
+    rows.push(infoRow(readonlyList("post", config.hooks.post.map(describeHook))))
+    const pipelineHooks = Object.entries(config.hooks.pipelines).flatMap(([name, set]) => [
+      ...set.pre.map((hook) => `${name}:pre:${describeHook(hook)}`),
+      ...set.post.map((hook) => `${name}:post:${describeHook(hook)}`),
+    ])
+    rows.push(infoRow(readonlyList("pipeline", pipelineHooks)))
     rows.push(blankRow(), sectionRow("Attachments  (read-only — edit in .archer/config.yaml)"))
     rows.push(infoRow(readonlyList("files", config.attachments)))
 
@@ -1138,6 +1147,12 @@ function describeDefault(key: keyof ArcherDefaults): string {
 
 function readonlyList(label: string, values: string[]): string {
   return `${label}: ${values.length === 0 ? "—" : values.join(", ")}`
+}
+
+function describeHook(hook: HookSpec): string {
+  const name = hook.name ? `${hook.name}=` : ""
+  const suffix = hook.when ? ` (${hook.when})` : ""
+  return `${name}${hook.command}${suffix}`
 }
 
 function shortenPath(path: string): string {
