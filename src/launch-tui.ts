@@ -4,7 +4,7 @@ import { BoxRenderable, StyledText, TextRenderable, bold, createCliRenderer, dec
 
 import { buildAgentRegistry, loadMergedArcherConfig } from "./config"
 import { builtInPipelines, defaultPipelineName, resolvePipeline } from "./pipeline"
-import { joinLines, padBetween, paletteForTerminal, plain, raw, setTheme, terminalBackgroundHex, theme, truncate } from "./tui-theme"
+import { joinLines, padBetween, paletteForTerminal, plain, raw, setTheme, spinnerFrame, terminalBackgroundHex, theme, truncate } from "./tui-theme"
 
 import type { ArcherConfig } from "./config"
 import type { BoxOptions, CliRenderer, KeyEvent, PasteEvent, TextChunk } from "@opentui/core"
@@ -21,6 +21,8 @@ export type LaunchRunSelection = {
   keepRunDir: boolean
   yolo: boolean
   smart: boolean
+  /** When set, Archer ran against an isolated worktree created on launch. */
+  worktree?: { dir: string; branch: string }
 }
 
 type PipelineChoice = {
@@ -33,7 +35,7 @@ type PipelineChoice = {
   error?: string
 }
 
-type ToggleKey = "smart" | "yolo" | "humanReview" | "includeDirty" | "keepRunDir" | "tui"
+type ToggleKey = "smart" | "yolo" | "humanReview" | "includeDirty" | "keepRunDir" | "tui" | "worktree"
 
 type ToggleSpec = {
   key: ToggleKey
@@ -43,6 +45,10 @@ type ToggleSpec = {
 }
 
 type Mode = "pipelines" | "prompt" | "options"
+
+type Modal =
+  | { kind: "message"; title: string; message: string }
+  | { kind: "loading"; title: string; message: string }
 
 const toggles: readonly ToggleSpec[] = [
   {
@@ -80,6 +86,12 @@ const toggles: readonly ToggleSpec[] = [
     label: "Progress dashboard",
     flag: "--tui / --no-tui",
     description: "Show the full-screen dashboard while the pipeline is running.",
+  },
+  {
+    key: "worktree",
+    label: "Isolate in a worktree",
+    flag: "--worktree",
+    description: "Create a new branch + git worktree (named from your prompt) and run Archer there, leaving the current branch untouched.",
   },
 ]
 
@@ -150,6 +162,7 @@ class LaunchPicker {
   private promptError = ""
   private optionIndex = 0
   private message = ""
+  private modal?: Modal
 
   private readonly toggleState: Record<ToggleKey, boolean> = {
     smart: false,
@@ -158,11 +171,13 @@ class LaunchPicker {
     includeDirty: false,
     keepRunDir: false,
     tui: Boolean(process.stdout.isTTY && process.stderr.isTTY),
+    worktree: false,
   }
 
   private readonly ticker: ReturnType<typeof setInterval>
   private readonly headerText: TextRenderable
   private readonly pipelineText: TextRenderable
+  private readonly pipelineBox: BoxRenderable
   private readonly detailText: TextRenderable
   private readonly detailBox: BoxRenderable
   private readonly footerText: TextRenderable
@@ -199,6 +214,14 @@ class LaunchPicker {
 
     key.preventDefault()
     key.stopPropagation()
+    if (this.modal) {
+      // Only the message modal can be dismissed; loading blocks input until the async job finishes.
+      if (this.modal.kind === "message" && (key.name === "return" || key.name === "linefeed" || key.name === "escape" || key.name === "space" || key.name === "q")) {
+        this.modal = undefined
+        this.render()
+      }
+      return
+    }
     switch (this.mode) {
       case "pipelines":
         this.handlePipelineKey(key)
@@ -238,6 +261,8 @@ class LaunchPicker {
     const selectFromList = (event: { y: number; preventDefault(): void; stopPropagation(): void }) => {
       event.preventDefault()
       event.stopPropagation()
+      // Ignore clicks while a loading/message modal is up.
+      if (this.modal) return
       const row = event.y - this.pipelineText.y
       const index = this.pipelineRows[row]
       if (index === undefined) return
@@ -251,7 +276,7 @@ class LaunchPicker {
     const pipeline = this.panel({
       id: "archer-launch-pipelines",
       height: "100%",
-      flexGrow: 1,
+      width: this.pipelineWidth(),
       borderColor: theme.borderDim,
       backgroundColor: theme.bg,
       title: " pipelines ",
@@ -261,7 +286,7 @@ class LaunchPicker {
     pipeline.text.onMouseDown = selectFromList
 
     const selectOption = (event: { y: number; preventDefault(): void; stopPropagation(): void }) => {
-      if (this.mode !== "options") return
+      if (this.mode !== "options" || this.modal) return
       event.preventDefault()
       event.stopPropagation()
       const row = event.y - this.detailText.y
@@ -273,7 +298,7 @@ class LaunchPicker {
 
     const detail = this.panel({
       id: "archer-launch-detail",
-      width: this.detailWidth(),
+      flexGrow: 1,
       height: "100%",
       borderColor: theme.borderDim,
       backgroundColor: theme.bg,
@@ -286,6 +311,7 @@ class LaunchPicker {
 
     this.headerText = header.text
     this.pipelineText = pipeline.text
+    this.pipelineBox = pipeline.box
     this.detailText = detail.text
     this.detailBox = detail.box
     this.footerText = footer.text
@@ -459,6 +485,10 @@ class LaunchPicker {
 
   private startRun() {
     const choice = this.currentChoice()
+    if (this.toggleState.worktree) {
+      void this.startWorktreeRun(choice.name)
+      return
+    }
     this.finish({
       targetDir: this.targetDir,
       prompt: this.prompt,
@@ -472,6 +502,37 @@ class LaunchPicker {
     })
   }
 
+  // The AI naming call + `git worktree add` happen here, behind a blocking
+  // loading modal so the user can't toggle options mid-creation. Any failure
+  // falls back to the options screen with an explanatory message modal.
+  private async startWorktreeRun(pipelineName: string) {
+    this.modal = { kind: "loading", title: "isolating worktree", message: "generating a branch name…" }
+    this.render()
+    try {
+      const { createIsolatedWorktree } = await import("./worktree")
+      const result = await createIsolatedWorktree({
+        targetDir: this.targetDir,
+        prompt: this.prompt,
+      })
+      this.finish({
+        targetDir: result.dir,
+        prompt: this.prompt,
+        pipeline: pipelineName,
+        humanReview: this.toggleState.humanReview,
+        tui: this.toggleState.tui,
+        includeDirty: false,
+        keepRunDir: this.toggleState.keepRunDir,
+        yolo: this.toggleState.yolo,
+        smart: this.toggleState.smart,
+        worktree: { dir: result.dir, branch: result.branch },
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      this.modal = { kind: "message", title: "worktree failed", message }
+      this.render()
+    }
+  }
+
   private toggleOption() {
     const key = toggles[this.optionIndex]?.key
     if (!key) return
@@ -479,6 +540,9 @@ class LaunchPicker {
     this.toggleState[key] = next
     if (key === "smart" && next) this.toggleState.yolo = false
     if (key === "yolo" && next) this.toggleState.smart = false
+    // A fresh worktree is always clean, so includeDirty is meaningless there.
+    if (key === "worktree" && next) this.toggleState.includeDirty = false
+    if (key === "includeDirty" && next) this.toggleState.worktree = false
     this.render()
   }
 
@@ -529,9 +593,10 @@ class LaunchPicker {
   private render() {
     if (this.renderer.isDestroyed) return
     const innerWidth = Math.max(40, this.renderer.width - 6)
-    const detailWidth = this.detailWidth()
-    const pipelineWidth = Math.max(36, this.renderer.width - detailWidth - 7)
+    const pipelineWidth = this.pipelineWidth()
+    const detailWidth = Math.max(40, this.renderer.width - pipelineWidth - 7)
 
+    this.pipelineBox.width = pipelineWidth
     this.detailBox.width = detailWidth
     this.headerText.content = this.headerContent(innerWidth)
     this.pipelineText.content = this.pipelineContent(pipelineWidth)
@@ -586,6 +651,7 @@ class LaunchPicker {
   }
 
   private detailContent(width: number) {
+    if (this.modal) return this.modalContent(width)
     this.optionRows = []
     switch (this.mode) {
       case "pipelines":
@@ -595,6 +661,27 @@ class LaunchPicker {
       case "options":
         return this.optionsDetail(width)
     }
+  }
+
+  private modalContent(width: number) {
+    const modal = this.modal!
+    const lines: StyledText[] = []
+    lines.push(plain(""))
+    if (modal.kind === "loading") {
+      const frame = spinnerFrame(Date.now())
+      lines.push(new StyledText([fg(theme.accent)(frame), raw(" "), bold(fg(theme.text)(modal.title))]))
+    } else {
+      lines.push(new StyledText([bold(fg(theme.yellow)(modal.title))]))
+    }
+    lines.push(plain(""))
+    for (const line of wrapWords(modal.message, width)) lines.push(new StyledText([fg(theme.dim)(line)]))
+    lines.push(plain(""))
+    if (modal.kind === "message") {
+      lines.push(new StyledText([fg(theme.faint)("press any key to dismiss")]))
+    } else {
+      lines.push(new StyledText([fg(theme.faint)("creating a new branch + worktree…")]))
+    }
+    return joinLines(lines)
   }
 
   private pipelineDetail(width: number) {
@@ -699,12 +786,12 @@ class LaunchPicker {
       const selected = index === this.optionIndex
       const enabled = this.toggleState[spec.key]
       const marker = selected ? fg(theme.accent)("▸ ") : raw("  ")
-      const box = enabled ? fg(theme.green)("[on] ") : fg(theme.faint)("[off]")
+      const toggle = toggleSwitch(enabled)
       const label = selected ? bold(fg(theme.text)(spec.label)) : fg(theme.text)(spec.label)
       const flag = fg(enabled ? theme.green : theme.dim)(spec.flag)
-      lines.push(padBetween([marker, box, raw(" "), label], [flag], width))
+      lines.push(padBetween([marker, ...toggle, raw(" "), label], [flag], width))
       this.optionRows.push(index)
-      lines.push(new StyledText([raw("     "), fg(theme.dim)(truncate(spec.description, Math.max(8, width - 5)))]))
+      lines.push(new StyledText([raw("        "), fg(theme.dim)(truncate(spec.description, Math.max(8, width - 8)))]))
       this.optionRows.push(index)
     }
 
@@ -724,6 +811,7 @@ class LaunchPicker {
     if (this.toggleState.includeDirty) flags.push("--include-dirty", "--max-attempts 1")
     if (this.toggleState.keepRunDir) flags.push("--keep-run-dir")
     flags.push(this.toggleState.tui ? "--tui" : "--no-tui")
+    if (this.toggleState.worktree) flags.push("--worktree")
     return flags
   }
 
@@ -750,8 +838,12 @@ class LaunchPicker {
     )
   }
 
-  private detailWidth() {
-    return Math.max(42, Math.min(70, this.renderer.width - 50))
+  // The pipeline sidebar is capped at one third of the inner width so the
+  // prompt/options panel gets the bulk of the screen; clamped so very narrow
+  // terminals still show enough of each pipeline name to disambiguate.
+  private pipelineWidth() {
+    const inner = Math.max(40, this.renderer.width - 6)
+    return clamp(Math.floor(inner / 3), 22, 44)
   }
 
   private listHeight() {
@@ -762,6 +854,16 @@ class LaunchPicker {
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value))
+}
+
+// A slider-style toggle: the knob (●) sits on the right when on, left when
+// off, with a colored track that reads as a single cell. Returns the chunks
+// so the caller can splice them into the row's left column.
+function toggleSwitch(enabled: boolean): TextChunk[] {
+  if (enabled) {
+    return [fg(theme.green)("━━●"), fg(theme.green)(bold(" on"))]
+  }
+  return [fg(theme.faint)("●━━"), fg(theme.dim)(" off")]
 }
 
 export function typedText(key: KeyEvent): string | undefined {

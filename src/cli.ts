@@ -123,6 +123,10 @@ async function launchInteractiveRun(targetDir: string) {
   parsed.smart = selection.smart
   if (selection.includeDirty) parsed.maxAttempts = 1
 
+  if (selection.worktree) {
+    process.stderr.write(`archer: running in isolated worktree\n  branch: ${selection.worktree.branch}\n  dir: ${selection.worktree.dir}\n`)
+  }
+
   await run({ ...(await resolveRunOptions(parsed)), prompt: selection.prompt })
 }
 
