@@ -4,11 +4,13 @@ Archer is a higher-level orchestration harness for [OpenCode](https://opencode.a
 
 Rather than being only a sequential agent chain, Archer owns the operational layer around OpenCode: repo context attachment, runtime guard rails, permission gates, phase reports, diff tracking, and human-in-the-loop checkpoints.
 
-Pipelines are data, not code: archer ships a family of built-in pipelines (`default`, `ultra-implementation`, `refine`, `ultra-refine`, and a report-only `review` — see [Built-in pipelines](#built-in-pipelines)), and a project can define its own — any number of steps, its own agents, its own models, with `human-review` gates anywhere — in `.archer/config.yaml`.
+Pipelines are data, not code: archer ships a family of built-in pipelines (`implement` — the default — plus `ultra-implement`, `refine`, `ultra-refine`, and a report-only `review`; see [Built-in pipelines](#built-in-pipelines)), and a project can define its own — any number of steps, its own agents, its own models, with `human-review` gates anywhere — in `.archer/config.yaml`.
 
 Archer is written in Bun + TypeScript and uses `@opencode-ai/sdk` to control OpenCode. The SDK starts/controls the OpenCode server; Archer no longer manually calls `opencode run` nor parses stdout.
 
-## The default pipeline
+## The default pipeline: `implement`
+
+`implement` is the pipeline archer runs when you don't pass `-p/--pipeline`.
 
 ```
 PRD ──► implementer ──► patterns ──► security ──► design ──► tests ──► adversarial
@@ -32,8 +34,8 @@ Archer ships these pipelines; select one with `-p/--pipeline` (no config needed)
 
 | Pipeline | Changes code? | What it does |
 |---|---|---|
-| `default` | yes | Implement a PRD, then audit, polish, test, and adversarial review (the table above). |
-| `ultra-implementation` | yes | Like `default`, but the pattern/security/adversarial reviews of the initial diff run in parallel across two models feeding a triage step, and the run ends with an audit-only final review, a fixer that applies only blocking findings, and a final validator. |
+| `implement` | yes | **The default** (runs with no `-p`). Implement a PRD, then audit, polish, test, and adversarial review (the table above). |
+| `ultra-implement` | yes | Like `implement`, but the pattern/security/adversarial reviews of the initial diff run in parallel across two models feeding a triage step, and the run ends with an audit-only final review, a fixer that applies only blocking findings, and a final validator. |
 | `refine` | yes | Audit the current diff (scope → bugs → clean-code → security), triage the findings adversarially, apply the accepted fixes, then validate them. |
 | `ultra-refine` | yes | Like `refine`, but every read-only audit is fanned out across two models before triage, fixes, and validation. |
 | `review` | **no — report only** | Scope the diff, run the bug / clean-code(+patterns) / security audits **in parallel across two models each**, then a single step synthesizes everything into one prioritized findings report. Makes no changes; the run's output is `reports/report.md`, which you read to decide whether to follow up with a `refine` run. |
@@ -278,7 +280,7 @@ The rules:
 - **Aliases**: the built-in agents answer to their short names in steps — `patterns`, `security`, `design`, `tests`, `adversarial` — as well as their full names.
 - **Read-only agents**: set `agents.<name>.readOnly: true` to enforce audit-only behavior. Archer disables the agent's write/edit/bash tools, denies edit/bash/task permissions, and saves the phase report from the assistant response if the agent cannot write it directly.
 - **Parallel steps and model fan-out**: wrap steps in `parallel: [...]` to run them concurrently, and/or give one step a `models: [...]` list (instead of `model:`) to run it once per model. Both are always forced read-only, regardless of the underlying agent's own `readOnly` setting, so concurrent runs can never step on each other's changes to the tree — there's no per-step way to opt out. A `models:` step's variants get disambiguated names (`<step>__<model-slug>`) and reports; `reports: previous` after a parallel block attaches every member's report, and `reports: [<step-name>]` on a fanned-out step's un-suffixed name attaches every one of its model variants. `parallel:` can't nest and can't contain `human-review`.
-- **Project pipelines shadow built-ins**: defining `pipelines.default` replaces the built-in default.
+- **Project pipelines shadow built-ins**: defining `pipelines.implement` replaces the built-in default pipeline.
 - **`--no-human-review`** (and non-TTY runs) drop every `human-review` gate from the pipeline.
 - **Resume is frozen**: the resolved pipeline is persisted in the run's `metadata.json`; `--resume` replays it even if the config changed since.
 - **Dirty-tree recovery**: a phase interrupted before its commit (Ctrl+C, a failed commit step, a killed process) leaves uncommitted work in the tree, which normally blocks `--resume`. In an interactive terminal, resume offers to commit that work as the interrupted phase (`archer(<phase>): …`), mark it done, and continue with the following phases. Decline (or a non-TTY resume) keeps the old "commit/stash first" behavior.
@@ -297,7 +299,7 @@ Both files are merged before a run, with the project winning: `defaults`, `agent
 - Pick models from an autocompleting list: it queries OpenCode for the models your enabled providers expose (including reasoning variants like `#xhigh`), falling back to the full [models.dev](https://models.dev) catalog when OpenCode can't answer, and always accepts a free-typed `provider/model[#variant]`.
 - Edit `defaults` (model, interactiveModel, autoAcceptJudgeModel, maxAttempts, baseRef, pipeline, app command, emulator) and each agent's model/temperature override. Agent `readOnly` is displayed when set; edit it in YAML.
 - Browse pipelines and their steps; add, delete, reorder steps, set a per-step model or max-attempts, and add new pipelines. Permissions and attachments are shown read-only (edit those in the YAML).
-- When a tab has no file yet, `initialize` writes a starter config (the built-in `default` pipeline, expanded and ready to edit).
+- When a tab has no file yet, `initialize` writes a starter config (the built-in `implement` pipeline, expanded and ready to edit).
 
 Keys: `↑/↓` move, `enter` edit/expand, `tab` switch tab, `a` add, `d` delete a step, `shift+↑/↓` reorder a step, `t` agent temperature, `m` step max-attempts, `s` save the active tab, `q` quit. Saving re-validates and rewrites clean YAML (comments are not preserved); the dashboard never paints backgrounds, like the run TUIs. Needs an interactive terminal.
 
@@ -312,7 +314,7 @@ archer init --global       # ~/.archer/config.yaml + ~/.archer/agents/*.md
 archer init --force        # overwrite existing files
 ```
 
-The generated config documents every key (commented out) and inlines the built-in `default` pipeline so it's immediately editable. The copied `agents/*.md` prompts are picked up by name — edit them to override a built-in agent's prompt, or declare a new agent in the config and add its prompt file. Existing files are never overwritten unless `--force` is given. `make install` runs `archer init --global` automatically, so a fresh install ships with a ready-to-edit global config.
+The generated config documents every key (commented out) and inlines the built-in `implement` pipeline so it's immediately editable. The copied `agents/*.md` prompts are picked up by name — edit them to override a built-in agent's prompt, or declare a new agent in the config and add its prompt file. Existing files are never overwritten unless `--force` is given. `make install` runs `archer init --global` automatically, so a fresh install ships with a ready-to-edit global config.
 
 ## Project Context And Custom Agents
 

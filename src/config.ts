@@ -10,6 +10,7 @@ import {
   builtInPipelines,
   defaultGptModel,
   defaultGptVariant,
+  defaultPipelineName,
   humanReviewStep,
   readOnlyAgentSuffix,
   splitModelVariant,
@@ -124,7 +125,7 @@ export async function loadMergedArcherConfig(targetDir: string): Promise<ArcherC
 
 /**
  * The commented YAML template written by `archer init`. It documents every key
- * (commented out) and inlines the built-in `default` pipeline so it's an
+ * (commented out) and inlines the built-in `implement` pipeline so it's an
  * immediately editable starting point. Unlike `defaultConfigTemplate` (used by
  * the TUI's initialize action), this is a human-readable string with comments.
  */
@@ -138,7 +139,7 @@ defaults:
   # model: openai/gpt-5.5#xhigh # optional: uncomment to force every agent unless a step/agent overrides it
   # maxAttempts: 2
   # baseRef: main
-  # pipeline: default
+  # pipeline: implement
   # interactiveModel: openai/gpt-5.5#xhigh
   # appRunCommand: pnpm dev # optional: unset by default; used during human-review
   # emulator: Pixel_8 # optional: unset by default; used during human-review
@@ -160,14 +161,14 @@ defaults:
 #     model: openai/gpt-5.5#xhigh
 
 # Archer ships these pipelines built in; pick one with -p/--pipeline without redeclaring it here:
-#   default              implement: build the feature, then audit, polish, test, and adversarial review
-#   ultra-implementation like default, with dual-model parallel audits and a final review/fix/validate stage
+#   implement            the default: build the feature, then audit, polish, test, and adversarial review
+#   ultra-implement      like implement, with dual-model parallel audits and a final review/fix/validate stage
 #   refine               audit the current diff, then apply the triaged fixes (changes code)
 #   ultra-refine         like refine, with every audit fanned out across two models
 #   review               report-only: parallel audits across two models plus one prioritized report (no changes)
-# The built-in \`default\` is inlined below as an editable starting point; redefining a name here overrides the built-in.
+# The default \`implement\` pipeline is inlined below as an editable starting point; redefining a name here overrides the built-in.
 pipelines:
-  default:
+  implement:
     description: Implementation, pattern/security audits, design polish, tests, and adversarial review
     steps:
       - agent: implementer
@@ -438,7 +439,7 @@ export function buildAgentRegistry(config?: ArcherConfig): AgentSpec[] {
   return registry
 }
 
-/** Project pipelines shadow built-ins of the same name (including "default"). */
+/** Project pipelines shadow built-ins of the same name (including "implement", the default). */
 export function selectPipelineSpec(config: ArcherConfig | undefined, name: string): PipelineSpec {
   const spec = config?.pipelines[name] ?? builtInPipelines[name]
   if (spec) return spec
@@ -483,7 +484,7 @@ export async function writeArcherConfig(path: string, config: ArcherConfig, targ
 
 /**
  * Boilerplate written by the config TUI's "initialize" action: the current
- * effective defaults plus the built-in `default` pipeline expanded so it stays
+ * effective defaults plus the built-in `implement` pipeline expanded so it stays
  * editable. Agent model preferences that differ from defaults.model are inlined
  * on their steps, because defaults.model would otherwise shadow them.
  */
@@ -492,7 +493,7 @@ export function defaultConfigTemplate(): ArcherConfig {
   return {
     defaults: { model: globalModel, maxAttempts: 2 },
     agents: {},
-    pipelines: { default: templatePipeline(builtInPipelines.default!, globalModel) },
+    pipelines: { implement: templatePipeline(builtInPipelines[defaultPipelineName]!, globalModel) },
     permissions: { allow: [], deny: [] },
     attachments: [],
   }

@@ -754,7 +754,7 @@ export class ConfigEditor {
     rows.push(blankRow(), sectionRow("Pipelines"))
     const pipelineNames = Object.keys(config.pipelines)
     if (pipelineNames.length === 0) {
-      rows.push(infoRow("none defined here — built-in 'default' is used"))
+      rows.push(infoRow("none defined here — built-in 'implement' is used"))
     }
     for (const name of pipelineNames) {
       const open = this.expanded.has(this.expandKey(name))

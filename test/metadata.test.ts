@@ -89,6 +89,6 @@ describe("run metadata", () => {
     expect(v1?.pipeline).toBeUndefined()
 
     const adopted = await openRunMetadata(ws, "/repo", defaultPipeline())
-    expect(adopted.pipeline.name).toBe("default")
+    expect(adopted.pipeline.name).toBe("implement")
   })
 })

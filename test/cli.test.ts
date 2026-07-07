@@ -212,7 +212,7 @@ describe("config precedence", () => {
       "--base",
       "main",
       "--pipeline",
-      "default",
+      "implement",
       "--no-app-run",
       "prompt",
     ])
@@ -222,13 +222,13 @@ describe("config precedence", () => {
     expect(command.options.maxAttempts).toBe(1)
     expect(command.options.baseRef).toBe("main")
     expect(command.options.appRunCommand).toBe("")
-    expect(command.options.pipeline.name).toBe("default")
+    expect(command.options.pipeline.name).toBe("implement")
   })
 
   test("an unknown pipeline lists what exists", async () => {
     const dir = await projectWithConfig()
     await expect(parseCommand(["--dir", dir, "--pipeline", "ghost", "prompt"])).rejects.toThrow(
-      'unknown pipeline "ghost" (available: default, quick, refine, review, ultra-implementation, ultra-refine)',
+      'unknown pipeline "ghost" (available: implement, quick, refine, review, ultra-implement, ultra-refine)',
     )
   })
 })

@@ -117,7 +117,7 @@ export const builtInAgents: readonly AgentSpec[] = [
     readOnly: true,
     builtIn: true,
   },
-  // ultra-implementation: final-review stage over the whole PR.
+  // ultra-implement: final-review stage over the whole PR.
   {
     name: "implementation-triage",
     description: "Synthesizes parallel pattern/security/adversarial findings into one action plan",
@@ -193,8 +193,11 @@ export type PipelineSpec = {
 /** Suffix reserved for archer's synthesized forced-read-only agent variants; project agents can't use it. */
 export const readOnlyAgentSuffix = "__ro"
 
+/** The pipeline run when none is selected (no -p flag and no defaults.pipeline). */
+export const defaultPipelineName = "implement"
+
 export const builtInPipelines: Record<string, PipelineSpec> = {
-  default: {
+  implement: {
     description: "Implementation, pattern/security audits, design polish, tests, and adversarial review",
     steps: [
       { agent: "implementer", reports: "none" },
@@ -248,12 +251,11 @@ export const builtInPipelines: Record<string, PipelineSpec> = {
       { agent: "review-validator", name: "validator", model: defaultOpusModel, reports: "all" },
     ],
   },
-  "ultra-implementation": {
+  "ultra-implement": {
     description:
-      "Like default, but pattern/security/adversarial reviews of the initial diff run in parallel across two models feeding a triage step, then design and tests, then an audit-only final review, a fixer that applies only blocking findings, and a final validator.",
+      "Like implement, but pattern/security/adversarial reviews of the initial diff run in parallel across two models feeding a triage step, then design and tests, then an audit-only final review, a fixer that applies only blocking findings, and a final validator.",
     steps: [
       { agent: "implementer", reports: "none" },
-      "human-review",
       {
         parallel: [
           { agent: "patterns", models: [sonnetModel, glmModel] },
@@ -519,5 +521,5 @@ export function validateStepFilters(pipeline: Pipeline, filters: { onlySteps: st
 }
 
 export function defaultPipeline(): Pipeline {
-  return resolvePipeline({ name: "default", spec: builtInPipelines.default!, agents: builtInAgents })
+  return resolvePipeline({ name: defaultPipelineName, spec: builtInPipelines[defaultPipelineName]!, agents: builtInAgents })
 }

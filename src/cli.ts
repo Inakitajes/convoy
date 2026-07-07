@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises"
 import { resolve } from "node:path"
 
 import { buildAgentRegistry, loadMergedArcherConfig, selectPipelineSpec, writeDefaultGlobalConfig, writeDefaultProjectConfig, type ArcherDefaults } from "./config"
-import { defaultGptModel, defaultGptVariant, defaultPipeline, resolvePipeline, splitModelVariant, validateStepFilters } from "./pipeline"
+import { defaultGptModel, defaultGptVariant, defaultPipeline, defaultPipelineName, resolvePipeline, splitModelVariant, validateStepFilters } from "./pipeline"
 import { parseModel, run } from "./runner"
 import { browseRuns } from "./runs"
 import type { Pipeline, RunOptions } from "./types"
@@ -212,7 +212,7 @@ export async function resolveRunOptions(parsed: ParsedArgs): Promise<Omit<RunOpt
   const humanReview = parsed.humanReview ?? Boolean(process.stdin.isTTY && process.stdout.isTTY)
 
   const agents = buildAgentRegistry(config)
-  const pipelineName = parsed.pipeline ?? defaults.pipeline ?? "default"
+  const pipelineName = parsed.pipeline ?? defaults.pipeline ?? defaultPipelineName
   let pipeline: Pipeline
   try {
     pipeline = resolvePipeline({ name: pipelineName, spec: selectPipelineSpec(config, pipelineName), agents, defaultModel: defaults.model })
@@ -435,7 +435,7 @@ Commands:
 Flags:
   --prompt-file <path>     Read the PRD/prompt from a file
   --file, -f <path>        Attach a file or directory to all steps (repeatable)
-  --pipeline, -p <name>    Pipeline to run; built-in "default" runs
+  --pipeline, -p <name>    Pipeline to run (default: "implement"), which runs
                            implementer,patterns,security,design,tests,adversarial
   --only <steps>           Run only these pipeline steps
   --skip <steps>           Skip these pipeline steps

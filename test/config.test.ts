@@ -301,13 +301,13 @@ describe("agent registry", () => {
 describe("pipeline selection", () => {
   test("project pipelines shadow built-ins; unknown names list what exists", async () => {
     const dir = await projectDir()
-    const config = parse("pipelines:\n  quick:\n    steps:\n      - implementer\n  default:\n    steps:\n      - tests", dir)
+    const config = parse("pipelines:\n  quick:\n    steps:\n      - implementer\n  implement:\n    steps:\n      - tests", dir)
 
     expect(selectPipelineSpec(config, "quick").steps).toEqual(["implementer"])
-    expect(selectPipelineSpec(config, "default").steps).toEqual(["tests"])
-    expect(selectPipelineSpec(undefined, "default").steps.length).toBeGreaterThan(1)
+    expect(selectPipelineSpec(config, "implement").steps).toEqual(["tests"])
+    expect(selectPipelineSpec(undefined, "implement").steps.length).toBeGreaterThan(1)
     expect(() => selectPipelineSpec(config, "ghost")).toThrow(
-      'unknown pipeline "ghost" (available: default, quick, refine, review, ultra-implementation, ultra-refine)',
+      'unknown pipeline "ghost" (available: implement, quick, refine, review, ultra-implement, ultra-refine)',
     )
     expect(() => selectPipelineSpec(config, "ghost")).toThrow(ConfigError)
   })
@@ -372,7 +372,7 @@ describe("serialization", () => {
   test("defaultConfigTemplate inlines opus on design and round-trips", () => {
     const template = defaultConfigTemplate()
     expect(template.defaults.model).toBe(`${defaultGptModel}#${defaultGptVariant}`)
-    const steps = template.pipelines.default!.steps
+    const steps = template.pipelines.implement!.steps
     expect(steps.find((step) => typeof step !== "string" && !isParallelSpec(step) && step.agent === "design")).toEqual({ agent: "design", model: defaultOpusModel })
     const reparsed = parse(serializeArcherConfig(template))
     expect(reparsed.defaults).toEqual(template.defaults)
@@ -431,7 +431,7 @@ describe("default config init", () => {
 
     expect(body).toContain("# maxAttempts: 2")
     expect(body).toContain("# baseRef: main")
-    expect(body).toContain("# pipeline: default")
+    expect(body).toContain("# pipeline: implement")
     expect(body).toContain("# interactiveModel: openai/gpt-5.5#xhigh")
     expect(body).toContain("# appRunCommand: pnpm dev")
     expect(body).toContain("# agents:")
@@ -443,7 +443,7 @@ describe("default config init", () => {
     for (const agent of builtInAgents) {
       expect(await readFile(join(dir, "agents", `${agent.name}.md`), "utf8")).toContain("#")
     }
-    expect(config.pipelines.default?.steps).toEqual([
+    expect(config.pipelines.implement?.steps).toEqual([
       { agent: "implementer", reports: "none" },
       "patterns",
       "security",
