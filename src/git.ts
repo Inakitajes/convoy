@@ -117,7 +117,9 @@ export async function restoreRepoSnapshot(snapshot: RepoSnapshot, cwd: string) {
  * flow so Archer runs against a clean checkout on a new branch.
  */
 export async function addWorktree(dir: string, branch: string, baseRef: string, cwd: string) {
-  await execFile("git", ["worktree", "add", "-b", branch, dir, baseRef], { cwd })
+  // `--` terminates option parsing so a `dir`/`baseRef` starting with `-`
+  // (e.g. a caller-supplied ref like `--detach`) can't be misread as a flag.
+  await execFile("git", ["worktree", "add", "-b", branch, "--", dir, baseRef], { cwd })
 }
 
 export async function writeDiff(path: string, baseRef: string, cwd: string) {
