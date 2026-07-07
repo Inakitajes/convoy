@@ -153,12 +153,19 @@ defaults:
 #     model: openai/gpt-5.5#xhigh
 #   design-polisher:
 #     description: Polishes new UI following the repo's design system, without redesigning
-#     model: anthropic/claude-opus-4-7
+#     model: anthropic/claude-opus-4-8
 #     temperature: 0.2
 #   api-reviewer:
 #     description: Reviews API consistency
 #     model: openai/gpt-5.5#xhigh
 
+# Archer ships these pipelines built in; pick one with -p/--pipeline without redeclaring it here:
+#   default              implement: build the feature, then audit, polish, test, and adversarial review
+#   ultra-implementation like default, with dual-model parallel audits and a final review/fix/validate stage
+#   refine               audit the current diff, then apply the triaged fixes (changes code)
+#   ultra-refine         like refine, with every audit fanned out across two models
+#   review               report-only: parallel audits across two models plus one prioritized report (no changes)
+# The built-in \`default\` is inlined below as an editable starting point; redefining a name here overrides the built-in.
 pipelines:
   default:
     description: Implementation, pattern/security audits, design polish, tests, and adversarial review

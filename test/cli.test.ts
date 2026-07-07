@@ -228,7 +228,7 @@ describe("config precedence", () => {
   test("an unknown pipeline lists what exists", async () => {
     const dir = await projectWithConfig()
     await expect(parseCommand(["--dir", dir, "--pipeline", "ghost", "prompt"])).rejects.toThrow(
-      'unknown pipeline "ghost" (available: default, quick)',
+      'unknown pipeline "ghost" (available: default, quick, refine, review, ultra-implementation, ultra-refine)',
     )
   })
 })

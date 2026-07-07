@@ -4,7 +4,7 @@ Archer is a higher-level orchestration harness for [OpenCode](https://opencode.a
 
 Rather than being only a sequential agent chain, Archer owns the operational layer around OpenCode: repo context attachment, runtime guard rails, permission gates, phase reports, diff tracking, and human-in-the-loop checkpoints.
 
-Pipelines are data, not code: archer ships a built-in `default` pipeline, and a project can define its own — any number of steps, its own agents, its own models, with `human-review` gates anywhere — in `.archer/config.yaml`.
+Pipelines are data, not code: archer ships a family of built-in pipelines (`default`, `ultra-implementation`, `refine`, `ultra-refine`, and a report-only `review` — see [Built-in pipelines](#built-in-pipelines)), and a project can define its own — any number of steps, its own agents, its own models, with `human-review` gates anywhere — in `.archer/config.yaml`.
 
 Archer is written in Bun + TypeScript and uses `@opencode-ai/sdk` to control OpenCode. The SDK starts/controls the OpenCode server; Archer no longer manually calls `opencode run` nor parses stdout.
 
@@ -22,9 +22,23 @@ PRD ──► implementer ──► patterns ──► security ──► design
 | `implementer` | `implementer` | `openai/gpt-5.5#xhigh` | Implements the feature respecting repo patterns |
 | `patterns` | `pattern-auditor` | `openai/gpt-5.5#xhigh` | Refactors without changing behavior, aligns with the rest of the code |
 | `security` | `security-auditor` | `openai/gpt-5.5#xhigh` | Audits and fixes security issues |
-| `design` | `design-polisher` | `anthropic/claude-opus-4-7` | Polishes UI following the repo's design system |
+| `design` | `design-polisher` | `anthropic/claude-opus-4-8` | Polishes UI following the repo's design system |
 | `tests` | `test-engineer` | `openai/gpt-5.5#xhigh` | Automated tests + relevant E2E/integration coverage |
-| `adversarial` | `adversarial-reviewer` | `anthropic/claude-opus-4-7` | Final adversarial review before PR creation |
+| `adversarial` | `adversarial-reviewer` | `anthropic/claude-opus-4-8` | Final adversarial review before PR creation |
+
+## Built-in pipelines
+
+Archer ships these pipelines; select one with `-p/--pipeline` (no config needed). A project can add or override any of them in `.archer/config.yaml`.
+
+| Pipeline | Changes code? | What it does |
+|---|---|---|
+| `default` | yes | Implement a PRD, then audit, polish, test, and adversarial review (the table above). |
+| `ultra-implementation` | yes | Like `default`, but the pattern/security/adversarial reviews of the initial diff run in parallel across two models feeding a triage step, and the run ends with an audit-only final review, a fixer that applies only blocking findings, and a final validator. |
+| `refine` | yes | Audit the current diff (scope → bugs → clean-code → security), triage the findings adversarially, apply the accepted fixes, then validate them. |
+| `ultra-refine` | yes | Like `refine`, but every read-only audit is fanned out across two models before triage, fixes, and validation. |
+| `review` | **no — report only** | Scope the diff, run the bug / clean-code(+patterns) / security audits **in parallel across two models each**, then a single step synthesizes everything into one prioritized findings report. Makes no changes; the run's output is `reports/report.md`, which you read to decide whether to follow up with a `refine` run. |
+
+`refine`/`ultra-refine` are the change-applying counterparts of `review`: run `review` first to get a report, then `refine` if you want the fixes applied.
 
 ## Requirements
 
@@ -46,7 +60,7 @@ opencode models openai
 opencode models anthropic
 ```
 
-To use different providers, authenticate them in OpenCode and select models as `provider/model`. Archer defaults to `openai/gpt-5.5` with variant `xhigh` for non-design phases, and `anthropic/claude-opus-4-7` for design and adversarial review.
+To use different providers, authenticate them in OpenCode and select models as `provider/model`. Archer defaults to `openai/gpt-5.5` with variant `xhigh` for non-design phases, and `anthropic/claude-opus-4-8` for design and adversarial review.
 
 ## Installation
 
@@ -211,7 +225,7 @@ defaults:
 agents:
   api-reviewer:
     description: Reviews public API consistency
-    model: anthropic/claude-opus-4-7
+    model: anthropic/claude-opus-4-8
     temperature: 0.1
     readOnly: true               # disables write/edit/bash tools for this agent
 
@@ -241,7 +255,7 @@ pipelines:
           - security
           - agent: clean-code
             models:                # fans this one step out across models, one read-only run per model
-              - anthropic/claude-opus-4-7
+              - anthropic/claude-opus-4-8
               - openai/gpt-5.5#xhigh
       - agent: adversarial
         name: triage

@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 
 import {
   builtInAgents,
+  builtInPipelines,
   defaultPipeline,
   resolvePipeline,
   slugifyModel,
@@ -68,9 +69,47 @@ describe("default pipeline", () => {
     )
 
     expect(byName.implementer).toMatchObject({ model: "openai/gpt-5.5", variant: "xhigh" })
-    expect(byName.design).toMatchObject({ model: "anthropic/claude-opus-4-7" })
+    expect(byName.design).toMatchObject({ model: "anthropic/claude-opus-4-8" })
     expect(byName.design?.variant).toBeUndefined()
-    expect(byName.adversarial?.model).toBe("anthropic/claude-opus-4-7")
+    expect(byName.adversarial?.model).toBe("anthropic/claude-opus-4-8")
+  })
+})
+
+describe("built-in review pipeline", () => {
+  const review = () => resolvePipeline({ name: "review", spec: builtInPipelines.review!, agents: builtInAgents })
+
+  test("is report-only: every step is read-only and there is no human gate", () => {
+    const pipeline = review()
+    const agents = pipeline.steps.filter((step): step is AgentStep => step.type === "agent")
+    expect(agents.length).toBeGreaterThan(0)
+    expect(agents.every((step) => step.readOnly)).toBe(true)
+    expect(pipeline.steps.some((step) => step.type === "human")).toBe(false)
+  })
+
+  test("fans each audit across glm + opus and feeds a single report step with every audit", () => {
+    const pipeline = review()
+    expect(stepNames(pipeline)).toEqual([
+      "scope",
+      "clean-code__openrouter-z-ai-glm-5-2",
+      "clean-code__anthropic-claude-opus-4-8",
+      "security__openrouter-z-ai-glm-5-2",
+      "security__anthropic-claude-opus-4-8",
+      "bugs__openrouter-z-ai-glm-5-2",
+      "bugs__anthropic-claude-opus-4-8",
+      "report",
+    ])
+
+    const report = pipeline.steps.find((step): step is AgentStep => step.type === "agent" && step.stepName === "report")
+    expect(report?.inputFiles).toEqual([
+      "prd.md",
+      "reports/scope.md",
+      "reports/clean-code__openrouter-z-ai-glm-5-2.md",
+      "reports/clean-code__anthropic-claude-opus-4-8.md",
+      "reports/security__openrouter-z-ai-glm-5-2.md",
+      "reports/security__anthropic-claude-opus-4-8.md",
+      "reports/bugs__openrouter-z-ai-glm-5-2.md",
+      "reports/bugs__anthropic-claude-opus-4-8.md",
+    ])
   })
 })
 
@@ -129,7 +168,7 @@ describe("pipeline resolution", () => {
     }
 
     const withoutDefault = agentSteps(spec)
-    expect(withoutDefault[1]).toMatchObject({ model: "anthropic/claude-opus-4-7" })
+    expect(withoutDefault[1]).toMatchObject({ model: "anthropic/claude-opus-4-8" })
 
     const [implementer, design, tests] = resolvePipeline({
       name: "test",

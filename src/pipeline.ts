@@ -2,9 +2,13 @@ import type { AgentSpec, AgentStep, HumanStep, Pipeline, Step } from "./types"
 
 export const defaultGptModel = "openai/gpt-5.5"
 export const defaultGptVariant = "xhigh"
-export const defaultOpusModel = "anthropic/claude-opus-4-7"
+export const defaultOpusModel = "anthropic/claude-opus-4-8"
 
 const fallbackModel = `${defaultGptModel}#${defaultGptVariant}`
+
+/** Models the built-in review/refine pipelines fan their audits across; a project can override per step. */
+const sonnetModel = "openrouter/anthropic/claude-sonnet-5"
+const glmModel = "openrouter/z-ai/glm-5.2"
 
 /** Reserved step keyword: pauses the pipeline for the manual review gate. */
 export const humanReviewStep = "human-review"
@@ -47,6 +51,102 @@ export const builtInAgents: readonly AgentSpec[] = [
     description: "Final adversarial reviewer before PR creation",
     defaultModel: defaultOpusModel,
     temperature: 0.1,
+    builtIn: true,
+  },
+  // Review pipelines: shared audit agents (report-only `review` and change-applying `refine`/`ultra-refine`).
+  {
+    name: "review-scope",
+    description: "Audit-only collector for branch scope and repository patterns",
+    defaultModel: fallbackModel,
+    temperature: 0.1,
+    readOnly: true,
+    builtIn: true,
+  },
+  {
+    name: "bug-auditor",
+    description: "Audit-only reviewer for bugs, regressions, and functional risks",
+    defaultModel: fallbackModel,
+    temperature: 0.1,
+    readOnly: true,
+    builtIn: true,
+  },
+  {
+    name: "clean-code-auditor",
+    description: "Audit-only reviewer for pattern alignment and maintainability risks",
+    defaultModel: fallbackModel,
+    temperature: 0.1,
+    readOnly: true,
+    builtIn: true,
+  },
+  {
+    name: "security-reviewer",
+    description: "Audit-only reviewer for security, privacy, and operational risks",
+    defaultModel: fallbackModel,
+    temperature: 0.1,
+    readOnly: true,
+    builtIn: true,
+  },
+  {
+    name: "review-adversary",
+    description: "Adversarial reviewer that validates and filters audit findings before fixes",
+    defaultModel: defaultOpusModel,
+    temperature: 0.1,
+    readOnly: true,
+    builtIn: true,
+  },
+  {
+    name: "review-fixer",
+    description: "Applies only triaged review fixes without adding new scope",
+    defaultModel: fallbackModel,
+    temperature: 0.1,
+    builtIn: true,
+  },
+  {
+    name: "review-validator",
+    description: "Final no-edit validator for applied review fixes",
+    defaultModel: fallbackModel,
+    temperature: 0.1,
+    readOnly: true,
+    builtIn: true,
+  },
+  {
+    name: "review-report",
+    description: "Synthesizes parallel audits into one prioritized, report-only findings summary",
+    defaultModel: defaultOpusModel,
+    temperature: 0.1,
+    readOnly: true,
+    builtIn: true,
+  },
+  // ultra-implementation: final-review stage over the whole PR.
+  {
+    name: "implementation-triage",
+    description: "Synthesizes parallel pattern/security/adversarial findings into one action plan",
+    defaultModel: defaultOpusModel,
+    temperature: 0.1,
+    readOnly: true,
+    builtIn: true,
+  },
+  {
+    name: "implementation-final-review",
+    description: "Final audit-only adversarial review of the whole PR; classifies blocking vs non-blocking findings",
+    defaultModel: defaultOpusModel,
+    temperature: 0.1,
+    readOnly: true,
+    builtIn: true,
+  },
+  {
+    name: "implementation-fixer",
+    description: "Applies only the blocking findings from the final review",
+    defaultModel: fallbackModel,
+    temperature: 0.1,
+    builtIn: true,
+  },
+  {
+    name: "implementation-validator",
+    description: "Final no-edit validator for applied blocking-finding fixes",
+    defaultModel: defaultOpusModel,
+    temperature: 0.1,
+    readOnly: true,
     builtIn: true,
   },
 ]
@@ -103,6 +203,70 @@ export const builtInPipelines: Record<string, PipelineSpec> = {
       "design",
       { agent: "tests", reports: "none" },
       { agent: "adversarial", reports: "all" },
+    ],
+  },
+  review: {
+    description:
+      "Report-only PR review: scope, then parallel bug/clean-code/security audits across two models, then one prioritized findings report. Makes no changes.",
+    steps: [
+      { agent: "review-scope", name: "scope", model: defaultOpusModel, reports: "none", diff: true },
+      {
+        parallel: [
+          { agent: "clean-code-auditor", name: "clean-code", models: [glmModel, defaultOpusModel], reports: ["scope"] },
+          { agent: "security-reviewer", name: "security", models: [glmModel, defaultOpusModel], reports: ["scope"] },
+          { agent: "bug-auditor", name: "bugs", models: [glmModel, defaultOpusModel], reports: ["scope"] },
+        ],
+      },
+      { agent: "review-report", name: "report", model: defaultOpusModel, reports: "all" },
+    ],
+  },
+  refine: {
+    description: "Audit-only PR review, adversarial finding triage, targeted fixes, and final validation — applies changes.",
+    steps: [
+      { agent: "review-scope", name: "scope", model: sonnetModel, reports: "none", diff: true },
+      { agent: "bug-auditor", name: "bugs", model: sonnetModel, reports: ["scope"] },
+      { agent: "clean-code-auditor", name: "clean-code", model: sonnetModel, reports: ["scope"] },
+      { agent: "security-reviewer", name: "security", model: sonnetModel, reports: ["scope"] },
+      { agent: "review-adversary", name: "triage", model: defaultOpusModel, reports: ["scope", "bugs", "clean-code", "security"] },
+      { agent: "review-fixer", name: "fixes", model: sonnetModel, reports: ["triage"] },
+      { agent: "review-validator", name: "validator", model: fallbackModel, reports: "all" },
+    ],
+  },
+  "ultra-refine": {
+    description: "Like refine, but every read-only audit runs in parallel across two models before triage, targeted fixes, and validation.",
+    steps: [
+      { agent: "review-scope", name: "scope", models: [sonnetModel, glmModel], reports: "none", diff: true },
+      {
+        parallel: [
+          { agent: "bug-auditor", name: "bugs", models: [sonnetModel, glmModel], reports: ["scope"] },
+          { agent: "clean-code-auditor", name: "clean-code", models: [sonnetModel, glmModel], reports: ["scope"] },
+          { agent: "security-reviewer", name: "security", models: [sonnetModel, glmModel], reports: ["scope"] },
+        ],
+      },
+      { agent: "review-adversary", name: "triage", model: defaultOpusModel, reports: ["scope", "bugs", "clean-code", "security"] },
+      { agent: "review-fixer", name: "fixes", model: sonnetModel, reports: ["triage"] },
+      { agent: "review-validator", name: "validator", model: defaultOpusModel, reports: "all" },
+    ],
+  },
+  "ultra-implementation": {
+    description:
+      "Like default, but pattern/security/adversarial reviews of the initial diff run in parallel across two models feeding a triage step, then design and tests, then an audit-only final review, a fixer that applies only blocking findings, and a final validator.",
+    steps: [
+      { agent: "implementer", reports: "none" },
+      "human-review",
+      {
+        parallel: [
+          { agent: "patterns", models: [sonnetModel, glmModel] },
+          { agent: "security", models: [sonnetModel, glmModel] },
+          { agent: "adversarial", models: [sonnetModel, glmModel] },
+        ],
+      },
+      { agent: "implementation-triage", name: "triage", model: defaultOpusModel },
+      { agent: "design", model: defaultOpusModel },
+      { agent: "tests", reports: "none" },
+      { agent: "implementation-final-review", name: "final-review", model: defaultOpusModel, reports: "all" },
+      { agent: "implementation-fixer", name: "fixes", reports: ["final-review"] },
+      { agent: "implementation-validator", name: "validator", model: defaultOpusModel, reports: "all" },
     ],
   },
 }
