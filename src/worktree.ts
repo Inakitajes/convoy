@@ -78,7 +78,7 @@ export async function generateBranchName(
   }
 }
 
-async function askForBranchName(
+export async function askForBranchName(
   client: OpencodeClient,
   prompt: string,
   targetDir: string,

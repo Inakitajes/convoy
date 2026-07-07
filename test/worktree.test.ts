@@ -1,6 +1,44 @@
 import { describe, expect, test } from "bun:test"
 
-import { cleanBranchName, fallbackBranchName, slugifyBranch } from "../src/worktree"
+import type { OpencodeClient } from "@opencode-ai/sdk/v2"
+
+import { askForBranchName, cleanBranchName, fallbackBranchName, slugifyBranch } from "../src/worktree"
+
+type FakeNamerOptions = {
+  promptText?: string
+  promptThrows?: boolean
+  onCreate?: (input: unknown, options: unknown) => void
+  onPrompt?: (input: unknown, options: unknown) => void
+  onDelete?: (input: unknown) => void
+}
+
+type NamerPromptInput = {
+  sessionID: string
+  directory: string
+  model: { providerID: string; modelID: string }
+  tools: Record<string, boolean>
+  parts: Array<{ type: string; text: string }>
+}
+
+function fakeNamerClient(opts: FakeNamerOptions): OpencodeClient {
+  return {
+    session: {
+      create: async (input: unknown, options: unknown) => {
+        opts.onCreate?.(input, options)
+        return { data: { id: "namer-session" }, error: undefined }
+      },
+      prompt: async (input: unknown, options: unknown) => {
+        opts.onPrompt?.(input, options)
+        if (opts.promptThrows) throw new Error("provider unavailable")
+        return { data: { info: {}, parts: [{ type: "text", text: opts.promptText ?? "" }] }, error: undefined }
+      },
+      delete: async (input: unknown) => {
+        opts.onDelete?.(input)
+        return { data: undefined, error: undefined }
+      },
+    },
+  } as unknown as OpencodeClient
+}
 
 describe("worktree branch name helpers", () => {
   test("cleanBranchName coerces model replies into git-safe kebab-case", () => {
@@ -40,5 +78,44 @@ describe("worktree branch name helpers", () => {
     expect(slugifyBranch("feature/foo bar")).toBe("feature-foo-bar")
     // Always returns something, even for garbage input.
     expect(slugifyBranch("!!!")).toMatch(/^archer-[a-z0-9]{6}$/)
+  })
+})
+
+describe("askForBranchName", () => {
+  test("asks a tool-less session for a branch name and collects text parts", async () => {
+    let createInput: unknown
+    let promptInput: NamerPromptInput | undefined
+    const client = fakeNamerClient({
+      promptText: "add-onboarding-flow",
+      onCreate: (input) => (createInput = input),
+      onPrompt: (input) => (promptInput = input as NamerPromptInput),
+    })
+
+    await expect(askForBranchName(client, "build onboarding", "/repo", "openai/gpt-5.5")).resolves.toBe("add-onboarding-flow")
+    expect(createInput).toEqual({ directory: "/repo", title: "archer branch namer" })
+    expect(promptInput?.sessionID).toBe("namer-session")
+    expect(promptInput?.directory).toBe("/repo")
+    expect(promptInput?.model).toEqual({ providerID: "openai", modelID: "gpt-5.5" })
+    expect(promptInput?.tools).toEqual({ read: false, write: false, edit: false, bash: false, webfetch: false, todoread: false, todowrite: false })
+    expect(promptInput?.parts).toEqual([{ type: "text", text: "Prompt:\nbuild onboarding" }])
+  })
+
+  test("truncates long prompts before sending them to the naming model", async () => {
+    let promptInput: NamerPromptInput | undefined
+    const client = fakeNamerClient({ promptText: "long-prompt-work", onPrompt: (input) => (promptInput = input as NamerPromptInput) })
+
+    await askForBranchName(client, "x".repeat(1_300), "/repo", "anthropic/claude-haiku-4-5")
+
+    const sent = promptInput?.parts[0]?.text ?? ""
+    expect(sent.length).toBe("Prompt:\n".length + 1_200)
+    expect(sent.endsWith("…")).toBe(true)
+  })
+
+  test("cleans up the throwaway session when the provider call fails", async () => {
+    let deleted: unknown
+    const client = fakeNamerClient({ promptThrows: true, onDelete: (input) => (deleted = input) })
+
+    await expect(askForBranchName(client, "fix login", "/repo", "openai/gpt-5.5")).rejects.toThrow("provider unavailable")
+    expect(deleted).toEqual({ sessionID: "namer-session", directory: "/repo" })
   })
 })

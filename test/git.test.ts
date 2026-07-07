@@ -1,9 +1,9 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import { ensureRepoReady, findSuspiciousStagedFiles } from "../src/git"
+import { addWorktree, ensureRepoReady, findSuspiciousStagedFiles } from "../src/git"
 
 describe("findSuspiciousStagedFiles", () => {
   test("flags common secret filenames", () => {
@@ -85,5 +85,47 @@ describe("ensureRepoReady", () => {
   test("allowDirty defers the dirty-tree decision so resume can recover", async () => {
     const dir = await dirtyRepo()
     await expect(ensureRepoReady(dir, { allowDirty: true })).resolves.toBeUndefined()
+  })
+})
+
+describe("addWorktree", () => {
+  const dirs: string[] = []
+  afterAll(async () => {
+    await Promise.all(dirs.map((dir) => rm(dir, { recursive: true, force: true })))
+  })
+
+  async function git(args: string[], cwd: string) {
+    const proc = Bun.spawn(["git", ...args], {
+      cwd,
+      stdout: "pipe",
+      stderr: "pipe",
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: "archer-test",
+        GIT_AUTHOR_EMAIL: "archer-test@example.invalid",
+        GIT_COMMITTER_NAME: "archer-test",
+        GIT_COMMITTER_EMAIL: "archer-test@example.invalid",
+      },
+    })
+    if ((await proc.exited) !== 0) throw new Error(`git ${args.join(" ")}: ${await new Response(proc.stderr).text()}`)
+  }
+
+  test("creates a branch checked out in a separate worktree", async () => {
+    const repo = await mkdtemp(join(tmpdir(), "archer-worktree-repo-"))
+    const worktree = await mkdtemp(join(tmpdir(), "archer-worktree-dir-"))
+    await rm(worktree, { recursive: true, force: true })
+    dirs.push(repo, worktree)
+
+    await git(["init", "-q"], repo)
+    await writeFile(join(repo, "README.md"), "base\n")
+    await git(["add", "README.md"], repo)
+    await git(["commit", "-q", "-m", "init"], repo)
+
+    await addWorktree(worktree, "add-onboarding-flow", "HEAD", repo)
+
+    expect(await readFile(join(worktree, "README.md"), "utf8")).toBe("base\n")
+    const branch = Bun.spawn(["git", "branch", "--show-current"], { cwd: worktree, stdout: "pipe", stderr: "pipe" })
+    expect((await new Response(branch.stdout).text()).trim()).toBe("add-onboarding-flow")
+    expect(await branch.exited).toBe(0)
   })
 })
