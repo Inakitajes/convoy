@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import { addWorktree, ensureRepoReady, findSuspiciousStagedFiles } from "../src/git"
+import { addWorktree, ensureRepoReady, findSuspiciousStagedFiles, initializeRepoWithInitialCommit, repoBootstrapStatus } from "../src/git"
 
 describe("findSuspiciousStagedFiles", () => {
   test("flags common secret filenames", () => {
@@ -85,6 +85,81 @@ describe("ensureRepoReady", () => {
   test("allowDirty defers the dirty-tree decision so resume can recover", async () => {
     const dir = await dirtyRepo()
     await expect(ensureRepoReady(dir, { allowDirty: true })).resolves.toBeUndefined()
+  })
+})
+
+describe("initializeRepoWithInitialCommit", () => {
+  const dirs: string[] = []
+  afterAll(async () => {
+    await Promise.all(dirs.map((dir) => rm(dir, { recursive: true, force: true })))
+  })
+
+  async function tmpRepoDir() {
+    const dir = await mkdtemp(join(tmpdir(), "archer-init-repo-"))
+    dirs.push(dir)
+    return dir
+  }
+
+  async function gitOutput(args: string[], cwd: string) {
+    const proc = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe", env: process.env })
+    const stdout = await new Response(proc.stdout).text()
+    const stderr = await new Response(proc.stderr).text()
+    const exitCode = await proc.exited
+    if (exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${stderr}`)
+    return stdout.trim()
+  }
+
+  test("detects a directory without a git repository", async () => {
+    const dir = await tmpRepoDir()
+    expect(await repoBootstrapStatus(dir)).toBe("no-repo")
+  })
+
+  test("initializes a new repository with an empty initial commit", async () => {
+    const dir = await tmpRepoDir()
+
+    await initializeRepoWithInitialCommit(dir, { baseRef: "main" })
+
+    expect(await repoBootstrapStatus(dir)).toBe("ready")
+    expect(await gitOutput(["branch", "--show-current"], dir)).toBe("main")
+    expect(await gitOutput(["log", "-1", "--format=%s"], dir)).toBe("archer: initial commit")
+    await expect(ensureRepoReady(dir, { baseRef: "main" })).resolves.toBeUndefined()
+  })
+
+  test("includes existing project files in the initial commit", async () => {
+    const dir = await tmpRepoDir()
+    await writeFile(join(dir, "README.md"), "hello\n")
+
+    await initializeRepoWithInitialCommit(dir, { baseRef: "main" })
+
+    expect(await gitOutput(["show", "--format=", "--name-only", "HEAD"], dir)).toBe("README.md")
+    expect(await gitOutput(["status", "--porcelain"], dir)).toBe("")
+  })
+
+  test("creates an initial commit for a repository with no commits", async () => {
+    const dir = await tmpRepoDir()
+    await gitOutput(["init", "-q", "-b", "main"], dir)
+
+    expect(await repoBootstrapStatus(dir)).toBe("no-commits")
+    await initializeRepoWithInitialCommit(dir, { baseRef: "main" })
+    expect(await repoBootstrapStatus(dir)).toBe("ready")
+  })
+
+  test("creates the initial commit on the requested base branch", async () => {
+    const dir = await tmpRepoDir()
+    await gitOutput(["init", "-q", "-b", "master"], dir)
+
+    await initializeRepoWithInitialCommit(dir, { baseRef: "main" })
+
+    expect(await gitOutput(["branch", "--show-current"], dir)).toBe("main")
+    await expect(ensureRepoReady(dir, { baseRef: "main" })).resolves.toBeUndefined()
+  })
+
+  test("refuses to create an initial commit with likely secrets", async () => {
+    const dir = await tmpRepoDir()
+    await writeFile(join(dir, ".env"), "TOKEN=secret\n")
+
+    await expect(initializeRepoWithInitialCommit(dir, { baseRef: "main" })).rejects.toThrow(/look like secrets/)
+    expect(await repoBootstrapStatus(dir)).toBe("no-commits")
   })
 })
 

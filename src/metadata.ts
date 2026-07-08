@@ -222,6 +222,7 @@ export function recordProgress(progress: ProgressUI, store: RunMetadataStore): P
   // The gate decides between in-place prompts and the readline fallback by
   // probing for askPermission, so its presence must mirror the wrapped UI.
   if (progress.askPermission) recorder.askPermission = progress.askPermission.bind(progress)
+  if (progress.askHumanReview) recorder.askHumanReview = progress.askHumanReview.bind(progress)
   // Same probing contract: the runner only holds the finish screen when the UI offers one.
   if (progress.runFinished) recorder.runFinished = progress.runFinished.bind(progress)
   return recorder

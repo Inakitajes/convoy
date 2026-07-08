@@ -19,6 +19,8 @@ export type RepoSnapshot = {
   head: string
 }
 
+export type RepoBootstrapStatus = "ready" | "no-repo" | "no-commits"
+
 async function execFile(command: string, args: string[], options: ExecOptions): Promise<ExecResult> {
   const proc = Bun.spawn([command, ...args], {
     cwd: options.cwd,
@@ -41,17 +43,7 @@ async function execFile(command: string, args: string[], options: ExecOptions): 
 }
 
 export async function ensureRepoReady(cwd: string, options: { includeDirty?: boolean; maxAttempts?: number; baseRef?: string; allowDirty?: boolean } = {}) {
-  const rootResult = await execFile("git", ["rev-parse", "--show-toplevel"], { cwd, allowFailure: true })
-  if (rootResult.exitCode !== 0) {
-    throw new Error("archer must be run at the root of a git repo")
-  }
-
-  // git reports the physical path; resolve symlinks on our side too so a
-  // symlinked --dir (e.g. /tmp on macOS) doesn't false-positive.
-  const root = await realpathSafe(rootResult.stdout.trim())
-  if (root !== (await realpathSafe(cwd))) {
-    throw new Error(`archer must be run at the root of the git repo (${root})`)
-  }
+  await requireRepoRoot(cwd)
 
   if (options.baseRef) {
     const base = await execFile("git", ["rev-parse", "--verify", "--quiet", `${options.baseRef}^{commit}`], { cwd, allowFailure: true })
@@ -73,6 +65,48 @@ export async function ensureRepoReady(cwd: string, options: { includeDirty?: boo
     }
     log.warn("working tree is not clean; --include-dirty will include those changes in the first commit of the pipeline")
   }
+}
+
+export async function repoBootstrapStatus(cwd: string): Promise<RepoBootstrapStatus> {
+  const rootResult = await execFile("git", ["rev-parse", "--show-toplevel"], { cwd, allowFailure: true })
+  if (rootResult.exitCode !== 0) return "no-repo"
+
+  await assertRepoRoot(cwd, rootResult.stdout.trim())
+  const head = await execFile("git", ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"], { cwd, allowFailure: true })
+  return head.exitCode === 0 ? "ready" : "no-commits"
+}
+
+export async function initializeRepoWithInitialCommit(cwd: string, options: { baseRef?: string } = {}) {
+  const status = await repoBootstrapStatus(cwd)
+  if (status === "no-repo") {
+    const args = ["init", "-q"]
+    if (options.baseRef && isSafeInitialBranch(options.baseRef)) args.push("-b", options.baseRef)
+    await execFile("git", args, { cwd })
+  } else if (status === "ready") {
+    return
+  }
+
+  const currentStatus = await repoBootstrapStatus(cwd)
+  if (currentStatus === "ready") return
+  if (currentStatus === "no-repo") throw new Error("couldn't initialize git repository")
+
+  if (options.baseRef && isSafeInitialBranch(options.baseRef)) {
+    await execFile("git", ["symbolic-ref", "HEAD", `refs/heads/${options.baseRef}`], { cwd })
+  }
+
+  await execFile("git", ["add", "-A"], { cwd })
+  const porcelain = await execFile("git", ["status", "--porcelain"], { cwd })
+  const suspicious = findSuspiciousStagedFiles(porcelain.stdout)
+  if (suspicious.length > 0) {
+    await execFile("git", ["reset"], { cwd })
+    throw new Error(
+      `refusing to create initial commit with files that look like secrets: ${suspicious.join(", ")}. ` +
+        `Add them to .gitignore (or remove them) and re-run.`,
+    )
+  }
+
+  const commitArgs = porcelain.stdout.trim() === "" ? ["commit", "--allow-empty", "-m", "archer: initial commit"] : ["commit", "-m", "archer: initial commit"]
+  await execFile("git", commitArgs, { cwd, env: archerGitEnv })
 }
 
 export async function statusPorcelain(cwd: string): Promise<string> {
@@ -152,14 +186,16 @@ export async function addAllAndCommit(message: string, cwd: string) {
 
   await execFile("git", ["commit", "-m", message], {
     cwd,
-    env: {
-      GIT_AUTHOR_NAME: "archer",
-      GIT_AUTHOR_EMAIL: "archer@local",
-      GIT_COMMITTER_NAME: "archer",
-      GIT_COMMITTER_EMAIL: "archer@local",
-    },
+    env: archerGitEnv,
   })
   return true
+}
+
+const archerGitEnv = {
+  GIT_AUTHOR_NAME: "archer",
+  GIT_AUTHOR_EMAIL: "archer@local",
+  GIT_COMMITTER_NAME: "archer",
+  GIT_COMMITTER_EMAIL: "archer@local",
 }
 
 const secretPatterns: RegExp[] = [
@@ -212,4 +248,25 @@ async function realpathSafe(path: string) {
   } catch {
     return resolve(path)
   }
+}
+
+async function requireRepoRoot(cwd: string) {
+  const rootResult = await execFile("git", ["rev-parse", "--show-toplevel"], { cwd, allowFailure: true })
+  if (rootResult.exitCode !== 0) {
+    throw new Error("archer must be run at the root of a git repo")
+  }
+  await assertRepoRoot(cwd, rootResult.stdout.trim())
+}
+
+async function assertRepoRoot(cwd: string, rootPath: string) {
+  // git reports the physical path; resolve symlinks on our side too so a
+  // symlinked --dir (e.g. /tmp on macOS) doesn't false-positive.
+  const root = await realpathSafe(rootPath)
+  if (root !== (await realpathSafe(cwd))) {
+    throw new Error(`archer must be run at the root of the git repo (${root})`)
+  }
+}
+
+function isSafeInitialBranch(value: string) {
+  return value !== "HEAD" && !value.startsWith("-") && !/[~^:?*[\\\s]/.test(value) && !value.includes("..")
 }

@@ -111,6 +111,18 @@ export type PermissionPromptInfo = {
   judgeReason?: string
 }
 
+export type HumanReviewAction = "continue" | "iterate" | "rerun" | "abort" | "prepare"
+
+export type HumanReviewPromptInfo = {
+  stepName: string
+  iterations: number
+  appRunning: boolean
+  appCommand: string
+  emulatorID: string
+  interactiveModel: string
+  interactiveVariant: string
+}
+
 export type RunOutcome = {
   status: "completed" | "failed"
   error?: string
@@ -142,6 +154,8 @@ export type ProgressUI = {
   phaseRestored(name: string, snapshot: ProgressPhaseSnapshot): void
   /** When present, the UI resolves permission prompts itself (no terminal fallback). */
   askPermission?(info: PermissionPromptInfo): Promise<PermissionReply>
+  /** When present, the UI keeps manual review gates inside the dashboard. */
+  askHumanReview?(info: HumanReviewPromptInfo): Promise<HumanReviewAction>
   /** Holds the dashboard open on a finish screen (phase browser) and resolves when the user dismisses it. */
   runFinished?(outcome: RunOutcome): Promise<void>
   message(message: string): void

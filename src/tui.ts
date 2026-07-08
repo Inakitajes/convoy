@@ -50,6 +50,8 @@ import type {
   PermissionReply,
   ProgressAttempt,
   ProgressDiffSummary,
+  HumanReviewAction,
+  HumanReviewPromptInfo,
   ProgressMessage,
   ProgressMessageChannel,
   ProgressPhase,
@@ -150,6 +152,11 @@ type PendingPermission = {
   resolve: (reply: PermissionReply) => void
 }
 
+type PendingHumanReview = {
+  info: HumanReviewPromptInfo
+  resolve: (action: HumanReviewAction) => void
+}
+
 // The post-run screen keeps the very same dashboard: the pipeline is still the
 // phase selector and the content panel still carries its logs/reports/session
 // tabs. Only the run is over, so it becomes frozen-in-time browsing.
@@ -206,6 +213,7 @@ export class TuiProgress implements ProgressUI {
   private readonly ticker: ReturnType<typeof setInterval>
   private readonly dirText: TextRenderable
   private readonly headerText: TextRenderable
+  private readonly pipelineBox: BoxRenderable
   private readonly pipelineText: TextRenderable
   // The detail panel: header (name, status, model, cost, tokens, diff) of the
   // one focused phase. A single pane now — concurrent phases are browsed via
@@ -214,6 +222,7 @@ export class TuiProgress implements ProgressUI {
   private readonly stepText: TextRenderable
   private readonly todosBox: BoxRenderable
   private readonly todosText: TextRenderable
+  private readonly feedBox: BoxRenderable
   private readonly feedText: TextRenderable
   private readonly footerText: TextRenderable
   // Rebuilt on every pipeline render: panel row index → phase name, so clicks
@@ -225,6 +234,7 @@ export class TuiProgress implements ProgressUI {
   // Panels repainted when the terminal reports a theme change mid-run.
   private readonly paletteTargets: Array<{ box: BoxRenderable; background: PaletteColor; border?: PaletteColor }> = []
   private readonly permissionQueue: PendingPermission[] = []
+  private humanReview?: PendingHumanReview
   private permissionChoice = 0
   // Suspension nests: outer scopes (human-review gate) and inner prompts may
   // both suspend; only the outermost transition touches the renderer.
@@ -236,11 +246,17 @@ export class TuiProgress implements ProgressUI {
   // Phase reports read lazily from the run dir; the cache entry is dropped when
   // a phase finishes so a report written mid-run is picked up on the next view.
   private readonly reports = new Map<string, string[] | "loading" | "missing">()
-  // Visible rows of the reports tab, captured at render time for paging keys.
-  private reportPageRows = 10
-  // Scroll offset + indicator for the reports tab, shared across live/finished.
+  // Visible rows of the content tab, captured at render time for paging keys.
+  private contentPageRows = 10
+  // The content panel has an explicit read focus: normally ↑/↓ move the
+  // pipeline selector; after Enter they scroll the active tab until Escape.
+  private contentFocused = false
+  // Scroll offsets + indicator for the content tabs, shared across live/finished.
+  // sessionScroll is measured from the bottom so live transcripts keep tailing.
   private reportScroll = 0
-  private reportPosition = ""
+  private logScroll = 0
+  private sessionScroll = 0
+  private contentPosition = ""
   // The content panel's active tab, scoped to the focused phase: its activity
   // feed, the report it wrote (if any), or a read-only "follow along" view of
   // its opencode session. [o] still opens the interactive session externally.
@@ -284,22 +300,24 @@ export class TuiProgress implements ProgressUI {
       this.handlePermissionKey(key)
       return
     }
+    if (this.humanReview && this.handleHumanReviewKey(key)) return
     // Everything else is navigation, shared by the live dashboard and the
-    // finish screen: move the focused phase, switch the content tab, scroll a
-    // report, or open the external session.
+    // finish screen: move the focused phase, switch the content tab, focus or
+    // scroll the reading panel, or open the external session.
     this.handleNavKey(key)
   }
 
   // Unified navigation for both the live run and the finish screen. Vertical
   // keys move the focused phase through the pipeline (the tab selector);
-  // horizontal keys / Tab / digits switch the content tab; page keys scroll the
-  // reports tab; [o] opens the external session. Finish-only keys come last.
+  // Enter focuses the content panel; horizontal keys / Tab / digits switch the
+  // content tab; page keys scroll; [o] opens the external session.
   private handleNavKey(key: KeyEvent) {
     const finished = this.finished
     const consume = () => {
       key.preventDefault()
       key.stopPropagation()
     }
+    if (this.contentFocused && this.handleContentFocusedKey(key, consume)) return
     switch (key.name) {
       case "up":
       case "k":
@@ -322,14 +340,20 @@ export class TuiProgress implements ProgressUI {
         consume()
         this.cycleContentTab(1)
         return
+      case "return":
+      case "linefeed":
+        consume()
+        this.contentFocused = true
+        this.render()
+        return
       case "pagedown":
       case "space":
         consume()
-        this.scrollReport(this.reportPageRows)
+        this.scrollContent(this.contentPageRows)
         return
       case "pageup":
         consume()
-        this.scrollReport(-this.reportPageRows)
+        this.scrollContent(-this.contentPageRows)
         return
       case "o":
         consume()
@@ -361,6 +385,53 @@ export class TuiProgress implements ProgressUI {
       this.manualFocus = false
       this.render()
     }
+  }
+
+  private handleContentFocusedKey(key: KeyEvent, consume: () => void) {
+    switch (key.name) {
+      case "up":
+      case "k":
+        consume()
+        this.scrollContent(-1)
+        return true
+      case "down":
+      case "j":
+        consume()
+        this.scrollContent(1)
+        return true
+      case "pageup":
+        consume()
+        this.scrollContent(-this.contentPageRows)
+        return true
+      case "pagedown":
+      case "space":
+        consume()
+        this.scrollContent(this.contentPageRows)
+        return true
+      case "home":
+        consume()
+        this.scrollContentToStart()
+        return true
+      case "end":
+        consume()
+        this.scrollContentToEnd()
+        return true
+      case "g":
+        consume()
+        if (key.shift) this.scrollContentToEnd()
+        else this.scrollContentToStart()
+        return true
+      case "escape":
+        consume()
+        this.contentFocused = false
+        this.render()
+        return true
+      case "return":
+      case "linefeed":
+        consume()
+        return true
+    }
+    return false
   }
 
   constructor(
@@ -530,11 +601,13 @@ export class TuiProgress implements ProgressUI {
 
     this.dirText = dirLine
     this.headerText = header.text
+    this.pipelineBox = pipeline.box
     this.pipelineText = pipeline.text
     this.stepBox = step.box
     this.stepText = step.text
     this.todosBox = todos.box
     this.todosText = todos.text
+    this.feedBox = feed.box
     this.feedText = feed.text
     this.footerText = footer.text
 
@@ -786,6 +859,17 @@ export class TuiProgress implements ProgressUI {
     })
   }
 
+  askHumanReview(info: HumanReviewPromptInfo): Promise<HumanReviewAction> {
+    if (this.renderer.isDestroyed) return Promise.resolve("abort")
+    return new Promise((resolve) => {
+      this.humanReview = { info, resolve }
+      this.selectPhaseByName(info.stepName)
+      this.manualFocus = false
+      this.addEvent(info.stepName, "permission", "waiting for human review action")
+      this.render()
+    })
+  }
+
   // Resolves when the user dismisses the screen (q/esc/ctrl+c). Until then the
   // run stays alive upstream: the opencode server keeps serving [o] and the
   // run dir keeps the reports readable.
@@ -801,7 +885,7 @@ export class TuiProgress implements ProgressUI {
         this.selected = failed
         this.manualFocus = true
       }
-      this.reportScroll = 0
+      this.resetContentScroll()
       for (const pending of this.permissionQueue.splice(0)) pending.resolve("reject")
       this.addEvent(
         "archer",
@@ -826,7 +910,7 @@ export class TuiProgress implements ProgressUI {
     if (this.phases.length === 0) return
     this.manualFocus = true
     this.selected = Math.max(0, Math.min(this.phases.length - 1, this.selected + delta))
-    this.reportScroll = 0
+    this.resetContentScroll()
     this.render()
   }
 
@@ -835,7 +919,7 @@ export class TuiProgress implements ProgressUI {
     if (index === -1) return
     this.manualFocus = true
     this.selected = index
-    this.reportScroll = 0
+    this.resetContentScroll()
     this.render()
   }
 
@@ -847,14 +931,43 @@ export class TuiProgress implements ProgressUI {
   private setContentTab(tab: ContentTab) {
     if (this.contentTab !== tab) {
       this.contentTab = tab
-      this.reportScroll = 0
+      this.resetContentScroll()
     }
     this.render()
   }
 
-  private scrollReport(delta: number) {
-    if (this.contentTab !== "reports") return
-    this.reportScroll = Math.max(0, this.reportScroll + delta)
+  private resetContentScroll() {
+    this.reportScroll = 0
+    this.logScroll = 0
+    this.sessionScroll = 0
+  }
+
+  private scrollContent(delta: number) {
+    switch (this.contentTab) {
+      case "reports":
+        this.reportScroll = Math.max(0, this.reportScroll + delta)
+        break
+      case "logs":
+        this.logScroll = Math.max(0, this.logScroll + delta)
+        break
+      case "session":
+        this.sessionScroll = Math.max(0, this.sessionScroll - delta)
+        break
+    }
+    this.render()
+  }
+
+  private scrollContentToStart() {
+    if (this.contentTab === "session") this.sessionScroll = Number.MAX_SAFE_INTEGER
+    else if (this.contentTab === "reports") this.reportScroll = 0
+    else this.logScroll = 0
+    this.render()
+  }
+
+  private scrollContentToEnd() {
+    if (this.contentTab === "session") this.sessionScroll = 0
+    else if (this.contentTab === "reports") this.reportScroll = Number.MAX_SAFE_INTEGER
+    else this.logScroll = Number.MAX_SAFE_INTEGER
     this.render()
   }
 
@@ -928,6 +1041,8 @@ export class TuiProgress implements ProgressUI {
     // A shutdown signal can tear the run down while the finish screen is still
     // up; resolving here keeps that promise from leaking.
     this.finished?.resolve()
+    this.humanReview?.resolve("abort")
+    this.humanReview = undefined
     for (const pending of this.permissionQueue.splice(0)) pending.resolve("reject")
     if (this.renderer.isDestroyed) return
     this.renderer.destroy()
@@ -1018,6 +1133,24 @@ export class TuiProgress implements ProgressUI {
     const verdict = reply === "once" ? "allowed once" : reply === "always" ? "always allowed" : "rejected"
     this.addEvent("archer", "permission", `${verdict}: ${permissionSummary(pending.info)}`)
     pending.resolve(reply)
+    this.render()
+  }
+
+  private handleHumanReviewKey(key: KeyEvent) {
+    const action = humanReviewActionForKey(key)
+    if (!action) return false
+    key.preventDefault()
+    key.stopPropagation()
+    this.resolveHumanReview(action)
+    return true
+  }
+
+  private resolveHumanReview(action: HumanReviewAction) {
+    const pending = this.humanReview
+    if (!pending) return
+    this.humanReview = undefined
+    this.addEvent(pending.info.stepName, action === "prepare" ? "step" : action === "abort" ? "error" : "permission", humanReviewActionLabel(action))
+    pending.resolve(action)
     this.render()
   }
 
@@ -1126,6 +1259,8 @@ export class TuiProgress implements ProgressUI {
       if (activeIndex >= 0) this.selected = activeIndex
     }
     const focus = this.focusedPhase()
+    this.pipelineBox.borderColor = this.contentFocused ? theme.borderDim : theme.accent
+    this.feedBox.borderColor = this.contentFocused ? theme.accent : theme.borderDim
 
     // Detail panel: the focused phase's header — name, status, model, cost,
     // tokens, diff — the same shape whether it's running, finished, or still
@@ -1151,13 +1286,13 @@ export class TuiProgress implements ProgressUI {
     // rail) over the active tab's body, all scoped to the focused phase.
     const feedRows = Math.max(3, bodyHeight - usedHeight - 2)
     const contentRows = feedRows - 2
-    this.reportPageRows = contentRows
+    this.contentPageRows = contentRows
 
     this.dirText.content = this.dirContent(innerWidth)
     this.headerText.content = this.headerContent(now, innerWidth)
     this.pipelineText.content = this.pipelineContent(now)
 
-    // Body first: the reports tab computes the scroll indicator the title shows.
+    // Body first: the active content tab computes the scroll indicator the rail shows.
     const body =
       this.contentTab === "reports"
         ? this.reportPanelLines(focus, rightWidth, contentRows)
@@ -1422,6 +1557,15 @@ export class TuiProgress implements ProgressUI {
     if (this.finished?.error && phase.status === "failed") {
       out.push(t`${fg(theme.red)(truncate(this.finished.error, Math.max(20, width)))}`)
     }
+    if (this.humanReview?.info.stepName === phase.name) {
+      out.push(plain(""))
+      out.push(new StyledText([fg(theme.yellow)("human review"), fg(theme.faint)(" · choose from the dashboard shortcuts")]))
+      out.push(new StyledText([fg(theme.accent)("c"), fg(theme.dim)(" continue pipeline   "), fg(theme.accent)("s"), fg(theme.dim)(" start app   "), fg(theme.accent)("r"), fg(theme.dim)(" rerun app")]))
+      out.push(new StyledText([fg(theme.accent)("i"), fg(theme.dim)(" open OpenCode iteration   "), fg(theme.accent)("a"), fg(theme.dim)(" abort")]))
+      const info = this.humanReview.info
+      const app = info.appCommand ? (info.appRunning ? "running" : "configured") : "disabled"
+      out.push(new StyledText([fg(theme.faint)("app "), fg(theme.dim)(app), fg(theme.faint)(" · iterations "), fg(theme.dim)(String(info.iterations))]))
+    }
     return out
   }
 
@@ -1429,7 +1573,7 @@ export class TuiProgress implements ProgressUI {
   // Works live (the run dir is known from start) and on the finish screen; a
   // step that hasn't finished yet — or wrote nothing — says so.
   private reportPanelLines(phase: PhaseState | undefined, width: number, visible: number): StyledText[] {
-    this.reportPosition = ""
+    this.contentPosition = ""
     if (visible <= 0) return []
     if (!phase) return [t`${fg(theme.dim)("no step selected")}`]
     if (!this.runDir) return [t`${fg(theme.dim)("report directory not ready yet…")}`]
@@ -1448,9 +1592,7 @@ export class TuiProgress implements ProgressUI {
     const wrapped = wrapLines(report, Math.max(20, width))
     const maxScroll = Math.max(0, wrapped.length - visible)
     this.reportScroll = Math.max(0, Math.min(this.reportScroll, maxScroll))
-    if (maxScroll > 0) {
-      this.reportPosition = `${Math.round(((this.reportScroll + visible) / wrapped.length) * 100)}%`
-    }
+    this.contentPosition = scrollPosition(this.reportScroll, maxScroll)
     return wrapped.slice(this.reportScroll, this.reportScroll + visible).map(styleSummaryLine)
   }
 
@@ -1458,12 +1600,17 @@ export class TuiProgress implements ProgressUI {
   // phase (the tab selector picks it), so there's no cross-phase label column —
   // just time, kind icon, and message, leaving more room for the message.
   private phaseFeedLines(phase: PhaseState | undefined, width: number, visible: number): StyledText[] {
+    this.contentPosition = ""
     if (visible <= 0) return []
     if (!phase) return [t`${fg(theme.dim)("no step selected")}`]
-    const events = this.feed.filter((entry) => entry.phase === phase.name).slice(-visible).reverse()
+    const events = this.feed.filter((entry) => entry.phase === phase.name).reverse()
     if (events.length === 0) return [t`${fg(theme.dim)("no activity for this step yet…")}`]
 
-    return events.map((entry) => {
+    const maxScroll = Math.max(0, events.length - visible)
+    this.logScroll = Math.max(0, Math.min(this.logScroll, maxScroll))
+    this.contentPosition = scrollPosition(this.logScroll, maxScroll)
+
+    return events.slice(this.logScroll, this.logScroll + visible).map((entry) => {
       const style = kindStyle(entry.kind)
       return new StyledText([
         fg(theme.faint)(formatTime(entry.time)),
@@ -1481,7 +1628,7 @@ export class TuiProgress implements ProgressUI {
   // browser tab underline — with faint dashes elsewhere. Pure character
   // styling, no painted chip. Records each label's column span (shared by
   // both rows) so a click on either row resolves to the right tab. The
-  // reports tab's scroll position rides in faint text at the rail's tail.
+  // active tab's scroll position rides in faint text at the rail's tail.
   private contentTabBar(width: number): StyledText[] {
     this.feedTabRegions = []
     const labelChunks: TextChunk[] = []
@@ -1511,7 +1658,7 @@ export class TuiProgress implements ProgressUI {
     const activeEnd = Math.min(Math.max(active.end, activeStart), width)
     pushRail("╌".repeat(activeStart), theme.faint)
     pushRail("━".repeat(activeEnd - activeStart), theme.accent)
-    const suffix = this.contentTab === "reports" ? this.reportPosition : ""
+    const suffix = this.contentPosition
     const remaining = width - activeEnd
     if (suffix.length > 0 && suffix.length < remaining) {
       pushRail("╌".repeat(remaining - suffix.length), theme.faint)
@@ -1535,6 +1682,7 @@ export class TuiProgress implements ProgressUI {
   // so this whole pane is the transcript. Tails the newest rows, like a
   // terminal, since streaming means the interesting end is the bottom.
   private sessionLines(phase: PhaseState | undefined, width: number, visible: number): StyledText[] {
+    this.contentPosition = ""
     if (visible <= 0) return []
     if (!phase) return [t`${fg(theme.dim)("no active session yet — waiting for a phase to start…")}`]
 
@@ -1558,24 +1706,44 @@ export class TuiProgress implements ProgressUI {
       const live = running && index === blocks.length - 1
       lines.push(...transcriptBlockLines(block, width, live))
     })
-    // Newest at the bottom: keep only the rows that fit.
-    return lines.slice(-visible)
+    if (!this.contentFocused) this.sessionScroll = 0
+    const maxScroll = Math.max(0, lines.length - visible)
+    this.sessionScroll = Math.max(0, Math.min(this.sessionScroll, maxScroll))
+    const topOffset = maxScroll - this.sessionScroll
+    this.contentPosition = scrollPosition(topOffset, maxScroll)
+    // Newest at the bottom by default, but explicit read focus can scroll back.
+    return lines.slice(topOffset, topOffset + visible)
   }
 
   private footerContent(now: number, width: number) {
     if (this.finished) {
+      if (this.contentFocused) {
+        const left: TextChunk[] = [
+          fg(theme.dim)("read · ["),
+          fg(theme.accent)("↑↓"),
+          fg(theme.dim)("] scroll · ["),
+          fg(theme.accent)("pgup/pgdn"),
+          fg(theme.dim)("] page · ["),
+          fg(theme.accent)("esc"),
+          fg(theme.dim)("] pipeline · ["),
+          fg(theme.accent)("q"),
+          fg(theme.dim)("] close"),
+        ]
+        const right: TextChunk[] = [fg(theme.faint)(this.runID ? `run ${this.runID}` : "run …")]
+        return padBetween(left, right, width)
+      }
       const left: TextChunk[] = [
         fg(theme.dim)("["),
         fg(theme.accent)("↑↓"),
         fg(theme.dim)("] step · ["),
+        fg(theme.accent)("enter"),
+        fg(theme.dim)("] read · ["),
         fg(theme.accent)("←→"),
         fg(theme.dim)("] tab · ["),
         fg(theme.accent)("o"),
         fg(theme.dim)("] session · ["),
         fg(theme.accent)("g"),
         fg(theme.dim)("] lazygit · ["),
-        fg(theme.accent)("pgdn"),
-        fg(theme.dim)("] scroll · ["),
         fg(theme.accent)("q"),
         fg(theme.dim)("] close"),
       ]
@@ -1604,20 +1772,49 @@ export class TuiProgress implements ProgressUI {
       return padBetween(left, right, width)
     }
 
-    const left: TextChunk[] = [
-      fg(theme.dim)("["),
-      fg(theme.accent)("↑↓"),
-      fg(theme.dim)("] step · ["),
-      fg(theme.accent)("←→"),
-      fg(theme.dim)("] tab · ["),
-      fg(theme.accent)("o"),
-      fg(theme.dim)("] session · "),
-      fg(theme.yellow)("ctrl+c"),
-      fg(theme.dim)(" abort"),
-    ]
-    if (this.contentTab === "reports") {
-      left.push(fg(theme.dim)(" · ["), fg(theme.accent)("pgdn"), fg(theme.dim)("] scroll"))
+    if (this.humanReview) {
+      const left: TextChunk[] = [
+        fg(theme.yellow)("human review · "),
+        fg(theme.accent)("c"),
+        fg(theme.dim)(" continue · "),
+        fg(theme.accent)("s"),
+        fg(theme.dim)(" start app · "),
+        fg(theme.accent)("r"),
+        fg(theme.dim)(" rerun app · "),
+        fg(theme.accent)("i"),
+        fg(theme.dim)(" iterate · "),
+        fg(theme.accent)("a"),
+        fg(theme.dim)(" abort"),
+      ]
+      const right: TextChunk[] = [fg(theme.faint)(this.humanReview.info.appRunning ? "app running" : this.humanReview.info.appCommand ? "app configured" : "app disabled")]
+      return padBetween(left, right, width)
     }
+
+    const left: TextChunk[] = this.contentFocused
+      ? [
+          fg(theme.dim)("read · ["),
+          fg(theme.accent)("↑↓"),
+          fg(theme.dim)("] scroll · ["),
+          fg(theme.accent)("pgup/pgdn"),
+          fg(theme.dim)("] page · ["),
+          fg(theme.accent)("esc"),
+          fg(theme.dim)("] pipeline · "),
+          fg(theme.yellow)("ctrl+c"),
+          fg(theme.dim)(" abort"),
+        ]
+      : [
+          fg(theme.dim)("["),
+          fg(theme.accent)("↑↓"),
+          fg(theme.dim)("] step · ["),
+          fg(theme.accent)("enter"),
+          fg(theme.dim)("] read · ["),
+          fg(theme.accent)("←→"),
+          fg(theme.dim)("] tab · ["),
+          fg(theme.accent)("o"),
+          fg(theme.dim)("] session · "),
+          fg(theme.yellow)("ctrl+c"),
+          fg(theme.dim)(" abort"),
+        ]
     if (this.autoAccept) {
       left.push(fg(theme.dim)(" · "), fg(theme.accent)("shift+tab"))
       left.push(autoAcceptStatusChunk(this.autoAccept.mode))
@@ -1689,6 +1886,37 @@ function statusWordChunk(phase: PhaseState, now: number): TextChunk {
       return fg(theme.faint)("skipped")
     default:
       return fg(theme.faint)("scheduled")
+  }
+}
+
+function humanReviewActionForKey(key: KeyEvent): HumanReviewAction | undefined {
+  switch (key.name) {
+    case "c":
+      return "continue"
+    case "s":
+      return "prepare"
+    case "r":
+      return "rerun"
+    case "i":
+      return "iterate"
+    case "a":
+      return "abort"
+  }
+  return undefined
+}
+
+function humanReviewActionLabel(action: HumanReviewAction) {
+  switch (action) {
+    case "continue":
+      return "human review: continue"
+    case "prepare":
+      return "human review: start app"
+    case "rerun":
+      return "human review: rerun app"
+    case "iterate":
+      return "human review: open OpenCode iteration"
+    case "abort":
+      return "human review: abort"
   }
 }
 
@@ -1777,6 +2005,13 @@ function wrapWords(text: string, width: number): string[] {
   }
   if (current) lines.push(current)
   return lines.length > 0 ? lines : [""]
+}
+
+function scrollPosition(topOffset: number, maxScroll: number) {
+  if (maxScroll <= 0) return ""
+  if (topOffset <= 0) return "top"
+  if (topOffset >= maxScroll) return "end"
+  return `${Math.round((topOffset / maxScroll) * 100)}%`
 }
 
 function phaseMetaChunks(phase: PhaseState, now: number): TextChunk[] {

@@ -1,6 +1,6 @@
 import { basename } from "node:path"
 
-import { BoxRenderable, StyledText, TextRenderable, bold, createCliRenderer, decodePasteBytes, fg, stripAnsiSequences, t } from "@opentui/core"
+import { BoxRenderable, StyledText, TextRenderable, bg, bold, createCliRenderer, decodePasteBytes, fg, stripAnsiSequences, t } from "@opentui/core"
 
 import { buildAgentRegistry, loadMergedArcherConfig } from "./config"
 import { builtInPipelines, defaultPipelineName, resolvePipeline } from "./pipeline"
@@ -61,8 +61,9 @@ type ToggleSpec = {
 type Mode = "pipelines" | "prompt" | "options"
 
 type Modal =
-  | { kind: "message"; title: string; message: string }
-  | { kind: "loading"; title: string; message: string }
+  | { kind: "message"; title: string; message: string; footer?: string }
+  | { kind: "loading"; title: string; message: string; footer?: string }
+  | { kind: "confirm"; title: string; message: string; footer?: string; onConfirm: () => void }
 
 const toggles: readonly ToggleSpec[] = [
   {
@@ -116,6 +117,7 @@ export async function launchRunTui(options: { targetDir: string }): Promise<Laun
 
   const config = await loadMergedArcherConfig(options.targetDir)
   const choices = pipelineChoices(config, buildAgentRegistry(config))
+  const baseRef = config?.defaults.baseRef ?? "main"
 
   // No backgroundColor yet: the palette is only chosen after the terminal
   // answers the background query, so a light terminal never flashes dark.
@@ -127,7 +129,7 @@ export async function launchRunTui(options: { targetDir: string }): Promise<Laun
   })
   const mode = await renderer.waitForThemeMode(1_000).catch(() => null)
   setTheme(paletteForTerminal(mode, terminalBackgroundHex(renderer)))
-  return new LaunchPicker(renderer, options.targetDir, choices).result
+  return new LaunchPicker(renderer, options.targetDir, choices, baseRef).result
 }
 
 function pipelineChoices(config: ArcherConfig | undefined, agents: readonly AgentSpec[]): PipelineChoice[] {
@@ -226,8 +228,7 @@ class LaunchPicker {
     event.stopPropagation()
     const text = sanitizePaste(stripAnsiSequences(decodePasteBytes(event.bytes)))
     if (!text) return
-    this.prompt = this.prompt.slice(0, this.cursor) + text + this.prompt.slice(this.cursor)
-    this.cursor += text.length
+    this.insertPromptText(text)
     this.promptError = ""
     this.render()
   }
@@ -242,9 +243,20 @@ class LaunchPicker {
 
     key.preventDefault()
     key.stopPropagation()
-    if (this.modal) {
+    const modal = this.modal
+    if (modal) {
+      if (modal.kind === "confirm") {
+        if (key.name === "return" || key.name === "linefeed") {
+          this.modal = undefined
+          modal.onConfirm()
+        } else if (key.name === "escape" || key.name === "q") {
+          this.modal = undefined
+          this.render()
+        }
+        return
+      }
       // Only the message modal can be dismissed; loading blocks input until the async job finishes.
-      if (this.modal.kind === "message" && (key.name === "return" || key.name === "linefeed" || key.name === "escape" || key.name === "space" || key.name === "q")) {
+      if (modal.kind === "message" && (key.name === "return" || key.name === "linefeed" || key.name === "escape" || key.name === "space" || key.name === "q")) {
         this.modal = undefined
         this.render()
       }
@@ -267,6 +279,7 @@ class LaunchPicker {
     private readonly renderer: CliRenderer,
     private readonly targetDir: string,
     private readonly choices: PipelineChoice[],
+    private readonly baseRef: string,
   ) {
     const defaultIndex = choices.findIndex((choice) => choice.isDefault)
     this.selected = defaultIndex >= 0 ? defaultIndex : 0
@@ -438,7 +451,14 @@ class LaunchPicker {
       this.render()
       return
     }
-    if (key.name === "return" || key.name === "linefeed") {
+    const enterAction = promptEnterAction(key)
+    if (enterAction === "newline") {
+      this.insertPromptText("\n")
+      this.promptError = ""
+      this.render()
+      return
+    }
+    if (enterAction === "submit") {
       if (!this.prompt.trim()) {
         this.promptError = "Write a prompt before continuing."
       } else {
@@ -490,11 +510,15 @@ class LaunchPicker {
 
     const text = typedText(key)
     if (text) {
-      this.prompt = this.prompt.slice(0, this.cursor) + text + this.prompt.slice(this.cursor)
-      this.cursor += text.length
+      this.insertPromptText(text)
       this.promptError = ""
       this.render()
     }
+  }
+
+  private insertPromptText(text: string) {
+    this.prompt = this.prompt.slice(0, this.cursor) + text + this.prompt.slice(this.cursor)
+    this.cursor += text.length
   }
 
   private handleOptionsKey(key: KeyEvent) {
@@ -543,15 +567,58 @@ class LaunchPicker {
   }
 
   private startRun() {
+    void this.startRunAfterGitCheck()
+  }
+
+  private async startRunAfterGitCheck() {
     const choice = this.currentChoice()
+    try {
+      const { repoBootstrapStatus } = await import("./git")
+      const status = await repoBootstrapStatus(this.targetDir)
+      if (status !== "ready") {
+        this.modal = {
+          kind: "confirm",
+          title: "Initialize Git",
+          message: status === "no-repo" ? "This project has no Git repository. Initialize it now with an initial commit?" : "This Git repository has no commits. Create an initial commit now?",
+          footer: "enter initialize · esc cancel",
+          onConfirm: () => void this.initializeGitAndStart(choice.name),
+        }
+        this.render()
+        return
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      this.modal = { kind: "message", title: "git check failed", message }
+      this.render()
+      return
+    }
+
+    this.startReadyRun(choice.name)
+  }
+
+  private async initializeGitAndStart(pipelineName: string) {
+    this.modal = { kind: "loading", title: "initializing Git", message: "creating initial commit…", footer: "please wait…" }
+    this.render()
+    try {
+      const { initializeRepoWithInitialCommit } = await import("./git")
+      await initializeRepoWithInitialCommit(this.targetDir, { baseRef: this.baseRef })
+      this.startReadyRun(pipelineName)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      this.modal = { kind: "message", title: "git init failed", message }
+      this.render()
+    }
+  }
+
+  private startReadyRun(pipelineName: string) {
     if (this.toggleState.worktree) {
-      void this.startWorktreeRun(choice.name)
+      void this.startWorktreeRun(pipelineName)
       return
     }
     this.finish({
       targetDir: this.targetDir,
       prompt: this.prompt,
-      pipeline: choice.name,
+      pipeline: pipelineName,
       humanReview: this.toggleState.humanReview,
       tui: this.toggleState.tui,
       includeDirty: this.toggleState.includeDirty,
@@ -565,7 +632,7 @@ class LaunchPicker {
   // loading modal so the user can't toggle options mid-creation. Any failure
   // falls back to the options screen with an explanatory message modal.
   private async startWorktreeRun(pipelineName: string) {
-    this.modal = { kind: "loading", title: "isolating worktree", message: "generating a branch name…" }
+    this.modal = { kind: "loading", title: "isolating worktree", message: "generating a branch name…", footer: "creating a new branch + worktree…" }
     this.render()
     try {
       const { createIsolatedWorktree } = await import("./worktree")
@@ -657,6 +724,10 @@ class LaunchPicker {
 
     this.pipelineBox.width = pipelineWidth
     this.detailBox.width = detailWidth
+    // Mirror the dashboard focus cue: the accented border marks where Enter,
+    // Esc, and the navigation keys apply in the current setup step.
+    this.pipelineBox.borderColor = this.mode === "pipelines" ? theme.accent : theme.borderDim
+    this.detailBox.borderColor = this.mode === "pipelines" ? theme.borderDim : theme.accent
     this.headerText.content = this.headerContent(innerWidth)
     // Panels reserve 4 cells of chrome (rounded border + paddingX:1 each side),
     // so lay out the rows against the inner text width — matching detailWidth
@@ -687,7 +758,8 @@ class LaunchPicker {
       for (const line of wrapWords(modal.message, width)) lines.push(new StyledText([fg(theme.text)(line)]))
     }
     lines.push(plain(""))
-    lines.push(new StyledText([fg(theme.dim)(modal.kind === "message" ? "press any key to dismiss" : "creating a new branch + worktree…")]))
+    const footer = modal.footer ?? (modal.kind === "message" ? "press any key to dismiss" : modal.kind === "confirm" ? "enter confirm · esc cancel" : "please wait…")
+    lines.push(new StyledText([fg(theme.dim)(footer)]))
 
     this.modalBox.width = boxWidth
     this.modalBox.height = lines.length + 4
@@ -788,11 +860,11 @@ class LaunchPicker {
     const lines: StyledText[] = []
     lines.push(new StyledText([fg(theme.faint)("pipeline "), bold(fg(theme.text)(choice.name))]))
     lines.push(plain(""))
-    lines.push(t`${fg(theme.dim)("Describe what Archer should do. Paste freely; Enter continues.")}`)
+    lines.push(t`${fg(theme.dim)("Describe what Archer should do. Paste freely; Shift+Enter adds a line.")}`)
     lines.push(plain(""))
 
     const fieldWidth = Math.max(10, width - 2)
-    const contentWidth = Math.max(1, fieldWidth - 1)
+    const contentWidth = Math.max(1, fieldWidth)
     const inputHeight = Math.max(5, Math.min(20, this.listHeight() - 6))
     const visibleRows = Math.max(1, inputHeight - 2)
     const wrapped = wrapPromptLines(this.prompt, contentWidth)
@@ -811,16 +883,19 @@ class LaunchPicker {
       const seg = wrapped[r] ?? ""
       const chunks: TextChunk[] = [fg(theme.faint)("│")]
       if (r === cursorRow) {
-        const before = seg.slice(0, cursorCol)
-        const after = seg.slice(cursorCol)
-        const used = before.length + 1 + after.length
         if (!this.prompt && r === 0) {
-          chunks.push(fg(theme.accent)("▏"))
-          chunks.push(fg(theme.faint)(truncate(placeholder, Math.max(0, fieldWidth - 1))))
-          chunks.push(fg(theme.faint)(" ".repeat(Math.max(0, fieldWidth - 1 - truncate(placeholder, fieldWidth - 1).length)) + "│"))
+          const placeholderText = truncate(placeholder, Math.max(0, fieldWidth - 1))
+          chunks.push(cursorChunk(" "))
+          chunks.push(fg(theme.faint)(placeholderText))
+          chunks.push(fg(theme.faint)(" ".repeat(Math.max(0, fieldWidth - 1 - placeholderText.length)) + "│"))
         } else {
+          const col = clamp(cursorCol, 0, Math.max(0, fieldWidth - 1))
+          const before = seg.slice(0, col)
+          const cursorCell = seg[col] ?? " "
+          const after = seg.slice(col + 1)
+          const used = before.length + 1 + after.length
           chunks.push(fg(theme.text)(before))
-          chunks.push(fg(theme.accent)("▏"))
+          chunks.push(cursorChunk(cursorCell))
           chunks.push(fg(theme.text)(after))
           chunks.push(fg(theme.faint)(" ".repeat(Math.max(0, fieldWidth - used)) + "│"))
         }
@@ -840,7 +915,7 @@ class LaunchPicker {
       lines.push(t`${fg(theme.red)(this.promptError)}`)
     }
     lines.push(plain(""))
-    const hint = "←/→ move · home/end jump · ctrl+U clear · esc back"
+    const hint = "shift+enter newline · enter options · ←/→ move · ctrl+U clear · esc back"
     if (wrapped.length > 1) {
       lines.push(new StyledText([fg(theme.faint)(hint + " · "), fg(theme.accent)(`${wrapped.length} lines`)]))
     } else {
@@ -903,7 +978,7 @@ class LaunchPicker {
     }
     if (this.mode === "prompt") {
       return padBetween(
-        [fg(theme.dim)("type/paste · "), fg(theme.accent)("enter"), fg(theme.dim)(" options · "), fg(theme.accent)("esc"), fg(theme.dim)(" back")],
+        [fg(theme.dim)("type/paste · "), fg(theme.accent)("shift+enter"), fg(theme.dim)(" newline · "), fg(theme.accent)("enter"), fg(theme.dim)(" options · "), fg(theme.accent)("esc"), fg(theme.dim)(" back")],
         [fg(theme.faint)(`${this.prompt.length} char${this.prompt.length === 1 ? "" : "s"}`)],
         width,
       )
@@ -961,6 +1036,15 @@ export function typedText(key: KeyEvent): string | undefined {
     if (code >= 0x20 && code !== 0x7f) out += ch
   }
   return out || undefined
+}
+
+export function promptEnterAction(key: Pick<KeyEvent, "name" | "shift">): "newline" | "submit" | undefined {
+  if (key.name !== "return" && key.name !== "linefeed") return undefined
+  return key.shift ? "newline" : "submit"
+}
+
+function cursorChunk(text: string): TextChunk {
+  return bg(theme.accent)(fg(theme.chipText)(text || " "))
 }
 
 export function sanitizePaste(text: string): string {

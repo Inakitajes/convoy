@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
-import { cursorPosition, sanitizePaste, typedText, wrapPromptLines } from "../src/launch-tui"
+import { cursorPosition, promptEnterAction, sanitizePaste, typedText, wrapPromptLines } from "../src/launch-tui"
 
 import type { KeyEvent } from "@opentui/core"
 
@@ -37,5 +37,12 @@ describe("launch TUI prompt input", () => {
     expect(typedText(key({ name: "", raw: "pasted text" }))).toBe("pasted text")
     expect(typedText(key({ name: "left", raw: "\u001b[D" }))).toBeUndefined()
     expect(typedText(key({ name: "v", raw: "v", ctrl: true }))).toBeUndefined()
+  })
+
+  test("uses Shift+Enter for prompt new-lines and Enter for continuing", () => {
+    expect(promptEnterAction(key({ name: "return" }))).toBe("submit")
+    expect(promptEnterAction(key({ name: "linefeed" }))).toBe("submit")
+    expect(promptEnterAction(key({ name: "return", shift: true }))).toBe("newline")
+    expect(promptEnterAction(key({ name: "a" }))).toBeUndefined()
   })
 })

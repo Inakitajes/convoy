@@ -62,6 +62,17 @@ export async function openOpencodeSessionWindow(input: {
   )
 }
 
+export async function openInteractiveOpencodeWindow(input: {
+  url: string
+  targetDir: string
+  model: string
+  variant?: string
+}): Promise<SessionWindowBackend> {
+  const args = ["opencode", "run", "--interactive", "--attach", input.url, "--dir", input.targetDir, "--model", input.model]
+  if (input.variant) args.push("--variant", input.variant)
+  return openSessionCommand(args.map(shellQuote).join(" "))
+}
+
 // Opens a standalone opencode TUI on a stored session — it starts its own
 // server and reads the session from disk — for runs whose live server is gone
 // (so `[o]` in a re-opened finished-run dashboard still works).
