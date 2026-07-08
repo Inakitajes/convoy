@@ -846,6 +846,7 @@ type ActivityState = {
   lastTextUpdate: number
   lastServerEvent: number
   messageUsage: Map<string, { cost: number; tokens: ProgressTokens }>
+  messagePartChannels: Map<string, "reasoning" | "response">
   usageSignature: string
 }
 
@@ -987,7 +988,7 @@ export function watchSession(
           // The verbatim model stream for the session transcript, extracted
           // separately so the summarized activity/status signals above are
           // untouched. Appends only — the TUI repaints it on its own ticker.
-          const chunk = describeMessageChunk(payload)
+          const chunk = describeMessageChunk(payload, state)
           if (chunk) {
             sawWork = true
             input.progress.phaseMessage(input.phaseName, chunk)
@@ -1118,6 +1119,7 @@ export function newActivityState(): ActivityState {
     lastTextUpdate: 0,
     lastServerEvent: Date.now(),
     messageUsage: new Map(),
+    messagePartChannels: new Map(),
     usageSignature: "",
   }
 }
@@ -1232,12 +1234,21 @@ export function describeSessionActivity(payload: unknown, state: ActivityState):
  * one-line action markers. Everything else — usage, todos, diffs, heartbeats —
  * belongs to the activity path, not the transcript.
  */
-export function describeMessageChunk(payload: unknown): ProgressMessage | undefined {
+export function describeMessageChunk(payload: unknown, state?: ActivityState): ProgressMessage | undefined {
   const type = payloadType(payload)
   const properties = payloadProperties(payload)
   if (!properties) return undefined
 
   switch (type) {
+    case "message.part.updated":
+      rememberMessagePartChannel(properties, state)
+      return undefined
+    case "message.part.delta": {
+      const text = rawString(properties.delta)
+      if (!text || properties.field !== "text") return undefined
+      const partID = rawString(properties.partID)
+      return { channel: state?.messagePartChannels.get(partID) ?? "response", text }
+    }
     case "session.next.reasoning.delta": {
       const text = rawString(properties.delta)
       return text ? { channel: "reasoning", text } : undefined
@@ -1255,6 +1266,16 @@ export function describeMessageChunk(payload: unknown): ProgressMessage | undefi
     default:
       return undefined
   }
+}
+
+function rememberMessagePartChannel(properties: Record<string, unknown>, state: ActivityState | undefined) {
+  if (!state) return
+  const part = properties.part
+  if (!part || typeof part !== "object") return
+  const candidate = part as { id?: unknown; type?: unknown }
+  if (typeof candidate.id !== "string") return
+  if (candidate.type === "reasoning") state.messagePartChannels.set(candidate.id, "reasoning")
+  else if (candidate.type === "text") state.messagePartChannels.set(candidate.id, "response")
 }
 
 function rawString(value: unknown): string {

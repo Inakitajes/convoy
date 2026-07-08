@@ -183,9 +183,27 @@ describe("runner helpers", () => {
       text: "bun test",
     })
 
+    // Current opencode streams text through message.part.delta. If no part
+    // metadata has arrived yet, show it as response text rather than leaving
+    // the session tab blank.
+    const state = newActivityState()
+    expect(describeMessageChunk({ type: "message.part.delta", properties: props({ field: "text", partID: "part_1", delta: "hello" }) }, state)).toEqual({
+      channel: "response",
+      text: "hello",
+    })
+
+    // message.part.updated teaches the transcript whether later deltas belong
+    // to reasoning or response content.
+    expect(describeMessageChunk({ type: "message.part.updated", properties: props({ part: { id: "part_2", type: "reasoning" } }) }, state)).toBeUndefined()
+    expect(describeMessageChunk({ type: "message.part.delta", properties: props({ field: "text", partID: "part_2", delta: "thinking" }) }, state)).toEqual({
+      channel: "reasoning",
+      text: "thinking",
+    })
+
     // Empty deltas and everything else (usage, todos, heartbeats) are not
     // transcript content.
     expect(describeMessageChunk({ type: "session.next.text.delta", properties: props({ delta: "" }) })).toBeUndefined()
+    expect(describeMessageChunk({ type: "message.part.delta", properties: props({ field: "metadata", partID: "part_1", delta: "ignored" }) }, state)).toBeUndefined()
     expect(describeMessageChunk({ type: "session.status", properties: props({ status: { type: "busy" } }) })).toBeUndefined()
   })
 
