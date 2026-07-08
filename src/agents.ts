@@ -1,15 +1,13 @@
 import { readFileSync, statSync } from "node:fs"
-import { dirname, join } from "node:path"
-import { fileURLToPath } from "node:url"
+import { join } from "node:path"
 
 import type { AgentConfig, Config } from "@opencode-ai/sdk/v2"
 import { bashPolicy, noAdditions } from "./bash-policy"
+import { builtInPrompts } from "./built-in-prompts"
 import { builtInAgents, readOnlyAgentSuffix } from "./pipeline"
 import type { AgentSpec, PermissionAdditions } from "./types"
 import { globalAgentsDir } from "./workspace"
 
-const sourceDir = dirname(fileURLToPath(import.meta.url))
-const builtInPromptsDir = join(sourceDir, "..", "prompts")
 const runtimeSafetyPrompt = "runtime-safety"
 
 export function opencodeConfig(
@@ -47,10 +45,6 @@ export function projectAgentPromptPath(agentName: string, targetDir: string) {
   return join(targetDir, ".archer", "agents", `${agentName}.md`)
 }
 
-export function builtInPromptPath(promptName: string) {
-  return join(builtInPromptsDir, `${promptName}.md`)
-}
-
 function readProjectAgentPrompt(agentName: string, targetDir: string) {
   const path = projectAgentPromptPath(agentName, targetDir)
   if (!isFile(path)) return undefined
@@ -64,10 +58,10 @@ function readGlobalAgentPrompt(agentName: string) {
 }
 
 function readBuiltInPrompt(promptName: string) {
-  const path = builtInPromptPath(promptName)
-  if (isFile(path)) return readFileSync(path, "utf8")
+  const prompt = builtInPrompts[promptName]
+  if (prompt !== undefined) return prompt
   if (builtInAgents.some((agent) => agent.name === promptName) || promptName === runtimeSafetyPrompt) {
-    throw new Error(`missing built-in prompt: ${path}`)
+    throw new Error(`missing built-in prompt: add prompts/${promptName}.md to src/built-in-prompts.ts`)
   }
   throw new Error(`agent "${promptName}" has no prompt; create .archer/agents/${promptName}.md in the target repo`)
 }

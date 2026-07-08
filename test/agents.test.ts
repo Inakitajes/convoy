@@ -1,10 +1,11 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { describe, expect, test } from "bun:test"
 
 import { loadAgentPrompt, opencodeConfig } from "../src/agents"
+import { builtInPrompts } from "../src/built-in-prompts"
 
 describe("opencode config", () => {
   test("disables total provider timeouts but keeps idle stream timeouts", () => {
@@ -14,6 +15,15 @@ describe("opencode config", () => {
       expect(config.provider?.[provider]?.options?.timeout).toBe(false)
       expect(config.provider?.[provider]?.options?.chunkTimeout).toBe(600_000)
     }
+  })
+
+  test("embedded built-in prompts stay in sync with the prompts/ directory", async () => {
+    const files = (await readdir(join(import.meta.dir, "..", "prompts")))
+      .filter((name) => name.endsWith(".md"))
+      .map((name) => name.slice(0, -".md".length))
+      .sort()
+
+    expect(Object.keys(builtInPrompts).sort()).toEqual(files)
   })
 
   test("loads built-in markdown prompts with runtime safety guard rails", () => {

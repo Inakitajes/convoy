@@ -2,7 +2,8 @@ import { statSync } from "node:fs"
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 
-import { builtInPromptPath, projectAgentPromptPath } from "./agents"
+import { projectAgentPromptPath } from "./agents"
+import { builtInPrompts } from "./built-in-prompts"
 import { log } from "./log"
 import {
   agentAliases,
@@ -279,7 +280,8 @@ async function writeDefaultAgentPrompts(configDir: string, force: boolean) {
   await mkdir(agentsDir, { recursive: true })
   for (const agent of builtInAgents) {
     const target = join(agentsDir, `${agent.name}.md`)
-    const body = await readFile(builtInPromptPath(agent.name), "utf8")
+    const body = builtInPrompts[agent.name]
+    if (body === undefined) throw new Error(`missing built-in prompt: add prompts/${agent.name}.md to src/built-in-prompts.ts`)
     try {
       await writeFile(target, body, { flag: force ? "w" : "wx" })
     } catch (error) {

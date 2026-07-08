@@ -10,7 +10,7 @@
     "dev": "bun run src/main.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
-    "build": "bun run scripts/build-launcher.ts"
+    "build": "bun build --compile src/main.ts --outfile archer"
   },
   "dependencies": {
     "@opencode-ai/sdk": "1.15.13",
