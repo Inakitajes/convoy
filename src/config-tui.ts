@@ -97,14 +97,11 @@ type Row = {
 
 const defaultFields: DefaultField[] = [
   { key: "model", type: "model" },
-  { key: "interactiveModel", type: "model" },
   { key: "autoAcceptJudgeModel", type: "model" },
   { key: "branchNameModel", type: "model" },
   { key: "maxAttempts", type: "number" },
   { key: "baseRef", type: "string" },
   { key: "pipeline", type: "string" },
-  { key: "appRunCommand", type: "string" },
-  { key: "emulator", type: "string" },
 ]
 
 const modalListHeight = 12
@@ -1137,8 +1134,6 @@ function describeDefault(key: keyof ArcherDefaults): string {
   switch (key) {
     case "model":
       return "Default model for steps with no model of their own."
-    case "interactiveModel":
-      return "Model used by manual OpenCode iterations in human steps."
     case "autoAcceptJudgeModel":
       return "Model the smart auto-accept judge uses (falls back to the run's model)."
     case "branchNameModel":
@@ -1149,10 +1144,6 @@ function describeDefault(key: keyof ArcherDefaults): string {
       return "Branch/base used to diff between steps (auto-detected when unset)."
     case "pipeline":
       return "Pipeline used when -p/--pipeline is not given."
-    case "appRunCommand":
-      return "App command run during human steps."
-    case "emulator":
-      return "Flutter emulator launched during human steps."
     default:
       return ""
   }

@@ -8,10 +8,6 @@ export type RunOptions = {
   modelOverride: string
   tui: boolean
   humanReview: boolean
-  emulatorID: string
-  appRunCommand: string
-  interactiveModel: string
-  interactiveVariant: string
   maxAttempts: number
   baseRef: string
   targetDir: string

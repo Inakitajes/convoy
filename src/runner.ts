@@ -8,11 +8,11 @@ import type { AssistantMessage, FilePartInput, OpencodeClient, Part } from "@ope
 import { opencodeConfig } from "./agents"
 import { fileParts } from "./attachments"
 import { addAllAndCommit, createCleanRepoSnapshot, dirtyFilesPreview, dirtyTreeError, ensureRepoReady, restoreRepoSnapshot, type RepoSnapshot, statusPorcelain, writeDiff } from "./git"
-import { hooksForPipeline, runHooks } from "./hooks"
+import { hookPhaseNames, hooksForPipeline, runHooks, type HookStage } from "./hooks"
 import { runHumanReviewGate } from "./human"
 import { log } from "./log"
 import { openRunMetadata, recordProgress, type RunMetadataStore } from "./metadata"
-import { startOpencode } from "./opencode"
+import { openOpencodeSessionWindow, startOpencode } from "./opencode"
 import { startPermissionGate, type PermissionGate } from "./permissions"
 import { splitModelVariant, synthesizeReadOnlyAgents, validateStepFilters } from "./pipeline"
 import {
@@ -31,7 +31,7 @@ import {
   type RunOutcome,
 } from "./progress"
 import { discoverProjectContextFiles } from "./project-context"
-import type { AgentSpec, AgentStep, Pipeline, RunOptions, Step } from "./types"
+import type { AgentSpec, AgentStep, HookSet, HookSpec, Pipeline, RunOptions, Step } from "./types"
 import { addTokens, emptyTokens, tokensFromValue } from "./usage"
 import { cleanupWorkspace, createWorkspace, resumeWorkspace, type Workspace, writeSummary } from "./workspace"
 
@@ -261,7 +261,7 @@ export async function run(options: RunOptions) {
     // before the TUI grabs the terminal, so the readline prompt stays visible.
     await maybeRecoverDirtyTree(workspace, metadata, options)
     progress = recordProgress(
-      await createProgressUI(progressPhases(pipeline), options.tui, () => shutdown.request("Ctrl+C"), autoAccept),
+      await createProgressUI(progressPhases(pipeline, hookSet), options.tui, () => shutdown.request("Ctrl+C"), autoAccept),
       metadata,
     )
     progress.start(workspace.runID, options.targetDir, workspace.dir)
@@ -284,6 +284,7 @@ export async function run(options: RunOptions) {
         signal: shutdown.signal,
       })
     } else if (hookSet.pre.length > 0) {
+      for (const name of hookPhaseNames("pre", hookSet.pre)) progress.phaseSkipped(name)
       progress.message("pre-hooks skipped while resuming an existing run")
       log.info("pre-hooks skipped on resume")
     }
@@ -322,6 +323,7 @@ export async function run(options: RunOptions) {
     // above, and TS won't retain that narrowing inside the batch's nested
     // arrow functions, but a `const` alias captured here stays narrowed.
     const client = opencode.client
+    const serverUrl = opencode.url
     const runMetadata = metadata
 
     for (const batch of planBatches(pipeline.steps)) {
@@ -348,7 +350,7 @@ export async function run(options: RunOptions) {
           }
           const restored = resuming && (await restorePhaseFromPreviousRun(workspace, runMetadata, step, progress))
           if (!restored) {
-            await runPhase(client, workspace, step, options, extraFiles, projectContextFiles, progress, shutdown, gitLock)
+            await runPhase(client, workspace, step, options, extraFiles, projectContextFiles, progress, shutdown, gitLock, { serverUrl, permissions })
           }
         }),
       )
@@ -560,6 +562,12 @@ function recoveryReport(phaseName: string) {
   ].join("\n")
 }
 
+/** What the mid-step interactive gate needs to reopen the session window and hold permission prompts. */
+export type TakeoverContext = {
+  serverUrl: string
+  permissions?: PermissionGate
+}
+
 async function runPhase(
   client: OpencodeClient,
   workspace: Workspace,
@@ -570,6 +578,7 @@ async function runPhase(
   progress: ProgressUI,
   shutdown: RunShutdown,
   gitLock: GitLock,
+  takeover?: TakeoverContext,
 ) {
   progress.phaseStarted(phase.name, phase.description)
   log.section(`${phase.name} - ${phase.description}`)
@@ -577,7 +586,7 @@ async function runPhase(
   try {
     const prepared = await preparePhaseRun(workspace, phase, options, extraFiles, projectContextFiles)
     const baseline = await gitLock(() => createCleanRepoSnapshot(options.targetDir))
-    const assistantText = await runPhaseWithRetries(client, workspace, phase, options.targetDir, prepared, baseline, progress, shutdown, gitLock)
+    const assistantText = await runPhaseWithRetries(client, workspace, phase, options.targetDir, prepared, baseline, progress, shutdown, gitLock, takeover)
 
     const reportAbs = await persistPhaseReport(workspace, phase, assistantText)
     await gitLock(() => commitPhase(phase, reportAbs, options.targetDir))
@@ -641,22 +650,43 @@ async function runPhaseWithRetries(
   progress: ProgressUI,
   shutdown: RunShutdown,
   gitLock: GitLock,
+  takeover?: TakeoverContext,
 ) {
   if (!baseline && prepared.maxAttempts > 1) {
     throw new Error(`[${phase.name}] can't retry with dirty working tree; use --max-attempts 1 or clean the repo`)
   }
 
   let lastError: unknown
+  const sessionRef: SessionRef = {}
+  // Read fresh at each decision point: the user can arm/disarm [i] mid-attempt.
+  const armed = () => Boolean(takeover && progress.isInteractiveTakeover?.(phase.name))
 
   for (let attempt = 1; attempt <= prepared.maxAttempts; attempt++) {
     shutdown.throwIfRequested()
     progress.phaseAttempt(phase.name, { attempt, maxAttempts: prepared.maxAttempts, model: formatModel(prepared.model) })
     log.info(`[${phase.name}] attempt ${attempt}/${prepared.maxAttempts} with ${formatModel(prepared.model)}`)
     try {
-      return await runPhaseAttempt(client, workspace, phase, targetDir, prepared, attempt, progress, shutdown)
+      const assistantText = await runPhaseAttempt(client, workspace, phase, targetDir, prepared, attempt, progress, shutdown, sessionRef)
+      if (armed()) {
+        // Armed means "this step is mine": even a clean finish waits for the
+        // user's decision before the step commits and the pipeline moves on.
+        log.info(`[${phase.name}] attempt succeeded with interactive mode armed; waiting for manual action`)
+        await waitForInteractiveGate(phase.name, targetDir, sessionRef.id, takeover!, progress)
+      }
+      return assistantText
     } catch (error) {
       if (!shouldRetryAttempt(error, shutdown.signal, attempt, prepared.maxAttempts) && (shutdown.aborted || isUserAbortError(error))) {
         throw shutdown.abortError(error)
+      }
+      if (armed()) {
+        // The user took over (typically esc in the attached OpenCode window):
+        // no retry and no baseline restore — their manual work must survive.
+        log.info(`[${phase.name}] attempt ended with interactive mode armed (${formatSdkError(error)}); waiting for manual action`)
+        if (!(error instanceof LoggedAttemptError)) {
+          await writeAttemptLog(workspace, phase, attempt, { error: formatSdkError(error) })
+        }
+        await waitForInteractiveGate(phase.name, targetDir, sessionRef.id, takeover!, progress)
+        return ""
       }
       lastError = error
       progress.phaseRunning(phase.name, `attempt ${attempt} failed`)
@@ -676,6 +706,55 @@ async function runPhaseWithRetries(
   return ""
 }
 
+/** Last session created for the phase's attempts, so the interactive gate can reopen its window. */
+type SessionRef = { id?: string }
+
+type InteractiveGateDeps = { openWindow: typeof openOpencodeSessionWindow }
+
+/**
+ * The mid-step gate for phases armed with [i]: holds the pipeline until the
+ * user picks continue (commit whatever the tree holds and move on), reopens
+ * the session window on iterate, or aborts the run — leaving the working tree
+ * untouched either way. Permission prompts stay paused while it waits, since
+ * the user's attached OpenCode TUI answers its own.
+ */
+export async function waitForInteractiveGate(
+  phaseName: string,
+  targetDir: string,
+  sessionID: string | undefined,
+  takeover: TakeoverContext,
+  progress: ProgressUI,
+  deps: InteractiveGateDeps = { openWindow: openOpencodeSessionWindow },
+): Promise<void> {
+  const ask = progress.askHumanReview?.bind(progress)
+  if (!ask) return // no dashboard, no gate: arming is impossible without the TUI anyway
+
+  progress.phaseRunning(phaseName, "interactive session — waiting for your decision")
+  let iterations = 0
+  takeover.permissions?.pause()
+  try {
+    for (;;) {
+      const action = await ask({ stepName: phaseName, iterations, kind: "interactive" })
+      if (action === "continue") return
+      if (action === "abort") throw new UserAbortError("aborted from interactive session gate")
+
+      iterations++
+      if (!sessionID) {
+        progress.phaseActivity(phaseName, "no session to reopen; use the OpenCode window you already have", "info")
+        continue
+      }
+      try {
+        const backend = await deps.openWindow({ url: takeover.serverUrl, targetDir, sessionID })
+        progress.phaseActivity(phaseName, `session reopened in ${backend}; return here and press c to continue`, "system")
+      } catch (error) {
+        progress.phaseActivity(phaseName, `couldn't reopen the session window: ${error instanceof Error ? error.message : String(error)}`, "error")
+      }
+    }
+  } finally {
+    takeover.permissions?.resume()
+  }
+}
+
 async function runPhaseAttempt(
   client: OpencodeClient,
   workspace: Workspace,
@@ -685,6 +764,7 @@ async function runPhaseAttempt(
   attempt: number,
   progress: ProgressUI,
   shutdown: RunShutdown,
+  sessionRef?: SessionRef,
 ) {
   const result = await promptPhase(client, {
     phase,
@@ -695,6 +775,7 @@ async function runPhaseAttempt(
     attachments: prepared.attachments,
     progress,
     shutdown,
+    sessionRef,
   })
   const assistantText = extractAssistantText(result.parts)
 
@@ -763,6 +844,7 @@ async function promptPhase(
     attachments: FilePartInput[]
     progress: ProgressUI
     shutdown: RunShutdown
+    sessionRef?: SessionRef
   },
 ): Promise<SessionResult> {
   input.shutdown.throwIfRequested()
@@ -774,6 +856,7 @@ async function promptPhase(
   if (session.error) throw new Error(formatSdkError(session.error))
   if (!session.data?.id) throw new Error("opencode didn't return session id")
 
+  if (input.sessionRef) input.sessionRef.id = session.data.id
   input.progress.phaseSession(input.phase.name, session.data.id)
   input.shutdown.setActiveSession({ client, sessionID: session.data.id, directory: input.targetDir, phaseName: input.phase.name })
   log.info(`[${input.phase.name}] session: ${session.data.id}`)
@@ -1540,8 +1623,8 @@ function ensureAgentsAvailable(pipeline: Pipeline, agents: readonly AgentSpec[])
   }
 }
 
-export function progressPhases(pipeline: Pipeline): ProgressPhase[] {
-  return pipeline.steps.map((step) =>
+export function progressPhases(pipeline: Pipeline, hooks?: HookSet): ProgressPhase[] {
+  const steps = pipeline.steps.map((step) =>
     step.type === "agent"
       ? {
           name: step.name,
@@ -1553,6 +1636,12 @@ export function progressPhases(pipeline: Pipeline): ProgressPhase[] {
         }
       : { name: step.name, description: step.description },
   )
+  if (!hooks) return steps
+  // Hooks are dashboard rows too, so their execution is watchable like any
+  // step: pre-hooks ahead of the pipeline, post-hooks after it.
+  const hookPhase = (stage: HookStage, specs: readonly HookSpec[]) =>
+    hookPhaseNames(stage, specs).map((name, index) => ({ name, description: specs[index]!.command }))
+  return [...hookPhase("pre", hooks.pre), ...steps, ...hookPhase("post", hooks.post)]
 }
 
 class LoggedAttemptError extends Error {}

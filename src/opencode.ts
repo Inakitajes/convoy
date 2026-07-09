@@ -62,14 +62,14 @@ export async function openOpencodeSessionWindow(input: {
   )
 }
 
+// `run --interactive` needs a message and exits immediately without one, so
+// the window attaches the full TUI to the run's server instead; --continue
+// resumes the run's latest session with its context.
 export async function openInteractiveOpencodeWindow(input: {
   url: string
   targetDir: string
-  model: string
-  variant?: string
 }): Promise<SessionWindowBackend> {
-  const args = ["opencode", "run", "--interactive", "--attach", input.url, "--dir", input.targetDir, "--model", input.model]
-  if (input.variant) args.push("--variant", input.variant)
+  const args = ["opencode", "attach", input.url, "--dir", input.targetDir, "--continue"]
   return openSessionCommand(args.map(shellQuote).join(" "))
 }
 

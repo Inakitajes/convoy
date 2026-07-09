@@ -4,8 +4,8 @@ import { join } from "node:path"
 
 import { afterAll, describe, expect, test } from "bun:test"
 
-import { hooksForPipeline, runHooks } from "../src/hooks"
-import { noopProgress } from "../src/progress"
+import { hookPhaseNames, hooksForPipeline, runHooks } from "../src/hooks"
+import { noopProgress, type ProgressUI } from "../src/progress"
 import type { HooksConfig } from "../src/types"
 import type { Workspace } from "../src/workspace"
 
@@ -87,5 +87,39 @@ describe("hooks", () => {
     await Bun.spawn(["chmod", "+x", join(context.targetDir, "slow.sh")]).exited
 
     await expect(runHooks("pre", [{ name: "slow", command: "./slow.sh", timeoutSeconds: 1 }], context)).rejects.toThrow("timed out")
+  })
+
+  test("hookPhaseNames are stable and disambiguate duplicate labels", () => {
+    const names = hookPhaseNames("post", [{ name: "deploy", command: "a" }, { command: "npm    run\nlint" }, { name: "deploy", command: "b" }])
+    expect(names).toEqual(["post-hook: deploy", "post-hook: npm run lint", "post-hook: deploy (3)"])
+  })
+
+  test("reports each hook as a dashboard phase with its output in the feed", async () => {
+    const context = await hookContext()
+    const events: string[] = []
+    const progress: ProgressUI = {
+      ...noopProgress,
+      phaseStarted: (name) => void events.push(`started ${name}`),
+      phaseCompleted: (name) => void events.push(`completed ${name}`),
+      phaseFailed: (name, detail) => void events.push(`failed ${name}: ${detail}`),
+      phaseSkipped: (name) => void events.push(`skipped ${name}`),
+      phaseActivity: (name, detail) => void events.push(`activity ${name}: ${detail}`),
+    }
+    const hooks = [
+      { name: "notify", command: "echo hook says hi", when: "always" as const },
+      { name: "only-on-failure", command: "echo never", when: "failure" as const },
+      { name: "broken", command: "exit 3", when: "always" as const, continueOnError: true },
+    ]
+
+    await runHooks("post", hooks, { ...context, progress, status: "success" })
+
+    expect(events).toEqual([
+      "started post-hook: notify",
+      "activity post-hook: notify: hook says hi",
+      "completed post-hook: notify",
+      "skipped post-hook: only-on-failure",
+      "started post-hook: broken",
+      "failed post-hook: broken: exited with code 3",
+    ])
   })
 })

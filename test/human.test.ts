@@ -43,11 +43,7 @@ async function fixture() {
       humanReview: true,
       targetDir,
       resumeRunID: "",
-      appRunCommand: "",
-      emulatorID: "",
-      interactiveModel: "openai/gpt-5.5",
-      interactiveVariant: "",
-    } as RunOptions,
+    } as Partial<RunOptions> as RunOptions,
   }
 }
 
@@ -84,19 +80,7 @@ describe("runHumanReviewGate", () => {
     expect(calls.resume).toBe(0)
     expect(calls.completed).toBe(1)
     expect(calls.prompts).toHaveLength(1)
-    expect(calls.prompts[0]).toMatchObject({ stepName: "human-review", appRunning: false, appCommand: "" })
-    await expect(readFile(join(workspace.dir, "reports", "human-review.md"), "utf8")).resolves.toContain("- Result: approved")
-  })
-
-  test("handles start-app from the TUI without inheriting terminal output", async () => {
-    const { workspace, options } = await fixture()
-    const { calls, progress } = progressWithActions(["prepare", "continue"])
-
-    await runHumanReviewGate(workspace, options, "http://127.0.0.1:1234", progress)
-
-    expect(calls.suspend).toBe(0)
-    expect(calls.prompts).toHaveLength(2)
-    expect(calls.activities).toContain("app launch disabled; start it manually")
+    expect(calls.prompts[0]).toMatchObject({ stepName: "human-review", iterations: 0 })
     await expect(readFile(join(workspace.dir, "reports", "human-review.md"), "utf8")).resolves.toContain("- Result: approved")
   })
 

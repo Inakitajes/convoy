@@ -28,10 +28,6 @@ export type ParsedArgs = {
   modelOverride?: string
   tui?: boolean
   humanReview?: boolean
-  emulatorID?: string
-  appRunCommand?: string
-  interactiveModel?: string
-  interactiveVariant?: string
   maxAttempts?: number
   baseRef?: string
   /**
@@ -284,7 +280,6 @@ export async function resolveRunOptions(parsed: ParsedArgs): Promise<Omit<RunOpt
 
   if (parsed.modelOverride) parseModel(splitModelVariant(parsed.modelOverride).model)
   if (parsed.smartModel) parseModel(splitModelVariant(parsed.smartModel).model)
-  const interactive = resolveInteractiveModel(parsed, defaults)
   // Smart auto-accept always needs a concrete judge model; resolve the fallback
   // chain here so the runner can stay oblivious to config and built-in defaults.
   const smartJudgeModel =
@@ -299,10 +294,6 @@ export async function resolveRunOptions(parsed: ParsedArgs): Promise<Omit<RunOpt
     modelOverride: parsed.modelOverride ?? "",
     tui: parsed.tui ?? Boolean(process.stdout.isTTY && process.stderr.isTTY),
     humanReview,
-    emulatorID: parsed.emulatorID ?? defaults.emulator ?? "",
-    appRunCommand: parsed.appRunCommand ?? defaults.appRunCommand ?? "",
-    interactiveModel: interactive.model,
-    interactiveVariant: interactive.variant,
     maxAttempts: parsed.maxAttempts ?? defaults.maxAttempts ?? 2,
     baseRef: await resolveBaseRef(parsed, defaults),
     targetDir: parsed.targetDir,
@@ -332,17 +323,6 @@ async function resolveBaseRef(parsed: ParsedArgs, defaults: ArcherDefaults): Pro
   if (!detected) return "HEAD" // non-repo / zero commits: ensureRepoReady reports the real problem
   log.info(`base ref: ${detected.ref} (auto-detected)`)
   return detected.ref
-}
-
-// Model source: flag > config defaults.interactiveModel > built-in default.
-// The variant rides on whichever source won (or --interactive-variant).
-function resolveInteractiveModel(parsed: ParsedArgs, defaults: ArcherDefaults): { model: string; variant: string } {
-  const chosen = parsed.interactiveModel
-    ? splitModelVariant(parsed.interactiveModel)
-    : defaults.interactiveModel
-      ? splitModelVariant(defaults.interactiveModel)
-      : { model: defaultGptModel, variant: defaultGptVariant }
-  return { model: chosen.model, variant: parsed.interactiveVariant ?? chosen.variant ?? "" }
 }
 
 export function parseArgs(argv: string[]): ParsedArgs {
@@ -433,21 +413,6 @@ export function parseArgs(argv: string[]): ParsedArgs {
       case "--no-human-step":
         parsed.humanReview = false
         break
-      case "--emulator":
-        parsed.emulatorID = takeValue()
-        break
-      case "--app-run-command":
-        parsed.appRunCommand = takeValue()
-        break
-      case "--no-app-run":
-        parsed.appRunCommand = ""
-        break
-      case "--interactive-model":
-        parsed.interactiveModel = takeValue()
-        break
-      case "--interactive-variant":
-        parsed.interactiveVariant = takeValue()
-        break
       case "--max-attempts":
         parsed.maxAttempts = parseInt(takeValue(), 10)
         if (!Number.isInteger(parsed.maxAttempts) || parsed.maxAttempts < 1) {
@@ -524,11 +489,6 @@ Flags:
   --no-tui                 Disable visual phase progress
   --human-step             Enable human steps (alias: --human-review; default in interactive terminals)
   --no-human-step          Drop all human steps (alias: --no-human-review)
-  --emulator <id>          Optional Flutter emulator to launch during human steps
-  --app-run-command <cmd>  Command used to run the app during human steps (default: disabled)
-  --no-app-run             Don't launch the app automatically during human steps
-  --interactive-model <m>  Model used by manual OpenCode iterations (default: ${defaultGptModel}#${defaultGptVariant})
-  --interactive-variant <v> Model variant for manual iterations
   --max-attempts <n>       Attempts per step before failing (default: 2)
   --base <ref>             Branch/base for calculating diffs (default: auto-detected — origin's default branch, else main/master/develop/trunk, else the current branch)
   --dir <path>             Target repo (default: cwd)
@@ -539,7 +499,7 @@ Config files:
   agents/*.md              Markdown prompts loaded by matching the agent name
 
 Config keys:
-  defaults:                model, maxAttempts, baseRef, pipeline, appRunCommand, emulator, interactiveModel, autoAcceptJudgeModel, branchNameModel
+  defaults:                model, maxAttempts, baseRef, pipeline, autoAcceptJudgeModel, branchNameModel
   agents:                  project agents or built-in overrides; prompts live at agents/<name>.md
   pipelines:               named step lists mixing agents and human gates
   permissions:             allow/deny additions to the bash policy (deny always wins)

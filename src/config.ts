@@ -44,9 +44,6 @@ export type ArcherDefaults = {
   maxAttempts?: number
   baseRef?: string
   pipeline?: string
-  appRunCommand?: string
-  emulator?: string
-  interactiveModel?: string
   /** Model for the smart auto-accept judge; falls back to the run's model when unset. */
   autoAcceptJudgeModel?: string
   /** Model that names worktree branches; falls back to the built-in cheap default when unset. */
@@ -170,10 +167,7 @@ defaults:
   # maxAttempts: 2
   # baseRef: main # optional: when unset, archer auto-detects (origin default branch, else main/master/develop/trunk, else current branch)
   # pipeline: implement
-  # interactiveModel: openai/gpt-5.5#xhigh
   # branchNameModel: anthropic/claude-haiku-4-5 # optional: model that names worktree branches
-  # appRunCommand: pnpm dev # optional: unset by default; used during human steps
-  # emulator: Pixel_8 # optional: unset by default; used during human steps
 
 # Agents are matched by name with Markdown prompts next to this config:
 #   agents/<name>.md
@@ -346,16 +340,13 @@ export function parseArcherConfig(body: string, source: string, targetDir: strin
 
 function validateDefaults(v: Validator, raw: unknown): ArcherDefaults {
   const record = v.record(raw, "defaults")
-  v.knownKeys(record, "defaults", ["model", "maxAttempts", "baseRef", "pipeline", "appRunCommand", "emulator", "interactiveModel", "autoAcceptJudgeModel", "branchNameModel"])
+  v.knownKeys(record, "defaults", ["model", "maxAttempts", "baseRef", "pipeline", "autoAcceptJudgeModel", "branchNameModel"])
 
   const defaults: ArcherDefaults = {}
   if (record.model !== undefined) defaults.model = v.model(record.model, "defaults.model")
   if (record.maxAttempts !== undefined) defaults.maxAttempts = v.positiveInt(record.maxAttempts, "defaults.maxAttempts")
   if (record.baseRef !== undefined) defaults.baseRef = v.nonEmptyString(record.baseRef, "defaults.baseRef")
   if (record.pipeline !== undefined) defaults.pipeline = v.nonEmptyString(record.pipeline, "defaults.pipeline")
-  if (record.appRunCommand !== undefined) defaults.appRunCommand = v.nonEmptyString(record.appRunCommand, "defaults.appRunCommand")
-  if (record.emulator !== undefined) defaults.emulator = v.nonEmptyString(record.emulator, "defaults.emulator")
-  if (record.interactiveModel !== undefined) defaults.interactiveModel = v.model(record.interactiveModel, "defaults.interactiveModel")
   if (record.autoAcceptJudgeModel !== undefined) defaults.autoAcceptJudgeModel = v.model(record.autoAcceptJudgeModel, "defaults.autoAcceptJudgeModel")
   if (record.branchNameModel !== undefined) defaults.branchNameModel = v.model(record.branchNameModel, "defaults.branchNameModel")
   return defaults

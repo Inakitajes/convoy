@@ -111,16 +111,13 @@ export type PermissionPromptInfo = {
   judgeReason?: string
 }
 
-export type HumanReviewAction = "continue" | "iterate" | "rerun" | "abort" | "prepare"
+export type HumanReviewAction = "continue" | "iterate" | "abort"
 
 export type HumanReviewPromptInfo = {
   stepName: string
   iterations: number
-  appRunning: boolean
-  appCommand: string
-  emulatorID: string
-  interactiveModel: string
-  interactiveVariant: string
+  /** "interactive" marks the mid-step takeover gate (armed with [i]); absent for pipeline human steps. */
+  kind?: "interactive"
 }
 
 export type RunOutcome = {
@@ -156,6 +153,8 @@ export type ProgressUI = {
   askPermission?(info: PermissionPromptInfo): Promise<PermissionReply>
   /** When present, the UI keeps manual review gates inside the dashboard. */
   askHumanReview?(info: HumanReviewPromptInfo): Promise<HumanReviewAction>
+  /** True while the user has armed interactive takeover ([i]) for this phase: the runner must not retry, restore, or complete it without asking. */
+  isInteractiveTakeover?(name: string): boolean
   /** Holds the dashboard open on a finish screen (phase browser) and resolves when the user dismisses it. */
   runFinished?(outcome: RunOutcome): Promise<void>
   message(message: string): void

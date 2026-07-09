@@ -32,6 +32,12 @@ export async function openRunDashboard(runID: string): Promise<void> {
   }
   const targetDir = metadata.targetDir || process.cwd()
   const phases = progressPhases(metadata.pipeline)
+  // Hook phases aren't part of the frozen pipeline but were recorded as they
+  // ran; re-add them as rows so replayHistory has somewhere to restore them.
+  const known = new Set(phases.map((phase) => phase.name))
+  const extras = Object.keys(metadata.phases).filter((name) => !known.has(name))
+  phases.unshift(...extras.filter((name) => name.startsWith("pre-hook")).map((name) => ({ name, description: "" })))
+  phases.push(...extras.filter((name) => !name.startsWith("pre-hook")).map((name) => ({ name, description: "" })))
   // Re-checked here: the browser's liveness snapshot may be a couple of seconds
   // stale, and the run may have ended (or started) since it was listed.
   const server = (await isServerLive(metadata.server)) ? metadata.server : undefined
@@ -50,7 +56,7 @@ export async function openRunDashboard(runID: string): Promise<void> {
       resolveDetached()
     },
     undefined,
-    { offlineSessions: !server },
+    { offlineSessions: !server, observer: true },
   )
   tui.start(runID, targetDir, dir)
 

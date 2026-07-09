@@ -1,4 +1,3 @@
-import { spawn, type ChildProcess } from "node:child_process"
 import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { stdin, stdout } from "node:process"
@@ -12,7 +11,6 @@ import type { PermissionGate } from "./permissions"
 import type { RunOptions } from "./types"
 import type { Workspace } from "./workspace"
 
-type AppProcess = ChildProcess
 type HumanReviewGateDeps = {
   openInteractiveOpencodeWindow: typeof openInteractiveOpencodeWindow
   runInteractiveOpencode: typeof runInteractiveOpencode
@@ -53,9 +51,7 @@ export async function runHumanReviewGate(
   progress.phaseStarted(stepName, "waiting for manual action")
 
   let iterations = 0
-  let app: AppProcess | undefined
-  const inheritOutput = !askInTui
-  const askAction = async () => (askInTui ? askInTui(humanReviewInfo(stepName, options, iterations, app)) : askHumanAction())
+  const askAction = async () => (askInTui ? askInTui({ stepName, iterations }) : askHumanAction())
 
   // Plain readline fallback still owns the terminal. The TUI path keeps the
   // dashboard active and resolves actions via ProgressUI.askHumanReview.
@@ -67,16 +63,9 @@ export async function runHumanReviewGate(
     for (;;) {
       if (action === "continue") {
         await commitHumanChanges(options, stepName)
-        await writeHumanReviewReport(workspace, options, "approved", iterations, stepName)
+        await writeHumanReviewReport(workspace, "approved", iterations, stepName)
         progress.phaseCompleted(stepName, "approved")
         return
-      }
-
-      if (action === "prepare" || action === "rerun") {
-        await stopApp(app)
-        app = await prepareApp(options, progress, stepName, { inheritOutput })
-        action = await askAction()
-        continue
       }
 
       if (action === "iterate") {
@@ -97,13 +86,9 @@ export async function runHumanReviewGate(
             permissions?.resume()
           }
 
-          await stopApp(app)
-          app = undefined
           await runSuspendedInteractiveIteration(options, opencodeUrl, progress, stepName, permissions, deps.runInteractiveOpencode)
           await commitHumanChanges(options, stepName)
         } else {
-          await stopApp(app)
-          app = undefined
           await runInteractiveIteration(options, opencodeUrl, stepName, permissions, deps.runInteractiveOpencode)
           await commitHumanChanges(options, stepName)
         }
@@ -111,12 +96,11 @@ export async function runHumanReviewGate(
         continue
       }
 
-      await writeHumanReviewReport(workspace, options, "aborted", iterations, stepName)
+      await writeHumanReviewReport(workspace, "aborted", iterations, stepName)
       progress.phaseFailed(stepName, "aborted by user")
       throw new Error("aborted by human review")
     }
   } finally {
-    await stopApp(app)
     if (!askInTui) progress.resume()
   }
 }
@@ -128,62 +112,6 @@ async function humanReviewApproved(workspace: Workspace, stepName: string) {
   } catch {
     return false
   }
-}
-
-function humanReviewInfo(stepName: string, options: RunOptions, iterations: number, app: AppProcess | undefined) {
-  return {
-    stepName,
-    iterations,
-    appRunning: Boolean(app && app.exitCode === null && app.signalCode === null),
-    appCommand: options.appRunCommand,
-    emulatorID: options.emulatorID,
-    interactiveModel: options.interactiveModel,
-    interactiveVariant: options.interactiveVariant,
-  }
-}
-
-async function prepareApp(options: RunOptions, progress: ProgressUI, stepName: string, io: { inheritOutput: boolean }): Promise<AppProcess | undefined> {
-  progress.phaseRunning(stepName, "preparing app")
-  await launchEmulator(options, io, stepName)
-  progress.phaseRunning(stepName, "running app command")
-  return startApp(options, progress, stepName, io)
-}
-
-async function launchEmulator(options: RunOptions, io: { inheritOutput: boolean }, stepName: string) {
-  const emulatorID = options.emulatorID
-  if (!emulatorID) {
-    log.info(`[${stepName}] no emulator configured; starting app command without launching one`)
-    return
-  }
-
-  log.info(`[${stepName}] launching emulator ${emulatorID}`)
-  const proc = Bun.spawn(["flutter", "emulators", "--launch", emulatorID], {
-    cwd: options.targetDir,
-    stdin: "ignore",
-    stdout: io.inheritOutput ? "inherit" : "ignore",
-    stderr: io.inheritOutput ? "inherit" : "ignore",
-    env: process.env,
-  })
-  const code = await proc.exited
-  if (code !== 0) log.warn(`[${stepName}] emulator launch exited with code ${code}; start it manually if needed`)
-}
-
-function startApp(options: RunOptions, progress: ProgressUI, stepName: string, io: { inheritOutput: boolean }): AppProcess | undefined {
-  if (!options.appRunCommand) {
-    log.warn(`[${stepName}] app launch disabled; start the app manually before continuing`)
-    progress.phaseActivity(stepName, "app launch disabled; start it manually", "info")
-    return undefined
-  }
-
-  log.info(`[${stepName}] starting app: ${options.appRunCommand}`)
-  // detached gives the shell its own process group, so stopApp can signal the
-  // whole tree (pnpm/flutter spawn the real servers as grandchildren).
-  return spawn("sh", ["-c", options.appRunCommand], {
-    cwd: options.targetDir,
-    stdio: io.inheritOutput ? ["ignore", "inherit", "inherit"] : ["ignore", "ignore", "ignore"],
-    detached: true,
-    env: process.env,
-  })
 }
 
 async function askHumanAction(): Promise<HumanReviewAction> {
@@ -199,17 +127,15 @@ async function askHumanAction(): Promise<HumanReviewAction> {
 
   try {
     for (;;) {
-      const answer = (await rl.question("Human step: [c]ontinue, [i]terate, [s]tart app, [r]erun app, [a]bort > ", {
+      const answer = (await rl.question("Human step: [c]ontinue pipeline, [o]pen OpenCode, [a]bort > ", {
         signal: controller.signal,
       }))
         .trim()
         .toLowerCase()
       if (answer === "c" || answer === "continue") return "continue" as const
-      if (answer === "i" || answer === "iterate") return "iterate" as const
-      if (answer === "s" || answer === "start" || answer === "prepare") return "prepare" as const
-      if (answer === "r" || answer === "rerun") return "rerun" as const
+      if (answer === "o" || answer === "open" || answer === "opencode") return "iterate" as const
       if (answer === "a" || answer === "abort") return "abort" as const
-      stdout.write("Choose c, i, s, r, or a.\n")
+      stdout.write("Choose c, o, or a.\n")
     }
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {
@@ -237,8 +163,6 @@ async function openExternalIteration(
     const backend = await openWindow({
       url: opencodeUrl,
       targetDir: options.targetDir,
-      model: options.interactiveModel,
-      variant: options.interactiveVariant,
     })
     progress.phaseActivity(stepName, `OpenCode iteration opened in ${backend}; return here and press c to continue`, "system")
     return true
@@ -283,19 +207,11 @@ async function runInteractiveIteration(
 }
 
 async function runInteractiveOpencode(options: RunOptions, opencodeUrl: string, stepName = "human") {
-  const args = [
-    "run",
-    "--interactive",
-    "--attach",
-    opencodeUrl,
-    "--dir",
-    options.targetDir,
-    "--model",
-    options.interactiveModel,
-  ]
-  if (options.interactiveVariant) args.push("--variant", options.interactiveVariant)
+  // Same shape as the windowed path: `run --interactive` refuses to start
+  // without a message, so attach the full TUI to the run's server instead.
+  const args = ["attach", opencodeUrl, "--dir", options.targetDir, "--continue"]
 
-  log.info(`[${stepName}] handing control to OpenCode (${options.interactiveModel}${options.interactiveVariant ? `#${options.interactiveVariant}` : ""})`)
+  log.info(`[${stepName}] handing control to OpenCode (attached to ${opencodeUrl})`)
   const proc = Bun.spawn(["opencode", ...args], {
     cwd: options.targetDir,
     stdin: "inherit",
@@ -313,7 +229,7 @@ async function commitHumanChanges(options: RunOptions, stepName: string) {
   if (committed) log.info(`[${stepName}] committed manual changes`)
 }
 
-async function writeHumanReviewReport(workspace: Workspace, options: RunOptions, result: "approved" | "aborted", iterations: number, stepName: string) {
+async function writeHumanReviewReport(workspace: Workspace, result: "approved" | "aborted", iterations: number, stepName: string) {
   const reportPath = join(workspace.dir, "reports", `${stepName}.md`)
   await mkdir(dirname(reportPath), { recursive: true })
   await writeFile(
@@ -323,43 +239,7 @@ async function writeHumanReviewReport(workspace: Workspace, options: RunOptions,
       "",
       `- Result: ${result}`,
       `- Manual OpenCode iterations: ${iterations}`,
-      `- App command: ${options.appRunCommand || "disabled"}`,
-      `- Emulator: ${options.emulatorID || "not launched by Archer"}`,
-      `- Interactive model: ${options.interactiveModel}${options.interactiveVariant ? `#${options.interactiveVariant}` : ""}`,
       "",
     ].join("\n"),
   )
-}
-
-async function stopApp(proc: AppProcess | undefined) {
-  if (!proc || proc.exitCode !== null || proc.signalCode !== null) return
-
-  const exited = new Promise<number | null>((resolve) => proc.once("exit", (code) => resolve(code)))
-  killAppGroup(proc, "SIGTERM")
-  const code = await Promise.race([exited, sleep(5_000).then(() => undefined)])
-  if (code === undefined) {
-    killAppGroup(proc, "SIGKILL")
-    await exited
-    return
-  }
-  if (code !== null && ![0, 130, 143].includes(code)) log.warn(`[human-step] stopped app process with code ${code}`)
-}
-
-// The app runs in its own process group (detached); signal the group so dev
-// servers spawned by the wrapper shell die too, not just the shell.
-function killAppGroup(proc: AppProcess, signal: NodeJS.Signals) {
-  if (!proc.pid) return
-  try {
-    process.kill(-proc.pid, signal)
-  } catch {
-    try {
-      proc.kill(signal)
-    } catch {
-      // already gone
-    }
-  }
-}
-
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms))
 }

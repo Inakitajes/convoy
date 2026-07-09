@@ -35,23 +35,41 @@ export function hooksForPipeline(config: HooksConfig, pipelineName: string): Hoo
 }
 
 export async function runHooks(stage: HookStage, hooks: readonly HookSpec[], context: RunHookContext): Promise<void> {
-  const selected = stage === "post" ? hooks.filter((hook) => shouldRunPostHook(hook, context.status ?? "success")) : [...hooks]
-  if (selected.length === 0) return
+  if (hooks.length === 0) return
+  const names = hookPhaseNames(stage, hooks)
+  const status = context.status ?? "success"
+  const selected = hooks.filter((hook) => stage === "pre" || shouldRunPostHook(hook, status))
 
-  const noun = `${stage}-hook${selected.length === 1 ? "" : "s"}`
-  context.progress.message(`running ${selected.length} ${noun}`)
-  log.section(`archer ${noun}`)
+  if (selected.length > 0) {
+    const noun = `${stage}-hook${selected.length === 1 ? "" : "s"}`
+    context.progress.message(`running ${selected.length} ${noun}`)
+    log.section(`archer ${noun}`)
+  }
 
-  for (const [index, hook] of selected.entries()) {
-    throwIfAborted(context.signal)
+  // Every hook has a dashboard phase (added by progressPhases), so each one is
+  // marked started/completed/failed/skipped there rather than only logged.
+  let ran = 0
+  for (const [index, hook] of hooks.entries()) {
+    const phase = names[index]!
     const label = hookLabel(hook)
-    context.progress.message(`${stage}-hook ${index + 1}/${selected.length}: ${label}`)
+    if (stage === "post" && !shouldRunPostHook(hook, status)) {
+      context.progress.phaseSkipped(phase)
+      log.info(`[${stage}-hook:${label}] skipped (when: ${hook.when ?? "success"}, run ${status})`)
+      continue
+    }
+
+    throwIfAborted(context.signal)
+    ran++
+    context.progress.phaseStarted(phase, hook.command)
+    context.progress.message(`${stage}-hook ${ran}/${selected.length}: ${label}`)
     log.info(`[${stage}-hook:${label}] ${hook.command}`)
 
     const result = await runHookCommand(stage, hook, context)
     logHookOutput(stage, label, result)
+    surfaceHookOutput(context.progress, phase, result)
 
     if (result.exitCode === 0 && !result.timedOut) {
+      context.progress.phaseCompleted(phase, "exit 0")
       context.progress.message(`${stage}-hook completed: ${label}`)
       continue
     }
@@ -60,6 +78,7 @@ export async function runHooks(stage: HookStage, hooks: readonly HookSpec[], con
       ? `timed out after ${hook.timeoutSeconds}s`
       : `exited with code ${result.exitCode}`
     const message = `${stage}-hook "${label}" ${reason}`
+    context.progress.phaseFailed(phase, reason)
     if (hook.continueOnError) {
       log.warn(`${message}; continuing because continueOnError is true`)
       context.progress.message(`${message}; continuing`)
@@ -67,6 +86,33 @@ export async function runHooks(stage: HookStage, hooks: readonly HookSpec[], con
     }
     throw new Error(message)
   }
+}
+
+/**
+ * Dashboard phase names for a stage's hooks, in execution order. Shared by the
+ * TUI phase list and the runner so both resolve the same rows; an index suffix
+ * disambiguates hooks that share a label.
+ */
+export function hookPhaseNames(stage: HookStage, hooks: readonly HookSpec[]): string[] {
+  const names: string[] = []
+  for (const [index, hook] of hooks.entries()) {
+    const base = `${stage}-hook: ${hookLabel(hook).replace(/\s+/g, " ").trim().slice(0, 48)}`
+    names.push(names.includes(base) ? `${base} (${index + 1})` : base)
+  }
+  return names
+}
+
+// The tail of the hook's output lands in its phase feed, so the dashboard's
+// logs tab shows what the command did without leaving the run.
+const hookFeedLines = 20
+
+function surfaceHookOutput(progress: ProgressUI, phase: string, result: HookCommandResult) {
+  const emit = (text: string, kind: "info" | "error") => {
+    const lines = text.split("\n").map((line) => line.trimEnd()).filter(Boolean)
+    for (const line of lines.slice(-hookFeedLines)) progress.phaseActivity(phase, line, kind)
+  }
+  emit(result.stdout, "info")
+  emit(result.stderr, "error")
 }
 
 function shouldRunPostHook(hook: HookSpec, status: HookRunStatus): boolean {

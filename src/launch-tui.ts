@@ -225,13 +225,13 @@ class LaunchPicker {
   private modal?: Modal
 
   private readonly toggleState: Record<ToggleKey, boolean> = {
-    smart: false,
+    smart: true,
     yolo: false,
     humanReview: Boolean(process.stdin.isTTY && process.stdout.isTTY),
     includeDirty: false,
     keepRunDir: false,
     tui: Boolean(process.stdout.isTTY && process.stderr.isTTY),
-    worktree: false,
+    worktree: true,
   }
 
   private readonly ticker: ReturnType<typeof setInterval>

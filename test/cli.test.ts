@@ -87,36 +87,11 @@ describe("cli parsing", () => {
   })
 
   test("parses human step flags", () => {
-    const parsed = parseArgs([
-      "--human-step",
-      "--no-tui",
-      "--emulator",
-      "Pixel_8",
-      "--app-run-command",
-      "flutter run -d emulator-5554",
-      "--interactive-model",
-      "openai/gpt-5.5-pro",
-      "--interactive-variant",
-      "xhigh",
-      "prompt",
-    ])
+    const parsed = parseArgs(["--human-step", "--no-tui", "prompt"])
 
     expect(parsed.humanReview).toBe(true)
     expect(parsed.tui).toBe(false)
-    expect(parsed.emulatorID).toBe("Pixel_8")
-    expect(parsed.appRunCommand).toBe("flutter run -d emulator-5554")
-    expect(parsed.interactiveModel).toBe("openai/gpt-5.5-pro")
-    expect(parsed.interactiveVariant).toBe("xhigh")
     expect(parseArgs(["--no-human-step", "prompt"]).humanReview).toBe(false)
-  })
-
-  test("does not configure a Flutter app command by default", async () => {
-    const command = await parseCommand(["prompt"])
-
-    expect(command.type).toBe("run")
-    if (command.type !== "run") return
-    expect(command.options.appRunCommand).toBe("")
-    expect(command.options.emulatorID).toBe("")
   })
 
   test("yolo is opt-in", async () => {
@@ -177,7 +152,6 @@ describe("config precedence", () => {
         "  maxAttempts: 5",
         "  baseRef: develop",
         "  pipeline: quick",
-        "  appRunCommand: flutter run",
         "pipelines:",
         "  quick:",
         "    steps:",
@@ -198,7 +172,6 @@ describe("config precedence", () => {
     if (command.type !== "run") return
     expect(command.options.maxAttempts).toBe(5)
     expect(command.options.baseRef).toBe("develop")
-    expect(command.options.appRunCommand).toBe("flutter run")
     expect(command.options.pipeline.name).toBe("quick")
     expect(stepNames(command.options.pipeline)).toEqual(["implementer", "tests"])
     expect(command.options.files).toEqual(["docs.md"])
@@ -215,7 +188,6 @@ describe("config precedence", () => {
       "main",
       "--pipeline",
       "implement",
-      "--no-app-run",
       "prompt",
     ])
 
@@ -223,7 +195,6 @@ describe("config precedence", () => {
     if (command.type !== "run") return
     expect(command.options.maxAttempts).toBe(1)
     expect(command.options.baseRef).toBe("main")
-    expect(command.options.appRunCommand).toBe("")
     expect(command.options.pipeline.name).toBe("implement")
   })
 

@@ -169,9 +169,10 @@ export async function createTuiProgress(
   phases: readonly ProgressPhase[],
   onAbort?: () => void,
   autoAccept?: AutoAccept,
-  // Re-opened finished runs have no live server, so [o] opens their stored
-  // sessions from disk instead of attaching. Live runs/attaches leave this off.
-  options?: { offlineSessions?: boolean },
+  // offlineSessions: re-opened finished runs have no live server, so [o] opens
+  // their stored sessions from disk instead of attaching. observer: read-only
+  // attach to another process's run, where [i] takeover must be refused.
+  options?: { offlineSessions?: boolean; observer?: boolean },
 ): Promise<ProgressUI> {
   // No backgroundColor yet: the palette is only chosen after the terminal
   // answers the background query, so a light terminal never flashes dark.
@@ -183,7 +184,7 @@ export async function createTuiProgress(
   })
   const mode = await renderer.waitForThemeMode(1_000).catch(() => null)
   setTheme(paletteForTerminal(mode, terminalBackgroundHex(renderer)))
-  return new TuiProgress(renderer, phases, onAbort, autoAccept, options?.offlineSessions ?? false)
+  return new TuiProgress(renderer, phases, onAbort, autoAccept, options?.offlineSessions ?? false, options?.observer ?? false)
 }
 
 export class TuiProgress implements ProgressUI {
@@ -199,6 +200,8 @@ export class TuiProgress implements ProgressUI {
   // still-scheduled) stays open for inspection.
   private selected = 0
   private manualFocus = false
+  // First visible step row in the pipeline panel when the tree overflows it.
+  private pipelineScroll = 0
   // Run workspace dir, where phase reports land; set at start so the reports
   // tab reads them live, and refreshed from the outcome on the finish screen.
   private runDir = ""
@@ -234,7 +237,12 @@ export class TuiProgress implements ProgressUI {
   // Panels repainted when the terminal reports a theme change mid-run.
   private readonly paletteTargets: Array<{ box: BoxRenderable; background: PaletteColor; border?: PaletteColor }> = []
   private readonly permissionQueue: PendingPermission[] = []
-  private humanReview?: PendingHumanReview
+  // Gates queue because parallel phases can both be armed with [i]; the head
+  // entry owns the c/o/a keys, the rest wait their turn.
+  private readonly humanReviewQueue: PendingHumanReview[] = []
+  // Phases the user armed with [i]: the runner checks this set (via
+  // isInteractiveTakeover) and gates instead of retrying or completing.
+  private readonly interactiveTakeover = new Set<string>()
   private permissionChoice = 0
   // Suspension nests: outer scopes (human-review gate) and inner prompts may
   // both suspend; only the outermost transition touches the renderer.
@@ -300,7 +308,7 @@ export class TuiProgress implements ProgressUI {
       this.handlePermissionKey(key)
       return
     }
-    if (this.humanReview && this.handleHumanReviewKey(key)) return
+    if (this.humanReviewQueue.length > 0 && this.handleHumanReviewKey(key)) return
     // Everything else is navigation, shared by the live dashboard and the
     // finish screen: move the focused phase, switch the content tab, focus or
     // scroll the reading panel, or open the external session.
@@ -358,6 +366,10 @@ export class TuiProgress implements ProgressUI {
       case "o":
         consume()
         this.openActiveSessionWindow("key")
+        return
+      case "i":
+        consume()
+        this.toggleInteractiveTakeover()
         return
     }
     // Digit keys jump straight to a content tab (1 session · 2 reports · 3 logs).
@@ -442,6 +454,9 @@ export class TuiProgress implements ProgressUI {
     // When true (a re-opened finished run), [o] opens the phase's stored
     // session from disk rather than attaching to a (nonexistent) live server.
     private readonly offlineSessions = false,
+    // When true (attached read-only to another process's run), [i] is refused:
+    // no runner reads this dashboard's takeover set.
+    private readonly observer = false,
   ) {
     this.phases = phases.map((phase) => ({
       ...phase,
@@ -505,6 +520,15 @@ export class TuiProgress implements ProgressUI {
       if (name) this.selectPhaseByName(name)
     }
 
+    // The wheel over the pipeline steps the phase selector, one row per tick.
+    const wheelFromPipeline = (event: WheelEvent) => {
+      const delta = wheelDelta(event)
+      if (delta === 0) return
+      event.preventDefault()
+      event.stopPropagation()
+      this.moveSelection(Math.sign(delta))
+    }
+
     const pipeline = this.panel({
       id: "archer-pipeline",
       width: pipelineWidth,
@@ -514,8 +538,10 @@ export class TuiProgress implements ProgressUI {
       title: " pipeline ",
       titleAlignment: "left",
       onMouseDown: focusFromPipeline,
+      onMouseScroll: wheelFromPipeline,
     })
     pipeline.text.onMouseDown = focusFromPipeline
+    pipeline.text.onMouseScroll = wheelFromPipeline
 
     const right = new BoxRenderable(renderer, {
       id: "archer-right",
@@ -574,6 +600,15 @@ export class TuiProgress implements ProgressUI {
       this.setContentTab(hit.tab)
     }
 
+    // The wheel scrolls the active content tab without needing [enter] focus.
+    const wheelFromFeed = (event: WheelEvent) => {
+      const delta = wheelDelta(event)
+      if (delta === 0) return
+      event.preventDefault()
+      event.stopPropagation()
+      this.scrollContent(delta)
+    }
+
     const feed = this.panel({
       id: "archer-feed",
       width: "100%",
@@ -581,8 +616,10 @@ export class TuiProgress implements ProgressUI {
       borderColor: theme.borderDim,
       backgroundColor: theme.bg,
       onMouseDown: switchTabFromFeed,
+      onMouseScroll: wheelFromFeed,
     })
     feed.text.onMouseDown = switchTabFromFeed
+    feed.text.onMouseScroll = wheelFromFeed
 
     const openFromFooter = (event: { preventDefault(): void; stopPropagation(): void }) => {
       event.preventDefault()
@@ -862,12 +899,18 @@ export class TuiProgress implements ProgressUI {
   askHumanReview(info: HumanReviewPromptInfo): Promise<HumanReviewAction> {
     if (this.renderer.isDestroyed) return Promise.resolve("abort")
     return new Promise((resolve) => {
-      this.humanReview = { info, resolve }
-      this.selectPhaseByName(info.stepName)
-      this.manualFocus = false
-      this.addEvent(info.stepName, "permission", "waiting for human review action")
+      this.humanReviewQueue.push({ info, resolve })
+      if (this.humanReviewQueue.length === 1) {
+        this.selectPhaseByName(info.stepName)
+        this.manualFocus = false
+      }
+      this.addEvent(info.stepName, "permission", info.kind === "interactive" ? "interactive session — waiting for your decision" : "waiting for human review action")
       this.render()
     })
+  }
+
+  isInteractiveTakeover(name: string): boolean {
+    return this.interactiveTakeover.has(name)
   }
 
   // Resolves when the user dismisses the screen (q/esc/ctrl+c). Until then the
@@ -1041,8 +1084,7 @@ export class TuiProgress implements ProgressUI {
     // A shutdown signal can tear the run down while the finish screen is still
     // up; resolving here keeps that promise from leaking.
     this.finished?.resolve()
-    this.humanReview?.resolve("abort")
-    this.humanReview = undefined
+    for (const pending of this.humanReviewQueue.splice(0)) pending.resolve("abort")
     for (const pending of this.permissionQueue.splice(0)) pending.resolve("reject")
     if (this.renderer.isDestroyed) return
     this.renderer.destroy()
@@ -1146,10 +1188,14 @@ export class TuiProgress implements ProgressUI {
   }
 
   private resolveHumanReview(action: HumanReviewAction) {
-    const pending = this.humanReview
+    const pending = this.humanReviewQueue.shift()
     if (!pending) return
-    this.humanReview = undefined
-    this.addEvent(pending.info.stepName, action === "prepare" ? "step" : action === "abort" ? "error" : "permission", humanReviewActionLabel(action))
+    this.addEvent(pending.info.stepName, action === "abort" ? "error" : "permission", humanReviewActionLabel(action, pending.info.kind === "interactive"))
+    const next = this.humanReviewQueue[0]
+    if (next) {
+      this.selectPhaseByName(next.info.stepName)
+      this.manualFocus = false
+    }
     pending.resolve(action)
     this.render()
   }
@@ -1164,6 +1210,39 @@ export class TuiProgress implements ProgressUI {
       return
     }
     this.openSessionWindowForPhase(active.name, source)
+  }
+
+  // Arms (or disarms) interactive takeover for the focused phase: while armed,
+  // the runner won't retry, restore, or complete the step on its own — it gates
+  // and waits, so the user can stop the agent from the attached OpenCode window
+  // (esc) and keep working in the session manually.
+  private toggleInteractiveTakeover() {
+    if (this.finished) return
+    if (this.observer) {
+      this.addEvent("archer", "system", "interactive mode isn't available while attached read-only")
+      this.render()
+      return
+    }
+    const phase = this.focusedPhase() ?? this.phases.find((candidate) => candidate.status === "running")
+    if (!phase || phase.status !== "running") {
+      this.addEvent("archer", "system", "interactive mode needs a running step")
+      this.render()
+      return
+    }
+    if (this.interactiveTakeover.has(phase.name)) {
+      this.interactiveTakeover.delete(phase.name)
+      this.addEvent(phase.name, "system", "interactive mode off — normal retries apply again")
+      this.render()
+      return
+    }
+    if (!phase.sessionID) {
+      this.addEvent(phase.name, "system", "interactive mode needs the step's session; wait for it to appear")
+      this.render()
+      return
+    }
+    this.interactiveTakeover.add(phase.name)
+    this.addEvent(phase.name, "system", "interactive mode armed — esc in OpenCode stops the agent; archer will wait for you")
+    this.openSessionWindowForPhase(phase.name, "key")
   }
 
   private openSessionWindowForPhase(name: string, source: "click" | "key") {
@@ -1205,7 +1284,10 @@ export class TuiProgress implements ProgressUI {
     const phase = this.findPhase(name)
     if (!phase) return
     if (status === "running" && phase.startedAt === undefined) phase.startedAt = Date.now()
-    if (status === "completed" || status === "failed" || status === "skipped") phase.endedAt = Date.now()
+    if (status === "completed" || status === "failed" || status === "skipped") {
+      phase.endedAt = Date.now()
+      this.interactiveTakeover.delete(name)
+    }
     phase.status = status
     phase.updatedAt = Date.now()
     this.activePhase = name
@@ -1290,7 +1372,7 @@ export class TuiProgress implements ProgressUI {
 
     this.dirText.content = this.dirContent(innerWidth)
     this.headerText.content = this.headerContent(now, innerWidth)
-    this.pipelineText.content = this.pipelineContent(now)
+    this.pipelineText.content = this.pipelineContent(now, bodyHeight - 2)
 
     // Body first: the active content tab computes the scroll indicator the rail shows.
     const body =
@@ -1351,7 +1433,7 @@ export class TuiProgress implements ProgressUI {
   // `parallel:` block, or a step fanned out across `models:`) renders as an
   // indented sub-tree under a group header, so the nesting is visible instead
   // of a flat list of `step__model` names all sitting at the same level.
-  private pipelineContent(now: number) {
+  private pipelineContent(now: number, visibleRows: number) {
     const width = pipelineWidth - 4
     const done = this.phases.filter((phase) => phase.status === "completed" || phase.status === "skipped").length
     const failed = this.phases.some((phase) => phase.status === "failed")
@@ -1379,6 +1461,8 @@ export class TuiProgress implements ProgressUI {
     // phase carries a ▸ marker at column 0 (before the tree prefix, so it stays
     // aligned across every depth).
     const isSelected = (phase: PhaseState) => this.phases[this.selected] === phase
+    // Row index of the ▸ marker, so the scroll window below can follow it.
+    let selectedRow = -1
 
     // One rendered line, sized so it never wraps: the marker, tree prefix and
     // status icon are fixed, the right-aligned meta is preserved whole, and
@@ -1397,6 +1481,7 @@ export class TuiProgress implements ProgressUI {
       right: TextChunk[]
     }) => {
       const selected = args.selectedPhase !== undefined && isSelected(args.selectedPhase)
+      if (selected) selectedRow = rows.length
       const left: TextChunk[] = []
       left.push(selected ? fg(theme.accent)("▸ ") : raw("  "))
       const prefix = treePrefix(args.lasts)
@@ -1486,8 +1571,23 @@ export class TuiProgress implements ProgressUI {
       })
     }
 
-    this.pipelineRowPhases = rows
-    return joinLines(out)
+    // Pinned header (progress bar + spacer) over a scrolled window of the step
+    // rows, so pipelines taller than the panel stay reachable: the window
+    // follows the ▸ selection, and rows/clicks stay one-to-one with the screen.
+    const headerRows = 2
+    const bodyVisible = Math.max(1, visibleRows - headerRows)
+    const body = out.slice(headerRows)
+    const bodyRows = rows.slice(headerRows)
+    const maxScroll = Math.max(0, body.length - bodyVisible)
+    if (selectedRow >= headerRows) {
+      const target = selectedRow - headerRows
+      if (target < this.pipelineScroll) this.pipelineScroll = target
+      if (target >= this.pipelineScroll + bodyVisible) this.pipelineScroll = target - bodyVisible + 1
+    }
+    this.pipelineScroll = Math.max(0, Math.min(this.pipelineScroll, maxScroll))
+    const start = this.pipelineScroll
+    this.pipelineRowPhases = [...rows.slice(0, headerRows), ...bodyRows.slice(start, start + bodyVisible)]
+    return joinLines([...out.slice(0, headerRows), ...body.slice(start, start + bodyVisible)])
   }
 
   // The detail panel header for the focused phase — one shape for every state.
@@ -1557,14 +1657,15 @@ export class TuiProgress implements ProgressUI {
     if (this.finished?.error && phase.status === "failed") {
       out.push(t`${fg(theme.red)(truncate(this.finished.error, Math.max(20, width)))}`)
     }
-    if (this.humanReview?.info.stepName === phase.name) {
+    const gate = this.humanReviewQueue[0]
+    if (gate?.info.stepName === phase.name) {
       out.push(plain(""))
-      out.push(new StyledText([fg(theme.yellow)("human review"), fg(theme.faint)(" · choose from the dashboard shortcuts")]))
-      out.push(new StyledText([fg(theme.accent)("c"), fg(theme.dim)(" continue pipeline   "), fg(theme.accent)("s"), fg(theme.dim)(" start app   "), fg(theme.accent)("r"), fg(theme.dim)(" rerun app")]))
-      out.push(new StyledText([fg(theme.accent)("i"), fg(theme.dim)(" open OpenCode iteration   "), fg(theme.accent)("a"), fg(theme.dim)(" abort")]))
-      const info = this.humanReview.info
-      const app = info.appCommand ? (info.appRunning ? "running" : "configured") : "disabled"
-      out.push(new StyledText([fg(theme.faint)("app "), fg(theme.dim)(app), fg(theme.faint)(" · iterations "), fg(theme.dim)(String(info.iterations))]))
+      out.push(new StyledText([fg(theme.yellow)(gate.info.kind === "interactive" ? "interactive session" : "human review"), fg(theme.faint)(" · choose from the dashboard shortcuts")]))
+      out.push(new StyledText([fg(theme.accent)("c"), fg(theme.dim)(" continue pipeline   "), fg(theme.accent)("o"), fg(theme.dim)(" open OpenCode   "), fg(theme.accent)("a"), fg(theme.dim)(" abort")]))
+      out.push(new StyledText([fg(theme.faint)("iterations "), fg(theme.dim)(String(gate.info.iterations))]))
+    } else if (phase.status === "running" && this.interactiveTakeover.has(phase.name)) {
+      out.push(plain(""))
+      out.push(new StyledText([fg(theme.cyan)("interactive armed"), fg(theme.faint)(" · esc in OpenCode stops the agent; a gate opens here — "), fg(theme.accent)("i"), fg(theme.faint)(" disarms")]))
     }
     return out
   }
@@ -1706,12 +1807,12 @@ export class TuiProgress implements ProgressUI {
       const live = running && index === blocks.length - 1
       lines.push(...transcriptBlockLines(block, width, live))
     })
-    if (!this.contentFocused) this.sessionScroll = 0
     const maxScroll = Math.max(0, lines.length - visible)
     this.sessionScroll = Math.max(0, Math.min(this.sessionScroll, maxScroll))
     const topOffset = maxScroll - this.sessionScroll
     this.contentPosition = scrollPosition(topOffset, maxScroll)
-    // Newest at the bottom by default, but explicit read focus can scroll back.
+    // Measured from the bottom: 0 tails the live stream, scrolling up (keys or
+    // wheel, focused or not) holds a position in history until scrolled back.
     return lines.slice(topOffset, topOffset + visible)
   }
 
@@ -1772,21 +1873,20 @@ export class TuiProgress implements ProgressUI {
       return padBetween(left, right, width)
     }
 
-    if (this.humanReview) {
+    const gate = this.humanReviewQueue[0]
+    if (gate) {
       const left: TextChunk[] = [
-        fg(theme.yellow)("human review · "),
+        fg(theme.yellow)(gate.info.kind === "interactive" ? "interactive session · " : "human review · "),
         fg(theme.accent)("c"),
         fg(theme.dim)(" continue · "),
-        fg(theme.accent)("s"),
-        fg(theme.dim)(" start app · "),
-        fg(theme.accent)("r"),
-        fg(theme.dim)(" rerun app · "),
-        fg(theme.accent)("i"),
-        fg(theme.dim)(" iterate · "),
+        fg(theme.accent)("o"),
+        fg(theme.dim)(" open OpenCode · "),
         fg(theme.accent)("a"),
         fg(theme.dim)(" abort"),
       ]
-      const right: TextChunk[] = [fg(theme.faint)(this.humanReview.info.appRunning ? "app running" : this.humanReview.info.appCommand ? "app configured" : "app disabled")]
+      const right: TextChunk[] = []
+      if (this.humanReviewQueue.length > 1) right.push(fg(theme.yellow)(`${this.humanReviewQueue.length - 1} more waiting`), fg(theme.faint)(" · "))
+      if (gate.info.iterations > 0) right.push(fg(theme.faint)(`${gate.info.iterations} iteration${gate.info.iterations === 1 ? "" : "s"}`))
       return padBetween(left, right, width)
     }
 
@@ -1811,7 +1911,9 @@ export class TuiProgress implements ProgressUI {
           fg(theme.accent)("←→"),
           fg(theme.dim)("] tab · ["),
           fg(theme.accent)("o"),
-          fg(theme.dim)("] session · "),
+          fg(theme.dim)("] session · ["),
+          fg(theme.accent)("i"),
+          fg(theme.dim)("] interactive · "),
           fg(theme.yellow)("ctrl+c"),
           fg(theme.dim)(" abort"),
         ]
@@ -1889,15 +1991,26 @@ function statusWordChunk(phase: PhaseState, now: number): TextChunk {
   }
 }
 
+// Terminal wheel events arrive as mouse "scroll" with a direction and a tick
+// count; normalized to a signed line delta (up = negative, like PgUp).
+type WheelEvent = {
+  scroll?: { direction: string; delta: number }
+  preventDefault(): void
+  stopPropagation(): void
+}
+
+function wheelDelta(event: WheelEvent): number {
+  const scroll = event.scroll
+  if (!scroll || (scroll.direction !== "up" && scroll.direction !== "down")) return 0
+  const magnitude = Math.max(1, Math.round(scroll.delta || 1))
+  return scroll.direction === "up" ? -magnitude : magnitude
+}
+
 function humanReviewActionForKey(key: KeyEvent): HumanReviewAction | undefined {
   switch (key.name) {
     case "c":
       return "continue"
-    case "s":
-      return "prepare"
-    case "r":
-      return "rerun"
-    case "i":
+    case "o":
       return "iterate"
     case "a":
       return "abort"
@@ -1905,18 +2018,15 @@ function humanReviewActionForKey(key: KeyEvent): HumanReviewAction | undefined {
   return undefined
 }
 
-function humanReviewActionLabel(action: HumanReviewAction) {
+function humanReviewActionLabel(action: HumanReviewAction, interactive: boolean) {
+  const gate = interactive ? "interactive session" : "human review"
   switch (action) {
     case "continue":
-      return "human review: continue"
-    case "prepare":
-      return "human review: start app"
-    case "rerun":
-      return "human review: rerun app"
+      return `${gate}: continue`
     case "iterate":
-      return "human review: open OpenCode iteration"
+      return `${gate}: open OpenCode`
     case "abort":
-      return "human review: abort"
+      return `${gate}: abort`
   }
 }
 

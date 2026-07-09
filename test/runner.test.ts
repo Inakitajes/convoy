@@ -4,10 +4,11 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { openRunMetadata, type RunMetadataStore } from "../src/metadata"
-import { noopProgress, type ProgressPhaseSnapshot } from "../src/progress"
+import { noopProgress, type HumanReviewAction, type HumanReviewPromptInfo, type ProgressPhaseSnapshot, type ProgressUI } from "../src/progress"
 import {
   RunShutdown,
   UserAbortError,
+  waitForInteractiveGate,
   commitRecoveredPhase,
   createGitLock,
   describeMessageChunk,
@@ -461,5 +462,89 @@ describe("dirty-tree recovery", () => {
 
     expect(await readFile(join(ws.dir, "reports", "implementer.md"), "utf8")).toBe("# implementer")
     expect(await git(["log", "-1", "--pretty=%s"], repo)).toContain("archer(implementer): implementer")
+  })
+})
+
+describe("waitForInteractiveGate", () => {
+  function gateProgress(actions: HumanReviewAction[]) {
+    const calls = { prompts: [] as HumanReviewPromptInfo[], activities: [] as string[] }
+    const progress: ProgressUI = {
+      ...noopProgress,
+      phaseActivity: (_name, detail) => void calls.activities.push(detail),
+      askHumanReview: (info) => {
+        calls.prompts.push(info)
+        return Promise.resolve(actions.shift() ?? "continue")
+      },
+    }
+    return { calls, progress }
+  }
+
+  function trackedPermissions() {
+    const events: string[] = []
+    const permissions = {
+      stop: async () => {},
+      pause: () => void events.push("pause"),
+      resume: () => void events.push("resume"),
+    }
+    return { events, permissions }
+  }
+
+  test("continue resolves the gate and pauses permissions only while waiting", async () => {
+    const { calls, progress } = gateProgress(["continue"])
+    const { events, permissions } = trackedPermissions()
+
+    await waitForInteractiveGate("implementer", "/repo", "ses_1", { serverUrl: "http://127.0.0.1:1", permissions }, progress)
+
+    expect(events).toEqual(["pause", "resume"])
+    expect(calls.prompts).toEqual([{ stepName: "implementer", iterations: 0, kind: "interactive" }])
+  })
+
+  test("iterate reopens the phase session window, then waits again", async () => {
+    const { calls, progress } = gateProgress(["iterate", "continue"])
+    const { permissions } = trackedPermissions()
+    const opened: unknown[] = []
+
+    await waitForInteractiveGate("implementer", "/repo", "ses_1", { serverUrl: "http://127.0.0.1:1", permissions }, progress, {
+      openWindow: async (input) => {
+        opened.push(input)
+        return "terminal"
+      },
+    })
+
+    expect(opened).toEqual([{ url: "http://127.0.0.1:1", targetDir: "/repo", sessionID: "ses_1" }])
+    expect(calls.prompts.map((prompt) => prompt.iterations)).toEqual([0, 1])
+    expect(calls.activities).toContain("session reopened in terminal; return here and press c to continue")
+  })
+
+  test("a failed window reopen keeps the gate waiting instead of crashing", async () => {
+    const { calls, progress } = gateProgress(["iterate", "continue"])
+    const { events, permissions } = trackedPermissions()
+
+    await waitForInteractiveGate("implementer", "/repo", "ses_1", { serverUrl: "http://127.0.0.1:1", permissions }, progress, {
+      openWindow: async () => {
+        throw new Error("no window backend")
+      },
+    })
+
+    expect(events).toEqual(["pause", "resume"])
+    expect(calls.activities).toContain("couldn't reopen the session window: no window backend")
+  })
+
+  test("abort throws a user abort and still resumes permissions", async () => {
+    const { progress } = gateProgress(["abort"])
+    const { events, permissions } = trackedPermissions()
+
+    await expect(
+      waitForInteractiveGate("implementer", "/repo", "ses_1", { serverUrl: "http://127.0.0.1:1", permissions }, progress),
+    ).rejects.toBeInstanceOf(UserAbortError)
+    expect(events).toEqual(["pause", "resume"])
+  })
+
+  test("without a dashboard gate the wait is a no-op", async () => {
+    const { events, permissions } = trackedPermissions()
+
+    await waitForInteractiveGate("implementer", "/repo", "ses_1", { serverUrl: "http://127.0.0.1:1", permissions }, noopProgress)
+
+    expect(events).toEqual([])
   })
 })

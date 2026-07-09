@@ -137,6 +137,15 @@ class RunsBrowser {
       this.render()
     }
 
+    // The wheel steps the run selection, one row per tick, list and details alike.
+    const wheelFromList = (event: WheelEvent) => {
+      const delta = wheelDelta(event)
+      if (delta === 0 || this.summary) return
+      event.preventDefault()
+      event.stopPropagation()
+      this.moveSelection(Math.sign(delta))
+    }
+
     const list = this.panel({
       id: "archer-runs-list",
       height: "100%",
@@ -146,8 +155,10 @@ class RunsBrowser {
       title: " runs ",
       titleAlignment: "left",
       onMouseDown: selectFromList,
+      onMouseScroll: wheelFromList,
     })
     list.text.onMouseDown = selectFromList
+    list.text.onMouseScroll = wheelFromList
 
     const details = this.panel({
       id: "archer-runs-details",
@@ -157,7 +168,9 @@ class RunsBrowser {
       backgroundColor: theme.bg,
       title: " details ",
       titleAlignment: "left",
+      onMouseScroll: wheelFromList,
     })
+    details.text.onMouseScroll = wheelFromList
 
     const footer = this.panel({
       id: "archer-runs-footer",
@@ -215,6 +228,20 @@ class RunsBrowser {
     this.overlay.add(this.modal)
     renderer.root.add(this.overlay)
     this.paletteTargets.push({ box: this.modal, background: "overlay", border: "accent" })
+
+    // While the summary is up its full-screen overlay owns the wheel.
+    const wheelFromSummary = (event: WheelEvent) => {
+      const summary = this.summary
+      const delta = wheelDelta(event)
+      if (!summary || delta === 0) return
+      event.preventDefault()
+      event.stopPropagation()
+      summary.scroll += delta
+      this.render()
+    }
+    this.overlay.onMouseScroll = wheelFromSummary
+    this.modal.onMouseScroll = wheelFromSummary
+    this.modalText.onMouseScroll = wheelFromSummary
 
     renderer.keyInput.on("keypress", this.handleKeyPress)
     renderer.on("theme_mode", this.handleThemeMode)
@@ -606,4 +633,19 @@ function pad2(value: number) {
 function truncatePath(value: string, max: number) {
   if (value.length <= max) return value
   return `…${value.slice(-(Math.max(1, max - 1)))}`
+}
+
+// Terminal wheel events arrive as mouse "scroll" with a direction and a tick
+// count; normalized to a signed line delta (up = negative, like PgUp).
+type WheelEvent = {
+  scroll?: { direction: string; delta: number }
+  preventDefault(): void
+  stopPropagation(): void
+}
+
+function wheelDelta(event: WheelEvent): number {
+  const scroll = event.scroll
+  if (!scroll || (scroll.direction !== "up" && scroll.direction !== "down")) return 0
+  const magnitude = Math.max(1, Math.round(scroll.delta || 1))
+  return scroll.direction === "up" ? -magnitude : magnitude
 }
