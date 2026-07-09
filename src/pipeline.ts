@@ -8,6 +8,7 @@ const fallbackModel = `${defaultGptModel}#${defaultGptVariant}`
 
 /** Models the built-in review/refine pipelines fan their audits across; a project can override per step. */
 const sonnetModel = "openrouter/anthropic/claude-sonnet-5"
+/** Lower-cost replacement for the GPT xhigh phases in the lightweight implementation pipeline. */
 const glmModel = "openrouter/z-ai/glm-5.2"
 
 /** Reserved step keyword: pauses the pipeline for the manual review gate. */
@@ -208,6 +209,17 @@ export const builtInPipelines: Record<string, PipelineSpec> = {
       { agent: "adversarial", reports: "all" },
     ],
   },
+  "implement-lite": {
+    description: "Like implement, but swaps ChatGPT 5.5 xhigh phases for GLM 5.2 to reduce cost",
+    steps: [
+      { agent: "implementer", model: glmModel, reports: "none" },
+      { agent: "patterns", model: glmModel },
+      { agent: "security", model: glmModel },
+      { agent: "design", model: defaultOpusModel },
+      { agent: "tests", model: glmModel, reports: "none" },
+      { agent: "adversarial", model: defaultOpusModel, reports: "all" },
+    ],
+  },
   review: {
     description:
       "Report-only PR review: scope, then parallel bug/clean-code/security audits across two models, then one prioritized findings report. Makes no changes.",
@@ -215,9 +227,9 @@ export const builtInPipelines: Record<string, PipelineSpec> = {
       { agent: "review-scope", name: "scope", model: defaultOpusModel, reports: "none", diff: true },
       {
         parallel: [
-          { agent: "clean-code-auditor", name: "clean-code", models: [glmModel, defaultOpusModel], reports: ["scope"] },
-          { agent: "security-reviewer", name: "security", models: [glmModel, defaultOpusModel], reports: ["scope"] },
-          { agent: "bug-auditor", name: "bugs", models: [glmModel, defaultOpusModel], reports: ["scope"] },
+          { agent: "clean-code-auditor", name: "clean-code", models: [fallbackModel, defaultOpusModel], reports: ["scope"] },
+          { agent: "security-reviewer", name: "security", models: [fallbackModel, defaultOpusModel], reports: ["scope"] },
+          { agent: "bug-auditor", name: "bugs", models: [fallbackModel, defaultOpusModel], reports: ["scope"] },
         ],
       },
       { agent: "review-report", name: "report", model: defaultOpusModel, reports: "all" },
@@ -238,12 +250,12 @@ export const builtInPipelines: Record<string, PipelineSpec> = {
   "ultra-refine": {
     description: "Like refine, but every read-only audit runs in parallel across two models before triage, targeted fixes, and validation.",
     steps: [
-      { agent: "review-scope", name: "scope", models: [sonnetModel, glmModel], reports: "none", diff: true },
+      { agent: "review-scope", name: "scope", models: [sonnetModel, fallbackModel], reports: "none", diff: true },
       {
         parallel: [
-          { agent: "bug-auditor", name: "bugs", models: [sonnetModel, glmModel], reports: ["scope"] },
-          { agent: "clean-code-auditor", name: "clean-code", models: [sonnetModel, glmModel], reports: ["scope"] },
-          { agent: "security-reviewer", name: "security", models: [sonnetModel, glmModel], reports: ["scope"] },
+          { agent: "bug-auditor", name: "bugs", models: [sonnetModel, fallbackModel], reports: ["scope"] },
+          { agent: "clean-code-auditor", name: "clean-code", models: [sonnetModel, fallbackModel], reports: ["scope"] },
+          { agent: "security-reviewer", name: "security", models: [sonnetModel, fallbackModel], reports: ["scope"] },
         ],
       },
       { agent: "review-adversary", name: "triage", model: defaultOpusModel, reports: ["scope", "bugs", "clean-code", "security"] },
@@ -258,9 +270,9 @@ export const builtInPipelines: Record<string, PipelineSpec> = {
       { agent: "implementer", reports: "none" },
       {
         parallel: [
-          { agent: "patterns", models: [sonnetModel, glmModel] },
-          { agent: "security", models: [sonnetModel, glmModel] },
-          { agent: "adversarial", models: [sonnetModel, glmModel] },
+          { agent: "patterns", models: [sonnetModel, fallbackModel] },
+          { agent: "security", models: [sonnetModel, fallbackModel] },
+          { agent: "adversarial", models: [sonnetModel, fallbackModel] },
         ],
       },
       { agent: "implementation-triage", name: "triage", model: defaultOpusModel },

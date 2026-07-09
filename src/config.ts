@@ -186,6 +186,7 @@ defaults:
 
 # Archer ships these pipelines built in; pick one with -p/--pipeline without redeclaring it here:
 #   implement            the default: build the feature, then audit, polish, test, and adversarial review
+#   implement-lite       like implement, but swaps ChatGPT 5.5 xhigh phases for GLM 5.2
 #   ultra-implement      like implement, with dual-model parallel audits and a final review/fix/validate stage
 #   refine               audit the current diff, then apply the triaged fixes (changes code)
 #   ultra-refine         like refine, with every audit fanned out across two models

@@ -4,7 +4,7 @@ Archer is a higher-level orchestration harness for [OpenCode](https://opencode.a
 
 Rather than being only a sequential agent chain, Archer owns the operational layer around OpenCode: repo context attachment, runtime guard rails, permission gates, phase reports, diff tracking, and human-in-the-loop checkpoints.
 
-Pipelines are data, not code: archer ships a family of built-in pipelines (`implement` — the default — plus `ultra-implement`, `refine`, `ultra-refine`, and a report-only `review`; see [Built-in pipelines](#built-in-pipelines)), and a project can define its own — any number of steps, its own agents, its own models, with `human-review` gates anywhere — in `.archer/config.yaml`.
+Pipelines are data, not code: archer ships a family of built-in pipelines (`implement` — the default — plus `implement-lite`, `ultra-implement`, `refine`, `ultra-refine`, and a report-only `review`; see [Built-in pipelines](#built-in-pipelines)), and a project can define its own — any number of steps, its own agents, its own models, with `human-review` gates anywhere — in `.archer/config.yaml`.
 
 Archer is written in Bun + TypeScript and uses `@opencode-ai/sdk` to control OpenCode. The SDK starts/controls the OpenCode server; Archer no longer manually calls `opencode run` nor parses stdout.
 
@@ -35,6 +35,7 @@ Archer ships these pipelines; select one with `-p/--pipeline` (no config needed)
 | Pipeline | Changes code? | What it does |
 |---|---|---|
 | `implement` | yes | **The default** (runs with no `-p`). Implement a PRD, then audit, polish, test, and adversarial review (the table above). |
+| `implement-lite` | yes | Same workflow and agents as `implement`, but swaps the ChatGPT 5.5 xhigh phases (`implementer`, `patterns`, `security`, `tests`) to `openrouter/z-ai/glm-5.2` for a lower-cost implementation run. |
 | `ultra-implement` | yes | Like `implement`, but the pattern/security/adversarial reviews of the initial diff run in parallel across two models feeding a triage step, and the run ends with an audit-only final review, a fixer that applies only blocking findings, and a final validator. |
 | `refine` | yes | Audit the current diff (scope → bugs → clean-code → security), triage the findings adversarially, apply the accepted fixes, then validate them. |
 | `ultra-refine` | yes | Like `refine`, but every read-only audit is fanned out across two models before triage, fixes, and validation. |
@@ -62,7 +63,7 @@ opencode models openai
 opencode models anthropic
 ```
 
-To use different providers, authenticate them in OpenCode and select models as `provider/model`. Archer defaults to `openai/gpt-5.5` with variant `xhigh` for non-design phases, and `anthropic/claude-opus-4-8` for design and adversarial review.
+To use different providers, authenticate them in OpenCode and select models as `provider/model`. Archer defaults to `openai/gpt-5.5` with variant `xhigh` for non-design phases, and `anthropic/claude-opus-4-8` for design and adversarial review. Use `--pipeline implement-lite` for the lower-cost variant that swaps those GPT phases to `openrouter/z-ai/glm-5.2`.
 
 ## Installation
 

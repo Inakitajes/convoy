@@ -75,6 +75,57 @@ describe("default pipeline", () => {
   })
 })
 
+describe("built-in implement-lite pipeline", () => {
+  const implementLite = (defaultModel?: string) =>
+    resolvePipeline({ name: "implement-lite", spec: builtInPipelines["implement-lite"]!, agents: builtInAgents, defaultModel })
+
+  test("keeps the implement workflow and agents while swapping GPT phases to GLM 5.2", () => {
+    const lite = implementLite().steps.filter((step): step is AgentStep => step.type === "agent")
+    const standard = defaultPipeline().steps.filter((step): step is AgentStep => step.type === "agent")
+
+    const workflowShape = (step: AgentStep) => ({
+      name: step.name,
+      stepName: step.stepName,
+      agentName: step.agentName,
+      inputFiles: step.inputFiles,
+      inputDiff: step.inputDiff,
+      reportPath: step.reportPath,
+    })
+    expect(lite.map(workflowShape)).toEqual(standard.map(workflowShape))
+
+    const byName = Object.fromEntries(lite.map((step) => [step.name, step]))
+    expect(byName.implementer?.model).toBe("openrouter/z-ai/glm-5.2")
+    expect(byName.patterns?.model).toBe("openrouter/z-ai/glm-5.2")
+    expect(byName.security?.model).toBe("openrouter/z-ai/glm-5.2")
+    expect(byName.tests?.model).toBe("openrouter/z-ai/glm-5.2")
+    expect(byName.design?.model).toBe("anthropic/claude-opus-4-8")
+    expect(byName.adversarial?.model).toBe("anthropic/claude-opus-4-8")
+  })
+
+  test("does not reintroduce GPT through defaults.model", () => {
+    const byName = Object.fromEntries(
+      implementLite("openai/gpt-5.5#xhigh")
+        .steps.filter((step): step is AgentStep => step.type === "agent")
+        .map((step) => [step.name, step]),
+    )
+
+    expect(byName.implementer).toMatchObject({ model: "openrouter/z-ai/glm-5.2" })
+    expect(byName.patterns).toMatchObject({ model: "openrouter/z-ai/glm-5.2" })
+    expect(byName.security).toMatchObject({ model: "openrouter/z-ai/glm-5.2" })
+    expect(byName.tests).toMatchObject({ model: "openrouter/z-ai/glm-5.2" })
+    expect(byName.design).toMatchObject({ model: "anthropic/claude-opus-4-8" })
+    expect(byName.adversarial).toMatchObject({ model: "anthropic/claude-opus-4-8" })
+  })
+
+  test("keeps GLM 5.2 scoped to the lower-cost implementation variant", () => {
+    const glmPipelines = Object.entries(builtInPipelines)
+      .filter(([, spec]) => JSON.stringify(spec).includes("openrouter/z-ai/glm-5.2"))
+      .map(([name]) => name)
+
+    expect(glmPipelines).toEqual(["implement-lite"])
+  })
+})
+
 describe("built-in review pipeline", () => {
   const review = () => resolvePipeline({ name: "review", spec: builtInPipelines.review!, agents: builtInAgents })
 
@@ -86,15 +137,15 @@ describe("built-in review pipeline", () => {
     expect(pipeline.steps.some((step) => step.type === "human")).toBe(false)
   })
 
-  test("fans each audit across glm + opus and feeds a single report step with every audit", () => {
+  test("fans each audit across GPT 5.5 xhigh + opus and feeds a single report step with every audit", () => {
     const pipeline = review()
     expect(stepNames(pipeline)).toEqual([
       "scope",
-      "clean-code__openrouter-z-ai-glm-5-2",
+      "clean-code__openai-gpt-5-5-xhigh",
       "clean-code__anthropic-claude-opus-4-8",
-      "security__openrouter-z-ai-glm-5-2",
+      "security__openai-gpt-5-5-xhigh",
       "security__anthropic-claude-opus-4-8",
-      "bugs__openrouter-z-ai-glm-5-2",
+      "bugs__openai-gpt-5-5-xhigh",
       "bugs__anthropic-claude-opus-4-8",
       "report",
     ])
@@ -103,11 +154,11 @@ describe("built-in review pipeline", () => {
     expect(report?.inputFiles).toEqual([
       "prd.md",
       "reports/scope.md",
-      "reports/clean-code__openrouter-z-ai-glm-5-2.md",
+      "reports/clean-code__openai-gpt-5-5-xhigh.md",
       "reports/clean-code__anthropic-claude-opus-4-8.md",
-      "reports/security__openrouter-z-ai-glm-5-2.md",
+      "reports/security__openai-gpt-5-5-xhigh.md",
       "reports/security__anthropic-claude-opus-4-8.md",
-      "reports/bugs__openrouter-z-ai-glm-5-2.md",
+      "reports/bugs__openai-gpt-5-5-xhigh.md",
       "reports/bugs__anthropic-claude-opus-4-8.md",
     ])
   })
