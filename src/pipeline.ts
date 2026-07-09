@@ -12,9 +12,11 @@ const sonnetModel = "openrouter/anthropic/claude-sonnet-5"
 /** Lower-cost replacement for the GPT xhigh phases in the lightweight implementation pipeline. */
 const glmModel = "openrouter/z-ai/glm-5.2"
 
-/** Reserved step keyword: pauses the pipeline for the manual review gate. */
+/** Legacy reserved step keyword: pauses the pipeline for a manual human gate. */
 export const humanReviewStep = "human-review"
+export const humanStepType = "human"
 const humanReviewDescription = "Manual review checkpoint"
+const humanStepDescription = "Human checkpoint"
 
 export const builtInAgents: readonly AgentSpec[] = [
   {
@@ -164,8 +166,9 @@ export const agentAliases: Record<string, string> = {
 
 /**
  * A pipeline as written in config: a list of steps referencing agents by name
- * (or alias), plus the reserved "human-review" keyword. Strings are shorthand
- * for `{ agent: <string> }`.
+ * (or alias), plus human gate steps. Strings are shorthand for
+ * `{ agent: <string> }`, except the legacy `human-review` string which remains
+ * a shorthand for a human gate.
  */
 export type AgentStepSpec = {
   agent: string
@@ -180,12 +183,20 @@ export type AgentStepSpec = {
   diff?: boolean
 }
 
-/** A group of steps that run concurrently, forced read-only. No nesting, no human-review members. */
+export type HumanStepSpec = {
+  type: typeof humanStepType
+  /** Optional step/report name. Defaults to `human`, `human-2`, etc. */
+  name?: string
+  /** Optional dashboard/report description. */
+  description?: string
+}
+
+/** A group of steps that run concurrently, forced read-only. No nesting, no human members. */
 export type ParallelStepSpec = {
   parallel: (string | AgentStepSpec)[]
 }
 
-export type StepSpec = string | AgentStepSpec | ParallelStepSpec
+export type StepSpec = string | AgentStepSpec | HumanStepSpec | ParallelStepSpec
 
 export type PipelineSpec = {
   description?: string
@@ -321,12 +332,17 @@ export function resolvePipeline(input: ResolvePipelineInput): Pipeline {
   const steps: Step[] = []
   const agentSteps: AgentStep[] = []
   const names = new Set<string>()
-  let humanCount = 0
+  let legacyHumanCount = 0
+  let genericHumanCount = 0
 
-  const claimName = (name: string, position: string) => {
+  const claimAgentName = (name: string, position: string) => {
     if (name === humanReviewStep || name.startsWith(`${humanReviewStep}-`)) {
       throw new Error(`pipeline "${input.name}": step ${position} can't use the reserved name "${name}"`)
     }
+    claimStepName(name, position)
+  }
+
+  const claimStepName = (name: string, position: string) => {
     if (names.has(name)) {
       throw new Error(`pipeline "${input.name}": duplicate step name "${name}"; set an explicit name: on one of them`)
     }
@@ -346,31 +362,43 @@ export function resolvePipeline(input: ResolvePipelineInput): Pipeline {
           throw new Error(`pipeline "${input.name}": step ${position} can't nest a parallel block inside another`)
         }
       }
-      const members = raw.parallel.flatMap((inner, innerIndex) =>
-        resolveAgentStepSpec(inner, {
+      const members = raw.parallel.flatMap((inner, innerIndex) => {
+        if (asHumanStepSpec(inner as StepSpec)) {
+          throw new Error(`pipeline "${input.name}": step ${position}.${innerIndex + 1} can't use a human step inside a parallel block`)
+        }
+        return resolveAgentStepSpec(inner, {
           input,
           position: `${position}.${innerIndex + 1}`,
           groupId,
           forcedReadOnly: true,
           priorSteps: agentSteps,
-          claimName,
-        }),
-      )
+          claimName: claimAgentName,
+        })
+      })
       steps.push(...members)
       agentSteps.push(...members)
       continue
     }
 
-    const spec = typeof raw === "string" ? { agent: raw } : raw
-
-    if (spec.agent === humanReviewStep) {
-      humanCount++
-      const name = humanCount === 1 ? humanReviewStep : `${humanReviewStep}-${humanCount}`
-      names.add(name)
-      const step: HumanStep = { type: "human", name, description: humanReviewDescription }
+    const humanSpec = asHumanStepSpec(raw)
+    if (humanSpec) {
+      const isLegacy = "agent" in humanSpec
+      const defaultName = isLegacy ? humanReviewStep : humanStepType
+      let name = humanSpec.name
+      if (!name) {
+        if (isLegacy) legacyHumanCount++
+        else genericHumanCount++
+        const index = isLegacy ? legacyHumanCount : genericHumanCount
+        name = index === 1 ? defaultName : `${defaultName}-${index}`
+      }
+      claimStepName(name, position)
+      const description = humanSpec.description ?? (isLegacy ? humanReviewDescription : humanStepDescription)
+      const step: HumanStep = { type: "human", name, description }
       steps.push(step)
       continue
     }
+
+    const spec: AgentStepSpec = typeof raw === "string" ? { agent: raw } : (raw as AgentStepSpec)
 
     const members = resolveAgentStepSpec(spec, {
       input,
@@ -378,7 +406,7 @@ export function resolvePipeline(input: ResolvePipelineInput): Pipeline {
       groupId,
       forcedReadOnly: Boolean(spec.models && spec.models.length > 0),
       priorSteps: agentSteps,
-      claimName,
+      claimName: claimAgentName,
     })
     steps.push(...members)
     agentSteps.push(...members)
@@ -393,6 +421,24 @@ export function resolvePipeline(input: ResolvePipelineInput): Pipeline {
 
 export function isParallelSpec(raw: StepSpec): raw is ParallelStepSpec {
   return typeof raw === "object" && raw !== null && "parallel" in raw
+}
+
+export function isHumanStepSpec(raw: StepSpec): raw is HumanStepSpec {
+  return typeof raw === "object" && raw !== null && "type" in raw && raw.type === humanStepType
+}
+
+type LegacyHumanStepSpec = { agent: typeof humanReviewStep; name?: string; description?: string }
+
+function asHumanStepSpec(raw: StepSpec): HumanStepSpec | LegacyHumanStepSpec | undefined {
+  if (raw === humanReviewStep) return { agent: humanReviewStep }
+  if (isHumanStepSpec(raw)) return raw
+  if (typeof raw === "object" && raw !== null && !isParallelSpec(raw) && "agent" in raw && raw.agent === humanReviewStep) {
+    return {
+      agent: humanReviewStep,
+      ...(raw.name !== undefined ? { name: raw.name } : {}),
+    }
+  }
+  return undefined
 }
 
 type ResolveStepContext = {
@@ -525,7 +571,7 @@ export function validateStepFilters(pipeline: Pipeline, filters: { onlySteps: st
   ] as const) {
     for (const name of names) {
       if (valid.has(name)) continue
-      // Human gates may already be filtered out (--no-human-review, no TTY);
+      // Human gates may already be filtered out (--no-human-step/--no-human-review, no TTY);
       // referencing them must not turn into a typo error.
       if (name === humanReviewStep || name.startsWith(`${humanReviewStep}-`)) continue
       throw new Error(`${flag}: unknown step "${name}" in pipeline "${pipeline.name}" (valid: ${[...valid].join(", ")})`)

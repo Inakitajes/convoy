@@ -13,10 +13,13 @@ import {
   defaultGptVariant,
   defaultImplementReviewModel,
   defaultPipelineName,
+  humanStepType,
   humanReviewStep,
+  isHumanStepSpec,
   readOnlyAgentSuffix,
   splitModelVariant,
   type AgentStepSpec,
+  type HumanStepSpec,
   type PipelineSpec,
   type StepSpec,
 } from "./pipeline"
@@ -166,8 +169,8 @@ defaults:
   # baseRef: main
   # pipeline: implement
   # interactiveModel: openai/gpt-5.5#xhigh
-  # appRunCommand: pnpm dev # optional: unset by default; used during human-review
-  # emulator: Pixel_8 # optional: unset by default; used during human-review
+  # appRunCommand: pnpm dev # optional: unset by default; used during human steps
+  # emulator: Pixel_8 # optional: unset by default; used during human steps
 
 # Agents are matched by name with Markdown prompts next to this config:
 #   agents/<name>.md
@@ -422,6 +425,16 @@ function validateStep(v: Validator, raw: unknown, path: string, context: { insid
     return { parallel: members as (string | AgentStepSpec)[] }
   }
 
+  if ("type" in record) {
+    if (context.insideParallel) v.fail(path, "human steps can't run inside a parallel block")
+    v.knownKeys(record, path, ["type", "name", "description"])
+    if (record.type !== humanStepType) v.fail(`${path}.type`, `must be "${humanStepType}"`)
+    const step: HumanStepSpec = { type: humanStepType }
+    if (record.name !== undefined) step.name = v.nonEmptyString(record.name, `${path}.name`)
+    if (record.description !== undefined) step.description = v.nonEmptyString(record.description, `${path}.description`)
+    return step
+  }
+
   v.knownKeys(record, path, ["agent", "name", "model", "models", "maxAttempts", "reports", "diff"])
 
   const agent = v.nonEmptyString(record.agent, `${path}.agent`)
@@ -636,6 +649,7 @@ function templateStep(raw: StepSpec, globalModel: string): StepSpec {
   if (typeof raw === "object" && raw !== null && "parallel" in raw) {
     return { parallel: raw.parallel.map((inner) => templateStep(inner, globalModel) as string | AgentStepSpec) }
   }
+  if (isHumanStepSpec(raw) || raw === humanReviewStep) return raw
   const step = typeof raw === "string" ? { agent: raw } : { ...raw }
   if (step.agent === humanReviewStep) return step.agent
   const agent = builtInAgents.find((candidate) => candidate.name === (agentAliases[step.agent] ?? step.agent))

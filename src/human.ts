@@ -29,11 +29,11 @@ export async function runHumanReviewGate(
   stepName = "human-review",
   deps: HumanReviewGateDeps = defaultHumanReviewGateDeps,
 ) {
-  // Human steps are filtered out of new pipelines when --no-human-review is
+  // Human steps are filtered out of new pipelines when --no-human-step / --no-human-review is
   // set; this guard covers resumed runs whose frozen pipeline still has one.
   if (!options.humanReview) {
     progress.phaseSkipped(stepName)
-    log.warn(`[${stepName}] skipped by --no-human-review`)
+    log.warn(`[${stepName}] skipped by --no-human-step`)
     return
   }
 
@@ -66,7 +66,7 @@ export async function runHumanReviewGate(
 
     for (;;) {
       if (action === "continue") {
-        await commitHumanChanges(options)
+        await commitHumanChanges(options, stepName)
         await writeHumanReviewReport(workspace, options, "approved", iterations, stepName)
         progress.phaseCompleted(stepName, "approved")
         return
@@ -100,12 +100,12 @@ export async function runHumanReviewGate(
           await stopApp(app)
           app = undefined
           await runSuspendedInteractiveIteration(options, opencodeUrl, progress, stepName, permissions, deps.runInteractiveOpencode)
-          await commitHumanChanges(options)
+          await commitHumanChanges(options, stepName)
         } else {
           await stopApp(app)
           app = undefined
-          await runInteractiveIteration(options, opencodeUrl, permissions, deps.runInteractiveOpencode)
-          await commitHumanChanges(options)
+          await runInteractiveIteration(options, opencodeUrl, stepName, permissions, deps.runInteractiveOpencode)
+          await commitHumanChanges(options, stepName)
         }
         action = await askAction()
         continue
@@ -144,19 +144,19 @@ function humanReviewInfo(stepName: string, options: RunOptions, iterations: numb
 
 async function prepareApp(options: RunOptions, progress: ProgressUI, stepName: string, io: { inheritOutput: boolean }): Promise<AppProcess | undefined> {
   progress.phaseRunning(stepName, "preparing app")
-  await launchEmulator(options, io)
+  await launchEmulator(options, io, stepName)
   progress.phaseRunning(stepName, "running app command")
   return startApp(options, progress, stepName, io)
 }
 
-async function launchEmulator(options: RunOptions, io: { inheritOutput: boolean }) {
+async function launchEmulator(options: RunOptions, io: { inheritOutput: boolean }, stepName: string) {
   const emulatorID = options.emulatorID
   if (!emulatorID) {
-    log.info("[human-review] no emulator configured; starting app command without launching one")
+    log.info(`[${stepName}] no emulator configured; starting app command without launching one`)
     return
   }
 
-  log.info(`[human-review] launching emulator ${emulatorID}`)
+  log.info(`[${stepName}] launching emulator ${emulatorID}`)
   const proc = Bun.spawn(["flutter", "emulators", "--launch", emulatorID], {
     cwd: options.targetDir,
     stdin: "ignore",
@@ -165,17 +165,17 @@ async function launchEmulator(options: RunOptions, io: { inheritOutput: boolean 
     env: process.env,
   })
   const code = await proc.exited
-  if (code !== 0) log.warn(`[human-review] emulator launch exited with code ${code}; start it manually if needed`)
+  if (code !== 0) log.warn(`[${stepName}] emulator launch exited with code ${code}; start it manually if needed`)
 }
 
 function startApp(options: RunOptions, progress: ProgressUI, stepName: string, io: { inheritOutput: boolean }): AppProcess | undefined {
   if (!options.appRunCommand) {
-    log.warn("[human-review] app launch disabled; start the app manually before continuing")
+    log.warn(`[${stepName}] app launch disabled; start the app manually before continuing`)
     progress.phaseActivity(stepName, "app launch disabled; start it manually", "info")
     return undefined
   }
 
-  log.info(`[human-review] starting app: ${options.appRunCommand}`)
+  log.info(`[${stepName}] starting app: ${options.appRunCommand}`)
   // detached gives the shell its own process group, so stopApp can signal the
   // whole tree (pnpm/flutter spawn the real servers as grandchildren).
   return spawn("sh", ["-c", options.appRunCommand], {
@@ -199,7 +199,7 @@ async function askHumanAction(): Promise<HumanReviewAction> {
 
   try {
     for (;;) {
-      const answer = (await rl.question("Human review: [c]ontinue, [i]terate, [s]tart app, [r]erun app, [a]bort > ", {
+      const answer = (await rl.question("Human step: [c]ontinue, [i]terate, [s]tart app, [r]erun app, [a]bort > ", {
         signal: controller.signal,
       }))
         .trim()
@@ -215,7 +215,7 @@ async function askHumanAction(): Promise<HumanReviewAction> {
     if (error instanceof Error && error.name === "AbortError") {
       stdout.write("\n")
       if (interrupted) {
-        log.warn("[human-review] Ctrl+C received; aborting")
+        log.warn("[human-step] Ctrl+C received; aborting")
         return "abort"
       }
     }
@@ -259,7 +259,7 @@ async function runSuspendedInteractiveIteration(
   progress.phaseActivity(stepName, "falling back to interactive OpenCode in this terminal", "system")
   progress.suspend()
   try {
-    await runInteractiveIteration(options, opencodeUrl, permissions, runInteractive)
+    await runInteractiveIteration(options, opencodeUrl, stepName, permissions, runInteractive)
   } finally {
     progress.resume()
   }
@@ -268,6 +268,7 @@ async function runSuspendedInteractiveIteration(
 async function runInteractiveIteration(
   options: RunOptions,
   opencodeUrl: string,
+  stepName: string,
   permissions?: PermissionGate,
   runInteractive: typeof runInteractiveOpencode = runInteractiveOpencode,
 ) {
@@ -275,13 +276,13 @@ async function runInteractiveIteration(
   // gate must not race it for the same requests.
   permissions?.pause()
   try {
-    await runInteractive(options, opencodeUrl)
+    await runInteractive(options, opencodeUrl, stepName)
   } finally {
     permissions?.resume()
   }
 }
 
-async function runInteractiveOpencode(options: RunOptions, opencodeUrl: string) {
+async function runInteractiveOpencode(options: RunOptions, opencodeUrl: string, stepName = "human") {
   const args = [
     "run",
     "--interactive",
@@ -294,7 +295,7 @@ async function runInteractiveOpencode(options: RunOptions, opencodeUrl: string) 
   ]
   if (options.interactiveVariant) args.push("--variant", options.interactiveVariant)
 
-  log.info(`[human-review] handing control to OpenCode (${options.interactiveModel}${options.interactiveVariant ? `#${options.interactiveVariant}` : ""})`)
+  log.info(`[${stepName}] handing control to OpenCode (${options.interactiveModel}${options.interactiveVariant ? `#${options.interactiveVariant}` : ""})`)
   const proc = Bun.spawn(["opencode", ...args], {
     cwd: options.targetDir,
     stdin: "inherit",
@@ -304,12 +305,12 @@ async function runInteractiveOpencode(options: RunOptions, opencodeUrl: string) 
   })
 
   const code = await proc.exited
-  if (code !== 0) throw new Error(`[human-review] interactive OpenCode exited with code ${code}`)
+  if (code !== 0) throw new Error(`[${stepName}] interactive OpenCode exited with code ${code}`)
 }
 
-async function commitHumanChanges(options: RunOptions) {
-  const committed = await addAllAndCommit("archer(human-review): apply manual iteration", options.targetDir)
-  if (committed) log.info("[human-review] committed manual changes")
+async function commitHumanChanges(options: RunOptions, stepName: string) {
+  const committed = await addAllAndCommit(`archer(${stepName}): apply manual iteration`, options.targetDir)
+  if (committed) log.info(`[${stepName}] committed manual changes`)
 }
 
 async function writeHumanReviewReport(workspace: Workspace, options: RunOptions, result: "approved" | "aborted", iterations: number, stepName: string) {
@@ -318,7 +319,7 @@ async function writeHumanReviewReport(workspace: Workspace, options: RunOptions,
   await writeFile(
     reportPath,
     [
-      "# human review",
+      "# human step",
       "",
       `- Result: ${result}`,
       `- Manual OpenCode iterations: ${iterations}`,
@@ -341,7 +342,7 @@ async function stopApp(proc: AppProcess | undefined) {
     await exited
     return
   }
-  if (code !== null && ![0, 130, 143].includes(code)) log.warn(`[human-review] stopped app process with code ${code}`)
+  if (code !== null && ![0, 130, 143].includes(code)) log.warn(`[human-step] stopped app process with code ${code}`)
 }
 
 // The app runs in its own process group (detached); signal the group so dev

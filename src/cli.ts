@@ -269,7 +269,7 @@ export async function resolveRunOptions(parsed: ParsedArgs): Promise<Omit<RunOpt
     if (!parsed.resumeRunID) throw error
     pipeline = defaultPipeline()
   }
-  // --no-human-review (and non-interactive defaults) drop manual gates from
+  // --no-human-review / --no-human-step (and non-interactive defaults) drop manual gates from
   // the run entirely, so they never show up as steps.
   if (!humanReview) pipeline = { ...pipeline, steps: pipeline.steps.filter((step) => step.type !== "human") }
 
@@ -406,9 +406,11 @@ export function parseArgs(argv: string[]): ParsedArgs {
         parsed.tui = false
         break
       case "--human-review":
+      case "--human-step":
         parsed.humanReview = true
         break
       case "--no-human-review":
+      case "--no-human-step":
         parsed.humanReview = false
         break
       case "--emulator":
@@ -500,11 +502,11 @@ Flags:
   --model <provider/model[#variant]> Force a model for all steps
   --tui                    Show visual phase progress (default in interactive terminals)
   --no-tui                 Disable visual phase progress
-  --human-review           Enable human-review steps (default in interactive terminals)
-  --no-human-review        Drop all human-review steps from the pipeline
-  --emulator <id>          Optional Flutter emulator to launch during manual review
-  --app-run-command <cmd>  Command used to run the app during manual review (default: disabled)
-  --no-app-run             Don't launch the app automatically during manual review
+  --human-step             Enable human steps (alias: --human-review; default in interactive terminals)
+  --no-human-step          Drop all human steps (alias: --no-human-review)
+  --emulator <id>          Optional Flutter emulator to launch during human steps
+  --app-run-command <cmd>  Command used to run the app during human steps (default: disabled)
+  --no-app-run             Don't launch the app automatically during human steps
   --interactive-model <m>  Model used by manual OpenCode iterations (default: ${defaultGptModel}#${defaultGptVariant})
   --interactive-variant <v> Model variant for manual iterations
   --max-attempts <n>       Attempts per step before failing (default: 2)
@@ -519,7 +521,7 @@ Config files:
 Config keys:
   defaults:                model, maxAttempts, baseRef, pipeline, appRunCommand, emulator, interactiveModel
   agents:                  project agents or built-in overrides; prompts live at agents/<name>.md
-  pipelines:               named step lists mixing agents and human-review gates
+  pipelines:               named step lists mixing agents and human gates
   permissions:             allow/deny additions to the bash policy (deny always wins)
   hooks:                   pre/post shell commands, globally or per pipeline
   attachments:             files attached to every step

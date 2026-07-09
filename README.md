@@ -4,7 +4,7 @@ Archer is a higher-level orchestration harness for [OpenCode](https://opencode.a
 
 Rather than being only a sequential agent chain, Archer owns the operational layer around OpenCode: repo context attachment, runtime guard rails, permission gates, phase reports, diff tracking, and human-in-the-loop checkpoints.
 
-Pipelines are data, not code: archer ships a family of built-in pipelines (`implement` — the default — plus `implement-lite`, `ultra-implement`, `refine`, `ultra-refine`, and a report-only `review`; see [Built-in pipelines](#built-in-pipelines)), and a project can define its own — any number of steps, its own agents, its own models, with `human-review` gates anywhere — in `.archer/config.yaml`.
+Pipelines are data, not code: archer ships a family of built-in pipelines (`implement` — the default — plus `implement-lite`, `ultra-implement`, `refine`, `ultra-refine`, and a report-only `review`; see [Built-in pipelines](#built-in-pipelines)), and a project can define its own — any number of steps, its own agents, its own models, with named human gates anywhere — in `.archer/config.yaml`.
 
 Archer is written in Bun + TypeScript and uses `@opencode-ai/sdk` to control OpenCode. The SDK starts/controls the OpenCode server; Archer no longer manually calls `opencode run` nor parses stdout.
 
@@ -108,13 +108,13 @@ archer --prompt-file prd.md --model anthropic/claude-sonnet-4-6
 # disable the OpenTUI progress footer
 archer --prompt-file prd.md --no-tui
 
-# drop human-review gates (for pipelines that define them)
-archer --prompt-file prd.md --no-human-review
+# drop human gates (for pipelines that define them)
+archer --prompt-file prd.md --no-human-step
 
-# configure the app command used during manual review
+# configure the app command used during human gates
 archer --prompt-file prd.md --app-run-command "pnpm dev"
 
-# optional Flutter emulator launch during manual review
+# optional Flutter emulator launch during human gates
 archer --prompt-file prd.md --emulator Pixel_8 --app-run-command "flutter run -d emulator-5554"
 
 # resume a failed run (phases that already wrote their report are skipped,
@@ -207,7 +207,7 @@ The judge model is `--smart-model <provider/model[#variant]>`, falling back to `
 
 Before each commit Archer scans the staged files for common secret names (`.env*`, `*.pem`, `*.key`, `id_rsa*`, `credentials*`, `*.p12`, `*.keystore`, ...). If any match, the commit is aborted, the index reset, and Archer asks you to add them to `.gitignore` (or delete them) before re-running. Combined with `--include-dirty` this is the only line of defense against accidentally publishing a secret your working tree had lying around — review the resulting commits with `git show` before pushing.
 
-During `human-review`, Archer waits indefinitely for an explicit action. Use the start/rerun app actions to prepare the configured app command in the target worktree. By default the app command is disabled; pass `--app-run-command "pnpm dev"`, `--app-run-command "flutter run"`, or the repo's equivalent. Archer only launches a Flutter emulator when `--emulator <id>` is explicitly provided.
+During a human step, Archer waits indefinitely for an explicit action. Use the start/rerun app actions to prepare the configured app command in the target worktree. By default the app command is disabled; pass `--app-run-command "pnpm dev"`, `--app-run-command "flutter run"`, or the repo's equivalent. Archer only launches a Flutter emulator when `--emulator <id>` is explicitly provided.
 
 ## Project configuration (`.archer/config.yaml`)
 
@@ -221,8 +221,8 @@ defaults:
   maxAttempts: 2
   baseRef: main
   pipeline: quick                  # pipeline used when -p/--pipeline is not given
-  appRunCommand: pnpm dev          # app command for human-review gates
-  emulator: Pixel_8                # optional Flutter emulator for human-review gates
+  appRunCommand: pnpm dev          # app command for human gates
+  emulator: Pixel_8                # optional Flutter emulator for human gates
   interactiveModel: openai/gpt-5.5#xhigh
   autoAcceptJudgeModel: anthropic/claude-haiku-4-5   # model for smart auto-accept (--smart); defaults to the run's model
 
@@ -240,14 +240,17 @@ pipelines:
     description: Implementation, manual gate, tests
     steps:
       - implementer                # string = agent (or alias) with that step name
-      - human-review               # reserved keyword: manual review gate, placeable anywhere, repeatable
+      - type: human                # named human gate, placeable anywhere, repeatable
+        name: planning
+        description: Plan implementation interactively
       - agent: tests
         maxAttempts: 3
   api:
     steps:
       - implementer
       - api-reviewer               # project agent defined above
-      - human-review
+      - type: human
+        name: api-review
       - agent: security
         reports: all               # attach every previous step report (default: the nearest one)
       - agent: adversarial
@@ -298,9 +301,10 @@ The rules:
 - **Conventions over wiring**: every agent step gets the PRD, the cumulative diff against the base branch (except the first step; opt out with `diff: false`), and the previous step's report (`reports: previous|all|none|[names]`). Its report lands at `reports/<step>.md` and its commit is `archer(<step>): …`.
 - **Aliases**: the built-in agents answer to their short names in steps — `patterns`, `security`, `design`, `tests`, `adversarial` — as well as their full names.
 - **Read-only agents**: set `agents.<name>.readOnly: true` to enforce audit-only behavior. Archer disables the agent's write/edit/bash tools, denies edit/bash/task permissions, and saves the phase report from the assistant response if the agent cannot write it directly.
-- **Parallel steps and model fan-out**: wrap steps in `parallel: [...]` to run them concurrently, and/or give one step a `models: [...]` list (instead of `model:`) to run it once per model. Both are always forced read-only, regardless of the underlying agent's own `readOnly` setting, so concurrent runs can never step on each other's changes to the tree — there's no per-step way to opt out. A `models:` step's variants get disambiguated names (`<step>__<model-slug>`) and reports; `reports: previous` after a parallel block attaches every member's report, and `reports: [<step-name>]` on a fanned-out step's un-suffixed name attaches every one of its model variants. `parallel:` can't nest and can't contain `human-review`.
+- **Human steps**: use `type: human` with optional `name` and `description` to insert an interactive gate. The old `human-review` string still works as a legacy shorthand, but named `type: human` steps are preferred for planning, QA, approval, or any other human checkpoint.
+- **Parallel steps and model fan-out**: wrap steps in `parallel: [...]` to run them concurrently, and/or give one step a `models: [...]` list (instead of `model:`) to run it once per model. Both are always forced read-only, regardless of the underlying agent's own `readOnly` setting, so concurrent runs can never step on each other's changes to the tree — there's no per-step way to opt out. A `models:` step's variants get disambiguated names (`<step>__<model-slug>`) and reports; `reports: previous` after a parallel block attaches every member's report, and `reports: [<step-name>]` on a fanned-out step's un-suffixed name attaches every one of its model variants. `parallel:` can't nest and can't contain human steps.
 - **Project pipelines shadow built-ins**: defining `pipelines.implement` replaces the built-in default pipeline.
-- **`--no-human-review`** (and non-TTY runs) drop every `human-review` gate from the pipeline.
+- **`--no-human-step` / `--no-human-review`** (and non-TTY runs) drop every human gate from the pipeline.
 - **Resume is frozen**: the resolved pipeline is persisted in the run's `metadata.json`; `--resume` replays it even if the config changed since.
 - **Dirty-tree recovery**: a phase interrupted before its commit (Ctrl+C, a failed commit step, a killed process) leaves uncommitted work in the tree, which normally blocks `--resume`. In an interactive terminal, resume offers to commit that work as the interrupted phase (`archer(<phase>): …`), mark it done, and continue with the following phases. Decline (or a non-TTY resume) keeps the old "commit/stash first" behavior.
 - **Permissions are additive**: `permissions.deny` extends the hard denylist, `permissions.allow` extends the allowlist, deny always wins, and there is deliberately no way for a repo to grant itself `--yolo`.

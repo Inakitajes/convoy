@@ -193,6 +193,16 @@ describe("pipeline resolution", () => {
     if (tests?.type === "agent") expect(tests.agentName).toBe("test-engineer")
   })
 
+  test("accepts generic named human steps", () => {
+    const pipeline = resolve({
+      steps: ["implementer", { type: "human", name: "planning", description: "Plan interactively" }, "tests", { type: "human" }],
+    })
+
+    expect(stepNames(pipeline)).toEqual(["implementer", "planning", "tests", "human"])
+    expect(pipeline.steps[1]).toMatchObject({ type: "human", name: "planning", description: "Plan interactively" })
+    expect(pipeline.steps[3]).toMatchObject({ type: "human", name: "human" })
+  })
+
   test("derives report paths and commit step names from the step name", () => {
     const [implementer, review] = agentSteps({
       steps: ["implementer", { agent: "adversarial", name: "final-check" }],
@@ -220,7 +230,7 @@ describe("pipeline resolution", () => {
   })
 
   test("human gates never leak into report wiring", () => {
-    const [, after] = agentSteps({ steps: ["implementer", "human-review", "tests"] })
+    const [, after] = agentSteps({ steps: ["implementer", { type: "human", name: "planning" }, "tests"] })
     expect(after?.inputFiles).toEqual(["prd.md", "reports/implementer.md"])
   })
 
@@ -358,9 +368,12 @@ describe("parallel groups", () => {
     expect(() => resolve({ steps: ["implementer", { parallel: [nested, "security"] }] })).toThrow("nest a parallel block")
   })
 
-  test("human-review can't run inside a parallel block", () => {
+  test("human steps can't run inside a parallel block", () => {
     expect(() => resolve({ steps: ["implementer", { parallel: ["patterns", "human-review"] }] })).toThrow("inside a parallel block")
     expect(() => resolve({ steps: ["implementer", { parallel: ["patterns", { agent: "human-review" }] }] })).toThrow("inside a parallel block")
+    expect(() => resolve({ steps: ["implementer", { parallel: ["patterns", { type: "human", name: "planning" } as never] }] })).toThrow(
+      "inside a parallel block",
+    )
   })
 })
 

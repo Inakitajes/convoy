@@ -20,7 +20,7 @@ import {
   writeDefaultArcherConfig,
   writeDefaultProjectConfig,
 } from "../src/config"
-import { builtInAgents, defaultGptModel, defaultGptVariant, defaultImplementReviewModel, defaultOpusModel, isParallelSpec } from "../src/pipeline"
+import { builtInAgents, defaultGptModel, defaultGptVariant, defaultImplementReviewModel, defaultOpusModel, isHumanStepSpec, isParallelSpec } from "../src/pipeline"
 
 const dirs: string[] = []
 
@@ -76,7 +76,9 @@ describe("config loading", () => {
         "    description: Implementation plus tests",
         "    steps:",
         "      - implementer",
-        "      - human-review",
+        "      - type: human",
+        "        name: planning",
+        "        description: Plan implementation interactively",
         "      - agent: tests",
         "        maxAttempts: 3",
         "      - agent: api-reviewer",
@@ -115,7 +117,7 @@ describe("config loading", () => {
     })
     expect(config.pipelines.quick?.steps).toEqual([
       "implementer",
-      "human-review",
+      { type: "human", name: "planning", description: "Plan implementation interactively" },
       { agent: "tests", maxAttempts: 3 },
       { agent: "api-reviewer", reports: "all" },
     ])
@@ -210,13 +212,24 @@ describe("parallel steps and model fan-out", () => {
     ).toThrow("nested")
   })
 
-  test("rejects human-review inside a parallel block, string and object form", () => {
+  test("rejects human steps inside a parallel block", () => {
     expect(() => parse("pipelines:\n  p:\n    steps:\n      - implementer\n      - parallel:\n          - patterns\n          - human-review")).toThrow(
       "can't run inside a parallel block",
     )
     expect(() =>
       parse("pipelines:\n  p:\n    steps:\n      - implementer\n      - parallel:\n          - patterns\n          - agent: human-review"),
     ).toThrow("can't run inside a parallel block")
+    expect(() =>
+      parse("pipelines:\n  p:\n    steps:\n      - implementer\n      - parallel:\n          - patterns\n          - type: human\n            name: planning"),
+    ).toThrow("human steps can't run inside a parallel block")
+  })
+
+  test("parses generic human steps", () => {
+    const config = parse(
+      "pipelines:\n  p:\n    steps:\n      - type: human\n        name: planning\n        description: Plan interactively\n      - implementer",
+    )
+    expect(config.pipelines.p?.steps).toEqual([{ type: "human", name: "planning", description: "Plan interactively" }, "implementer"])
+    expect(() => parse("pipelines:\n  p:\n    steps:\n      - type: robot\n      - implementer")).toThrow('type must be "human"')
   })
 
   test("rejects an empty parallel block", () => {
@@ -432,8 +445,8 @@ describe("serialization", () => {
     const template = defaultConfigTemplate()
     expect(template.defaults.model).toBe(`${defaultGptModel}#${defaultGptVariant}`)
     const steps = template.pipelines.implement!.steps
-    expect(steps.find((step) => typeof step !== "string" && !isParallelSpec(step) && step.agent === "design")).toEqual({ agent: "design", model: defaultImplementReviewModel })
-    expect(steps.find((step) => typeof step !== "string" && !isParallelSpec(step) && step.agent === "adversarial")).toEqual({ agent: "adversarial", model: defaultImplementReviewModel, reports: "all" })
+    expect(steps.find((step) => typeof step !== "string" && !isParallelSpec(step) && !isHumanStepSpec(step) && step.agent === "design")).toEqual({ agent: "design", model: defaultImplementReviewModel })
+    expect(steps.find((step) => typeof step !== "string" && !isParallelSpec(step) && !isHumanStepSpec(step) && step.agent === "adversarial")).toEqual({ agent: "adversarial", model: defaultImplementReviewModel, reports: "all" })
     const reparsed = parse(serializeArcherConfig(template))
     expect(reparsed.defaults).toEqual(template.defaults)
     expect(reparsed.pipelines).toEqual(template.pipelines)

@@ -70,7 +70,7 @@ describe("cli parsing", () => {
     await expect(parseCommand(["--only", "secuirty", "prompt"])).rejects.toThrow('unknown step "secuirty"')
     await expect(parseCommand(["--skip", "desing", "prompt"])).rejects.toThrow('unknown step "desing"')
 
-    // human-review is a real step now; referencing it stays valid even when
+    // human-review is a legacy human step name; referencing it stays valid even when
     // the gate was dropped from the pipeline (non-interactive runs).
     const command = await parseCommand(["--skip", "human-review", "prompt"])
     expect(command.type).toBe("run")
@@ -85,9 +85,9 @@ describe("cli parsing", () => {
     await expect(parseCommand(["--resume", "20260519-103045-x7q2", "new prompt"])).rejects.toThrow("--resume")
   })
 
-  test("parses human review flags", () => {
+  test("parses human step flags", () => {
     const parsed = parseArgs([
-      "--human-review",
+      "--human-step",
       "--no-tui",
       "--emulator",
       "Pixel_8",
@@ -106,6 +106,7 @@ describe("cli parsing", () => {
     expect(parsed.appRunCommand).toBe("flutter run -d emulator-5554")
     expect(parsed.interactiveModel).toBe("openai/gpt-5.5-pro")
     expect(parsed.interactiveVariant).toBe("xhigh")
+    expect(parseArgs(["--no-human-step", "prompt"]).humanReview).toBe(false)
   })
 
   test("does not configure a Flutter app command by default", async () => {

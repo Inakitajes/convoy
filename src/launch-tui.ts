@@ -86,8 +86,8 @@ const toggles: readonly ToggleSpec[] = [
   },
   {
     key: "humanReview",
-    label: "Human-review gates",
-    flag: "--human-review / --no-human-review",
+    label: "Human gates",
+    flag: "--human-step / --no-human-step",
     description: "Keep manual checkpoints in pipelines that define them.",
   },
   {
@@ -975,7 +975,7 @@ class LaunchPicker {
     const flags = [`--pipeline ${this.currentChoice().name}`]
     if (this.toggleState.smart) flags.push("--smart")
     if (this.toggleState.yolo) flags.push("--yolo")
-    flags.push(this.toggleState.humanReview ? "--human-review" : "--no-human-review")
+    flags.push(this.toggleState.humanReview ? "--human-step" : "--no-human-step")
     if (this.toggleState.includeDirty) flags.push("--include-dirty", "--max-attempts 1")
     if (this.toggleState.keepRunDir) flags.push("--keep-run-dir")
     flags.push(this.toggleState.tui ? "--tui" : "--no-tui")
