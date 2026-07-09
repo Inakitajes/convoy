@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
-import { cursorPosition, promptEnterAction, sanitizePaste, stepTree, typedText, wrapPromptLines } from "../src/launch-tui"
+import { cursorPosition, hookLines, promptEnterAction, sanitizePaste, stepTree, typedText, wrapPromptLines } from "../src/launch-tui"
 
 import type { KeyEvent } from "@opentui/core"
 
@@ -64,5 +64,24 @@ describe("launch TUI pipeline preview", () => {
     )
 
     expect(lines).toEqual(["○ implementer  · gpt-5.5 xhigh", "○ design  · claude-opus-4-8"])
+  })
+
+  test("shows an explicit placeholder when a pipeline has no hooks", () => {
+    expect(plainLines(hookLines([], 80))).toEqual(["hooks  · none"])
+  })
+
+  test("lists pre and post hooks with non-default post-hook conditions", () => {
+    const lines = plainLines(
+      hookLines(
+        [
+          { stage: "pre", label: "lint" },
+          { stage: "post", label: "notify-slack", when: "failure" },
+          { stage: "post", label: "bun run build" },
+        ] satisfies Parameters<typeof hookLines>[0],
+        80,
+      ),
+    )
+
+    expect(lines).toEqual(["hooks", "○ pre   · lint", "○ post  · notify-slack  · on failure", "○ post  · bun run build"])
   })
 })

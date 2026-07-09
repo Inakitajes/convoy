@@ -2,13 +2,14 @@ import { basename } from "node:path"
 
 import { BoxRenderable, StyledText, TextRenderable, bg, bold, createCliRenderer, decodePasteBytes, fg, stripAnsiSequences, t } from "@opentui/core"
 
-import { buildAgentRegistry, loadMergedArcherConfig } from "./config"
+import { buildAgentRegistry, emptyHooksConfig, loadMergedArcherConfig } from "./config"
+import { hooksForPipeline } from "./hooks"
 import { builtInPipelines, defaultPipelineName, resolvePipeline } from "./pipeline"
 import { joinLines, padBetween, paletteForTerminal, plain, raw, setTheme, spinnerFrame, terminalBackgroundHex, theme, truncate } from "./tui-theme"
 
 import type { ArcherConfig } from "./config"
 import type { BoxOptions, CliRenderer, KeyEvent, PasteEvent, TextChunk } from "@opentui/core"
-import type { AgentSpec, Step } from "./types"
+import type { AgentSpec, HookSet, HookSpec, Step } from "./types"
 import type { PaletteColor } from "./tui-theme"
 
 export type LaunchRunSelection = {
@@ -45,12 +46,23 @@ type StepNode = {
   modelLabel: string
 }
 
+// One shell hook that would run around the selected pipeline, flattened for
+// the preview: global hooks plus the pipeline's own, in execution order.
+type HookNode = {
+  stage: "pre" | "post"
+  /** Display label: the hook's name, falling back to its command text. */
+  label: string
+  /** Post-hooks only: set when the hook deviates from the "success" default. */
+  when?: "failure" | "always"
+}
+
 type PipelineChoice = {
   name: string
   description: string
   source: "built-in" | "configured"
   isDefault: boolean
   steps: StepNode[]
+  hooks: HookNode[]
   valid: boolean
   error?: string
 }
@@ -141,12 +153,14 @@ export async function launchRunTui(options: { targetDir: string }): Promise<Laun
 function pipelineChoices(config: ArcherConfig | undefined, agents: readonly AgentSpec[]): PipelineChoice[] {
   const configured = config?.pipelines ?? {}
   const defaultName = config?.defaults.pipeline ?? defaultPipelineName
+  const hooksConfig = config?.hooks ?? emptyHooksConfig()
   const names = [...new Set([...Object.keys(builtInPipelines), ...Object.keys(configured)])].sort((a, b) => a.localeCompare(b))
   names.sort((a, b) => (a === defaultName ? -1 : b === defaultName ? 1 : 0))
 
   return names.map((name) => {
     const spec = configured[name] ?? builtInPipelines[name]!
     const source: PipelineChoice["source"] = configured[name] ? "configured" : "built-in"
+    const hooks = hookNodes(hooksForPipeline(hooksConfig, name))
     try {
       const pipeline = resolvePipeline({ name, spec, agents, defaultModel: config?.defaults.model })
       return {
@@ -155,6 +169,7 @@ function pipelineChoices(config: ArcherConfig | undefined, agents: readonly Agen
         source,
         isDefault: name === defaultName,
         steps: pipeline.steps.map(stepNode),
+        hooks,
         valid: true,
       }
     } catch (error) {
@@ -164,11 +179,21 @@ function pipelineChoices(config: ArcherConfig | undefined, agents: readonly Agen
         source,
         isDefault: name === defaultName,
         steps: [],
+        hooks,
         valid: false,
         error: error instanceof Error ? error.message : String(error),
       }
     }
   })
+}
+
+function hookNodes(set: HookSet): HookNode[] {
+  const node = (stage: HookNode["stage"]) => (hook: HookSpec): HookNode => ({
+    stage,
+    label: (hook.name ?? hook.command).replace(/\s+/g, " ").trim(),
+    ...(stage === "post" && (hook.when === "failure" || hook.when === "always") ? { when: hook.when } : {}),
+  })
+  return [...set.pre.map(node("pre")), ...set.post.map(node("post"))]
 }
 
 function stepNode(step: Step): StepNode {
@@ -864,6 +889,8 @@ class LaunchPicker {
       lines.push(t`${fg(theme.faint)("steps")}`)
       for (const line of stepTree(choice.steps, width)) lines.push(line)
     }
+    lines.push(plain(""))
+    for (const line of hookLines(choice.hooks, width)) lines.push(line)
     if (this.message) {
       lines.push(plain(""))
       for (const line of wrapWords(this.message, width)) lines.push(t`${fg(theme.red)(line)}`)
@@ -1199,6 +1226,27 @@ export function stepTree(steps: readonly StepNode[], width: number): StyledText[
         pushModels(lines, agent.models, last ? "     " : "  │  ", width)
       }
     })
+  }
+  return lines
+}
+
+// Previews the shell hooks that wrap the selected pipeline — global hooks
+// plus the pipeline's own — so the launcher shows whether a run has side
+// effects configured before it starts. Mirrors the step tree's row shape:
+// `○ <stage>  · <label>`, with an extra annotation for non-default post-hook
+// `when` values. Stages pad to the same width so labels align across rows.
+export function hookLines(hooks: readonly HookNode[], width: number): StyledText[] {
+  if (hooks.length === 0) return [new StyledText([fg(theme.faint)("hooks  · none")])]
+
+  const lines: StyledText[] = [t`${fg(theme.faint)("hooks")}`]
+  for (const hook of hooks) {
+    const stage = hook.stage.padEnd(4)
+    const annotation = hook.when === "failure" ? "on failure" : hook.when === "always" ? "always" : ""
+    const used = 2 + stage.length + 4 + (annotation ? annotation.length + 4 : 0)
+    const label = truncate(hook.label, Math.max(6, width - used))
+    const chunks: TextChunk[] = [fg(theme.faint)("○ "), fg(theme.teal)(stage), fg(theme.faint)("  · "), fg(theme.text)(label)]
+    if (annotation) chunks.push(fg(theme.faint)("  · " + annotation))
+    lines.push(new StyledText(chunks))
   }
   return lines
 }
