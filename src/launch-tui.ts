@@ -1146,9 +1146,15 @@ export function stepTree(steps: readonly StepNode[], width: number): StyledText[
     }
     const total = phase.agents.reduce((sum, agent) => sum + agent.models.length, 0)
 
-    // A lone single-model step is just a sequential leaf.
+    // A lone single-model step is just a sequential leaf, but still show the
+    // resolved model so non-multi-model pipelines are as explicit as fanned-out
+    // ones.
     if (total === 1) {
-      lines.push(new StyledText([fg(theme.faint)("○ "), fg(theme.text)(fit(phase.agents[0]!.stepName, 2))]))
+      const agent = phase.agents[0]!
+      const model = agent.models[0] ?? ""
+      const stepName = fitNameWithModel(agent.stepName, model, width)
+      const modelLabel = truncate(model, Math.max(1, width - 6 - stepName.length))
+      lines.push(new StyledText([fg(theme.faint)("○ "), fg(theme.text)(stepName), fg(theme.faint)("  · "), fg(theme.dim)(modelLabel)]))
       continue
     }
 
@@ -1179,6 +1185,13 @@ export function stepTree(steps: readonly StepNode[], width: number): StyledText[
     })
   }
   return lines
+}
+
+function fitNameWithModel(stepName: string, model: string, width: number) {
+  const chrome = 6 // "○ " + "  · "
+  const available = Math.max(1, width - chrome)
+  const modelBudget = Math.min(model.length, Math.max(1, Math.floor(available / 2)))
+  return truncate(stepName, Math.max(1, available - modelBudget))
 }
 
 // Model leaves under a step node; `prefix` carries the ancestor spine so the

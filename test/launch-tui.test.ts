@@ -1,11 +1,15 @@
 import { describe, expect, test } from "bun:test"
 
-import { cursorPosition, promptEnterAction, sanitizePaste, typedText, wrapPromptLines } from "../src/launch-tui"
+import { cursorPosition, promptEnterAction, sanitizePaste, stepTree, typedText, wrapPromptLines } from "../src/launch-tui"
 
 import type { KeyEvent } from "@opentui/core"
 
 function key(partial: Partial<KeyEvent>): KeyEvent {
   return partial as KeyEvent
+}
+
+function plainLines(lines: ReturnType<typeof stepTree>): string[] {
+  return lines.map((line) => line.chunks.map((chunk) => chunk.text).join(""))
 }
 
 describe("launch TUI prompt input", () => {
@@ -44,5 +48,21 @@ describe("launch TUI prompt input", () => {
     expect(promptEnterAction(key({ name: "linefeed" }))).toBe("submit")
     expect(promptEnterAction(key({ name: "return", shift: true }))).toBe("newline")
     expect(promptEnterAction(key({ name: "a" }))).toBeUndefined()
+  })
+})
+
+describe("launch TUI pipeline preview", () => {
+  test("shows the resolved model for single-model pipeline steps", () => {
+    const lines = plainLines(
+      stepTree(
+        [
+          { stepName: "implementer", groupId: "g1", kind: "agent", modelLabel: "gpt-5.5 xhigh" },
+          { stepName: "design", groupId: "g2", kind: "agent", modelLabel: "claude-opus-4-8" },
+        ] satisfies Parameters<typeof stepTree>[0],
+        80,
+      ),
+    )
+
+    expect(lines).toEqual(["○ implementer  · gpt-5.5 xhigh", "○ design  · claude-opus-4-8"])
   })
 })
