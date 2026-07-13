@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
-import { autoFollowGroup, comparisonColumnCount, initialContentTab, pipelineSelectionTargets } from "../src/tui"
+import { autoFollowGroup, comparisonColumnCount, initialContentTab, iteratePrompt, pipelineSelectionTargets } from "../src/tui"
 import { limitsRow } from "../src/tui-theme"
 
 import type { LimitsSnapshot } from "../src/limits"
@@ -14,6 +14,20 @@ describe("run dashboard defaults", () => {
     expect(live).toBe("session")
     expect(historical).toBe("reports")
     expect([live, historical]).not.toContain("logs")
+  })
+})
+
+describe("iterate prompt", () => {
+  test("names the run, lists every context file, and stays on one line", () => {
+    const files = ["/runs/x/prd.md", "/runs/x/reports/plan.md", "/runs/x/reports/implement.md"]
+    const prompt = iteratePrompt("20260713-101010-abcd", files)
+
+    expect(prompt).toContain("20260713-101010-abcd")
+    for (const file of files) expect(prompt).toContain(file)
+    // The command travels through `zsh -lc`; a newline would break quoting assumptions.
+    expect(prompt).not.toContain("\n")
+    // The agent must know to wait instead of acting on the reports alone.
+    expect(prompt.toLowerCase()).toContain("wait")
   })
 })
 

@@ -113,6 +113,17 @@ describe("ensureRepoReady", () => {
     const dir = await emptyRepo()
     await expect(ensureRepoReady(dir, { baseRef: "main" })).rejects.toThrow(/no commits/)
   })
+
+  // The launcher's worktree pre-check: a dirty source tree is fine (the run
+  // gets a fresh worktree) but a bad base ref must still fail before launch.
+  test("allowDirty still rejects a base ref that doesn't exist", async () => {
+    const dir = await dirtyRepo()
+    await git(["add", "."], dir)
+    await git(["commit", "-q", "-m", "init"], dir)
+    await writeFile(join(dir, "dirty.txt"), "uncommitted again\n")
+    await expect(ensureRepoReady(dir, { allowDirty: true, baseRef: "nope" })).rejects.toThrow(/auto-detect/)
+    await expect(ensureRepoReady(dir, { allowDirty: true, baseRef: "HEAD" })).resolves.toBeUndefined()
+  })
 })
 
 describe("detectBaseRef", () => {

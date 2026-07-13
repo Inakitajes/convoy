@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises"
+import { readFile, stat } from "node:fs/promises"
 import { join } from "node:path"
 
 import {
@@ -14,7 +14,7 @@ import {
 
 import { startLimitsPoller } from "./limits"
 import { log } from "./log"
-import { openOpencodeSessionWindow, openStoredSessionWindow } from "./opencode"
+import { openIterateOpencodeWindow, openOpencodeSessionWindow, openStoredSessionWindow } from "./opencode"
 import { PhaseUsage, addTokens, emptyTokens } from "./usage"
 import {
   formatAgo,
@@ -102,6 +102,18 @@ export type TuiDashboardMode = "historical" | "live"
 // never the initial tab.
 export function initialContentTab(mode: TuiDashboardMode): ContentTab {
   return mode === "historical" ? "reports" : "session"
+}
+
+// The [i] iterate window's opening message. Plain absolute paths on purpose:
+// the fresh opencode instance reads them with its own tools, so this works
+// without the run's server and survives archer exiting. Single line because
+// the whole command travels through `zsh -lc`.
+export function iteratePrompt(runID: string, files: string[]): string {
+  return (
+    `Continuing archer run ${runID}. First read these context files: ${files.join(", ")}. ` +
+    "prd.md is the original task; each report is one pipeline step's output. " +
+    "The work is already applied in this directory. After reading, give a one-line status and wait for my instructions."
+  )
 }
 
 export type PipelineSelectionTarget =
@@ -235,6 +247,9 @@ export class TuiProgress implements ProgressUI {
   // Run workspace dir, where phase reports land; set at start so the reports
   // tab reads them live, and refreshed from the outcome on the finish screen.
   private runDir = ""
+  // Set when [i] opened an iterate window: its opening prompt points at files
+  // in the run dir, so the runner must not clean the workspace up.
+  private iterateRequested = false
   private lastActivityAt = Date.now()
   private readonly startedAt = Date.now()
   private readonly phases: PhaseState[]
@@ -407,7 +422,10 @@ export class TuiProgress implements ProgressUI {
         return
       case "i":
         consume()
-        this.toggleInteractiveTakeover()
+        // The same key shifts meaning with the run: mid-run it takes over the
+        // live session, on the finish screen it iterates in a fresh one.
+        if (this.finished) void this.openIterateWindow()
+        else this.toggleInteractiveTakeover()
         return
     }
     // Digit keys jump straight to a content tab (1 session · 2 reports · 3 logs).
@@ -987,6 +1005,12 @@ export class TuiProgress implements ProgressUI {
     })
   }
 
+  // The runner checks this after the finish screen: an iterate window's
+  // opening prompt points at files in the run dir, so it must survive cleanup.
+  keepRunDirRequested(): boolean {
+    return this.iterateRequested
+  }
+
   // The focused phase, clamped to a valid index (the pipeline can be empty
   // only in degenerate cases). Shared by rendering and [o].
   private focusedPhase(): PhaseState | undefined {
@@ -1387,6 +1411,43 @@ export class TuiProgress implements ProgressUI {
       })
       .catch((error: unknown) => {
         this.addEvent("archer", "error", `couldn't open opencode session: ${error instanceof Error ? error.message : String(error)}`)
+        this.render()
+      })
+    this.render()
+  }
+
+  // [i] on the finish screen: a fresh opencode window in the run's directory,
+  // opened on a new session whose first message points at the run's prd and
+  // step reports — so iterating continues from where the pipeline left off.
+  private async openIterateWindow() {
+    if (!this.runDir) {
+      this.addEvent("archer", "system", "no run directory to build iterate context from")
+      this.render()
+      return
+    }
+    const candidates = [join(this.runDir, "prd.md"), ...this.phases.map((phase) => join(this.runDir, "reports", `${phase.name}.md`))]
+    const files: string[] = []
+    for (const path of candidates) {
+      if (await fileReadable(path)) files.push(path)
+    }
+    if (files.length === 0) {
+      this.addEvent("archer", "system", "no context files found in the run dir; was it cleaned up?")
+      this.render()
+      return
+    }
+
+    this.iterateRequested = true
+    this.addEvent("archer", "system", `[i]: opening a new opencode session with ${files.length} context file${files.length === 1 ? "" : "s"}`)
+    openIterateOpencodeWindow({
+      targetDir: this.targetDir || process.cwd(),
+      prompt: iteratePrompt(this.runID, files),
+    })
+      .then((backend) => {
+        this.addEvent("archer", "system", `iterate session opened in ${backend}`)
+        this.render()
+      })
+      .catch((error: unknown) => {
+        this.addEvent("archer", "error", `couldn't open iterate session: ${error instanceof Error ? error.message : String(error)}`)
         this.render()
       })
     this.render()
@@ -2106,6 +2167,8 @@ export class TuiProgress implements ProgressUI {
             fg(theme.dim)("] read · ["),
             fg(theme.accent)("←→"),
             fg(theme.dim)("] tab · select a child for session · ["),
+            fg(theme.accent)("i"),
+            fg(theme.dim)("] iterate · ["),
             fg(theme.accent)("g"),
             fg(theme.dim)("] lazygit · ["),
             fg(theme.accent)("q"),
@@ -2121,6 +2184,8 @@ export class TuiProgress implements ProgressUI {
             fg(theme.dim)("] tab · ["),
             fg(theme.accent)("o"),
             fg(theme.dim)("] session · ["),
+            fg(theme.accent)("i"),
+            fg(theme.dim)("] iterate · ["),
             fg(theme.accent)("g"),
             fg(theme.dim)("] lazygit · ["),
             fg(theme.accent)("q"),
@@ -2684,5 +2749,14 @@ function totalUsage(phases: PhaseState[]) {
     (usage, phase) => ({ cost: usage.cost + phase.cost, tokens: addTokens(usage.tokens, phase.tokens) }),
     { cost: 0, tokens: emptyTokens() },
   )
+}
+
+async function fileReadable(path: string) {
+  try {
+    await stat(path)
+    return true
+  } catch {
+    return false
+  }
 }
 

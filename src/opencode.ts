@@ -83,6 +83,17 @@ export async function openStoredSessionWindow(input: {
   return openSessionCommand(["opencode", input.targetDir, "--session", input.sessionID].map(shellQuote).join(" "))
 }
 
+// Opens a standalone opencode TUI on a brand-new session seeded with an
+// initial prompt (--prompt submits it on startup). Standalone on purpose: the
+// run's server dies when the finish screen closes, and this window must
+// outlive archer so the user can keep iterating.
+export async function openIterateOpencodeWindow(input: {
+  targetDir: string
+  prompt: string
+}): Promise<SessionWindowBackend> {
+  return openSessionCommand(["opencode", input.targetDir, "--prompt", input.prompt].map(shellQuote).join(" "))
+}
+
 async function openSessionCommand(coreCommand: string): Promise<SessionWindowBackend> {
   if (process.platform !== "darwin") {
     throw new Error("opening a new OpenCode terminal window is currently implemented for macOS only")

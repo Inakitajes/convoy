@@ -157,6 +157,8 @@ export type ProgressUI = {
   isInteractiveTakeover?(name: string): boolean
   /** Holds the dashboard open on a finish screen (phase browser) and resolves when the user dismisses it. */
   runFinished?(outcome: RunOutcome): Promise<void>
+  /** True when the finish screen handed the run dir to an iterate session ([i]), so cleanup must skip it. */
+  keepRunDirRequested?(): boolean
   message(message: string): void
   suspend(): void
   resume(): void

@@ -233,7 +233,7 @@ class LaunchPicker {
     includeDirty: false,
     keepRunDir: true,
     tui: Boolean(process.stdout.isTTY && process.stderr.isTTY),
-    worktree: true,
+    worktree: false,
   }
 
   private readonly ticker: ReturnType<typeof setInterval>
@@ -646,7 +646,7 @@ class LaunchPicker {
       return
     }
 
-    this.startReadyRun(choice.name)
+    await this.startReadyRun(choice.name)
   }
 
   private async initializeGitAndStart(pipelineName: string) {
@@ -655,7 +655,7 @@ class LaunchPicker {
     try {
       const { initializeRepoWithInitialCommit } = await import("./git")
       await initializeRepoWithInitialCommit(this.targetDir, { baseRef: this.baseRef })
-      this.startReadyRun(pipelineName)
+      await this.startReadyRun(pipelineName)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       this.modal = { kind: "message", title: "git init failed", message }
@@ -663,7 +663,26 @@ class LaunchPicker {
     }
   }
 
-  private startReadyRun(pipelineName: string) {
+  // Mirrors the checks `run()` re-does after the launcher closes (ensureRepoReady
+  // in runner.ts): failing here keeps the wizard open, so the typed prompt and
+  // toggles survive a bad base ref or a dirty tree instead of dying with the process.
+  private async startReadyRun(pipelineName: string) {
+    try {
+      const { ensureRepoReady } = await import("./git")
+      await ensureRepoReady(this.targetDir, {
+        baseRef: this.baseRef,
+        includeDirty: this.toggleState.includeDirty,
+        // The interactive flow always forces max attempts to 1 with includeDirty.
+        maxAttempts: 1,
+        // A fresh worktree is always clean, so worktree runs tolerate a dirty source tree.
+        allowDirty: this.toggleState.worktree,
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      this.modal = { kind: "message", title: "can't start the run", message, footer: "esc dismiss · fix and press enter to retry" }
+      this.render()
+      return
+    }
     if (this.toggleState.worktree) {
       void this.startWorktreeRun(pipelineName)
       return
