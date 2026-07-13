@@ -37,27 +37,27 @@ describe("header limits row", () => {
     expect(row).toContain("42%")
     expect(row).toContain("resets 2h 10m")
     expect(row).toContain("wk 18%")
-    expect(row).toContain("OR $12.34 left")
+    expect(row).toContain("OpenRouter $12.34 left")
     expect(row.length).toBeGreaterThanOrEqual(100)
   })
 
   test("narrow widths drop weekly first, then the countdown", () => {
-    // Bar segment (18) + countdown (16) + weekly (9) + credits (14+1 gap):
-    // at 50 the weekly text no longer fits, at 40 the countdown goes too.
-    const at50 = text(full, 50)
-    expect(at50).toContain("resets")
-    expect(at50).not.toContain("wk 18%")
+    // Bar segment (18) + countdown (16) + weekly (9) + credits (22+1 gap):
+    // at 60 the weekly text no longer fits, at 40 the countdown goes too.
+    const at60 = text(full, 60)
+    expect(at60).toContain("resets")
+    expect(at60).not.toContain("wk 18%")
 
     const at40 = text(full, 40)
     expect(at40).toContain("42%")
     expect(at40).not.toContain("resets")
-    expect(at40).toContain("OR $12.34 left")
+    expect(at40).toContain("OpenRouter $12.34 left")
   })
 
   test("monthly fallback labels the amount as spend, not balance", () => {
     const row = text({ ...full, openrouter: { kind: "monthly", amount: 4.2 } }, 100)
 
-    expect(row).toContain("OR $4.20/mo")
+    expect(row).toContain("OpenRouter $4.20/mo")
   })
 
   test("auth problems surface a dim hint instead of a meter", () => {

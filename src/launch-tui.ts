@@ -334,7 +334,7 @@ class LaunchPicker {
       paddingX: 1,
     })
 
-    const header = this.panel({ id: "archer-launch-header", height: 5, borderColor: theme.border, backgroundColor: theme.bg })
+    const header = this.panel({ id: "archer-launch-header", height: 4, borderColor: theme.border, backgroundColor: theme.bg })
     const body = new BoxRenderable(renderer, { id: "archer-launch-body", width: "100%", flexGrow: 1, flexDirection: "row", gap: 1 })
 
     const selectFromList = (event: { y: number; preventDefault(): void; stopPropagation(): void }) => {
@@ -831,8 +831,11 @@ class LaunchPicker {
     return Math.max(46, Math.min(80, this.renderer.width - 10))
   }
 
+  // No "◆ archer" branding here: the launcher is archer's own front door, so
+  // the target project is the header's anchor and the meter row stays clean.
   private headerContent(width: number) {
-    const title: TextChunk[] = [bold(fg(theme.accent)("◆ archer")), fg(theme.faint)("  ·  "), fg(theme.text)("new run")]
+    const project = basename(this.targetDir) || this.targetDir
+    const title: TextChunk[] = [fg(theme.faint)("target "), bold(fg(theme.text)(truncate(project, Math.max(12, width - 32))))]
     const stage: TextChunk[] = []
     for (const [index, step] of ["pipeline", "prompt", "options"].entries()) {
       if (index > 0) stage.push(fg(theme.faint)(" → "))
@@ -840,9 +843,7 @@ class LaunchPicker {
       stage.push(active ? bold(fg(theme.accent)(step)) : fg(theme.dim)(step))
     }
     const line1 = padBetween(title, stage, width)
-    const project = basename(this.targetDir) || this.targetDir
-    const line2 = new StyledText([fg(theme.faint)("target "), fg(theme.text)(truncate(project, Math.max(12, width - 8)))])
-    return joinLines([line1, line2, limitsRow(this.limits, Date.now(), width)])
+    return joinLines([line1, limitsRow(this.limits, Date.now(), width)])
   }
 
   private pipelineContent(width: number) {
@@ -1060,8 +1061,8 @@ class LaunchPicker {
   }
 
   private listHeight() {
-    // header (5) + footer (3) + list panel borders (2).
-    return Math.max(3, this.renderer.height - 10)
+    // header (4) + footer (3) + list panel borders (2).
+    return Math.max(3, this.renderer.height - 9)
   }
 }
 

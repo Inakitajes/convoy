@@ -274,7 +274,7 @@ export function limitsRow(limits: LimitsSnapshot | undefined, now: number, width
   const openrouter = limits?.openrouter
   if (openrouter) {
     right.push(
-      fg(theme.dim)("OR "),
+      fg(theme.dim)("OpenRouter "),
       fg(theme.text)(openrouter.kind === "remaining" ? `${formatMoney(openrouter.amount)} left` : `${formatMoney(openrouter.amount)}/mo`),
     )
   }
