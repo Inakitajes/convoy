@@ -17,6 +17,7 @@ import {
   humanReviewStep,
   isHumanStepSpec,
   readOnlyAgentSuffix,
+  resolvePipeline,
   splitModelVariant,
   type AgentStepSpec,
   type HumanStepSpec,
@@ -629,31 +630,59 @@ export function defaultConfigTemplate(): ArcherConfig {
   return {
     defaults: { model: globalModel, maxAttempts: 2 },
     agents: {},
-    pipelines: { implement: templatePipeline(builtInPipelines[defaultPipelineName]!, globalModel) },
+    pipelines: { implement: materializePipelineSpec(builtInPipelines[defaultPipelineName]!, globalModel) },
     permissions: { allow: [], deny: [] },
     hooks: emptyHooksConfig(),
     attachments: [],
   }
 }
 
-function templatePipeline(spec: PipelineSpec, globalModel: string): PipelineSpec {
-  const steps = spec.steps.map<StepSpec>((raw) => templateStep(raw, globalModel))
+/**
+ * Copies a pipeline spec into a config-editable form. Deep-copied, so editing
+ * the result can never mutate the source (the built-in specs are shared module
+ * constants). When effectiveDefaultModel is set, built-in agent model
+ * preferences that differ from it are inlined on their steps, because
+ * defaults.model would otherwise shadow them at resolve time; when it's unset
+ * the precedence chain already applies them, so steps stay unpinned.
+ */
+export function materializePipelineSpec(spec: PipelineSpec, effectiveDefaultModel?: string): PipelineSpec {
+  const steps = spec.steps.map<StepSpec>((raw) => materializeStep(raw, effectiveDefaultModel))
   return { ...(spec.description ? { description: spec.description } : {}), steps }
 }
 
-function templateStep(raw: StepSpec, globalModel: string): StepSpec {
+function materializeStep(raw: StepSpec, effectiveDefaultModel: string | undefined): StepSpec {
   if (typeof raw === "object" && raw !== null && "parallel" in raw) {
-    return { parallel: raw.parallel.map((inner) => templateStep(inner, globalModel) as string | AgentStepSpec) }
+    return { parallel: raw.parallel.map((inner) => materializeStep(inner, effectiveDefaultModel) as string | AgentStepSpec) }
   }
-  if (isHumanStepSpec(raw) || raw === humanReviewStep) return raw
-  const step = typeof raw === "string" ? { agent: raw } : { ...raw }
-  if (step.agent === humanReviewStep) return step.agent
+  if (isHumanStepSpec(raw)) return structuredClone(raw)
+  if (typeof raw === "string") return raw === humanReviewStep ? raw : materializeAgentStep({ agent: raw }, effectiveDefaultModel)
+  if (raw.agent === humanReviewStep) return raw.agent
+  return materializeAgentStep(structuredClone(raw), effectiveDefaultModel)
+}
+
+function materializeAgentStep(step: AgentStepSpec, effectiveDefaultModel: string | undefined): StepSpec {
   const agent = builtInAgents.find((candidate) => candidate.name === (agentAliases[step.agent] ?? step.agent))
   const preferred = agent?.defaultModel
   const hasStepModel = step.model !== undefined || step.models !== undefined
-  const withModel = !hasStepModel && preferred && preferred !== globalModel ? { ...step, model: preferred } : step
+  if (!hasStepModel && effectiveDefaultModel !== undefined && preferred && preferred !== effectiveDefaultModel) step.model = preferred
   // Collapse a bare { agent } back to its string shorthand for clean YAML.
-  return Object.keys(withModel).length === 1 ? withModel.agent : withModel
+  return Object.keys(step).length === 1 ? step.agent : step
+}
+
+/**
+ * Best-effort resolve check for a pipeline spec: catches what parse-level
+ * validation can't (duplicate step names, unknown agents, dangling reports
+ * targets). Returns the error message, or undefined when the pipeline
+ * resolves. Callers should treat failures as warnings — a global pipeline may
+ * legitimately reference agents that only exist in some project's config.
+ */
+export function checkPipelineResolves(name: string, spec: PipelineSpec, config: ArcherConfig | undefined): string | undefined {
+  try {
+    resolvePipeline({ name, spec, agents: buildAgentRegistry(config), defaultModel: config?.defaults.model })
+    return undefined
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error)
+  }
 }
 
 class Validator {

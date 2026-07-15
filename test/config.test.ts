@@ -6,12 +6,14 @@ import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:tes
 
 import {
   buildAgentRegistry,
+  checkPipelineResolves,
   ConfigError,
   defaultConfigTemplate,
   isValidModelString,
   loadArcherConfig,
   loadGlobalArcherConfig,
   loadMergedArcherConfig,
+  materializePipelineSpec,
   mergeArcherConfigs,
   parseArcherConfig,
   selectPipelineSpec,
@@ -20,7 +22,16 @@ import {
   writeDefaultArcherConfig,
   writeDefaultProjectConfig,
 } from "../src/config"
-import { builtInAgents, defaultGptModel, defaultGptVariant, defaultImplementReviewModel, defaultOpusModel, isHumanStepSpec, isParallelSpec } from "../src/pipeline"
+import {
+  builtInAgents,
+  builtInPipelines,
+  defaultGptModel,
+  defaultGptVariant,
+  defaultImplementReviewModel,
+  defaultOpusModel,
+  isHumanStepSpec,
+  isParallelSpec,
+} from "../src/pipeline"
 
 const dirs: string[] = []
 
@@ -572,5 +583,74 @@ describe("default config init", () => {
     expect(await writeDefaultProjectConfig(dir)).toEqual({ path, created: false })
     expect(await readFile(path, "utf8")).toContain("pipelines:")
     expect(await readFile(join(dir, ".archer", "agents", "implementer.md"), "utf8")).toContain("# Implementer")
+  })
+})
+
+describe("materializing built-in pipelines", () => {
+  const fallback = `${defaultGptModel}#${defaultGptVariant}`
+  const emptyConfig = (pipelines: Record<string, ReturnType<typeof materializePipelineSpec>>) => ({
+    defaults: {},
+    agents: {},
+    pipelines,
+    permissions: { allow: [] as string[], deny: [] as string[] },
+    hooks: { pre: [], post: [], pipelines: {} },
+    attachments: [] as string[],
+  })
+
+  test("without an effective default model, every built-in materializes to an identical spec", () => {
+    for (const spec of Object.values(builtInPipelines)) {
+      expect(materializePipelineSpec(spec)).toEqual(spec)
+    }
+  })
+
+  test("the materialized copy is independent of the built-in spec", () => {
+    const spec = materializePipelineSpec(builtInPipelines.review!)
+    const group = spec.steps[1]
+    if (group === undefined || !isParallelSpec(group)) throw new Error("expected a parallel block")
+    const member = group.parallel[0]
+    if (typeof member === "string") throw new Error("expected a member object")
+    member.models!.push("mutated/model")
+    member.name = "mutated"
+    group.parallel.push("mutated-agent")
+    spec.steps.push("mutated-step")
+
+    const original = builtInPipelines.review!
+    const originalGroup = original.steps[1]
+    if (originalGroup === undefined || !isParallelSpec(originalGroup)) throw new Error("expected a parallel block")
+    const originalMember = originalGroup.parallel[0]
+    if (typeof originalMember === "string") throw new Error("expected a member object")
+    expect(original.steps).toHaveLength(3)
+    expect(originalGroup.parallel).toHaveLength(3)
+    expect(originalMember.models).toHaveLength(2)
+    expect(originalMember.name).toBe("clean-code")
+  })
+
+  test("inlines built-in agent model preferences only when a default model would shadow them", () => {
+    const spec = { steps: [{ agent: "implementer", reports: "none" as const }, "patterns", { agent: "design", model: "x/y" }] }
+    expect(materializePipelineSpec(spec, "other/model").steps).toEqual([
+      { agent: "implementer", reports: "none", model: fallback },
+      { agent: "patterns", model: fallback },
+      { agent: "design", model: "x/y" },
+    ])
+    // A matching default doesn't shadow anything, so nothing gets pinned.
+    expect(materializePipelineSpec(spec, fallback).steps).toEqual(spec.steps)
+  })
+
+  test("every materialized built-in serializes, re-parses, and resolves", () => {
+    for (const [name, spec] of Object.entries(builtInPipelines)) {
+      const materialized = materializePipelineSpec(spec, fallback)
+      const config = parse(serializeArcherConfig(emptyConfig({ [name]: materialized })))
+      expect(config.pipelines[name]).toEqual(materialized)
+      expect(checkPipelineResolves(name, config.pipelines[name]!, config)).toBeUndefined()
+    }
+  })
+
+  test("checkPipelineResolves reports duplicate names, unknown agents, and dangling reports", () => {
+    expect(checkPipelineResolves("x", { steps: ["patterns", "patterns"] }, undefined)).toContain("duplicate step name")
+    expect(checkPipelineResolves("x", { steps: ["nope"] }, undefined)).toContain("unknown agent")
+    expect(checkPipelineResolves("x", { steps: ["patterns", { agent: "security", reports: ["missing"] }] }, undefined)).toContain(
+      "not an earlier agent step",
+    )
+    expect(checkPipelineResolves("x", { steps: ["patterns"] }, undefined)).toBeUndefined()
   })
 })
