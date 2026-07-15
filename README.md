@@ -1,10 +1,30 @@
-# archer
+<p align="center">
+  <img src="assets/header.svg" alt="archer" width="820">
+</p>
 
-Archer is a higher-level orchestration harness for [OpenCode](https://opencode.ai) that turns a PRD into a structured, reviewable implementation workflow. It coordinates specialized agents across implementation, pattern alignment, security, design polish, tests, and adversarial review; adapts to the target repo's stack and conventions; and leaves one commit per phase.
+<p align="center"><em>An orchestration harness for multi-model agent pipelines.</em></p>
 
-Rather than being only a sequential agent chain, Archer owns the operational layer around OpenCode: repo context attachment, runtime guard rails, permission gates, phase reports, diff tracking, and human-in-the-loop checkpoints.
+<p align="center">
+  <img src="assets/screenshot.jpeg" alt="archer running a pipeline with six parallel agents" width="920">
+</p>
 
-Pipelines are data, not code: archer ships a family of built-in pipelines (`implement` — the default — plus `implement-lite`, `ultra-implement`, `refine`, `ultra-refine`, and the report-only `review` and `review-lite`; see [Built-in pipelines](#built-in-pipelines)), and a project can define its own — any number of steps, its own agents, its own models, with named human gates anywhere — in `.archer/config.yaml`.
+Archer takes a PRD and turns it into a structured, reviewable implementation: a **pipeline** of specialized agents — implementer, pattern auditor, security auditor, design polisher, test engineer, adversarial reviewer — each step a fresh agent on the model best suited to its job, leaving one commit per phase. It is built on top of [OpenCode](https://opencode.ai), so every step can run on any model from any provider you are authenticated with, within the same run.
+
+**Why it exists:** a single agent in a single session produces a first draft, not shippable code. The quality comes from what happens after that first pass — pattern alignment, security auditing, tests, adversarial review — and that follow-through is exactly the part nobody wants to orchestrate by hand. Archer makes it repeatable: audits fan out in parallel across different models (a GPT and a Claude reviewing the same diff catch different things), findings are triaged adversarially before any fix lands, and named human gates go wherever you want them.
+
+Typical uses:
+
+- **Ship a feature from a PRD.** `archer --prompt-file prd.md` runs the default `implement` pipeline; what lands has already been pattern-aligned, security-audited, design-polished, tested, and adversarially reviewed — one commit per phase, so you review a story, not a blob.
+- **Harden a branch you already have** — hand-written, or another agent's output. `archer -p refine "what this branch does"` audits the current diff (scope, bugs, clean code, security), triages the findings adversarially, applies only the accepted fixes, and validates them.
+- **Get a second opinion before merging.** `archer -p review "pre-merge check"` changes no code: each audit runs in parallel on two different models and everything is synthesized into one prioritized findings report at `reports/report.md`.
+- **Turn up the rigor for risky changes.** `ultra-implement` and `ultra-refine` fan every review out across two models, then finish with a fixer that applies only blocking findings and a final validator.
+- **Encode your team's actual workflow.** Pipelines are YAML in `.archer/config.yaml`: define, say, a `ship` pipeline — refine the branch, sync it with its base, draft the PR — and run `archer -p ship`.
+
+Use it as a **CLI** or as a **TUI**, interchangeably: every run can be launched with plain flags and prompt files (`--no-tui` gives you plain logs for pipes and CI), or driven entirely from the TUI — `archer` with no arguments opens the interactive launcher, every run gets a live dashboard, `archer runs` browses past runs, and `archer config` edits global and project config in place.
+
+**Pipelines are data, not code.** Archer ships a family of built-in pipelines (`implement` — the default — plus `implement-lite`, `ultra-implement`, `refine`, `ultra-refine`, and the report-only `review` and `review-lite`; see [Built-in pipelines](#built-in-pipelines)), and a project can define its own — any number of steps, its own agents, its own models, with named human gates anywhere — in `.archer/config.yaml`.
+
+Beyond sequencing agents, Archer owns the operational layer around OpenCode: repo context attachment, runtime guard rails, a live permission gate, commit safety, phase reports, diff tracking, and a TUI that shows cost, tokens, and provider limits while the run is live.
 
 Archer is written in Bun + TypeScript and uses `@opencode-ai/sdk` to control OpenCode. The SDK starts/controls the OpenCode server; Archer no longer manually calls `opencode run` nor parses stdout.
 
