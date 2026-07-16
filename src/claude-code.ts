@@ -27,6 +27,7 @@ export const claudeBinaryName = "claude"
 const allowedTools = "Read,Glob,Grep"
 const disallowedTools = "Write,Edit,NotebookEdit,Bash,Task,WebFetch,WebSearch"
 const readOnlyToolArgs = [
+  "--safe-mode",
   "--tools",
   allowedTools,
   "--disallowedTools",

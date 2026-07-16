@@ -55,6 +55,15 @@ describe("run metadata", () => {
     expect(resumed.pipeline.steps).toHaveLength(1)
   })
 
+  test("fails closed when a repository baseline cannot be persisted", async () => {
+    const ws = await workspace()
+    const store = await openRunMetadata(ws, "/repo", quick)
+    await store.flush()
+    await rm(ws.dir, { recursive: true, force: true })
+
+    await expect(store.phaseRepositoryBaseline("implementer", { head: "abc123", ref: "main" })).rejects.toThrow()
+  })
+
   test("rejects frozen pipelines whose artifact paths escape the run directory", async () => {
     const ws = await workspace()
     const path = join(ws.dir, "metadata.json")

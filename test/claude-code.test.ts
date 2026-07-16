@@ -241,6 +241,7 @@ describe("prompt and args assembly", () => {
     expect(args).not.toContain("--append-system-prompt")
     expect(args[args.indexOf("--append-system-prompt-file") + 1]).toBe("/runs/r1/prompts/security.md")
     expect(args[args.indexOf("--add-dir") + 1]).toBe("/runs/r1")
+    expect(args).toContain("--safe-mode")
     expect(args[args.indexOf("--tools") + 1]).toBe("Read,Glob,Grep")
     expect(args).not.toContain("--allowedTools")
     expect(args[args.indexOf("--disallowedTools") + 1]).toContain("Bash")
@@ -526,9 +527,10 @@ describe("model label", () => {
 })
 
 describe("interactive resume", () => {
-  test("keeps Claude customizations while preserving the read-only tool envelope", () => {
+  test("disables customizations while preserving the read-only tool envelope", () => {
     const args = claudeResumeArgs("session-123", ["/runs/r1", "/external/review-input"])
 
+    expect(args).toContain("--safe-mode")
     expect(args[args.indexOf("--tools") + 1]).toBe("Read,Glob,Grep")
     expect(args).not.toContain("--allowedTools")
     expect(args[args.indexOf("--permission-mode") + 1]).toBe("dontAsk")

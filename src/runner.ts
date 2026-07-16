@@ -360,7 +360,7 @@ export async function run(options: RunOptions) {
           }
           const restored = resuming && (await restorePhaseFromPreviousRun(workspace, runMetadata, step, progress))
           if (!restored) {
-            await runPhase(client, workspace, step, options, extraFiles, projectContextFiles, progress, shutdown, gitLock, { serverUrl, permissions })
+            await runPhase(client, workspace, runMetadata, step, options, extraFiles, projectContextFiles, progress, shutdown, gitLock, { serverUrl, permissions })
           }
         }),
       )
@@ -481,7 +481,12 @@ export async function restorePhaseFromPreviousRun(
 // A phase still needs to run on resume when its report is missing (it never
 // finished) or the metadata marks it failed (its report, if any, is stale).
 async function phaseNeedsRun(workspace: Workspace, metadata: RunMetadataStore, phase: AgentStep): Promise<boolean> {
+  if (metadata.phaseStatus?.(phase.name) === "skipped") return false
   if (!(await exists(join(workspace.dir, phase.reportPath)))) return true
+  // A read-only report is written before the repository boundary is checked.
+  // If the process died while still running, resume must revalidate/retry it
+  // rather than treating that unfinalized report as completed.
+  if (phase.readOnly && metadata.phaseStatus(phase.name) === "running") return true
   return metadata.snapshot(phase.name)?.status === "failed"
 }
 
@@ -493,6 +498,14 @@ export async function selectInterruptedPhase(
   metadata: RunMetadataStore,
   pipeline: Pipeline,
 ): Promise<AgentStep | undefined> {
+  // Lifecycle metadata is authoritative when present: a later running/failed
+  // phase must not be hidden by an earlier skipped/completed phase whose agent
+  // happened not to produce a report.
+  for (const step of pipeline.steps) {
+    if (step.type !== "agent") continue
+    const status = metadata.phaseStatus?.(step.name)
+    if (status === "running" || status === "failed") return step
+  }
   for (const step of pipeline.steps) {
     if (step.type !== "agent") continue
     if (await phaseNeedsRun(workspace, metadata, step)) return step
@@ -504,14 +517,19 @@ export async function selectInterruptedPhase(
 // work and continue. Runs before the TUI starts so the prompt owns the terminal.
 async function maybeRecoverDirtyTree(workspace: Workspace, metadata: RunMetadataStore, options: RunOptions) {
   if (!options.resumeRunID) return
+  await assertPendingReadOnlyResumeBaselines(metadata, metadata.pipeline, options.targetDir)
+  const phase = await selectInterruptedPhase(workspace, metadata, metadata.pipeline)
+
   const porcelain = await statusPorcelain(options.targetDir)
   if (porcelain.trim() === "") return
 
   const dirty = () => dirtyTreeError(options.targetDir, porcelain, { resuming: true })
-  const phase = await selectInterruptedPhase(workspace, metadata, metadata.pipeline)
   // No pending agent phase means the changes don't belong to an interrupted
   // phase (stray edits); leave them for the user rather than guess.
   if (!phase) throw dirty()
+  // Read-only output is never recoverable agent work: it may be a concurrent
+  // user edit, so committing it under the phase name would misattribute it.
+  if (phase.readOnly) throw dirty()
   if (!(stdin.isTTY && stdout.isTTY)) throw dirty()
   if (!(await confirmRecovery(phase.name, porcelain))) throw dirty()
 
@@ -549,6 +567,9 @@ export async function commitRecoveredPhase(
   phase: AgentStep,
   targetDir: string,
 ) {
+  if (phase.readOnly) {
+    throw new Error(`[${phase.name}] refusing to commit preserved changes from a read-only phase; resolve them manually before resuming`)
+  }
   const reportAbs = join(workspace.dir, phase.reportPath)
   if (!(await exists(reportAbs))) {
     await mkdir(dirname(reportAbs), { recursive: true })
@@ -583,6 +604,7 @@ export type TakeoverContext = {
 async function runPhase(
   client: OpencodeClient,
   workspace: Workspace,
+  metadata: RunMetadataStore,
   phase: AgentStep,
   options: RunOptions,
   extraFiles: FilePartInput[],
@@ -602,14 +624,16 @@ async function runPhase(
       if (phase.readOnly && !snapshot) {
         const porcelain = await statusPorcelain(options.targetDir)
         throw new Error(
-          `[${phase.name}] read-only steps require a clean working tree so Archer can detect and restore extension side effects\n${dirtyFilesPreview(porcelain)}`,
+          `[${phase.name}] read-only steps require a clean working tree so Archer can detect unexpected side effects without discarding concurrent user work\n${dirtyFilesPreview(porcelain)}`,
         )
       }
       return snapshot
     })
-    const assistantText = await runPhaseWithRetries(client, workspace, phase, options.targetDir, prepared, baseline, progress, shutdown, gitLock, takeover)
-
-    const reportAbs = await persistPhaseReport(workspace, phase, assistantText)
+    if (phase.readOnly && baseline) await metadata.phaseRepositoryBaseline(phase.name, baseline)
+    const reportAbs = await withReadOnlyRepositoryBoundary(phase, options.targetDir, baseline, gitLock, async () => {
+      const assistantText = await runPhaseWithRetries(client, workspace, phase, options.targetDir, prepared, baseline, progress, shutdown, gitLock, takeover)
+      return persistPhaseReport(workspace, phase, assistantText)
+    })
     await gitLock(() => finalizePhaseRepository(phase, reportAbs, options.targetDir, baseline))
     progress.phaseCompleted(phase.name, "report saved and commit checked")
   } catch (error) {
@@ -915,6 +939,7 @@ export async function finalizePhaseRepository(
   reportAbs: string,
   targetDir: string,
   baseline: RepoSnapshot | undefined,
+  originalError?: unknown,
 ): Promise<void> {
   if (!phase.readOnly) {
     await commitPhase(phase, reportAbs, targetDir)
@@ -928,14 +953,20 @@ export async function finalizePhaseRepository(
     return
   }
 
-  await restoreRepoSnapshot(baseline, targetDir)
-  throw new Error(
-    `[${phase.name}] read-only step modified the repository; Archer restored the baseline instead of committing these changes\n${difference}`,
-  )
+  if (originalError instanceof ReadOnlyRepositoryMutationError) throw originalError
+  const message = `[${phase.name}] repository changed during a read-only step; Archer left these changes intact to avoid discarding concurrent user work\n${difference}${
+      originalError === undefined ? "" : `\nOriginal failure: ${formatSdkError(originalError)}`
+    }`
+  if (isUserAbortError(originalError)) throw new UserAbortError(message)
+  throw new ReadOnlyRepositoryMutationError(message)
 }
 
 async function restorePhaseBaseline(phase: AgentStep, baseline: RepoSnapshot | undefined, targetDir: string, originalError: unknown) {
   if (!baseline) return
+  if (phase.readOnly) {
+    await finalizePhaseRepository(phase, "", targetDir, baseline, originalError)
+    return
+  }
   try {
     await restoreRepoSnapshot(baseline, targetDir)
   } catch (restoreError) {
@@ -944,6 +975,60 @@ async function restorePhaseBaseline(phase: AgentStep, baseline: RepoSnapshot | u
         originalError,
       )}`,
     )
+  }
+}
+
+class ReadOnlyRepositoryMutationError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "ReadOnlyRepositoryMutationError"
+  }
+}
+
+/**
+ * Checks the read-only boundary in a finally block so aborts, failed attempts,
+ * and report persistence errors cannot bypass mutation detection. Detection is
+ * deliberately non-destructive because Archer cannot distinguish an extension
+ * side effect from a user's concurrent edit in the same working tree.
+ */
+export async function withReadOnlyRepositoryBoundary<T>(
+  phase: AgentStep,
+  targetDir: string,
+  baseline: RepoSnapshot | undefined,
+  gitLock: GitLock,
+  action: () => Promise<T>,
+): Promise<T> {
+  if (!phase.readOnly) return action()
+  if (!baseline) throw new Error(`[${phase.name}] read-only step has no clean repository baseline`)
+
+  let originalError: unknown
+  try {
+    return await action()
+  } catch (error) {
+    originalError = error
+    throw error
+  } finally {
+    await gitLock(() => finalizePhaseRepository(phase, "", targetDir, baseline, originalError))
+  }
+}
+
+export async function assertReadOnlyResumeBaseline(metadata: RunMetadataStore, phase: AgentStep, targetDir: string): Promise<void> {
+  if (!phase.readOnly) return
+  const baseline = metadata.repositoryBaseline(phase.name)
+  if (!baseline) return
+  const difference = await describeRepoSnapshotDifference(baseline, targetDir)
+  if (!difference) return
+  throw new Error(
+    `[${phase.name}] repository changed since this read-only phase began; Archer left the changes intact. Restore the recorded HEAD/branch or start a new run before resuming\n${difference}`,
+  )
+}
+
+export async function assertPendingReadOnlyResumeBaselines(metadata: RunMetadataStore, pipeline: Pipeline, targetDir: string): Promise<void> {
+  for (const step of pipeline.steps) {
+    if (step.type !== "agent" || !step.readOnly) continue
+    const status = metadata.phaseStatus(step.name)
+    if (status !== "running" && status !== "failed") continue
+    await assertReadOnlyResumeBaseline(metadata, step, targetDir)
   }
 }
 
