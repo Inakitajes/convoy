@@ -242,7 +242,7 @@ describe("prompt and args assembly", () => {
     expect(args[args.indexOf("--append-system-prompt-file") + 1]).toBe("/runs/r1/prompts/security.md")
     expect(args[args.indexOf("--add-dir") + 1]).toBe("/runs/r1")
     expect(args[args.indexOf("--tools") + 1]).toBe("Read,Glob,Grep")
-    expect(args[args.indexOf("--allowedTools") + 1]).toBe("Read,Glob,Grep")
+    expect(args).not.toContain("--allowedTools")
     expect(args[args.indexOf("--disallowedTools") + 1]).toContain("Bash")
     expect(args[args.indexOf("--permission-mode") + 1]).toBe("dontAsk")
     expect(args[args.indexOf("--model") + 1]).toBe("opus")
@@ -530,6 +530,7 @@ describe("interactive resume", () => {
     const args = claudeResumeArgs("session-123", ["/runs/r1", "/external/review-input"])
 
     expect(args[args.indexOf("--tools") + 1]).toBe("Read,Glob,Grep")
+    expect(args).not.toContain("--allowedTools")
     expect(args[args.indexOf("--permission-mode") + 1]).toBe("dontAsk")
     expect(args).toContain("session-123")
     expect(args).toContain("/runs/r1")

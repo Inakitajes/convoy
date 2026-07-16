@@ -29,8 +29,6 @@ const disallowedTools = "Write,Edit,NotebookEdit,Bash,Task,WebFetch,WebSearch"
 const readOnlyToolArgs = [
   "--tools",
   allowedTools,
-  "--allowedTools",
-  allowedTools,
   "--disallowedTools",
   disallowedTools,
   "--permission-mode",

@@ -100,14 +100,7 @@ export async function openSessionCommand(coreCommand: string, cwd?: string): Pro
     throw new Error("opening a new terminal window is currently implemented for macOS only")
   }
 
-  // A login shell keeps the user's PATH for the launched CLI.
-  const command = [
-    process.env.PATH ? `export PATH=${shellQuote(process.env.PATH)}:$PATH` : "",
-    cwd ? `cd ${shellQuote(cwd)}` : "",
-    coreCommand,
-  ]
-    .filter(Boolean)
-    .join("; ")
+  const command = sessionShellCommand(coreCommand, cwd)
 
   const forced = process.env.ARCHER_TERMINAL?.toLowerCase()
   if (forced === "terminal") {
@@ -126,6 +119,17 @@ export async function openSessionCommand(coreCommand: string, cwd?: string): Pro
   }
   await openInTerminalApp(command)
   return "terminal"
+}
+
+/** Builds the login-shell command, stopping before launch if setup or `cd` fails. */
+export function sessionShellCommand(coreCommand: string, cwd?: string, path = process.env.PATH): string {
+  return [
+    path ? `export PATH=${shellQuote(path)}:$PATH` : "",
+    cwd ? `cd ${shellQuote(cwd)}` : "",
+    coreCommand,
+  ]
+    .filter(Boolean)
+    .join(" && ")
 }
 
 async function ghosttyInstalled() {
