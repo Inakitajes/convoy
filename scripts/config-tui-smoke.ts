@@ -102,8 +102,48 @@ try {
   await flush()
   check("member shows the new fan-out", captureCharFrame().includes("2 models"))
 
-  // Cycle diff on the same member (the row summary truncates, so the saved
+  // A fan-out cannot switch to Claude Code because that runner owns one CLI model.
+  mockInput.pressKey("r", { shift: true })
+  await flush()
+  check("runner toggle refuses model fan-out", captureCharFrame().includes("Remove the models fan-out"))
+  mockInput.pressKey("RETURN")
+  await flush()
+  check("blocked runner toggle preserves the fan-out", captureCharFrame().includes("2 models"))
+
+  // A singular-model step can switch runners, clear its incompatible OpenCode
+  // model with confirmation, and accept a full Claude CLI model ID through text input.
+  await pressUntil("ARROW_UP", (frame) => frame.includes("step 1 of review"), "cursor reaches scope step")
+  mockInput.pressKey("r", { shift: true })
+  await flush()
+  check("runner switch confirms model clearing", captureCharFrame().includes("current model belongs to the other runner"))
+  mockInput.pressKey("y")
+  await flush()
+  check("scope switches to Claude Code default", captureCharFrame().includes("claude-code/default"))
+  mockInput.pressKey("RETURN")
+  await flush()
+  check("Claude model editor uses CLI input", captureCharFrame().includes("Claude CLI alias"))
+  await type("claude-opus-4-8")
+  mockInput.pressKey("RETURN")
+  await flush()
+  mockInput.pressKey("RETURN")
+  await flush()
+  check("current Claude model ID is selected", captureCharFrame().includes("Claude claude-opus-4-8 · current"))
+  mockInput.pressKey("RETURN")
+  await flush()
+  mockInput.pressKey("RETURN")
+  await flush()
+  check("accepting the picker preserves the Claude model ID", captureCharFrame().includes("Claude claude-opus-4-8 · current"))
+  mockInput.pressKey("RETURN")
+  await flush()
+  mockInput.pressKey("m", { shift: true })
+  await flush()
+  check("Claude multi-model edit is unavailable", captureCharFrame().includes("Switch to OpenCode with Shift+R"))
+  mockInput.pressKey("RETURN")
+  await flush()
+
+  // Return to member 2.1, cycle diff (the row summary truncates, so the saved
   // YAML assertion below is what proves the toggle landed) and save.
+  await pressUntil("ARROW_DOWN", (frame) => frame.includes("step 2.1 of review"), "cursor returns to member 2.1")
   mockInput.pressKey("x")
   await flush()
   mockInput.pressKey("s")
@@ -117,6 +157,7 @@ try {
   check("saved YAML contains the parallel block", saved.includes("parallel:"))
   check("saved YAML contains the typed fan-out", saved.includes("smoke/model-a") && saved.includes("smoke/model-b"))
   check("saved YAML contains the diff toggle", saved.includes("diff: true"))
+  check("saved YAML contains the Claude runner and model", saved.includes("runner: claude-code") && saved.includes("model: claude-opus-4-8"))
 
   // Quit cleanly (config was just saved, so no confirm).
   mockInput.pressKey("q")

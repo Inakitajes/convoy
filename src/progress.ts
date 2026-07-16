@@ -1,4 +1,5 @@
 import { log } from "./log"
+import type { StepRunner } from "./types"
 
 export type ProgressPhase = {
   name: string
@@ -11,6 +12,10 @@ export type ProgressPhase = {
   plannedModel?: string
   /** The variant paired with `plannedModel`, when the model shorthand carried one. */
   plannedVariant?: string
+  /** Execution engine for the step; absent means OpenCode. The TUI's session window ([o]) branches on this. */
+  runner?: StepRunner
+  /** Whether Archer restricts this phase to audit-only behavior. */
+  readOnly?: boolean
 }
 
 export type ProgressTokens = {

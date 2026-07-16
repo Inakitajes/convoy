@@ -7,7 +7,8 @@ import type { AssistantMessage, FilePartInput, OpencodeClient, Part } from "@ope
 
 import { opencodeConfig } from "./agents"
 import { fileParts } from "./attachments"
-import { addAllAndCommit, createCleanRepoSnapshot, dirtyFilesPreview, dirtyTreeError, ensureRepoReady, restoreRepoSnapshot, type RepoSnapshot, statusPorcelain, writeDiff } from "./git"
+import { ensureClaudeAvailable, promptClaudePhase } from "./claude-code"
+import { addAllAndCommit, createCleanRepoSnapshot, describeRepoSnapshotDifference, dirtyFilesPreview, dirtyTreeError, ensureRepoReady, restoreRepoSnapshot, type RepoSnapshot, statusPorcelain, writeDiff } from "./git"
 import { hookPhaseNames, hooksForPipeline, runHooks, type HookStage } from "./hooks"
 import { runHumanReviewGate } from "./human"
 import { log } from "./log"
@@ -31,6 +32,7 @@ import {
   type RunOutcome,
 } from "./progress"
 import { discoverProjectContextFiles } from "./project-context"
+import { createStepRunnerImpl, stepRunnerFor, stepRunnerModel, type StepRunnerId, type StepRunnerImpl } from "./step-runners"
 import type { AgentSpec, AgentStep, HookSet, HookSpec, Pipeline, RunOptions, Step } from "./types"
 import { addTokens, emptyTokens, tokensFromValue } from "./usage"
 import { cleanupWorkspace, createWorkspace, resumeWorkspace, type Workspace, writeSummary } from "./workspace"
@@ -256,6 +258,9 @@ export async function run(options: RunOptions) {
     // register those variants alongside the normal registry for this run.
     const agents = [...options.agents, ...synthesizeReadOnlyAgents(pipeline, options.agents)]
     ensureAgentsAvailable(pipeline, agents)
+    // Claude Code is an optional dependency: only a pipeline that actually
+    // contains a claude-code step needs the CLI, checked before anything runs.
+    ensureClaudeAvailable(pipeline)
     // A run interrupted before its phase commit leaves the tree dirty; on resume
     // offer to commit that work as the interrupted phase and continue. Runs here,
     // before the TUI grabs the terminal, so the readline prompt stays visible.
@@ -266,6 +271,11 @@ export async function run(options: RunOptions) {
     )
     progress.start(workspace.runID, options.targetDir, workspace.dir)
     log.info(`Run ${workspace.runID} - dir: ${workspace.dir}`)
+    const overrideNotice = modelOverrideNotice(pipeline, options.modelOverride)
+    if (overrideNotice) {
+      progress.message(overrideNotice)
+      log.warn(overrideNotice)
+    }
     if (options.yolo) {
       progress.message("YOLO enabled: ask-level permissions will be auto-allowed (denylist still applies); shift+tab toggles")
       log.warn("YOLO enabled: unknown non-denied commands will be auto-allowed")
@@ -587,11 +597,20 @@ async function runPhase(
 
   try {
     const prepared = await preparePhaseRun(workspace, phase, options, extraFiles, projectContextFiles)
-    const baseline = await gitLock(() => createCleanRepoSnapshot(options.targetDir))
+    const baseline = await gitLock(async () => {
+      const snapshot = await createCleanRepoSnapshot(options.targetDir)
+      if (phase.readOnly && !snapshot) {
+        const porcelain = await statusPorcelain(options.targetDir)
+        throw new Error(
+          `[${phase.name}] read-only steps require a clean working tree so Archer can detect and restore extension side effects\n${dirtyFilesPreview(porcelain)}`,
+        )
+      }
+      return snapshot
+    })
     const assistantText = await runPhaseWithRetries(client, workspace, phase, options.targetDir, prepared, baseline, progress, shutdown, gitLock, takeover)
 
     const reportAbs = await persistPhaseReport(workspace, phase, assistantText)
-    await gitLock(() => commitPhase(phase, reportAbs, options.targetDir))
+    await gitLock(() => finalizePhaseRepository(phase, reportAbs, options.targetDir, baseline))
     progress.phaseCompleted(phase.name, "report saved and commit checked")
   } catch (error) {
     progress.phaseFailed(phase.name, formatSdkError(error))
@@ -768,34 +787,103 @@ async function runPhaseAttempt(
   shutdown: RunShutdown,
   sessionRef?: SessionRef,
 ) {
-  const result = await promptPhase(client, {
-    phase,
-    workspace,
-    targetDir,
-    prompt: prepared.prompt,
-    model: prepared.model,
-    attachments: prepared.attachments,
-    progress,
-    shutdown,
-    sessionRef,
-  })
-  const assistantText = extractAssistantText(result.parts)
+  const input = { client, workspace, phase, targetDir, prepared, attempt, progress, shutdown, sessionRef }
+  const runner = phaseAttemptRunners[stepRunnerFor(phase.runner).id]
+  const result = await runner.executeAttempt(input)
 
   await writeAttemptLog(workspace, phase, attempt, {
-    session: result.info.sessionID,
+    session: result.sessionID,
     agent: phase.agentName,
-    model: prepared.model,
+    model: result.model,
     attachments: prepared.attachments.map((file) => ({ filename: file.filename, mime: file.mime, url: file.url })),
+    finish: result.finish,
+    cost: result.cost,
+    tokens: result.tokens,
+    error: result.error,
+    text: result.assistantText,
+  })
+
+  if (result.error) throw new LoggedAttemptError(formatSdkError(result.error))
+  return result.assistantText
+}
+
+type PhaseAttemptInput = {
+  client: OpencodeClient
+  workspace: Workspace
+  phase: AgentStep
+  targetDir: string
+  prepared: PreparedPhaseRun
+  attempt: number
+  progress: ProgressUI
+  shutdown: RunShutdown
+  sessionRef?: SessionRef
+}
+
+type PhaseAttemptResult = {
+  assistantText: string
+  sessionID?: string
+  model: ModelSelection | string
+  finish?: unknown
+  cost?: number
+  tokens?: unknown
+  error?: unknown
+}
+
+const phaseAttemptRunners: Record<StepRunnerId, StepRunnerImpl<PhaseAttemptInput, PhaseAttemptResult>> = {
+  opencode: createStepRunnerImpl("opencode", executeOpenCodePhaseAttempt),
+  "claude-code": createStepRunnerImpl("claude-code", executeClaudeCodePhaseAttempt),
+}
+
+async function executeOpenCodePhaseAttempt(input: PhaseAttemptInput): Promise<PhaseAttemptResult> {
+  const result = await promptPhase(input.client, {
+    phase: input.phase,
+    workspace: input.workspace,
+    targetDir: input.targetDir,
+    prompt: input.prepared.prompt,
+    model: input.prepared.model,
+    attachments: input.prepared.attachments,
+    progress: input.progress,
+    shutdown: input.shutdown,
+    sessionRef: input.sessionRef,
+  })
+  const assistantText = extractAssistantText(result.parts)
+  return {
+    assistantText,
+    sessionID: result.info.sessionID,
+    model: input.prepared.model,
     finish: result.info.finish,
     cost: result.info.cost,
     tokens: result.info.tokens,
     error: result.info.error,
-    text: assistantText,
+  }
+}
+
+/**
+ * The claude-code twin of the OpenCode attempt: same prompt, same attempt log
+ * shape, same report contract (read-only step → the report is the final
+ * assistant text), executed by the local `claude` CLI instead of a session.
+ */
+async function executeClaudeCodePhaseAttempt(input: PhaseAttemptInput): Promise<PhaseAttemptResult> {
+  const result = await promptClaudePhase({
+    phase: input.phase,
+    workspace: input.workspace,
+    targetDir: input.targetDir,
+    prompt: input.prepared.prompt,
+    attachments: input.prepared.attachments,
+    attempt: input.attempt,
+    progress: input.progress,
+    shutdown: input.shutdown,
+    ...(input.sessionRef ? { sessionRef: input.sessionRef } : {}),
   })
-
-  if (result.info.error) throw new LoggedAttemptError(formatSdkError(result.info.error))
-
-  return assistantText
+  return {
+    assistantText: result.assistantText,
+    sessionID: result.sessionID,
+    model: stepRunnerFor(input.phase.runner).modelLabel(input.phase.model),
+    finish: result.finish,
+    cost: result.cost,
+    tokens: result.tokens,
+    error: result.error,
+  }
 }
 
 async function persistPhaseReport(workspace: Workspace, phase: AgentStep, assistantText: string) {
@@ -820,6 +908,30 @@ async function commitPhase(phase: AgentStep, reportAbs: string, targetDir: strin
   } else {
     log.info(`[${phase.name}] commit: ${message}`)
   }
+}
+
+export async function finalizePhaseRepository(
+  phase: AgentStep,
+  reportAbs: string,
+  targetDir: string,
+  baseline: RepoSnapshot | undefined,
+): Promise<void> {
+  if (!phase.readOnly) {
+    await commitPhase(phase, reportAbs, targetDir)
+    return
+  }
+  if (!baseline) throw new Error(`[${phase.name}] read-only step has no clean repository baseline`)
+
+  const difference = await describeRepoSnapshotDifference(baseline, targetDir)
+  if (!difference) {
+    log.info(`[${phase.name}] read-only step left the repository unchanged`)
+    return
+  }
+
+  await restoreRepoSnapshot(baseline, targetDir)
+  throw new Error(
+    `[${phase.name}] read-only step modified the repository; Archer restored the baseline instead of committing these changes\n${difference}`,
+  )
 }
 
 async function restorePhaseBaseline(phase: AgentStep, baseline: RepoSnapshot | undefined, targetDir: string, originalError: unknown) {
@@ -1592,12 +1704,8 @@ export function parseModel(value: string) {
 }
 
 function selectedModel(phase: AgentStep, override: string): ModelSelection {
-  if (override) {
-    const { model, variant } = splitModelVariant(override)
-    return { ...parseModel(model), ...(variant ? { variant } : {}) }
-  }
-  const model = parseModel(phase.model)
-  return phase.variant ? { ...model, variant: phase.variant } : model
+  const { label: _label, ...model } = stepRunnerModel(phase.runner, phase.model, phase.variant, override)
+  return model
 }
 
 function formatModel(model: ModelSelection) {
@@ -1633,8 +1741,10 @@ export function progressPhases(pipeline: Pipeline, hooks?: HookSet): ProgressPha
           description: step.description,
           groupId: step.groupId,
           stepName: step.stepName,
-          plannedModel: step.model,
+          plannedModel: stepRunnerFor(step.runner).modelLabel(step.model),
           ...(step.variant ? { plannedVariant: step.variant } : {}),
+          ...(step.runner ? { runner: step.runner } : {}),
+          ...(step.readOnly ? { readOnly: true } : {}),
         }
       : { name: step.name, description: step.description },
   )
@@ -1644,6 +1754,15 @@ export function progressPhases(pipeline: Pipeline, hooks?: HookSet): ProgressPha
   const hookPhase = (stage: HookStage, specs: readonly HookSpec[]) =>
     hookPhaseNames(stage, specs).map((name, index) => ({ name, description: specs[index]!.command }))
   return [...hookPhase("pre", hooks.pre), ...steps, ...hookPhase("post", hooks.post)]
+}
+
+export function modelOverrideNotice(pipeline: Pipeline, override: string): string | undefined {
+  if (!override) return undefined
+  const unaffected = pipeline.steps
+    .filter((step): step is AgentStep => step.type === "agent" && !stepRunnerFor(step.runner).capabilities.globalModelOverride)
+    .map((step) => step.name)
+  if (unaffected.length === 0) return undefined
+  return `--model applies to OpenCode steps only; Claude Code steps keep their configured model: ${unaffected.join(", ")}`
 }
 
 class LoggedAttemptError extends Error {}

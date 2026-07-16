@@ -2,6 +2,7 @@ import { readFile, rename, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 
 import { log } from "./log"
+import { isSafeStepName } from "./pipeline"
 
 import type {
   ProgressPhaseSnapshot,
@@ -63,6 +64,7 @@ export async function openRunMetadata(workspace: Workspace, targetDir: string, p
   // First open freezes the pipeline; pre-pipeline (v1) runs adopt the current
   // one, whose default step names match what those runs executed.
   const effectivePipeline = (data.pipeline ??= pipeline)
+  assertSafePipelineArtifacts(effectivePipeline)
   // One accumulator per phase. Kept out of the persisted shape — PhaseUsage holds
   // cumulative per-session totals, so re-counting them on resume would double up.
   const usage = new Map<string, PhaseUsage>()
@@ -168,6 +170,29 @@ export async function openRunMetadata(workspace: Workspace, targetDir: string, p
       await persist()
     },
   }
+}
+
+function assertSafePipelineArtifacts(pipeline: Pipeline): void {
+  if (!pipeline || !Array.isArray(pipeline.steps)) throw new Error("unsafe frozen pipeline: steps must be a list")
+  for (const step of pipeline.steps) {
+    if (!step || typeof step.name !== "string" || !isSafeStepName(step.name)) {
+      throw new Error("unsafe frozen pipeline: every step must have a filesystem-safe name")
+    }
+    if (step.type === "human") continue
+    if (step.type !== "agent") throw new Error("unsafe frozen pipeline: unknown step type")
+    if (step.reportPath !== `reports/${step.name}.md`) {
+      throw new Error(`unsafe frozen pipeline: report path for step "${step.name}" is outside its canonical location`)
+    }
+    if (!Array.isArray(step.inputFiles) || step.inputFiles.some((path) => !isSafePipelineInput(path))) {
+      throw new Error(`unsafe frozen pipeline: input path for step "${step.name}" is outside its canonical location`)
+    }
+  }
+}
+
+function isSafePipelineInput(path: unknown): path is string {
+  if (path === "prd.md") return true
+  if (typeof path !== "string" || !path.startsWith("reports/") || !path.endsWith(".md")) return false
+  return isSafeStepName(path.slice("reports/".length, -".md".length))
 }
 
 /** Forwards every ProgressUI call unchanged while recording phase lifecycle and usage into the store. */

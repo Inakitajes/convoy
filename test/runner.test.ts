@@ -4,6 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { openRunMetadata, type RunMetadataStore } from "../src/metadata"
+import { createCleanRepoSnapshot } from "../src/git"
 import { noopProgress, type HumanReviewAction, type HumanReviewPromptInfo, type ProgressPhaseSnapshot, type ProgressUI } from "../src/progress"
 import {
   RunShutdown,
@@ -13,10 +14,13 @@ import {
   createGitLock,
   describeMessageChunk,
   describeSessionActivity,
+  finalizePhaseRepository,
   isIgnorableRejection,
   newActivityState,
+  modelOverrideNotice,
   parseModel,
   planBatches,
+  progressPhases,
   restorePhaseFromPreviousRun,
   selectInterruptedPhase,
   shouldRetryAttempt,
@@ -45,14 +49,19 @@ async function git(args: string[], cwd: string) {
 }
 
 async function dirtyRepo(): Promise<string> {
+  const dir = await cleanRepo()
+  // leave an uncommitted change behind, as an interrupted phase would
+  await writeFile(join(dir, "feature.txt"), "work in progress\n")
+  return dir
+}
+
+async function cleanRepo(): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "archer-recover-repo-"))
   recoveryDirs.push(dir)
   await git(["init", "-q"], dir)
   await writeFile(join(dir, "keep.txt"), "base\n")
   await git(["add", "-A"], dir)
   await git(["commit", "-qm", "base"], dir)
-  // leave an uncommitted change behind, as an interrupted phase would
-  await writeFile(join(dir, "feature.txt"), "work in progress\n")
   return dir
 }
 
@@ -110,6 +119,24 @@ describe("runner helpers", () => {
     expect(shouldSkip(variant, { onlySteps: ["clean-code"], skipSteps: [] })).toBe(false)
     expect(shouldSkip(variant, { onlySteps: ["some-other-step"], skipSteps: [] })).toBe(true)
     expect(shouldSkip(variant, { onlySteps: [], skipSteps: ["clean-code"] })).toBe(true)
+  })
+
+  test("explains which runner steps a global model override cannot affect", () => {
+    const claude = { ...agentStep("security-claude"), runner: "claude-code" as const, model: "opus", readOnly: true }
+    const pipeline: Pipeline = { name: "review", steps: [agentStep("security-gpt"), claude] }
+
+    expect(modelOverrideNotice(pipeline, "openai/gpt-5.6#xhigh")).toBe(
+      "--model applies to OpenCode steps only; Claude Code steps keep their configured model: security-claude",
+    )
+    expect(modelOverrideNotice(pipeline, "")).toBeUndefined()
+    expect(modelOverrideNotice({ name: "review", steps: [agentStep("security-gpt")] }, "openai/gpt-5.6")).toBeUndefined()
+  })
+
+  test("progress phases expose runner labels and read-only state", () => {
+    const claude = { ...agentStep("security-claude"), runner: "claude-code" as const, model: "opus", readOnly: true }
+    const [phase] = progressPhases({ name: "review", steps: [claude] })
+
+    expect(phase).toMatchObject({ runner: "claude-code", plannedModel: "claude-code/opus", readOnly: true })
   })
 
   test("turns assistant message updates into live cumulative usage", () => {
@@ -395,6 +422,75 @@ describe("createGitLock", () => {
     await expect(first).rejects.toThrow("boom")
     await second
     expect(order).toEqual(["first", "second"])
+  })
+})
+
+describe("read-only repository boundary", () => {
+  test("restores extension mutations and refuses to commit them", async () => {
+    const repo = await cleanRepo()
+    const baseline = await createCleanRepoSnapshot(repo)
+    if (!baseline?.ref) throw new Error("expected a clean repository branch baseline")
+    const phase = { ...agentStep("security"), readOnly: true }
+    await writeFile(join(repo, "keep.txt"), "mutated by extension\n")
+    await writeFile(join(repo, "extension.txt"), "unexpected\n")
+
+    await expect(finalizePhaseRepository(phase, "/unused/report.md", repo, baseline)).rejects.toThrow(
+      "read-only step modified the repository",
+    )
+
+    expect(await readFile(join(repo, "keep.txt"), "utf8")).toBe("base\n")
+    expect((await git(["status", "--porcelain"], repo)).trim()).toBe("")
+    expect((await git(["rev-list", "--count", "HEAD"], repo)).trim()).toBe("1")
+  })
+
+  test("restores commits created by a read-only extension", async () => {
+    const repo = await cleanRepo()
+    const baseline = await createCleanRepoSnapshot(repo)
+    const phase = { ...agentStep("security"), readOnly: true }
+    await writeFile(join(repo, "extension.txt"), "unexpected\n")
+    await git(["add", "-A"], repo)
+    await git(["commit", "-qm", "extension side effect"], repo)
+
+    await expect(finalizePhaseRepository(phase, "/unused/report.md", repo, baseline)).rejects.toThrow(
+      "read-only step modified the repository",
+    )
+
+    expect((await git(["status", "--porcelain"], repo)).trim()).toBe("")
+    expect((await git(["rev-list", "--count", "HEAD"], repo)).trim()).toBe("1")
+  })
+
+  test("restores an extension commit followed by tracked and untracked changes", async () => {
+    const repo = await cleanRepo()
+    const baseline = await createCleanRepoSnapshot(repo)
+    const phase = { ...agentStep("security"), readOnly: true }
+    await writeFile(join(repo, "keep.txt"), "committed side effect\n")
+    await git(["add", "-A"], repo)
+    await git(["commit", "-qm", "extension side effect"], repo)
+    await writeFile(join(repo, "keep.txt"), "dirty after commit\n")
+    await writeFile(join(repo, "untracked.txt"), "dirty after commit\n")
+
+    await expect(finalizePhaseRepository(phase, "/unused/report.md", repo, baseline)).rejects.toThrow(
+      "read-only step modified the repository",
+    )
+
+    expect(await readFile(join(repo, "keep.txt"), "utf8")).toBe("base\n")
+    expect((await git(["status", "--porcelain"], repo)).trim()).toBe("")
+    expect((await git(["rev-list", "--count", "HEAD"], repo)).trim()).toBe("1")
+  })
+
+  test("restores the branch changed by a read-only extension", async () => {
+    const repo = await cleanRepo()
+    const baseline = await createCleanRepoSnapshot(repo)
+    if (!baseline?.ref) throw new Error("expected a clean repository branch baseline")
+    const phase = { ...agentStep("security"), readOnly: true }
+    await git(["checkout", "-qb", "extension-branch"], repo)
+
+    await expect(finalizePhaseRepository(phase, "/unused/report.md", repo, baseline)).rejects.toThrow(
+      "read-only step modified the repository",
+    )
+
+    expect((await git(["branch", "--show-current"], repo)).trim()).toBe(baseline.ref)
+    expect((await git(["rev-parse", "HEAD"], repo)).trim()).toBe(baseline.head)
   })
 })
 

@@ -1,8 +1,10 @@
-import { isAbsolute, relative } from "node:path"
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { isAbsolute, join, relative } from "node:path"
 
 import { describe, expect, test } from "bun:test"
 
-import { isValidRunID, runDir, runsRoot } from "../src/workspace"
+import { createWorkspace, isValidRunID, runDir, runsRoot } from "../src/workspace"
 
 describe("workspace run IDs", () => {
   test("accepts generated run ID shape", () => {
@@ -22,5 +24,23 @@ describe("workspace run IDs", () => {
     expect(pathFromRoot).toBe(id)
     expect(pathFromRoot.startsWith("..")).toBe(false)
     expect(isAbsolute(pathFromRoot)).toBe(false)
+  })
+
+  test("creates private run directories and prompt files", async () => {
+    if (process.platform === "win32") return
+    const root = await mkdtemp(join(tmpdir(), "archer-private-workspace-"))
+    const previousHome = process.env.ARCHER_HOME
+    process.env.ARCHER_HOME = root
+
+    try {
+      const workspace = await createWorkspace("confidential prompt")
+      expect((await stat(workspace.dir)).mode & 0o777).toBe(0o700)
+      expect((await stat(join(workspace.dir, "prd.md"))).mode & 0o777).toBe(0o600)
+      expect(await readFile(join(workspace.dir, "prd.md"), "utf8")).toBe("confidential prompt")
+    } finally {
+      if (previousHome === undefined) delete process.env.ARCHER_HOME
+      else process.env.ARCHER_HOME = previousHome
+      await rm(root, { recursive: true, force: true })
+    }
   })
 })

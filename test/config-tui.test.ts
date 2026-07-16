@@ -6,6 +6,7 @@ import {
   applyModelsSelection,
   asStepObject,
   collapseStep,
+  claudeModelPickerState,
   deleteAt,
   dissolveParallel,
   ejectMember,
@@ -15,6 +16,7 @@ import {
   setSpecAt,
   specAt,
   stepValueSummary,
+  toggleStepRunnerSpec,
   wrapInParallel,
 } from "../src/config-tui"
 
@@ -163,6 +165,51 @@ describe("multi-model selection", () => {
     const applied = applyModelsSelection({ agent: "x", model: "a/b", models: ["a/b", "c/d"] } as AgentStepSpec, ["e/f", "g/h"])
     expect(applied.model).toBeUndefined()
     expect(applied.models).toEqual(["e/f", "g/h"])
+  })
+})
+
+describe("runner selection", () => {
+  test("toggles between canonical OpenCode and Claude Code forms", () => {
+    expect(toggleStepRunnerSpec({ agent: "bug-auditor" }, true)).toEqual({
+      ok: true,
+      spec: { agent: "bug-auditor", runner: "claude-code" },
+      clearedModel: false,
+    })
+    expect(toggleStepRunnerSpec({ agent: "bug-auditor", runner: "claude-code" }, true)).toEqual({
+      ok: true,
+      spec: { agent: "bug-auditor" },
+      clearedModel: false,
+    })
+  })
+
+  test("clears incompatible singular models but preserves unrelated step fields", () => {
+    expect(
+      toggleStepRunnerSpec({ agent: "bug-auditor", model: "openai/gpt-5.6", name: "bugs", reports: "all", diff: false, maxAttempts: 3 }, true),
+    ).toEqual({
+      ok: true,
+      spec: { agent: "bug-auditor", runner: "claude-code", name: "bugs", reports: "all", diff: false, maxAttempts: 3 },
+      clearedModel: true,
+    })
+  })
+
+  test("refuses to switch a model fan-out to Claude Code", () => {
+    const spec: AgentStepSpec = { agent: "bug-auditor", models: ["a/b", "c/d"] }
+    expect(toggleStepRunnerSpec(spec, true)).toEqual({ ok: false, reason: "model-fanout" })
+    expect(spec).toEqual({ agent: "bug-auditor", models: ["a/b", "c/d"] })
+  })
+
+  test("summarizes Claude Code's model and read-only contract", () => {
+    expect(stepValueSummary({ agent: "bug-auditor", runner: "claude-code" })).toBe("claude-code/default · read-only")
+    expect(stepValueSummary({ agent: "bug-auditor", runner: "claude-code", model: "opus" })).toBe("claude-code/opus · read-only")
+  })
+
+  test("refuses to switch a writable sequential step to Claude Code", () => {
+    expect(toggleStepRunnerSpec({ agent: "implementer" }, false)).toEqual({ ok: false, reason: "writable-agent" })
+  })
+
+  test("preserves a configured full Claude model ID when the picker opens", () => {
+    const state = claudeModelPickerState("claude-opus-4-8")
+    expect(state.options[state.index]?.value).toBe("claude-opus-4-8")
   })
 })
 

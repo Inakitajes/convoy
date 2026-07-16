@@ -541,7 +541,7 @@ Flags:
   --smart                  Smart auto-accept: an AI judge auto-allows safe ask-level requests and escalates risky ones (shift+tab cycles)
   --smart-model <provider/model[#variant]> Model for the smart auto-accept judge (default: defaults.autoAcceptJudgeModel, else the run's model)
   --include-dirty          Include existing changes in the first commit (requires --max-attempts 1)
-  --model <provider/model[#variant]> Force a model for all steps
+  --model <provider/model[#variant]> Force a model for OpenCode steps (Claude Code steps keep their CLI model)
   --tui                    Show visual phase progress (default in interactive terminals)
   --no-tui                 Disable visual phase progress
   --human-step             Enable human steps (alias: --human-review; default in interactive terminals)

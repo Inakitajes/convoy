@@ -16,6 +16,7 @@ import {
   humanStepType,
   humanReviewStep,
   isHumanStepSpec,
+  isSafeStepName,
   readOnlyAgentSuffix,
   resolvePipeline,
   splitModelVariant,
@@ -24,6 +25,7 @@ import {
   type PipelineSpec,
   type StepSpec,
 } from "./pipeline"
+import { isStepRunnerId, normalizeStepRunnerModel, stepRunnerFor, type StepRunnerId } from "./step-runners"
 import type { AgentSpec, HookSet, HookSpec, HooksConfig, HookWhen, PermissionAdditions } from "./types"
 import { archerHome, archerRoot, globalConfigPath } from "./workspace"
 
@@ -360,6 +362,7 @@ function validateAgents(v: Validator, raw: unknown, targetDir: string): Record<s
 
   for (const [name, value] of Object.entries(record)) {
     const path = `agents.${name}`
+    validateStepName(v, name, path)
     if (name === humanReviewStep) v.fail(path, `"${humanReviewStep}" is a reserved step keyword, not an agent`)
     if (agentAliases[name]) v.fail(path, `"${name}" is an alias of the built-in agent "${agentAliases[name]}"; use that name to override it`)
     if (name.endsWith(readOnlyAgentSuffix)) v.fail(path, `agent names can't end in "${readOnlyAgentSuffix}"; that suffix is reserved for archer's forced-read-only variants`)
@@ -408,6 +411,7 @@ function validatePipelines(v: Validator, raw: unknown): Record<string, PipelineS
 function validateStep(v: Validator, raw: unknown, path: string, context: { insideParallel?: boolean } = {}): StepSpec {
   if (typeof raw === "string") {
     if (!raw.trim()) v.fail(path, "step name can't be empty")
+    if (!isSafeStepName(raw)) v.fail(path, "must be a filesystem-safe identifier using letters, numbers, hyphens, or underscores")
     if (context.insideParallel && raw.trim() === humanReviewStep) v.fail(path, `"${humanReviewStep}" can't run inside a parallel block`)
     return raw
   }
@@ -427,16 +431,21 @@ function validateStep(v: Validator, raw: unknown, path: string, context: { insid
     v.knownKeys(record, path, ["type", "name", "description"])
     if (record.type !== humanStepType) v.fail(`${path}.type`, `must be "${humanStepType}"`)
     const step: HumanStepSpec = { type: humanStepType }
-    if (record.name !== undefined) step.name = v.nonEmptyString(record.name, `${path}.name`)
+    if (record.name !== undefined) step.name = validateStepName(v, record.name, `${path}.name`)
     if (record.description !== undefined) step.description = v.nonEmptyString(record.description, `${path}.description`)
     return step
   }
 
-  v.knownKeys(record, path, ["agent", "name", "model", "models", "maxAttempts", "reports", "diff"])
+  v.knownKeys(record, path, ["agent", "name", "model", "models", "runner", "maxAttempts", "reports", "diff"])
 
-  const agent = v.nonEmptyString(record.agent, `${path}.agent`)
+  const agent = validateStepName(v, record.agent, `${path}.agent`)
   if (context.insideParallel && agent === humanReviewStep) v.fail(path, `"${humanReviewStep}" can't run inside a parallel block`)
   if (record.model !== undefined && record.models !== undefined) v.fail(path, `set either "model" or "models", not both`)
+
+  const runner = record.runner !== undefined ? validateRunner(v, record.runner, `${path}.runner`) : undefined
+  if (!stepRunnerFor(runner).capabilities.modelFanout && record.models !== undefined) {
+    v.fail(path, `can't combine runner: ${runner} with "models"; give the step a single model (or none for the CLI default)`)
+  }
 
   let models: string[] | undefined
   if (record.models !== undefined) {
@@ -445,14 +454,40 @@ function validateStep(v: Validator, raw: unknown, path: string, context: { insid
     models.forEach((model, index) => v.model(model, `${path}.models[${index}]`))
   }
 
+  const model =
+    record.model === undefined
+      ? undefined
+      : validateStepRunnerModel(v, runner ?? "opencode", record.model, `${path}.model`)
+
   return {
     agent,
-    ...(record.name !== undefined ? { name: v.nonEmptyString(record.name, `${path}.name`) } : {}),
-    ...(record.model !== undefined ? { model: v.model(record.model, `${path}.model`) } : {}),
+    ...(record.name !== undefined ? { name: validateStepName(v, record.name, `${path}.name`) } : {}),
+    ...(model !== undefined ? { model } : {}),
     ...(models !== undefined ? { models } : {}),
+    ...(runner !== undefined ? { runner } : {}),
     ...(record.maxAttempts !== undefined ? { maxAttempts: v.positiveInt(record.maxAttempts, `${path}.maxAttempts`) } : {}),
     ...(record.reports !== undefined ? { reports: validateReports(v, record.reports, `${path}.reports`) } : {}),
     ...(record.diff !== undefined ? { diff: v.boolean(record.diff, `${path}.diff`) } : {}),
+  }
+}
+
+function validateStepName(v: Validator, raw: unknown, path: string): string {
+  const value = v.nonEmptyString(raw, path)
+  if (!isSafeStepName(value)) v.fail(path, "must be a filesystem-safe identifier using letters, numbers, hyphens, or underscores")
+  return value
+}
+
+function validateRunner(v: Validator, raw: unknown, path: string): StepRunnerId {
+  if (isStepRunnerId(raw)) return raw
+  return v.fail(path, `must be "opencode" or "claude-code"`)
+}
+
+function validateStepRunnerModel(v: Validator, runner: StepRunnerId, raw: unknown, path: string): string {
+  const value = v.nonEmptyString(raw, path)
+  try {
+    return normalizeStepRunnerModel(runner, value)
+  } catch (error) {
+    return v.fail(path, error instanceof Error ? error.message : String(error))
   }
 }
 
@@ -568,12 +603,9 @@ export function selectPipelineSpec(config: ArcherConfig | undefined, name: strin
 
 /** True when a string is a valid `provider/model` or `provider/model#variant`. Shared by config validation and the config TUI. */
 export function isValidModelString(value: string): boolean {
-  if (typeof value !== "string" || !value.trim()) return false
   try {
-    const { model } = splitModelVariant(value)
-    const provider = model.split("/")[0]
-    const rest = model.split("/").slice(1).join("/")
-    return Boolean(provider && rest)
+    normalizeStepRunnerModel("opencode", value)
+    return true
   } catch {
     return false
   }
@@ -664,7 +696,15 @@ function materializeAgentStep(step: AgentStepSpec, effectiveDefaultModel: string
   const agent = builtInAgents.find((candidate) => candidate.name === (agentAliases[step.agent] ?? step.agent))
   const preferred = agent?.defaultModel
   const hasStepModel = step.model !== undefined || step.models !== undefined
-  if (!hasStepModel && effectiveDefaultModel !== undefined && preferred && preferred !== effectiveDefaultModel) step.model = preferred
+  if (
+    !hasStepModel &&
+    stepRunnerFor(step.runner).capabilities.globalModelOverride &&
+    effectiveDefaultModel !== undefined &&
+    preferred &&
+    preferred !== effectiveDefaultModel
+  ) {
+    step.model = preferred
+  }
   // Collapse a bare { agent } back to its string shorthand for clean YAML.
   return Object.keys(step).length === 1 ? step.agent : step
 }

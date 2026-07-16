@@ -5,6 +5,7 @@ import { readRunMetadata, type PhaseMetadata, type RunMetadata } from "./metadat
 import { connectOpencode } from "./opencode"
 import { isServerLive } from "./runs"
 import { progressPhases, watchSession, type SessionWatcher } from "./runner"
+import { stepRunnerFor } from "./step-runners"
 import { createTuiProgress } from "./tui"
 import { runsRoot } from "./workspace"
 
@@ -68,9 +69,11 @@ export async function openRunDashboard(runID: string): Promise<void> {
     return
   }
 
-  // Live attach.
+  // Live attach. Phases whose runner lacks live-attach support still update
+  // from metadata, but never open an OpenCode watcher.
   tui.serverReady(server.url)
-  const attach = new LiveAttach(connectOpencode(server.url), tui, targetDir, metaPath)
+  const phasesWithoutLiveAttach = new Set(phases.filter((phase) => !stepRunnerFor(phase.runner).capabilities.liveAttach).map((phase) => phase.name))
+  const attach = new LiveAttach(connectOpencode(server.url), tui, targetDir, metaPath, phasesWithoutLiveAttach)
   await attach.start()
 
   await Promise.race([detached, attach.serverGone])
@@ -104,6 +107,7 @@ class LiveAttach {
     private readonly tui: ProgressUI,
     private readonly targetDir: string,
     private readonly metaPath: string,
+    private readonly phasesWithoutLiveAttach: ReadonlySet<string> = new Set(),
   ) {
     this.serverGone = new Promise((resolve) => {
       this.resolveServerGone = resolve
@@ -132,7 +136,7 @@ class LiveAttach {
           this.tui.phaseStarted(name)
           if (phase.model) this.tui.phaseAttempt(name, { attempt: 1, maxAttempts: 1, model: phase.model })
         }
-        this.watch(name, phase.sessionID)
+        if (!this.phasesWithoutLiveAttach.has(name)) this.watch(name, phase.sessionID)
       } else if (phase.status !== "pending" && !this.finalized.has(name)) {
         // Reached a terminal state: stamp its real duration/cost and stop
         // mirroring its (now finished) session.

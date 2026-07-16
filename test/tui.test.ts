@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
-import { autoFollowGroup, comparisonColumnCount, initialContentTab, iteratePrompt, pipelineSelectionTargets } from "../src/tui"
+import { autoFollowGroup, comparisonColumnCount, initialContentTab, iteratePrompt, phaseCapabilityLabel, pipelineSelectionTargets } from "../src/tui"
 import { limitsRow } from "../src/tui-theme"
 
 import type { LimitsSnapshot } from "../src/limits"
@@ -14,6 +14,11 @@ describe("run dashboard defaults", () => {
     expect(live).toBe("session")
     expect(historical).toBe("reports")
     expect([live, historical]).not.toContain("logs")
+  })
+
+  test("labels audit-only phases without tagging writable work", () => {
+    expect(phaseCapabilityLabel({ readOnly: true })).toBe("audit · read-only")
+    expect(phaseCapabilityLabel({})).toBeUndefined()
   })
 })
 

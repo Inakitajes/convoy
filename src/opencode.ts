@@ -94,13 +94,18 @@ export async function openIterateOpencodeWindow(input: {
   return openSessionCommand(["opencode", input.targetDir, "--prompt", input.prompt].map(shellQuote).join(" "))
 }
 
-async function openSessionCommand(coreCommand: string): Promise<SessionWindowBackend> {
+/** Runs a command in a new macOS terminal window (Ghostty when installed, Terminal.app otherwise). Shared with the claude-code runner. */
+export async function openSessionCommand(coreCommand: string, cwd?: string): Promise<SessionWindowBackend> {
   if (process.platform !== "darwin") {
-    throw new Error("opening a new OpenCode terminal window is currently implemented for macOS only")
+    throw new Error("opening a new terminal window is currently implemented for macOS only")
   }
 
-  // A login shell keeps the user's PATH for `opencode`.
-  const command = [process.env.PATH ? `export PATH=${shellQuote(process.env.PATH)}:$PATH` : "", coreCommand]
+  // A login shell keeps the user's PATH for the launched CLI.
+  const command = [
+    process.env.PATH ? `export PATH=${shellQuote(process.env.PATH)}:$PATH` : "",
+    cwd ? `cd ${shellQuote(cwd)}` : "",
+    coreCommand,
+  ]
     .filter(Boolean)
     .join("; ")
 
@@ -174,7 +179,7 @@ async function freePort() {
   })
 }
 
-function shellQuote(value: string) {
+export function shellQuote(value: string) {
   return `'${value.replace(/'/g, `'\\''`)}'`
 }
 
