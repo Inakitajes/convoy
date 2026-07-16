@@ -10,6 +10,7 @@ import {
   loadArcherConfig,
   loadGlobalArcherConfig,
   materializePipelineSpec,
+  mergeArcherConfigs,
   writeArcherConfig,
   type ArcherConfig,
   type ArcherDefaults,
@@ -18,16 +19,19 @@ import {
 import { listModels, type ModelChoice } from "./model-catalog"
 import {
   builtInPipelines,
+  agentAliases,
   humanReviewStep,
   humanStepType,
   isHumanStepSpec,
   isParallelSpec,
+  isSafeStepName,
   type AgentStepSpec,
   type HumanStepSpec,
   type ParallelStepSpec,
   type PipelineSpec,
   type StepSpec,
 } from "./pipeline"
+import { claudeCodeModelAliases, normalizeStepRunnerModel, stepRunnerFor } from "./step-runners"
 import {
   joinLines,
   padBetween,
@@ -76,7 +80,16 @@ type ChooseItem = { value: string; label: string; hint?: string }
 
 type Modal =
   | { kind: "input"; title: string; help: string; value: string; error?: string; validate?: (value: string) => string | undefined; commit: (value: string) => void }
-  | { kind: "model"; title: string; filter: string; loading: boolean; options: ModelChoice[]; index: number; commit: (value: string | undefined) => void }
+  | {
+      kind: "model"
+      title: string
+      filter: string
+      loading: boolean
+      options: ModelChoice[]
+      index: number
+      normalize?: (value: string) => string
+      commit: (value: string | undefined) => void
+    }
   | { kind: "models"; title: string; filter: string; loading: boolean; options: ModelChoice[]; index: number; selected: string[]; commit: (values: string[]) => void }
   | { kind: "choose"; title: string; filter: string; options: ChooseItem[]; index: number; commit: (value: string) => void }
   | { kind: "confirm"; title: string; message: string; onYes: () => void }
@@ -115,6 +128,18 @@ const modalListHeight = 12
 
 /** Synthetic top entry in the model picker; its empty value means "inherit / clear the override". */
 const clearOption: ModelChoice = { value: "", label: "inherit — clear override", providerID: "" }
+
+export function claudeModelPickerState(current: string | undefined): { options: ModelChoice[]; index: number } {
+  const options: ModelChoice[] = [
+    clearOption,
+    ...claudeCodeModelAliases.map((alias) => ({ value: alias, label: `Claude ${alias}`, providerID: "claude-code" })),
+  ]
+  if (current && !options.some((choice) => choice.value === current)) {
+    options.push({ value: current, label: `Claude ${current} · current`, providerID: "claude-code" })
+  }
+  const index = current ? options.findIndex((choice) => choice.value === current) : 0
+  return { options, index }
+}
 
 export class ConfigEditor {
   readonly result: Promise<void>
@@ -318,7 +343,8 @@ export class ConfigEditor {
         this.editStepName()
         return
       case "r":
-        this.editReportsOrReadOnly()
+        if (key.shift) this.toggleStepRunner()
+        else this.editReportsOrReadOnly()
         return
       case "x":
         this.toggleStepDiff()
@@ -428,12 +454,19 @@ export class ConfigEditor {
       }
       // Nothing highlighted: accept the typed text as a free-form model id.
       const text = modal.filter.trim()
-      if (!isValidModelString(text)) {
+      let value: string
+      try {
+        value = modal.normalize ? modal.normalize(text) : text
+      } catch {
+        this.render()
+        return
+      }
+      if (!modal.normalize && !isValidModelString(value)) {
         this.render()
         return
       }
       this.modal = undefined
-      modal.commit(text)
+      modal.commit(value)
       this.render()
       return
     }
@@ -610,6 +643,16 @@ export class ConfigEditor {
     const spec = steps === undefined ? undefined : specAt(steps, index, member)
     if (!steps || spec === undefined || isParallelSpec(spec) || isHumanStep(spec)) return
     const obj = asStepObject(spec)
+    if (stepRunnerFor(obj.runner).id === "claude-code") {
+      this.openClaudeModelPicker(`${stepLabel(pipelineName, index, member)}.model — Claude CLI alias/ID`, obj.model, (value) => {
+        const next = { ...obj }
+        if (value === undefined) delete next.model
+        else next.model = value
+        setSpecAt(steps, index, member, collapseStep(next))
+        this.markDirty()
+      })
+      return
+    }
     this.openModelPicker(`${stepLabel(pipelineName, index, member)}.model`, obj.model, (value) => {
       const next = { ...obj }
       // A single-model pick replaces a fan-out; model and models are mutually exclusive.
@@ -625,11 +668,48 @@ export class ConfigEditor {
     const at = this.agentStepUnderCursor()
     if (!at) return
     const obj = asStepObject(at.spec)
+    if (!stepRunnerFor(obj.runner).capabilities.modelFanout) {
+      this.message("Model fan-out unavailable", "Claude Code steps use one CLI model. Switch to OpenCode with Shift+R first.")
+      return
+    }
     const current = obj.models ?? (obj.model !== undefined ? [obj.model] : [])
     this.openModelsPicker(`${stepLabel(at.meta.pipeline, at.meta.index, at.meta.member)}.models`, current, (values) => {
       setSpecAt(at.steps, at.meta.index, at.meta.member, collapseStep(applyModelsSelection(obj, values)))
       this.markDirty()
     })
+  }
+
+  private toggleStepRunner() {
+    const at = this.agentStepUnderCursor()
+    if (!at) return
+    const spec = asStepObject(at.spec)
+    const agentName = agentAliases[spec.agent] ?? spec.agent
+    const agent = buildAgentRegistry(this.effectiveConfig()).find((candidate) => candidate.name === agentName)
+    const supportsReadOnlyRunner = at.meta.member !== undefined || agent?.readOnly === true
+    const result = toggleStepRunnerSpec(spec, supportsReadOnlyRunner)
+    if (!result.ok) {
+      const detail =
+        result.reason === "model-fanout"
+          ? "Remove the models fan-out before switching this step to Claude Code."
+          : "Claude Code currently supports read-only steps only. Use a read-only agent or place the step in a parallel audit group."
+      this.message("Can't switch runner", detail)
+      return
+    }
+    const apply = () => {
+      setSpecAt(at.steps, at.meta.index, at.meta.member, collapseStep(result.spec))
+      this.markDirty()
+    }
+    if (!result.clearedModel) {
+      apply()
+      return
+    }
+    this.modal = {
+      kind: "confirm",
+      title: "Switch step runner",
+      message: "The current model belongs to the other runner and will be cleared. Continue? [y/n]",
+      onYes: apply,
+    }
+    this.render()
   }
 
   private editStepMaxAttempts() {
@@ -660,6 +740,7 @@ export class ConfigEditor {
       validate: (value) => {
         const name = value.trim()
         if (!name) return undefined
+        if (!isSafeStepName(name)) return "must use only letters, numbers, hyphens, or underscores"
         if (name === humanReviewStep || name.startsWith(`${humanReviewStep}-`)) return `"${humanReviewStep}" is a reserved name`
         return undefined
       },
@@ -900,6 +981,11 @@ export class ConfigEditor {
     return this.tabs[1].config?.defaults.model ?? global
   }
 
+  private effectiveConfig(): ArcherConfig | undefined {
+    if (this.active === 0) return this.tabs[0].config
+    return mergeArcherConfigs(this.tabs[0].config, this.tabs[1].config)
+  }
+
   private moveStep(direction: -1 | 1) {
     const meta = this.rows[this.selected]?.meta
     if (meta?.t !== "step") return
@@ -1045,6 +1131,21 @@ export class ConfigEditor {
         modal.loading = false
         this.render()
       })
+  }
+
+  private openClaudeModelPicker(title: string, current: string | undefined, commit: (value: string | undefined) => void) {
+    const { options, index } = claudeModelPickerState(current)
+    this.modal = {
+      kind: "model",
+      title,
+      filter: "",
+      loading: false,
+      options,
+      index,
+      normalize: (value) => normalizeStepRunnerModel("claude-code", value),
+      commit,
+    }
+    this.render()
   }
 
   private openModelsPicker(title: string, current: string[], commit: (values: string[]) => void) {
@@ -1298,13 +1399,22 @@ export class ConfigEditor {
           push([fg(theme.accent)("n"), fg(theme.dim)(" name   "), fg(theme.accent)("d"), fg(theme.dim)(" delete   "), fg(theme.accent)("shift+↑/↓"), fg(theme.dim)(" reorder")])
           break
         }
+        const step = spec === undefined ? undefined : asStepObject(spec as string | AgentStepSpec)
+        const runner = stepRunnerFor(step?.runner)
         push([fg(theme.text)(`step ${position} of ${meta.pipeline}`)])
         if (meta.member !== undefined) push([fg(theme.faint)("Parallel member: read-only at run time.")])
+        push([fg(theme.faint)(`runner: ${runner.displayName}${runner.capabilities.writeSteps ? "" : " (read-only)"}`)])
         lines.push(plain(""))
-        push([fg(theme.accent)("enter"), fg(theme.dim)(" pick model   "), fg(theme.accent)("M"), fg(theme.dim)(" multi-model")])
+        push([
+          fg(theme.accent)("enter"),
+          fg(theme.dim)(runner.id === "claude-code" ? " edit CLI model   " : " pick model   "),
+          fg(theme.accent)("M"),
+          fg(theme.dim)(runner.capabilities.modelFanout ? " multi-model" : " unavailable"),
+        ])
         push([fg(theme.accent)("m"), fg(theme.dim)(" max-attempts   "), fg(theme.accent)("n"), fg(theme.dim)(" name")])
-        push([fg(theme.accent)("r"), fg(theme.dim)(" reports   "), fg(theme.accent)("x"), fg(theme.dim)(" diff   "), fg(theme.accent)("d"), fg(theme.dim)(" delete")])
-        push([fg(theme.accent)("g"), fg(theme.dim)(meta.member === undefined ? " make parallel   " : " eject from group   "), fg(theme.accent)("shift+↑/↓"), fg(theme.dim)(" reorder")])
+        push([fg(theme.accent)("r"), fg(theme.dim)(" reports   "), fg(theme.accent)("R"), fg(theme.dim)(" runner   "), fg(theme.accent)("x"), fg(theme.dim)(" diff")])
+        push([fg(theme.accent)("d"), fg(theme.dim)(" delete   "), fg(theme.accent)("g"), fg(theme.dim)(meta.member === undefined ? " make parallel   " : " eject from group   ")])
+        push([fg(theme.accent)("shift+↑/↓"), fg(theme.dim)(" reorder")])
         break
       }
       case "add-step":
@@ -1671,6 +1781,23 @@ export function applyModelsSelection(spec: AgentStepSpec, values: string[]): Age
   return next
 }
 
+export type ToggleStepRunnerResult =
+  | { ok: true; spec: AgentStepSpec; clearedModel: boolean }
+  | { ok: false; reason: "model-fanout" | "writable-agent" }
+
+export function toggleStepRunnerSpec(spec: AgentStepSpec, supportsReadOnlyRunner: boolean): ToggleStepRunnerResult {
+  const current = stepRunnerFor(spec.runner)
+  if (current.id === "opencode" && spec.models !== undefined) return { ok: false, reason: "model-fanout" }
+  if (current.id === "opencode" && !supportsReadOnlyRunner) return { ok: false, reason: "writable-agent" }
+
+  const next = { ...spec }
+  const clearedModel = next.model !== undefined
+  delete next.model
+  if (current.id === "claude-code") delete next.runner
+  else next.runner = "claude-code"
+  return { ok: true, spec: next, clearedModel }
+}
+
 /**
  * Base step names (`name` ?? agent as written) of agent steps strictly before
  * `steps[index]` — the names `reports:` lists may reference. Groupmates are
@@ -1695,7 +1822,10 @@ function baseStepName(spec: string | AgentStepSpec): string {
 /** One-line value summary for an agent step row: model or fan-out plus any explicitly set fields. */
 export function stepValueSummary(spec: string | AgentStepSpec): string {
   if (typeof spec === "string") return "(inherits)"
-  const parts = [spec.models ? `${spec.models.length} models` : (spec.model ?? "(inherits)")]
+  const runner = stepRunnerFor(spec.runner)
+  const model = runner.id === "claude-code" ? runner.modelLabel(spec.model ?? "") : (spec.model ?? "(inherits)")
+  const parts = [spec.models ? `${spec.models.length} models` : model]
+  if (!runner.capabilities.writeSteps) parts.push("read-only")
   if (spec.name !== undefined) parts.push(`name ${spec.name}`)
   if (spec.reports !== undefined) parts.push(`reports ${Array.isArray(spec.reports) ? spec.reports.join(",") : spec.reports}`)
   if (spec.diff !== undefined) parts.push(`diff ${spec.diff ? "on" : "off"}`)

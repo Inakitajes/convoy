@@ -1,3 +1,5 @@
+import type { StepRunnerId } from "./step-runners"
+
 export type RunOptions = {
   prompt: string
   files: string[]
@@ -80,13 +82,24 @@ export type AgentSpec = {
   builtIn: boolean
 }
 
+/**
+ * Which engine executes an agent step. The default (absent) is the OpenCode
+ * SDK; "claude-code" spawns the user's local `claude` CLI instead — read-only
+ * audit steps only, authenticated by whatever that install already uses
+ * (subscription login or API key).
+ */
+export type StepRunner = Exclude<StepRunnerId, "opencode">
+
 export type AgentStep = {
   type: "agent"
   name: string
   agentName: string
   description: string
+  /** Empty string on claude-code steps that defer to the CLI's default model. */
   model: string
   variant?: string
+  /** Absent for OpenCode (the default engine). */
+  runner?: StepRunner
   inputFiles: readonly string[]
   inputDiff: boolean
   reportPath: string

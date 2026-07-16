@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises"
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -53,6 +53,94 @@ describe("run metadata", () => {
     const resumed = await openRunMetadata(ws, "/repo", defaultPipeline())
     expect(resumed.pipeline.name).toBe("quick")
     expect(resumed.pipeline.steps).toHaveLength(1)
+  })
+
+  test("fails closed when a repository baseline cannot be persisted", async () => {
+    const ws = await workspace()
+    const store = await openRunMetadata(ws, "/repo", quick)
+    await store.flush()
+    await rm(ws.dir, { recursive: true, force: true })
+
+    await expect(store.phaseRepositoryBaseline("implementer", { head: "abc123", ref: "main" })).rejects.toThrow()
+  })
+
+  test("persists lifecycle and baselines for step names that collide with Object.prototype", async () => {
+    const ws = await workspace()
+    const step = { ...quick.steps[0]!, name: "constructor", stepName: "constructor", reportPath: "reports/constructor.md" }
+    const pipeline: Pipeline = { name: "collision", steps: [step] }
+    const store = await openRunMetadata(ws, "/repo", pipeline)
+
+    store.phaseStarted(step.name)
+    await store.phaseRepositoryBaseline(step.name, { head: "abc123", ref: "main" })
+    store.phaseEnded(step.name, "failed")
+    await store.flush()
+
+    const resumed = await openRunMetadata(ws, "/repo", pipeline)
+    expect(resumed.phaseStatus(step.name)).toBe("failed")
+    expect(resumed.repositoryBaseline(step.name)).toEqual({ head: "abc123", ref: "main" })
+  })
+
+  test("rejects frozen pipelines whose artifact paths escape the run directory", async () => {
+    const ws = await workspace()
+    const path = join(ws.dir, "metadata.json")
+    const now = Date.now()
+    await writeFile(
+      path,
+      JSON.stringify({
+        schemaVersion: 2,
+        runID: ws.runID,
+        targetDir: "/repo",
+        createdAt: now,
+        updatedAt: now,
+        phases: {},
+        pipeline: {
+          ...quick,
+          steps: [{ ...quick.steps[0], reportPath: "../../../../tmp/owned.md" }],
+        },
+      }),
+    )
+
+    await expect(openRunMetadata(ws, "/repo", defaultPipeline())).rejects.toThrow("unsafe frozen pipeline")
+
+    await writeFile(
+      path,
+      JSON.stringify({
+        schemaVersion: 2,
+        runID: ws.runID,
+        targetDir: "/repo",
+        createdAt: now,
+        updatedAt: now,
+        phases: {},
+        pipeline: {
+          ...quick,
+          steps: [{ ...quick.steps[0], inputFiles: ["../../../../tmp/secret"] }],
+        },
+      }),
+    )
+    await expect(openRunMetadata(ws, "/repo", defaultPipeline())).rejects.toThrow("unsafe frozen pipeline")
+  })
+
+  test("rejects unknown frozen step types instead of bypassing artifact validation", async () => {
+    const ws = await workspace()
+    const path = join(ws.dir, "metadata.json")
+    const now = Date.now()
+    await writeFile(
+      path,
+      JSON.stringify({
+        schemaVersion: 2,
+        runID: ws.runID,
+        targetDir: "/repo",
+        createdAt: now,
+        updatedAt: now,
+        phases: {},
+        pipeline: {
+          ...quick,
+          steps: [{ ...quick.steps[0], type: "unknown", reportPath: "../../../../tmp/owned.md" }],
+        },
+      }),
+    )
+
+    await expect(openRunMetadata(ws, "/repo", defaultPipeline())).rejects.toThrow("unknown step type")
   })
 
   test("records the live server and clears it on shutdown", async () => {

@@ -2,7 +2,9 @@ import { readFile, rename, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 
 import { log } from "./log"
+import { isSafeStepName } from "./pipeline"
 
+import type { RepoSnapshot } from "./git"
 import type {
   ProgressPhaseSnapshot,
   ProgressStepUsage,
@@ -25,6 +27,7 @@ export type PhaseMetadata = {
   cost?: number
   tokens?: ProgressTokens
   model?: string
+  repositoryBaseline?: RepoSnapshot
 }
 
 export type RunMetadata = {
@@ -44,6 +47,7 @@ export type RunMetadataStore = {
   /** The effective pipeline for this run: the frozen one on resume, the freshly resolved one otherwise. */
   pipeline: Pipeline
   snapshot(name: string): ProgressPhaseSnapshot | undefined
+  phaseStatus(name: string): PhaseMetadataStatus | undefined
   /** Records the run's live opencode server URL so `archer runs` can attach; cleared by serverStopped. */
   serverStarted(url: string): void
   serverStopped(): void
@@ -51,6 +55,8 @@ export type RunMetadataStore = {
   phaseSession(name: string, sessionID: string): void
   phaseStepUsage(name: string, usage: ProgressStepUsage): void
   phaseUsageTotal(name: string, usage: ProgressUsage): void
+  repositoryBaseline(name: string): RepoSnapshot | undefined
+  phaseRepositoryBaseline(name: string, baseline: RepoSnapshot): Promise<void>
   phaseEnded(name: string, status: "completed" | "skipped" | "failed"): void
   flush(): Promise<void>
 }
@@ -60,9 +66,13 @@ const saveDebounceMs = 2_000
 export async function openRunMetadata(workspace: Workspace, targetDir: string, pipeline: Pipeline): Promise<RunMetadataStore> {
   const path = join(workspace.dir, "metadata.json")
   const data = (await loadMetadata(path, workspace.runID)) ?? newMetadata(workspace.runID, targetDir)
+  // Step names are user-configurable safe identifiers and may still equal
+  // Object.prototype keys such as "constructor" or "__proto__".
+  data.phases = Object.assign(Object.create(null) as Record<string, PhaseMetadata>, data.phases)
   // First open freezes the pipeline; pre-pipeline (v1) runs adopt the current
   // one, whose default step names match what those runs executed.
   const effectivePipeline = (data.pipeline ??= pipeline)
+  assertSafePipelineArtifacts(effectivePipeline)
   // One accumulator per phase. Kept out of the persisted shape — PhaseUsage holds
   // cumulative per-session totals, so re-counting them on resume would double up.
   const usage = new Map<string, PhaseUsage>()
@@ -76,21 +86,20 @@ export async function openRunMetadata(workspace: Workspace, targetDir: string, p
   // Single chain so a slow write can never interleave with the next one.
   let writing: Promise<void> = Promise.resolve()
 
-  const persist = () => {
+  const persist = (options: { throwOnError?: boolean } = {}) => {
     if (timer) clearTimeout(timer)
     timer = undefined
     data.updatedAt = Date.now()
     const body = JSON.stringify(data, null, 2)
-    writing = writing.then(async () => {
-      try {
-        // tmp + rename: a kill mid-write must never corrupt the resume data.
-        await writeFile(`${path}.tmp`, body)
-        await rename(`${path}.tmp`, path)
-      } catch (error) {
-        log.warn(`couldn't write run metadata: ${error instanceof Error ? error.message : String(error)}`)
-      }
+    const attempt = writing.then(async () => {
+      // tmp + rename: a kill mid-write must never corrupt the resume data.
+      await writeFile(`${path}.tmp`, body)
+      await rename(`${path}.tmp`, path)
     })
-    return writing
+    writing = attempt.catch((error) => {
+      log.warn(`couldn't write run metadata: ${error instanceof Error ? error.message : String(error)}`)
+    })
+    return options.throwOnError ? attempt : writing
   }
 
   const scheduleSave = () => {
@@ -129,6 +138,9 @@ export async function openRunMetadata(workspace: Workspace, targetDir: string, p
         model: entry.model,
       }
     },
+    phaseStatus(name) {
+      return data.phases[name]?.status
+    },
     serverStarted(url) {
       data.server = { url, pid: process.pid, startedAt: Date.now() }
       void persist()
@@ -157,6 +169,13 @@ export async function openRunMetadata(workspace: Workspace, targetDir: string, p
       recalculate(name)
       scheduleSave()
     },
+    repositoryBaseline(name) {
+      return data.phases[name]?.repositoryBaseline
+    },
+    async phaseRepositoryBaseline(name, baseline) {
+      phase(name).repositoryBaseline = baseline
+      await persist({ throwOnError: true })
+    },
     phaseEnded(name, status) {
       const entry = phase(name)
       entry.status = status
@@ -168,6 +187,29 @@ export async function openRunMetadata(workspace: Workspace, targetDir: string, p
       await persist()
     },
   }
+}
+
+function assertSafePipelineArtifacts(pipeline: Pipeline): void {
+  if (!pipeline || !Array.isArray(pipeline.steps)) throw new Error("unsafe frozen pipeline: steps must be a list")
+  for (const step of pipeline.steps) {
+    if (!step || typeof step.name !== "string" || !isSafeStepName(step.name)) {
+      throw new Error("unsafe frozen pipeline: every step must have a filesystem-safe name")
+    }
+    if (step.type === "human") continue
+    if (step.type !== "agent") throw new Error("unsafe frozen pipeline: unknown step type")
+    if (step.reportPath !== `reports/${step.name}.md`) {
+      throw new Error(`unsafe frozen pipeline: report path for step "${step.name}" is outside its canonical location`)
+    }
+    if (!Array.isArray(step.inputFiles) || step.inputFiles.some((path) => !isSafePipelineInput(path))) {
+      throw new Error(`unsafe frozen pipeline: input path for step "${step.name}" is outside its canonical location`)
+    }
+  }
+}
+
+function isSafePipelineInput(path: unknown): path is string {
+  if (path === "prd.md") return true
+  if (typeof path !== "string" || !path.startsWith("reports/") || !path.endsWith(".md")) return false
+  return isSafeStepName(path.slice("reports/".length, -".md".length))
 }
 
 /** Forwards every ProgressUI call unchanged while recording phase lifecycle and usage into the store. */

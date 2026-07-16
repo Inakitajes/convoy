@@ -1,4 +1,5 @@
-import type { AgentSpec, AgentStep, HumanStep, Pipeline, Step } from "./types"
+import { normalizeStepRunnerModel, stepRunnerFor } from "./step-runners"
+import type { AgentSpec, AgentStep, HumanStep, Pipeline, Step, StepRunner } from "./types"
 
 export const defaultGptModel = "openai/gpt-5.6-terra"
 export const defaultGptVariant = "xhigh"
@@ -176,6 +177,8 @@ export type AgentStepSpec = {
   model?: string
   /** Fans this step out into one concurrent, forced-read-only invocation per model. Mutually exclusive with `model`. */
   models?: string[]
+  /** Execution engine. Default is OpenCode; "claude-code" spawns the local `claude` CLI (read-only audit steps only). */
+  runner?: "opencode" | StepRunner
   maxAttempts?: number
   /** Which previous step reports to attach: the nearest group (default), all of them, none, or an explicit list of step names. */
   reports?: "previous" | "all" | "none" | string[]
@@ -358,6 +361,11 @@ export function resolvePipeline(input: ResolvePipelineInput): Pipeline {
   }
 
   const claimStepName = (name: string, position: string) => {
+    if (!isSafeStepName(name)) {
+      throw new Error(
+        `pipeline "${input.name}": step ${position} name "${name}" must be a filesystem-safe identifier using letters, numbers, hyphens, or underscores`,
+      )
+    }
     if (names.has(name)) {
       throw new Error(`pipeline "${input.name}": duplicate step name "${name}"; set an explicit name: on one of them`)
     }
@@ -442,6 +450,12 @@ export function isHumanStepSpec(raw: StepSpec): raw is HumanStepSpec {
   return typeof raw === "object" && raw !== null && "type" in raw && raw.type === humanStepType
 }
 
+const safeStepNamePattern = /^[A-Za-z0-9][A-Za-z0-9_-]*$/
+
+export function isSafeStepName(name: string): boolean {
+  return safeStepNamePattern.test(name)
+}
+
 type LegacyHumanStepSpec = { agent: typeof humanReviewStep; name?: string; description?: string }
 
 function asHumanStepSpec(raw: StepSpec): HumanStepSpec | LegacyHumanStepSpec | undefined {
@@ -490,16 +504,34 @@ function resolveAgentStepSpec(raw: string | AgentStepSpec, ctx: ResolveStepConte
     throw new Error(`pipeline "${ctx.input.name}": step ${ctx.position} ("${baseName}")'s "models" needs at least 2 entries; use "model" for a single one`)
   }
 
+  const runnerDefinition = stepRunnerFor(spec.runner)
+  // "opencode" is accepted for symmetry but resolves to the default (no runner field).
+  const runner: StepRunner | undefined = runnerDefinition.id === "claude-code" ? "claude-code" : undefined
+  if (!runnerDefinition.capabilities.modelFanout && spec.models !== undefined) {
+    throw new Error(
+      `pipeline "${ctx.input.name}": step ${ctx.position} ("${baseName}") can't combine runner: ${runnerDefinition.id} with a "models" fan-out; give the step a single model (or none for the CLI default)`,
+    )
+  }
+  if (!runnerDefinition.capabilities.writeSteps && !ctx.forcedReadOnly && !agent.readOnly) {
+    throw new Error(
+      `pipeline "${ctx.input.name}": step ${ctx.position} ("${baseName}") uses runner: ${runnerDefinition.id}, which currently supports read-only audit steps only — agent "${agent.name}" can modify the repo`,
+    )
+  }
+
   const models = spec.models
   const forced = ctx.forcedReadOnly || Boolean(models)
-  const variants = models ?? [spec.model ?? agent.model ?? ctx.input.defaultModel ?? agent.defaultModel ?? fallbackModel]
+  // Runners without global override support own their model namespace and use
+  // an empty string for their own configured default.
+  const variants = runnerDefinition.capabilities.globalModelOverride
+    ? (models ?? [spec.model ?? agent.model ?? ctx.input.defaultModel ?? agent.defaultModel ?? fallbackModel])
+    : [spec.model ? normalizeStepRunnerModel(runnerDefinition.id, spec.model) : ""]
   const agentName = forced && !agent.readOnly ? `${agent.name}${readOnlyAgentSuffix}` : agent.name
 
   return variants.map((modelValue, variantIndex) => {
     const name = models ? `${baseName}__${slugifyModel(modelValue)}` : baseName
     ctx.claimName(name, models ? `${ctx.position}[${variantIndex + 1}]` : ctx.position)
 
-    const { model, variant } = splitModelVariant(modelValue)
+    const { model, variant } = runner ? { model: modelValue, variant: undefined } : splitModelVariant(modelValue)
     const step: AgentStep = {
       type: "agent",
       name,
@@ -509,6 +541,7 @@ function resolveAgentStepSpec(raw: string | AgentStepSpec, ctx: ResolveStepConte
       description: agent.description,
       model,
       ...(variant ? { variant } : {}),
+      ...(runner ? { runner } : {}),
       inputFiles: ["prd.md", ...reportInputs(ctx.input.name, name, spec.reports ?? "previous", ctx.priorSteps)],
       inputDiff: spec.diff ?? ctx.priorSteps.length > 0,
       reportPath: `reports/${name}.md`,

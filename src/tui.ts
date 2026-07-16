@@ -12,9 +12,11 @@ import {
   t,
 } from "@opentui/core"
 
+import { openClaudeSessionWindow } from "./claude-code"
 import { startLimitsPoller } from "./limits"
 import { log } from "./log"
-import { openIterateOpencodeWindow, openOpencodeSessionWindow, openStoredSessionWindow } from "./opencode"
+import { openIterateOpencodeWindow, openOpencodeSessionWindow, openStoredSessionWindow, type SessionWindowBackend } from "./opencode"
+import { stepRunnerFor, type StepRunnerId } from "./step-runners"
 import { PhaseUsage, addTokens, emptyTokens } from "./usage"
 import {
   formatAgo,
@@ -90,6 +92,24 @@ function kindStyle(kind: ActivityKind): { icon: string; color: string } {
 
 const pipelineWidth = 32
 const feedLimit = 100
+
+type RunnerSessionContext = {
+  targetDir: string
+  sessionID: string
+  runDir: string
+  serverUrl: string
+  offlineSessions: boolean
+}
+
+const runnerSessionOpeners: Record<StepRunnerId, (context: RunnerSessionContext) => Promise<SessionWindowBackend> | undefined> = {
+  opencode: (context) =>
+    context.serverUrl
+      ? openOpencodeSessionWindow({ url: context.serverUrl, targetDir: context.targetDir, sessionID: context.sessionID })
+      : context.offlineSessions
+        ? openStoredSessionWindow({ targetDir: context.targetDir, sessionID: context.sessionID })
+        : undefined,
+  "claude-code": (context) => openClaudeSessionWindow({ targetDir: context.targetDir, sessionID: context.sessionID, runDir: context.runDir }),
+}
 
 // The right-hand content panel is a three-tab view of the focused phase.
 export type ContentTab = "logs" | "reports" | "session"
@@ -247,8 +267,8 @@ export class TuiProgress implements ProgressUI {
   // Run workspace dir, where phase reports land; set at start so the reports
   // tab reads them live, and refreshed from the outcome on the finish screen.
   private runDir = ""
-  // Set when [i] opened an iterate window: its opening prompt points at files
-  // in the run dir, so the runner must not clean the workspace up.
+  // Set when an external session opens with paths into the run directory, so
+  // the runner must not clean the workspace up while that session uses them.
   private iterateRequested = false
   private lastActivityAt = Date.now()
   private readonly startedAt = Date.now()
@@ -1005,8 +1025,8 @@ export class TuiProgress implements ProgressUI {
     })
   }
 
-  // The runner checks this after the finish screen: an iterate window's
-  // opening prompt points at files in the run dir, so it must survive cleanup.
+  // The runner checks this after the finish screen because external sessions
+  // can still be reading files from the run directory.
   keepRunDirRequested(): boolean {
     return this.iterateRequested
   }
@@ -1365,6 +1385,12 @@ export class TuiProgress implements ProgressUI {
       this.render()
       return
     }
+    const runner = stepRunnerFor(phase.runner)
+    if (!runner.capabilities.takeover) {
+      this.addEvent(phase.name, "system", `interactive mode isn't available for ${runner.id} steps; press o after the step finishes to resume its session`)
+      this.render()
+      return
+    }
     if (this.interactiveTakeover.has(phase.name)) {
       this.interactiveTakeover.delete(phase.name)
       this.addEvent(phase.name, "system", "interactive mode off — normal retries apply again")
@@ -1384,33 +1410,42 @@ export class TuiProgress implements ProgressUI {
   private openSessionWindowForPhase(name: string, source: "click" | "key") {
     const phase = this.findPhase(name)
     if (!phase) return
+    const runner = stepRunnerFor(phase.runner)
     if (!phase.sessionID) {
-      this.addEvent("archer", "system", `no opencode session for ${name} yet`)
+      this.addEvent("archer", "system", `no ${runner.sessionName} session for ${name} yet`)
       this.render()
       return
     }
-    // A live server (this run, or a live attach) → attach to it; a re-opened
-    // finished run → open the stored session standalone from disk.
     const targetDir = this.targetDir || process.cwd()
-    const open = this.serverUrl
-      ? openOpencodeSessionWindow({ url: this.serverUrl, targetDir, sessionID: phase.sessionID })
-      : this.offlineSessions
-        ? openStoredSessionWindow({ targetDir, sessionID: phase.sessionID })
-        : undefined
-    if (!open) {
-      this.addEvent("archer", "system", "opencode server is not ready yet")
+
+    if (phase.status === "running" && !runner.capabilities.liveAttach) {
+      this.addEvent(phase.name, "system", `${runner.id} steps stream here while running; press o once the step finishes to resume the session`)
       this.render()
       return
     }
 
-    this.addEvent("archer", "system", `${source === "key" ? "[o]" : "click"}: opening ${name} session ${shortID(phase.sessionID)}`)
+    const open = runnerSessionOpeners[runner.id]({
+      targetDir,
+      sessionID: phase.sessionID,
+      runDir: this.runDir,
+      serverUrl: this.serverUrl,
+      offlineSessions: this.offlineSessions,
+    })
+    if (!open) {
+      this.addEvent("archer", "system", `${runner.sessionName} session is not ready yet`)
+      this.render()
+      return
+    }
+
+    if (!runner.capabilities.liveAttach) this.iterateRequested = true
+    this.addEvent("archer", "system", `${source === "key" ? "[o]" : "click"}: opening ${name} ${runner.sessionName} session ${shortID(phase.sessionID)}`)
     open
       .then((backend) => {
         this.addEvent("archer", "system", `${name} session opened in ${backend}`)
         this.render()
       })
       .catch((error: unknown) => {
-        this.addEvent("archer", "error", `couldn't open opencode session: ${error instanceof Error ? error.message : String(error)}`)
+        this.addEvent("archer", "error", `couldn't open ${runner.sessionName} session: ${error instanceof Error ? error.message : String(error)}`)
         this.render()
       })
     this.render()
@@ -1862,8 +1897,13 @@ export class TuiProgress implements ProgressUI {
     }
 
     const meta: TextChunk[] = []
+    const capability = phaseCapabilityLabel(phase)
+    if (capability) meta.push(fg(theme.cyan)(capability))
     const elapsed = phaseElapsed(phase, now)
-    if (elapsed !== undefined) meta.push(fg(theme.faint)(running ? "elapsed " : "took "), fg(theme.dim)(formatElapsed(elapsed)))
+    if (elapsed !== undefined) {
+      if (meta.length > 0) meta.push(fg(theme.faint)(" · "))
+      meta.push(fg(theme.faint)(running ? "elapsed " : "took "), fg(theme.dim)(formatElapsed(elapsed)))
+    }
     // Falls back to the planned model so a scheduled step still shows what it
     // will run on.
     const model = phase.lastStepModel || phase.model || phase.plannedModel
@@ -2485,16 +2525,22 @@ function scrollPosition(topOffset: number, maxScroll: number) {
 }
 
 function phaseMetaChunks(phase: PhaseState, now: number): TextChunk[] {
-  if (phase.status === "pending") return []
-  if (phase.status === "skipped" && phase.restoredDurationMs === undefined) return [fg(theme.faint)("skipped")]
   const parts: TextChunk[] = []
+  const capability = phaseCapabilityLabel(phase)
+  if (capability) parts.push(fg(theme.cyan)(capability))
+  if (phase.status === "pending") return parts
+  if (phase.status === "skipped" && phase.restoredDurationMs === undefined) return [...parts, fg(theme.faint)(`${parts.length ? " · " : ""}skipped`)]
   const elapsed = phaseElapsed(phase, now)
   if (elapsed !== undefined) {
-    parts.push(fg(phase.status === "failed" ? theme.red : theme.dim)(formatElapsed(elapsed)))
+    parts.push(fg(phase.status === "failed" ? theme.red : theme.dim)(`${parts.length ? " · " : ""}${formatElapsed(elapsed)}`))
   }
   // Live cost belongs to the current-step panel; a phase's final cost lands here once it ends.
   if (phase.usageReported && phase.status !== "running") parts.push(fg(theme.faint)(` ${formatMoney(phase.cost)}`))
   return parts
+}
+
+export function phaseCapabilityLabel(phase: Pick<ProgressPhase, "readOnly">): string | undefined {
+  return phase.readOnly ? "audit · read-only" : undefined
 }
 
 function phaseElapsed(phase: PhaseState, now: number): number | undefined {
@@ -2759,4 +2805,3 @@ async function fileReadable(path: string) {
     return false
   }
 }
-

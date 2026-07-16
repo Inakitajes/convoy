@@ -17,9 +17,14 @@ type ExecResult = {
 
 export type RepoSnapshot = {
   head: string
+  ref?: string
 }
 
 export type RepoBootstrapStatus = "ready" | "no-repo" | "no-commits"
+
+// Never inherit status.showUntrackedFiles from repository/user config: safety
+// checks and commits must see every untracked file, including nested ones.
+const statusArgs = ["status", "--porcelain=v1", "--untracked-files=all"]
 
 async function execFile(command: string, args: string[], options: ExecOptions): Promise<ExecResult> {
   const proc = Bun.spawn([command, ...args], {
@@ -58,7 +63,7 @@ export async function ensureRepoReady(cwd: string, options: { includeDirty?: boo
     }
   }
 
-  const status = await execFile("git", ["status", "--porcelain"], { cwd })
+  const status = await execFile("git", statusArgs, { cwd })
   if (status.stdout.trim() !== "") {
     // A resumed run defers the dirty-tree decision to the recovery step, which
     // can offer to commit an interrupted phase's leftover changes and continue.
@@ -143,7 +148,7 @@ export async function initializeRepoWithInitialCommit(cwd: string, options: { ba
   }
 
   await execFile("git", ["add", "-A"], { cwd })
-  const porcelain = await execFile("git", ["status", "--porcelain"], { cwd })
+  const porcelain = await execFile("git", statusArgs, { cwd })
   const suspicious = findSuspiciousStagedFiles(porcelain.stdout)
   if (suspicious.length > 0) {
     await execFile("git", ["reset"], { cwd })
@@ -158,7 +163,7 @@ export async function initializeRepoWithInitialCommit(cwd: string, options: { ba
 }
 
 export async function statusPorcelain(cwd: string): Promise<string> {
-  const status = await execFile("git", ["status", "--porcelain"], { cwd })
+  const status = await execFile("git", statusArgs, { cwd })
   return status.stdout
 }
 
@@ -181,16 +186,38 @@ export function dirtyFilesPreview(porcelain: string) {
 }
 
 export async function createCleanRepoSnapshot(cwd: string): Promise<RepoSnapshot | undefined> {
-  const status = await execFile("git", ["status", "--porcelain"], { cwd })
+  const status = await execFile("git", statusArgs, { cwd })
   if (status.stdout.trim() !== "") return undefined
 
-  const head = await execFile("git", ["rev-parse", "HEAD"], { cwd })
-  return { head: head.stdout.trim() }
+  const [head, ref] = await Promise.all([
+    execFile("git", ["rev-parse", "HEAD"], { cwd }),
+    execFile("git", ["symbolic-ref", "--quiet", "--short", "HEAD"], { cwd, allowFailure: true }),
+  ])
+  return { head: head.stdout.trim(), ...(ref.exitCode === 0 ? { ref: ref.stdout.trim() } : {}) }
 }
 
 export async function restoreRepoSnapshot(snapshot: RepoSnapshot, cwd: string) {
+  await execFile("git", ["reset", "--hard"], { cwd })
+  await execFile("git", ["clean", "-fd"], { cwd })
+  await execFile("git", ["checkout", "--detach", snapshot.head], { cwd })
+  if (snapshot.ref) await execFile("git", ["checkout", "-B", snapshot.ref, snapshot.head], { cwd })
   await execFile("git", ["reset", "--hard", snapshot.head], { cwd })
   await execFile("git", ["clean", "-fd"], { cwd })
+}
+
+export async function describeRepoSnapshotDifference(snapshot: RepoSnapshot, cwd: string): Promise<string | undefined> {
+  const [status, head, ref] = await Promise.all([
+    execFile("git", statusArgs, { cwd }),
+    execFile("git", ["rev-parse", "HEAD"], { cwd, allowFailure: true }),
+    execFile("git", ["symbolic-ref", "--quiet", "--short", "HEAD"], { cwd, allowFailure: true }),
+  ])
+  const details: string[] = []
+  const currentHead = head.exitCode === 0 ? head.stdout.trim() : "<missing>"
+  const currentRef = ref.exitCode === 0 ? ref.stdout.trim() : undefined
+  if (currentHead !== snapshot.head) details.push(`HEAD changed from ${snapshot.head} to ${currentHead}`)
+  if (currentRef !== snapshot.ref) details.push(`branch changed from ${snapshot.ref ?? "<detached>"} to ${currentRef ?? "<detached>"}`)
+  if (status.stdout.trim() !== "") details.push(dirtyFilesPreview(status.stdout))
+  return details.length > 0 ? details.join("\n") : undefined
 }
 
 /**
@@ -218,7 +245,7 @@ export async function writeDiff(path: string, baseRef: string, cwd: string) {
 export async function addAllAndCommit(message: string, cwd: string) {
   await execFile("git", ["add", "-A"], { cwd })
 
-  const status = await execFile("git", ["status", "--porcelain"], { cwd })
+  const status = await execFile("git", statusArgs, { cwd })
   if (status.stdout.trim() === "") {
     return false
   }

@@ -1,3 +1,4 @@
 node_modules/
 archer
+.*.bun-build
 .DS_Store

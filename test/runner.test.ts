@@ -4,8 +4,10 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { openRunMetadata, type RunMetadataStore } from "../src/metadata"
+import { createCleanRepoSnapshot } from "../src/git"
 import { noopProgress, type HumanReviewAction, type HumanReviewPromptInfo, type ProgressPhaseSnapshot, type ProgressUI } from "../src/progress"
 import {
+  assertPendingReadOnlyResumeBaselines,
   RunShutdown,
   UserAbortError,
   waitForInteractiveGate,
@@ -13,14 +15,19 @@ import {
   createGitLock,
   describeMessageChunk,
   describeSessionActivity,
+  finalizePhaseRepository,
   isIgnorableRejection,
+  isUserAbortError,
   newActivityState,
+  modelOverrideNotice,
   parseModel,
   planBatches,
+  progressPhases,
   restorePhaseFromPreviousRun,
   selectInterruptedPhase,
   shouldRetryAttempt,
   shouldSkip,
+  withReadOnlyRepositoryBoundary,
   type ActiveSession,
 } from "../src/runner"
 import type { AgentStep, HumanStep, Pipeline, Step } from "../src/types"
@@ -45,14 +52,19 @@ async function git(args: string[], cwd: string) {
 }
 
 async function dirtyRepo(): Promise<string> {
+  const dir = await cleanRepo()
+  // leave an uncommitted change behind, as an interrupted phase would
+  await writeFile(join(dir, "feature.txt"), "work in progress\n")
+  return dir
+}
+
+async function cleanRepo(): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "archer-recover-repo-"))
   recoveryDirs.push(dir)
   await git(["init", "-q"], dir)
   await writeFile(join(dir, "keep.txt"), "base\n")
   await git(["add", "-A"], dir)
   await git(["commit", "-qm", "base"], dir)
-  // leave an uncommitted change behind, as an interrupted phase would
-  await writeFile(join(dir, "feature.txt"), "work in progress\n")
   return dir
 }
 
@@ -110,6 +122,24 @@ describe("runner helpers", () => {
     expect(shouldSkip(variant, { onlySteps: ["clean-code"], skipSteps: [] })).toBe(false)
     expect(shouldSkip(variant, { onlySteps: ["some-other-step"], skipSteps: [] })).toBe(true)
     expect(shouldSkip(variant, { onlySteps: [], skipSteps: ["clean-code"] })).toBe(true)
+  })
+
+  test("explains which runner steps a global model override cannot affect", () => {
+    const claude = { ...agentStep("security-claude"), runner: "claude-code" as const, model: "opus", readOnly: true }
+    const pipeline: Pipeline = { name: "review", steps: [agentStep("security-gpt"), claude] }
+
+    expect(modelOverrideNotice(pipeline, "openai/gpt-5.6#xhigh")).toBe(
+      "--model applies to OpenCode steps only; Claude Code steps keep their configured model: security-claude",
+    )
+    expect(modelOverrideNotice(pipeline, "")).toBeUndefined()
+    expect(modelOverrideNotice({ name: "review", steps: [agentStep("security-gpt")] }, "openai/gpt-5.6")).toBeUndefined()
+  })
+
+  test("progress phases expose runner labels and read-only state", () => {
+    const claude = { ...agentStep("security-claude"), runner: "claude-code" as const, model: "opus", readOnly: true }
+    const [phase] = progressPhases({ name: "review", steps: [claude] })
+
+    expect(phase).toMatchObject({ runner: "claude-code", plannedModel: "claude-code/opus", readOnly: true })
   })
 
   test("turns assistant message updates into live cumulative usage", () => {
@@ -398,6 +428,175 @@ describe("createGitLock", () => {
   })
 })
 
+describe("read-only repository boundary", () => {
+  test("preserves tracked and untracked mutations while refusing to commit them", async () => {
+    const repo = await cleanRepo()
+    const baseline = await createCleanRepoSnapshot(repo)
+    if (!baseline?.ref) throw new Error("expected a clean repository branch baseline")
+    const phase = { ...agentStep("security"), readOnly: true }
+    await writeFile(join(repo, "keep.txt"), "mutated by extension\n")
+    await writeFile(join(repo, "extension.txt"), "unexpected\n")
+
+    await expect(finalizePhaseRepository(phase, "/unused/report.md", repo, baseline)).rejects.toThrow(
+      "left these changes intact",
+    )
+
+    expect(await readFile(join(repo, "keep.txt"), "utf8")).toBe("mutated by extension\n")
+    expect(await readFile(join(repo, "extension.txt"), "utf8")).toBe("unexpected\n")
+    const status = await git(["status", "--porcelain"], repo)
+    expect(status).toContain("keep.txt")
+    expect(status).toContain("extension.txt")
+    expect((await git(["rev-list", "--count", "HEAD"], repo)).trim()).toBe("1")
+  })
+
+  test("detects untracked mutations even when git config hides untracked files", async () => {
+    const repo = await cleanRepo()
+    await git(["config", "status.showUntrackedFiles", "no"], repo)
+    const baseline = await createCleanRepoSnapshot(repo)
+    const phase = { ...agentStep("security"), readOnly: true }
+    await mkdir(join(repo, "nested"), { recursive: true })
+    await writeFile(join(repo, "nested", "hidden.txt"), "unexpected\n")
+
+    await expect(finalizePhaseRepository(phase, "/unused/report.md", repo, baseline)).rejects.toThrow("nested/hidden.txt")
+    expect(await readFile(join(repo, "nested", "hidden.txt"), "utf8")).toBe("unexpected\n")
+  })
+
+  test("preserves commits created during a read-only step", async () => {
+    const repo = await cleanRepo()
+    const baseline = await createCleanRepoSnapshot(repo)
+    const phase = { ...agentStep("security"), readOnly: true }
+    await writeFile(join(repo, "extension.txt"), "unexpected\n")
+    await git(["add", "-A"], repo)
+    await git(["commit", "-qm", "extension side effect"], repo)
+
+    await expect(finalizePhaseRepository(phase, "/unused/report.md", repo, baseline)).rejects.toThrow(
+      "left these changes intact",
+    )
+
+    expect((await git(["status", "--porcelain"], repo)).trim()).toBe("")
+    expect((await git(["rev-list", "--count", "HEAD"], repo)).trim()).toBe("2")
+    expect(await readFile(join(repo, "extension.txt"), "utf8")).toBe("unexpected\n")
+  })
+
+  test("preserves a concurrent commit followed by tracked and untracked changes", async () => {
+    const repo = await cleanRepo()
+    const baseline = await createCleanRepoSnapshot(repo)
+    const phase = { ...agentStep("security"), readOnly: true }
+    await writeFile(join(repo, "keep.txt"), "committed side effect\n")
+    await git(["add", "-A"], repo)
+    await git(["commit", "-qm", "extension side effect"], repo)
+    await writeFile(join(repo, "keep.txt"), "dirty after commit\n")
+    await writeFile(join(repo, "untracked.txt"), "dirty after commit\n")
+
+    await expect(finalizePhaseRepository(phase, "/unused/report.md", repo, baseline)).rejects.toThrow(
+      "left these changes intact",
+    )
+
+    expect(await readFile(join(repo, "keep.txt"), "utf8")).toBe("dirty after commit\n")
+    expect(await readFile(join(repo, "untracked.txt"), "utf8")).toBe("dirty after commit\n")
+    expect(await git(["status", "--porcelain"], repo)).toContain("untracked.txt")
+    expect((await git(["rev-list", "--count", "HEAD"], repo)).trim()).toBe("2")
+  })
+
+  test("preserves a concurrent branch change", async () => {
+    const repo = await cleanRepo()
+    const baseline = await createCleanRepoSnapshot(repo)
+    if (!baseline?.ref) throw new Error("expected a clean repository branch baseline")
+    const phase = { ...agentStep("security"), readOnly: true }
+    await git(["checkout", "-qb", "extension-branch"], repo)
+
+    await expect(finalizePhaseRepository(phase, "/unused/report.md", repo, baseline)).rejects.toThrow(
+      "left these changes intact",
+    )
+
+    expect((await git(["branch", "--show-current"], repo)).trim()).toBe("extension-branch")
+    expect((await git(["rev-parse", "HEAD"], repo)).trim()).toBe(baseline.head)
+  })
+
+  test("checks and preserves mutations when a read-only step is aborted", async () => {
+    const repo = await cleanRepo()
+    const baseline = await createCleanRepoSnapshot(repo)
+    const phase = { ...agentStep("security"), readOnly: true }
+
+    let failure: unknown
+    try {
+      await withReadOnlyRepositoryBoundary(phase, repo, baseline, createGitLock(), async () => {
+        await writeFile(join(repo, "concurrent.txt"), "keep me\n")
+        throw new UserAbortError()
+      })
+    } catch (error) {
+      failure = error
+    }
+
+    expect(isUserAbortError(failure)).toBe(true)
+    expect(failure).toBeInstanceOf(Error)
+    expect((failure as Error).message).toMatch(/left these changes intact[\s\S]*Original failure: aborted by user/)
+    expect(await readFile(join(repo, "concurrent.txt"), "utf8")).toBe("keep me\n")
+  })
+
+  test("checks and preserves mutations when report persistence fails", async () => {
+    const repo = await cleanRepo()
+    const baseline = await createCleanRepoSnapshot(repo)
+    const phase = { ...agentStep("security"), readOnly: true }
+
+    await expect(
+      withReadOnlyRepositoryBoundary(phase, repo, baseline, createGitLock(), async () => {
+        await writeFile(join(repo, "concurrent.txt"), "keep me\n")
+        throw new Error("report persistence failed")
+      }),
+    ).rejects.toThrow(/left these changes intact[\s\S]*Original failure: report persistence failed/)
+
+    expect(await readFile(join(repo, "concurrent.txt"), "utf8")).toBe("keep me\n")
+  })
+
+  test("blocks resume when a preserved commit changed the recorded baseline", async () => {
+    const repo = await cleanRepo()
+    const baseline = await createCleanRepoSnapshot(repo)
+    if (!baseline) throw new Error("expected repository baseline")
+    const phase = { ...agentStep("security"), readOnly: true }
+    const ws: Workspace = { dir: await mkdtemp(join(tmpdir(), "archer-read-only-resume-")), runID: "20260101-000000-readonly" }
+    recoveryDirs.push(ws.dir)
+    const skipped = agentStep("setup")
+    const pipeline: Pipeline = { name: "audit", steps: [skipped, phase] }
+    const metadata = await openRunMetadata(ws, repo, pipeline)
+    metadata.phaseEnded(skipped.name, "skipped")
+    metadata.phaseStarted(phase.name)
+    await metadata.phaseRepositoryBaseline(phase.name, baseline)
+    await mkdir(join(ws.dir, "reports"), { recursive: true })
+    await writeFile(join(ws.dir, phase.reportPath), "# interrupted audit\n")
+
+    await writeFile(join(repo, "preserved.txt"), "keep me\n")
+    await git(["add", "-A"], repo)
+    await git(["commit", "-qm", "concurrent user work"], repo)
+    expect((await git(["status", "--porcelain"], repo)).trim()).toBe("")
+
+    const resumed = await openRunMetadata(ws, repo, pipeline)
+    expect((await selectInterruptedPhase(ws, resumed, pipeline))?.name).toBe(phase.name)
+    await expect(assertPendingReadOnlyResumeBaselines(resumed, pipeline, repo)).rejects.toThrow("repository changed since this read-only phase began")
+    expect((await git(["rev-list", "--count", "HEAD"], repo)).trim()).toBe("2")
+  })
+
+  test("blocks dirty recovery for a later read-only phase even when an earlier skipped phase has no report", async () => {
+    const repo = await cleanRepo()
+    const baseline = await createCleanRepoSnapshot(repo)
+    if (!baseline) throw new Error("expected repository baseline")
+    const skipped = agentStep("setup")
+    const phase = { ...agentStep("security"), readOnly: true }
+    const ws: Workspace = { dir: await mkdtemp(join(tmpdir(), "archer-read-only-dirty-resume-")), runID: "20260101-000000-readonly-dirty" }
+    recoveryDirs.push(ws.dir)
+    const pipeline: Pipeline = { name: "audit", steps: [skipped, phase] }
+    const metadata = await openRunMetadata(ws, repo, pipeline)
+    metadata.phaseEnded(skipped.name, "skipped")
+    metadata.phaseStarted(phase.name)
+    await metadata.phaseRepositoryBaseline(phase.name, baseline)
+    await writeFile(join(repo, "preserved.txt"), "keep me\n")
+
+    await expect(assertPendingReadOnlyResumeBaselines(metadata, pipeline, repo)).rejects.toThrow("repository changed since this read-only phase began")
+    expect(await readFile(join(repo, "preserved.txt"), "utf8")).toBe("keep me\n")
+    expect((await git(["rev-list", "--count", "HEAD"], repo)).trim()).toBe("1")
+  })
+})
+
 describe("dirty-tree recovery", () => {
   const agent = agentStep
   const pipeline: Pipeline = {
@@ -451,6 +650,19 @@ describe("dirty-tree recovery", () => {
     // a recovery report was written and the phase is marked completed
     expect(await readFile(join(ws.dir, "reports", "implementer.md"), "utf8")).toContain("Recovered uncommitted changes")
     expect(metadata.snapshot("implementer")?.status).toBe("completed")
+  })
+
+  test("refuses to recover preserved changes as output from a read-only phase", async () => {
+    const repo = await dirtyRepo()
+    const ws = await workspaceWithReports([])
+    const phase = { ...agent("security"), readOnly: true }
+    const metadata = await openRunMetadata(ws, repo, { name: "audit", steps: [phase] })
+
+    await expect(commitRecoveredPhase(ws, metadata, phase, repo)).rejects.toThrow("refusing to commit preserved changes")
+
+    expect((await git(["status", "--porcelain"], repo))).toContain("feature.txt")
+    expect((await git(["rev-list", "--count", "HEAD"], repo)).trim()).toBe("1")
+    expect(metadata.snapshot(phase.name)).toBeUndefined()
   })
 
   test("keeps an existing report instead of overwriting it", async () => {

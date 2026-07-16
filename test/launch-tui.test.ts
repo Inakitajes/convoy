@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
-import { cursorPosition, hookLines, promptEnterAction, sanitizePaste, stepTree, typedText, wrapPromptLines } from "../src/launch-tui"
+import { cursorPosition, hookLines, launcherStepModelLabel, promptEnterAction, sanitizePaste, stepTree, typedText, wrapPromptLines } from "../src/launch-tui"
 
 import type { KeyEvent } from "@opentui/core"
 
@@ -64,6 +64,12 @@ describe("launch TUI pipeline preview", () => {
     )
 
     expect(lines).toEqual(["○ implementer  · gpt-5.5 xhigh", "○ design  · claude-opus-4-8"])
+  })
+
+  test("labels Claude Code aliases and its CLI default", () => {
+    expect(launcherStepModelLabel({ runner: "claude-code", model: "opus" })).toBe("claude-code/opus")
+    expect(launcherStepModelLabel({ runner: "claude-code", model: "" })).toBe("claude-code/default")
+    expect(launcherStepModelLabel({ model: "openai/gpt-5.6", variant: "xhigh" })).toBe("gpt-5.6 xhigh")
   })
 
   test("shows an explicit placeholder when a pipeline has no hooks", () => {

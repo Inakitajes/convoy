@@ -6,12 +6,13 @@ import { buildAgentRegistry, emptyHooksConfig, loadMergedArcherConfig } from "./
 import { hooksForPipeline } from "./hooks"
 import { startLimitsPoller } from "./limits"
 import { builtInPipelines, defaultPipelineName, resolvePipeline } from "./pipeline"
+import { stepRunnerFor } from "./step-runners"
 import { joinLines, limitsRow, padBetween, paletteForTerminal, plain, raw, setTheme, spinnerFrame, terminalBackgroundHex, theme, truncate } from "./tui-theme"
 
 import type { ArcherConfig } from "./config"
 import type { BoxOptions, CliRenderer, KeyEvent, PasteEvent, TextChunk } from "@opentui/core"
 import type { LimitsSnapshot } from "./limits"
-import type { AgentSpec, HookSet, HookSpec, Step } from "./types"
+import type { AgentSpec, AgentStep, HookSet, HookSpec, Step } from "./types"
 import type { PaletteColor } from "./tui-theme"
 
 export type LaunchRunSelection = {
@@ -202,7 +203,12 @@ function hookNodes(set: HookSet): HookNode[] {
 
 function stepNode(step: Step): StepNode {
   if (step.type === "human") return { stepName: step.name, groupId: "", kind: "human", modelLabel: "" }
-  return { stepName: step.stepName, groupId: step.groupId, kind: "agent", modelLabel: shortModelLabel(step.model, step.variant) }
+  return { stepName: step.stepName, groupId: step.groupId, kind: "agent", modelLabel: launcherStepModelLabel(step) }
+}
+
+export function launcherStepModelLabel(step: Pick<AgentStep, "model" | "variant" | "runner">): string {
+  const runner = stepRunnerFor(step.runner)
+  return runner.id === "opencode" ? shortModelLabel(step.model, step.variant) : runner.modelLabel(step.model)
 }
 
 /** Drops the provider path from a model id so the tree shows "claude-opus-4-8", not "anthropic/claude-opus-4-8#…". */

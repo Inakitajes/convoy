@@ -168,6 +168,22 @@ describe("config loading", () => {
     expect(() => parse("not yaml: [unclosed")).toThrow("invalid YAML")
   })
 
+  test("rejects step names that can escape the reports directory", () => {
+    expect(() =>
+      parse("pipelines:\n  audit:\n    steps:\n      - agent: security\n        name: ../../../../tmp/owned"),
+    ).toThrow("must be a filesystem-safe identifier")
+  })
+
+  test("rejects agent names that can escape the prompts directory", () => {
+    expect(() => parse('agents:\n  "../../../../tmp/owned": {}')).toThrow("must be a filesystem-safe identifier")
+  })
+
+  test("applies filesystem-safe names to human steps too", () => {
+    expect(() => parse("pipelines:\n  audit:\n    steps:\n      - type: human\n        name: ../../../../tmp/owned")).toThrow(
+      "must be a filesystem-safe identifier",
+    )
+  })
+
   test("a repo cannot grant itself yolo", () => {
     expect(() => parse("permissions:\n  yolo: true")).toThrow("--yolo is per-invocation only")
   })
@@ -586,6 +602,79 @@ describe("default config init", () => {
   })
 })
 
+describe("runner field on steps", () => {
+  const parse = (yaml: string) => parseArcherConfig(yaml, ".archer/config.yaml", "/tmp/non-existent-archer-target")
+
+  test("parses runner: claude-code with a bare CLI model alias", () => {
+    const config = parse(
+      [
+        "pipelines:",
+        "  p:",
+        "    steps:",
+        "      - agent: security-reviewer",
+        "        name: external-security",
+        "        runner: claude-code",
+        "        model: opus",
+        "        reports: all",
+      ].join("\n"),
+    )
+    expect(config.pipelines.p?.steps).toEqual([
+      { agent: "security-reviewer", name: "external-security", runner: "claude-code", model: "opus", reports: "all" },
+    ])
+  })
+
+  test("parses runner: claude-code with no model (CLI default)", () => {
+    const config = parse("pipelines:\n  p:\n    steps:\n      - agent: bug-auditor\n        runner: claude-code")
+    expect(config.pipelines.p?.steps).toEqual([{ agent: "bug-auditor", runner: "claude-code" }])
+  })
+
+  test("normalizes Anthropic-prefixed Claude models before persistence", () => {
+    const config = parse(
+      "pipelines:\n  p:\n    steps:\n      - agent: bug-auditor\n        runner: claude-code\n        model: anthropic/claude-opus-4-8",
+    )
+
+    expect(config.pipelines.p?.steps).toEqual([{ agent: "bug-auditor", runner: "claude-code", model: "claude-opus-4-8" }])
+  })
+
+  test("rejects non-Anthropic and malformed Claude models at config parse time", () => {
+    const prefix = "pipelines:\n  p:\n    steps:\n      - agent: bug-auditor\n        runner: claude-code\n        model: "
+    const message = "runner claude-code executes Anthropic models"
+
+    expect(() => parse(`${prefix}openai/gpt-5.6`)).toThrow(message)
+    expect(() => parse(`${prefix}anthropic/not-claude`)).toThrow(message)
+    expect(() => parse(`${prefix}opus#high`)).toThrow(message)
+  })
+
+  test("still requires provider/model for the default runner", () => {
+    expect(() => parse("pipelines:\n  p:\n    steps:\n      - agent: bug-auditor\n        model: opus")).toThrow(
+      "must look like provider/model",
+    )
+  })
+
+  test("rejects unknown runner values", () => {
+    expect(() => parse("pipelines:\n  p:\n    steps:\n      - agent: bug-auditor\n        runner: codex")).toThrow(
+      'pipelines.p.steps[0].runner must be "opencode" or "claude-code"',
+    )
+  })
+
+  test("rejects runner: claude-code with a models fan-out", () => {
+    expect(() =>
+      parse(
+        [
+          "pipelines:",
+          "  p:",
+          "    steps:",
+          "      - agent: bug-auditor",
+          "        runner: claude-code",
+          "        models:",
+          "          - openai/gpt-5.5#xhigh",
+          "          - anthropic/claude-opus-4-8",
+        ].join("\n"),
+      ),
+    ).toThrow('pipelines.p.steps[0] can\'t combine runner: claude-code with "models"')
+  })
+})
+
 describe("materializing built-in pipelines", () => {
   const fallback = `${defaultGptModel}#${defaultGptVariant}`
   const emptyConfig = (pipelines: Record<string, ReturnType<typeof materializePipelineSpec>>) => ({
@@ -634,6 +723,12 @@ describe("materializing built-in pipelines", () => {
     ])
     // A matching default doesn't shadow anything, so nothing gets pinned.
     expect(materializePipelineSpec(spec, fallback).steps).toEqual(spec.steps)
+  })
+
+  test("never injects an OpenCode model into a model-less Claude Code step", () => {
+    const spec = { steps: [{ agent: "review-report", runner: "claude-code" as const }] }
+
+    expect(materializePipelineSpec(spec, "other/model").steps).toEqual([{ agent: "review-report", runner: "claude-code" }])
   })
 
   test("every materialized built-in serializes, re-parses, and resolves", () => {
