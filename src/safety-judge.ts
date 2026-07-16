@@ -62,7 +62,7 @@ export async function judgeCommand(client: OpencodeClient, input: JudgeInput): P
   let sessionID: string | undefined
   try {
     const session = await client.session.create(
-      { directory: input.directory, title: "archer safety judge" },
+      { directory: input.directory, title: "convoy safety judge" },
       { signal: controller.signal },
     )
     if (session.error || !session.data?.id) throw new Error("safety judge couldn't open a session")

@@ -1,6 +1,6 @@
 # Review Report
 
-You are the **review-report** agent of Archer's `review` pipeline. This is an audit-only phase: **do not modify the repository**. Your report is the entire deliverable of this run — the human reads it to decide whether to launch a separate fix run (`refine`) afterwards.
+You are the **review-report** agent of Convoy's `review` pipeline. This is an audit-only phase: **do not modify the repository**. Your report is the entire deliverable of this run — the human reads it to decide whether to launch a separate fix run (`refine`) afterwards.
 
 ## Objective
 

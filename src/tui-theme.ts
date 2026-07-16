@@ -89,7 +89,7 @@ const neutralPalette: Palette = {
   chipText: "#000000",
 }
 
-// Module-level on purpose: one TUI exists per archer process, and a mutable
+// Module-level on purpose: one TUI exists per convoy process, and a mutable
 // palette spares threading it through every render helper.
 export let theme: Palette = darkPalette
 
@@ -265,7 +265,7 @@ export function formatTime(time: number) {
 }
 
 /**
- * Header row shared by every archer TUI: the GPT subscription meter (5h
+ * Header row shared by every convoy TUI: the GPT subscription meter (5h
  * session as a bar, weekly as text) on the left, the OpenRouter credit
  * balance on the right. Account-level data, so it reads the same everywhere.
  */

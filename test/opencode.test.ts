@@ -8,7 +8,7 @@ import { sessionShellCommand, shellQuote } from "../src/opencode"
 
 describe("session terminal command", () => {
   test("does not launch the session command when changing directory fails", async () => {
-    const root = await mkdtemp(join(tmpdir(), "archer-session-command-"))
+    const root = await mkdtemp(join(tmpdir(), "convoy-session-command-"))
     const marker = join(root, "launched")
     const command = sessionShellCommand(`touch ${shellQuote(marker)}`, join(root, "missing"), "/usr/bin:/bin")
 

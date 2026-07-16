@@ -7,7 +7,7 @@ import { addWorktree } from "./git"
 import { log } from "./log"
 import { startOpencode } from "./opencode"
 import { parseModel } from "./runner"
-import { archerHome } from "./workspace"
+import { convoyHome } from "./workspace"
 
 export type WorktreeResult = {
   /** Absolute path of the newly created worktree. */
@@ -58,7 +58,7 @@ function namerOpencodeConfig(): Config {
 
 /**
  * Creates a new git branch checked out in a dedicated worktree under
- * `~/.archer/worktrees/<slug>`, so Archer runs against an isolated checkout
+ * `~/.convoy/worktrees/<slug>`, so Convoy runs against an isolated checkout
  * instead of the user's current working tree. The branch name is synthesized
  * from the prompt by a cheap model (Haiku by default), falling back to a
  * timestamped slug when the model is unavailable.
@@ -67,8 +67,8 @@ export async function createIsolatedWorktree(input: WorktreeInput): Promise<Work
   const base = input.baseRef ?? "HEAD"
   const branch = await generateBranchName(input.prompt, input.targetDir, input.model, input.signal)
   const slug = slugifyBranch(branch)
-  const dir = join(archerHome(), "worktrees", slug)
-  await mkdir(join(archerHome(), "worktrees"), { recursive: true })
+  const dir = join(convoyHome(), "worktrees", slug)
+  await mkdir(join(convoyHome(), "worktrees"), { recursive: true })
   await addWorktree(dir, branch, base, input.targetDir)
   log.info(`created worktree at ${dir} on branch ${branch}`)
   return { dir, branch }
@@ -111,7 +111,7 @@ export async function askForBranchName(
   signal?: AbortSignal,
 ): Promise<string> {
   const session = await client.session.create(
-    { directory: targetDir, title: "archer branch namer" },
+    { directory: targetDir, title: "convoy branch namer" },
     { signal: signal ?? undefined },
   )
   if (session.error || !session.data?.id) throw new Error("couldn't open a naming session")
@@ -176,7 +176,7 @@ export function cleanBranchName(raw: string): string {
 export function fallbackBranchName(): string {
   const stamp = new Date()
   const pad = (value: number) => String(value).padStart(2, "0")
-  return `archer-${stamp.getFullYear()}${pad(stamp.getMonth() + 1)}${pad(stamp.getDate())}-${randomSlug(4)}`
+  return `convoy-${stamp.getFullYear()}${pad(stamp.getMonth() + 1)}${pad(stamp.getDate())}-${randomSlug(4)}`
 }
 
 /** Filesystem-safe directory name for the worktree (mirrors the branch slug). */
@@ -185,7 +185,7 @@ export function slugifyBranch(branch: string): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
-  return slug || `archer-${randomSlug(6)}`
+  return slug || `convoy-${randomSlug(6)}`
 }
 
 function collectText(parts: ReadonlyArray<{ type: string; text?: string }>): string {

@@ -58,7 +58,7 @@ export async function ensureRepoReady(cwd: string, options: { includeDirty?: boo
         throw new Error(`repository at ${cwd} has no commits yet; create an initial commit first`)
       }
       throw new Error(
-        `base ref "${options.baseRef}" doesn't exist in this repo; pass a --base <ref> that exists (e.g. --base master), or drop --base / defaults.baseRef to let archer auto-detect the base branch`,
+        `base ref "${options.baseRef}" doesn't exist in this repo; pass a --base <ref> that exists (e.g. --base master), or drop --base / defaults.baseRef to let convoy auto-detect the base branch`,
       )
     }
   }
@@ -158,8 +158,8 @@ export async function initializeRepoWithInitialCommit(cwd: string, options: { ba
     )
   }
 
-  const commitArgs = porcelain.stdout.trim() === "" ? ["commit", "--allow-empty", "-m", "archer: initial commit"] : ["commit", "-m", "archer: initial commit"]
-  await execFile("git", commitArgs, { cwd, env: archerGitEnv })
+  const commitArgs = porcelain.stdout.trim() === "" ? ["commit", "--allow-empty", "-m", "convoy: initial commit"] : ["commit", "-m", "convoy: initial commit"]
+  await execFile("git", commitArgs, { cwd, env: convoyGitEnv })
 }
 
 export async function statusPorcelain(cwd: string): Promise<string> {
@@ -223,7 +223,7 @@ export async function describeRepoSnapshotDifference(snapshot: RepoSnapshot, cwd
 /**
  * Creates `<dir>` as a new worktree on a fresh `<branch>` based off `<baseRef>`
  * (a commit/ref in `cwd`'s repo). Used by the launcher's "isolate in a worktree"
- * flow so Archer runs against a clean checkout on a new branch.
+ * flow so Convoy runs against a clean checkout on a new branch.
  */
 export async function addWorktree(dir: string, branch: string, baseRef: string, cwd: string) {
   // `--` terminates option parsing so a `dir`/`baseRef` starting with `-`
@@ -261,16 +261,16 @@ export async function addAllAndCommit(message: string, cwd: string) {
 
   await execFile("git", ["commit", "-m", message], {
     cwd,
-    env: archerGitEnv,
+    env: convoyGitEnv,
   })
   return true
 }
 
-const archerGitEnv = {
-  GIT_AUTHOR_NAME: "archer",
-  GIT_AUTHOR_EMAIL: "archer@local",
-  GIT_COMMITTER_NAME: "archer",
-  GIT_COMMITTER_EMAIL: "archer@local",
+const convoyGitEnv = {
+  GIT_AUTHOR_NAME: "convoy",
+  GIT_AUTHOR_EMAIL: "convoy@local",
+  GIT_COMMITTER_NAME: "convoy",
+  GIT_COMMITTER_EMAIL: "convoy@local",
 }
 
 const secretPatterns: RegExp[] = [
@@ -328,7 +328,7 @@ async function realpathSafe(path: string) {
 async function requireRepoRoot(cwd: string) {
   const rootResult = await execFile("git", ["rev-parse", "--show-toplevel"], { cwd, allowFailure: true })
   if (rootResult.exitCode !== 0) {
-    throw new Error("archer must be run at the root of a git repo")
+    throw new Error("convoy must be run at the root of a git repo")
   }
   await assertRepoRoot(cwd, rootResult.stdout.trim())
 }
@@ -338,7 +338,7 @@ async function assertRepoRoot(cwd: string, rootPath: string) {
   // symlinked --dir (e.g. /tmp on macOS) doesn't false-positive.
   const root = await realpathSafe(rootPath)
   if (root !== (await realpathSafe(cwd))) {
-    throw new Error(`archer must be run at the root of the git repo (${root})`)
+    throw new Error(`convoy must be run at the root of the git repo (${root})`)
   }
 }
 

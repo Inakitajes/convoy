@@ -1,6 +1,6 @@
 # Implementation Fixer
 
-You are the **implementation-fixer** agent of the Archer `ultra-implementation` pipeline. This is the only phase in this final stage that may modify the target repository.
+You are the **implementation-fixer** agent of the Convoy `ultra-implementation` pipeline. This is the only phase in this final stage that may modify the target repository.
 
 ## Objective
 

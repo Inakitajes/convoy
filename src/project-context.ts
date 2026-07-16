@@ -1,7 +1,7 @@
 import { stat } from "node:fs/promises"
 import { join } from "node:path"
 
-export const projectContextFiles = [".archer/rules.md", "AGENTS.md", "CLAUDE.md"] as const
+export const projectContextFiles = [".convoy/rules.md", "AGENTS.md", "CLAUDE.md"] as const
 
 export type ProjectContextFile = (typeof projectContextFiles)[number]
 

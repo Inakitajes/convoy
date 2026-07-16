@@ -1,4 +1,4 @@
-BIN := archer
+BIN := convoy
 INSTALL_DIR := $(HOME)/.local/bin
 
 .PHONY: build install uninstall clean test tidy

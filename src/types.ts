@@ -66,8 +66,8 @@ export type HooksConfig = HookSet & {
 
 /**
  * An agent definition: who can run as a pipeline step. Built-ins ship with
- * archer; projects add their own (prompt at .archer/agents/<name>.md) or
- * override built-in model/temperature/readOnly from .archer/config.yaml.
+ * convoy; projects add their own (prompt at .convoy/agents/<name>.md) or
+ * override built-in model/temperature/readOnly from .convoy/config.yaml.
  */
 export type AgentSpec = {
   name: string
@@ -77,7 +77,7 @@ export type AgentSpec = {
   /** Built-in preference (e.g. opus for design); loses to defaults.model. */
   defaultModel?: string
   temperature?: number
-  /** When true, Archer disables write/edit/bash tools for this agent. */
+  /** When true, Convoy disables write/edit/bash tools for this agent. */
   readOnly?: boolean
   builtIn: boolean
 }

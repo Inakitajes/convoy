@@ -42,7 +42,7 @@ export function loadAgentPrompt(agentName: string, targetDir = process.cwd()) {
 }
 
 export function projectAgentPromptPath(agentName: string, targetDir: string) {
-  return join(targetDir, ".archer", "agents", `${agentName}.md`)
+  return join(targetDir, ".convoy", "agents", `${agentName}.md`)
 }
 
 function readProjectAgentPrompt(agentName: string, targetDir: string) {
@@ -63,7 +63,7 @@ function readBuiltInPrompt(promptName: string) {
   if (builtInAgents.some((agent) => agent.name === promptName) || promptName === runtimeSafetyPrompt) {
     throw new Error(`missing built-in prompt: add prompts/${promptName}.md to src/built-in-prompts.ts`)
   }
-  throw new Error(`agent "${promptName}" has no prompt; create .archer/agents/${promptName}.md in the target repo`)
+  throw new Error(`agent "${promptName}" has no prompt; create .convoy/agents/${promptName}.md in the target repo`)
 }
 
 function isFile(path: string) {

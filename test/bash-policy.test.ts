@@ -57,7 +57,7 @@ describe("bash policy", () => {
   })
 
   test("safe package.json scripts are allowlisted, dangerous names are not", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "archer-scripts-"))
+    const dir = await mkdtemp(join(tmpdir(), "convoy-scripts-"))
     try {
       await writeFile(
         join(dir, "package.json"),
@@ -90,7 +90,7 @@ describe("bash policy", () => {
   })
 
   test("project without package.json adds no script patterns", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "archer-noscripts-"))
+    const dir = await mkdtemp(join(tmpdir(), "convoy-noscripts-"))
     try {
       expect(projectScriptAllowPatterns(dir)).toEqual([])
     } finally {
@@ -104,12 +104,12 @@ describe("bash policy", () => {
       expect(policy[pattern]).toBe("deny")
     }
     // --yolo never touches the policy: unknowns still surface as ask and are
-    // resolved by archer's gate, where only ask-level requests can auto-allow.
+    // resolved by convoy's gate, where only ask-level requests can auto-allow.
     expect(policy["*"]).toBe("ask")
   })
 
   test("project permission additions extend the policy without weakening it", () => {
-    const policy = bashPolicy("/tmp/non-existent-archer-target", {
+    const policy = bashPolicy("/tmp/non-existent-convoy-target", {
       allow: ["supabase gen types*", "git push*"],
       deny: ["stripe *"],
     })

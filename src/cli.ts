@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises"
 import { resolve } from "node:path"
 
-import { buildAgentRegistry, emptyHooksConfig, loadMergedArcherConfig, selectPipelineSpec, writeDefaultGlobalConfig, writeDefaultProjectConfig, type ArcherDefaults } from "./config"
+import { buildAgentRegistry, emptyHooksConfig, loadMergedConvoyConfig, selectPipelineSpec, writeDefaultGlobalConfig, writeDefaultProjectConfig, type ConvoyDefaults } from "./config"
 import { detectBaseRef } from "./git"
 import { openRouterKeySources } from "./limits"
 import { log } from "./log"
@@ -15,7 +15,7 @@ import { isValidRunID } from "./workspace"
 /**
  * Flags as written: every scalar stays undefined until the user sets it, so
  * resolveRunOptions can tell "flag given" from "flag at its default" and apply
- * the precedence chain flag > .archer/config.yaml defaults > built-in default.
+ * the precedence chain flag > .convoy/config.yaml defaults > built-in default.
  */
 export type ParsedArgs = {
   prompt?: string
@@ -168,7 +168,7 @@ async function resumeOptions(runID: string, targetDir?: string): Promise<RunOpti
 }
 
 /**
- * The management key never touches archer's argv, env, or disk: `security`
+ * The management key never touches convoy's argv, env, or disk: `security`
  * itself prompts for the value and the status report only says which sources
  * exist, never what they contain.
  */
@@ -177,7 +177,7 @@ async function runAuthCommand(action: "set" | "remove" | "status") {
     const sources = await openRouterKeySources()
     const lines = [
       "openrouter key sources (in precedence order):",
-      `  keychain (archer auth openrouter)  ${sources.keychain ? "configured — exact /credits balance" : "not set"}`,
+      `  keychain (convoy auth openrouter)  ${sources.keychain ? "configured — exact /credits balance" : "not set"}`,
       `  env OPENROUTER_API_KEY             ${sources.env ? "set" : "not set"}`,
       `  opencode auth.json                 ${sources.opencode ? "present" : "not found"}`,
     ]
@@ -193,7 +193,7 @@ async function runAuthCommand(action: "set" | "remove" | "status") {
   if (!keychainAvailable()) {
     throw new Error("the keychain is only available on macOS; set OPENROUTER_API_KEY in the environment instead")
   }
-  process.stdout.write('storing the OpenRouter management key in the macOS Keychain (service "archer"):\n')
+  process.stdout.write('storing the OpenRouter management key in the macOS Keychain (service "convoy"):\n')
   const stored = await storeKeychainSecret("openrouter")
   if (!stored) throw new Error("security add-generic-password failed; the key was not stored")
   process.stdout.write("openrouter key stored — the run header will show the exact credit balance\n")
@@ -209,16 +209,16 @@ export async function parseCommand(argv: string[]): Promise<CliCommand> {
       if (rest.length === 1) return { type: "auth", provider: "openrouter", action: "set" }
       if (rest.length === 2 && rest[1] === "--remove") return { type: "auth", provider: "openrouter", action: "remove" }
     }
-    throw new Error("usage: archer auth [status] | archer auth openrouter [--remove]")
+    throw new Error("usage: convoy auth [status] | convoy auth openrouter [--remove]")
   }
   if (argv[0] === "runs") {
     const rest = argv.slice(1)
-    if (rest.length > 1) throw new Error("usage: archer runs [run-id]")
+    if (rest.length > 1) throw new Error("usage: convoy runs [run-id]")
     if (rest[0] !== undefined && !isValidRunID(rest[0])) throw new Error(`invalid run id: ${rest[0]}`)
     return { type: "runs", runID: rest[0] }
   }
   if (argv[0] === "config") {
-    if (argv.length > 1) throw new Error("usage: archer config")
+    if (argv.length > 1) throw new Error("usage: convoy config")
     return { type: "config", targetDir: process.cwd() }
   }
   if (argv[0] === "init") {
@@ -262,7 +262,7 @@ function parseInitArgs(argv: string[]): ParsedInitArgs {
 
   for (let i = 0; i < argv.length; i++) {
     const raw = argv[i]!
-    if (!raw.startsWith("-")) throw new Error("usage: archer init [--global] [--force] [--dir <path>]")
+    if (!raw.startsWith("-")) throw new Error("usage: convoy init [--global] [--force] [--dir <path>]")
 
     const { flag, value } = splitFlag(raw)
     const noValue = () => {
@@ -308,7 +308,7 @@ function parseInitArgs(argv: string[]): ParsedInitArgs {
 
 /** Applies the precedence chain and resolves the pipeline the run will execute. */
 export async function resolveRunOptions(parsed: ParsedArgs): Promise<Omit<RunOptions, "prompt">> {
-  const config = await loadMergedArcherConfig(parsed.targetDir)
+  const config = await loadMergedConvoyConfig(parsed.targetDir)
   const defaults = config?.defaults ?? {}
 
   const humanReview = parsed.humanReview ?? Boolean(process.stdin.isTTY && process.stdout.isTTY)
@@ -366,7 +366,7 @@ export async function resolveRunOptions(parsed: ParsedArgs): Promise<Omit<RunOpt
 
 // Base source: flag > config defaults.baseRef > auto-detection (never persisted).
 // An explicit base that doesn't exist stays a hard error in ensureRepoReady.
-async function resolveBaseRef(parsed: ParsedArgs, defaults: ArcherDefaults): Promise<string> {
+async function resolveBaseRef(parsed: ParsedArgs, defaults: ConvoyDefaults): Promise<string> {
   const explicit = parsed.baseRef ?? defaults.baseRef
   if (explicit) return explicit
   const detected = await detectBaseRef(parsed.baseDetectionDir ?? parsed.targetDir)
@@ -501,28 +501,28 @@ function listValue(value: string) {
 }
 
 function help() {
-  return `archer [prompt]
+  return `convoy [prompt]
 
 Sequential OpenCode agent pipeline for implementing features.
 
 Usage:
-  archer
-  archer "Add onboarding"
-  archer --prompt-file prd.md --file lib/onboarding --file test/onboarding_test.dart
-  archer --pipeline bug-fix --prompt-file bug.md
-  archer init
-  archer runs [run-id]
-  archer config
-  archer auth openrouter
+  convoy
+  convoy "Add onboarding"
+  convoy --prompt-file prd.md --file lib/onboarding --file test/onboarding_test.dart
+  convoy --pipeline bug-fix --prompt-file bug.md
+  convoy init
+  convoy runs [run-id]
+  convoy config
+  convoy auth openrouter
 
 Commands:
-  archer                   Open an interactive TUI launcher to pick a pipeline,
+  convoy                   Open an interactive TUI launcher to pick a pipeline,
                            enter a prompt, and toggle run options
-  init                     Create .archer/config.yaml and .archer/agents/*.md in the target repo
-  init --global            Create ~/.archer/config.yaml and ~/.archer/agents/*.md
+  init                     Create .convoy/config.yaml and .convoy/agents/*.md in the target repo
+  init --global            Create ~/.convoy/config.yaml and ~/.convoy/agents/*.md
   runs [run-id]            Browse run history: resume a run, read its summary/reports,
-                           or open a subshell in its run dir (under ~/.archer/runs)
-  config                   View and edit the global (~/.archer) and current project config in a TUI
+                           or open a subshell in its run dir (under ~/.convoy/runs)
+  config                   View and edit the global (~/.convoy) and current project config in a TUI
   auth openrouter          Store an OpenRouter management key in the macOS Keychain for the
                            header credits meter (--remove deletes it; "auth status" lists sources)
 
@@ -551,8 +551,8 @@ Flags:
   --dir <path>             Target repo (default: cwd)
 
 Config files:
-  ~/.archer/config.yaml    user defaults, created by make install or archer init --global
-  .archer/config.yaml      project-local overrides, created by archer init
+  ~/.convoy/config.yaml    user defaults, created by make install or convoy init --global
+  .convoy/config.yaml      project-local overrides, created by convoy init
   agents/*.md              Markdown prompts loaded by matching the agent name
 
 Config keys:
@@ -562,19 +562,19 @@ Config keys:
   permissions:             allow/deny additions to the bash policy (deny always wins)
   hooks:                   pre/post shell commands, globally or per pipeline
   attachments:             files attached to every step
-  The same schema lives globally at ~/.archer/config.yaml; project config merges on top.
+  The same schema lives globally at ~/.convoy/config.yaml; project config merges on top.
   Precedence: CLI flags > project config > global config > built-in defaults.
 `
 }
 
 function initHelp() {
-  return `archer init [--global] [--force] [--dir <path>]
+  return `convoy init [--global] [--force] [--dir <path>]
 
-Create Archer's default config file and agent prompt Markdown files. Existing files are not overwritten unless --force is set.
+Create Convoy's default config file and agent prompt Markdown files. Existing files are not overwritten unless --force is set.
 
 Options:
-  --global                 Write ~/.archer/config.yaml instead of a project config
-  --dir <path>             Target repo for .archer/config.yaml (default: cwd)
+  --global                 Write ~/.convoy/config.yaml instead of a project config
+  --dir <path>             Target repo for .convoy/config.yaml (default: cwd)
   --force                  Overwrite an existing config file
   --quiet                  Suppress status output
 `

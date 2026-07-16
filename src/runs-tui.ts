@@ -108,7 +108,7 @@ class RunsBrowser {
     })
 
     const shell = new BoxRenderable(renderer, {
-      id: "archer-runs-shell",
+      id: "convoy-runs-shell",
       width: "100%",
       height: "100%",
       backgroundColor: theme.bg,
@@ -118,14 +118,14 @@ class RunsBrowser {
     })
 
     const header = this.panel({
-      id: "archer-runs-header",
+      id: "convoy-runs-header",
       height: 5,
       borderColor: theme.border,
       backgroundColor: theme.bg,
     })
 
     const body = new BoxRenderable(renderer, {
-      id: "archer-runs-body",
+      id: "convoy-runs-body",
       width: "100%",
       flexGrow: 1,
       flexDirection: "row",
@@ -152,7 +152,7 @@ class RunsBrowser {
     }
 
     const list = this.panel({
-      id: "archer-runs-list",
+      id: "convoy-runs-list",
       height: "100%",
       flexGrow: 1,
       borderColor: theme.borderDim,
@@ -166,7 +166,7 @@ class RunsBrowser {
     list.text.onMouseScroll = wheelFromList
 
     const details = this.panel({
-      id: "archer-runs-details",
+      id: "convoy-runs-details",
       width: this.detailsWidth(),
       height: "100%",
       borderColor: theme.borderDim,
@@ -178,7 +178,7 @@ class RunsBrowser {
     details.text.onMouseScroll = wheelFromList
 
     const footer = this.panel({
-      id: "archer-runs-footer",
+      id: "convoy-runs-footer",
       height: 3,
       borderColor: theme.borderDim,
       backgroundColor: theme.bg,
@@ -206,7 +206,7 @@ class RunsBrowser {
     renderer.root.add(shell)
 
     this.overlay = new BoxRenderable(renderer, {
-      id: "archer-runs-summary-overlay",
+      id: "convoy-runs-summary-overlay",
       position: "absolute",
       left: 0,
       top: 0,
@@ -218,7 +218,7 @@ class RunsBrowser {
       visible: false,
     })
     this.modal = new BoxRenderable(renderer, {
-      id: "archer-runs-summary-modal",
+      id: "convoy-runs-summary-modal",
       border: true,
       borderStyle: "rounded",
       borderColor: theme.accent,
@@ -381,7 +381,7 @@ class RunsBrowser {
     const shell = process.env.SHELL || "/bin/sh"
     this.inSubshell = true
     this.renderer.suspend()
-    stdout.write(`opening ${shell} in ${run.dir}; type "exit" to return to archer\n`)
+    stdout.write(`opening ${shell} in ${run.dir}; type "exit" to return to convoy\n`)
     try {
       const proc = Bun.spawn([shell], {
         cwd: run.dir,
@@ -468,7 +468,7 @@ class RunsBrowser {
     const cost = this.runs.reduce((sum, run) => sum + (run.cost ?? 0), 0)
 
     const title: TextChunk[] = [
-      bold(fg(theme.accent)("◆ archer")),
+      bold(fg(theme.accent)("◆ convoy")),
       fg(theme.faint)("  ·  "),
       fg(theme.text)("run history"),
     ]

@@ -22,7 +22,7 @@ function listen(): Promise<{ port: number; close: () => void }> {
 let root: string
 
 beforeAll(async () => {
-  root = await mkdtemp(join(tmpdir(), "archer-runs-test-"))
+  root = await mkdtemp(join(tmpdir(), "convoy-runs-test-"))
 
   // Newer run with metadata: gets targetDir, phase summary, and cost.
   const newer = join(root, "20260610-120000-bbbb")

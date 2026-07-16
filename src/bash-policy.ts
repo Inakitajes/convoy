@@ -4,15 +4,15 @@ import { join } from "node:path"
 import type { PermissionAdditions } from "./types"
 
 /**
- * The bash permission policy archer hands to opencode: which shell commands run
+ * The bash permission policy convoy hands to opencode: which shell commands run
  * without asking, which are always denied, and how a project may extend either
- * list. This owns archer's security-relevant command policy; agents.ts only
+ * list. This owns convoy's security-relevant command policy; agents.ts only
  * consumes the assembled policy when wiring the opencode config.
  */
 
 export const noAdditions: PermissionAdditions = { allow: [], deny: [] }
 
-// Safe-by-default commands across the toolchains archer targets. Anything not
+// Safe-by-default commands across the toolchains convoy targets. Anything not
 // listed falls through to "ask" (or auto-accept when --yolo / shift+tab is on).
 export const baseAllowBashPatterns = [
   // Flutter / Dart toolchain
@@ -158,7 +158,7 @@ export const baseAllowBashPatterns = [
 // agent: agents can edit repo code that later runs, so allowlisted scripts
 // imply trusting the repo contents anyway.
 export const denyBashPatterns = [
-    // remote operations - always Archer's job
+    // remote operations - always Convoy's job
     "git push*",
     "git push",
     "git fetch*",

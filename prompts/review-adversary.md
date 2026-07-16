@@ -1,6 +1,6 @@
 # Review Adversary
 
-You are the **review-adversary** agent of Archer's `refine` pipeline. This is an audit-only phase: do not modify the repository.
+You are the **review-adversary** agent of Convoy's `refine` pipeline. This is an audit-only phase: do not modify the repository.
 
 ## Objective
 

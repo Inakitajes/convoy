@@ -33,7 +33,7 @@ export async function startOpencode(config: Config, signal?: AbortSignal): Promi
 }
 
 // A client for an opencode server already running elsewhere (a live run's
-// server), so `archer runs` can attach and mirror its event stream.
+// server), so `convoy runs` can attach and mirror its event stream.
 export function connectOpencode(url: string): OpencodeClient {
   return createOpencodeClient({ baseUrl: url, fetch: fetchWithoutIdleTimeout as typeof fetch })
 }
@@ -51,7 +51,7 @@ export type SessionWindowBackend = "ghostty" | "terminal"
 // Async on purpose: this is called from the TUI's render path, and a sync
 // osascript call would freeze the dashboard while macOS opens the window.
 // Prefers Ghostty when installed; Terminal.app is the fallback that always
-// works on macOS. ARCHER_TERMINAL=ghostty|terminal forces a backend.
+// works on macOS. CONVOY_TERMINAL=ghostty|terminal forces a backend.
 export async function openOpencodeSessionWindow(input: {
   url: string
   targetDir: string
@@ -86,7 +86,7 @@ export async function openStoredSessionWindow(input: {
 // Opens a standalone opencode TUI on a brand-new session seeded with an
 // initial prompt (--prompt submits it on startup). Standalone on purpose: the
 // run's server dies when the finish screen closes, and this window must
-// outlive archer so the user can keep iterating.
+// outlive convoy so the user can keep iterating.
 export async function openIterateOpencodeWindow(input: {
   targetDir: string
   prompt: string
@@ -102,7 +102,7 @@ export async function openSessionCommand(coreCommand: string, cwd?: string): Pro
 
   const command = sessionShellCommand(coreCommand, cwd)
 
-  const forced = process.env.ARCHER_TERMINAL?.toLowerCase()
+  const forced = process.env.CONVOY_TERMINAL?.toLowerCase()
   if (forced === "terminal") {
     await openInTerminalApp(command)
     return "terminal"

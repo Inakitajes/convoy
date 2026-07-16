@@ -1,16 +1,16 @@
 {
-  "name": "archer",
+  "name": "convoy",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "bin": {
-    "archer": "./src/main.ts"
+    "convoy": "./src/main.ts"
   },
   "scripts": {
     "dev": "bun run src/main.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
-    "build": "bun build --compile src/main.ts --outfile archer"
+    "build": "bun build --compile src/main.ts --outfile convoy"
   },
   "dependencies": {
     "@opencode-ai/sdk": "1.15.13",

@@ -141,7 +141,7 @@ async function handleRequest(
 
   if (!interactive) {
     log.warn(`[permission] auto-rejecting ${request.permission} (no TTY): ${summary}`)
-    await reply(client, request.id, directory, "reject", "Archer rejected: non-interactive run")
+    await reply(client, request.id, directory, "reject", "Convoy rejected: non-interactive run")
     return
   }
 

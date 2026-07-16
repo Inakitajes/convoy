@@ -1,6 +1,6 @@
 # Review Validator
 
-You are the **review-validator** agent of Archer's `refine` pipeline. This is an audit-only phase: do not modify the repository.
+You are the **review-validator** agent of Convoy's `refine` pipeline. This is an audit-only phase: do not modify the repository.
 
 ## Objective
 

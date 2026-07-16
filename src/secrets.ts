@@ -1,11 +1,11 @@
-// Secrets live in the macOS Keychain (service "archer", account = provider),
+// Secrets live in the macOS Keychain (service "convoy", account = provider),
 // never in env vars or files: `security add-generic-password` prompts for the
-// value itself with stdio inherited, so the secret never crosses archer's
+// value itself with stdio inherited, so the secret never crosses convoy's
 // argv, environment, or disk in the clear. Items created through the
 // `security` binary keep it in their ACL, so later reads don't raise GUI
 // prompts — the same mechanism runway uses for Claude Code's credential.
 
-const service = "archer"
+const service = "convoy"
 
 export function keychainAvailable() {
   return process.platform === "darwin"
