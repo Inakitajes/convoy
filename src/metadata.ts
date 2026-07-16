@@ -66,6 +66,9 @@ const saveDebounceMs = 2_000
 export async function openRunMetadata(workspace: Workspace, targetDir: string, pipeline: Pipeline): Promise<RunMetadataStore> {
   const path = join(workspace.dir, "metadata.json")
   const data = (await loadMetadata(path, workspace.runID)) ?? newMetadata(workspace.runID, targetDir)
+  // Step names are user-configurable safe identifiers and may still equal
+  // Object.prototype keys such as "constructor" or "__proto__".
+  data.phases = Object.assign(Object.create(null) as Record<string, PhaseMetadata>, data.phases)
   // First open freezes the pipeline; pre-pipeline (v1) runs adopt the current
   // one, whose default step names match what those runs executed.
   const effectivePipeline = (data.pipeline ??= pipeline)

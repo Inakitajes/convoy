@@ -449,6 +449,18 @@ describe("read-only repository boundary", () => {
     expect((await git(["rev-list", "--count", "HEAD"], repo)).trim()).toBe("1")
   })
 
+  test("detects untracked mutations even when git config hides untracked files", async () => {
+    const repo = await cleanRepo()
+    await git(["config", "status.showUntrackedFiles", "no"], repo)
+    const baseline = await createCleanRepoSnapshot(repo)
+    const phase = { ...agentStep("security"), readOnly: true }
+    await mkdir(join(repo, "nested"), { recursive: true })
+    await writeFile(join(repo, "nested", "hidden.txt"), "unexpected\n")
+
+    await expect(finalizePhaseRepository(phase, "/unused/report.md", repo, baseline)).rejects.toThrow("nested/hidden.txt")
+    expect(await readFile(join(repo, "nested", "hidden.txt"), "utf8")).toBe("unexpected\n")
+  })
+
   test("preserves commits created during a read-only step", async () => {
     const repo = await cleanRepo()
     const baseline = await createCleanRepoSnapshot(repo)

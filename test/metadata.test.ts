@@ -64,6 +64,22 @@ describe("run metadata", () => {
     await expect(store.phaseRepositoryBaseline("implementer", { head: "abc123", ref: "main" })).rejects.toThrow()
   })
 
+  test("persists lifecycle and baselines for step names that collide with Object.prototype", async () => {
+    const ws = await workspace()
+    const step = { ...quick.steps[0]!, name: "constructor", stepName: "constructor", reportPath: "reports/constructor.md" }
+    const pipeline: Pipeline = { name: "collision", steps: [step] }
+    const store = await openRunMetadata(ws, "/repo", pipeline)
+
+    store.phaseStarted(step.name)
+    await store.phaseRepositoryBaseline(step.name, { head: "abc123", ref: "main" })
+    store.phaseEnded(step.name, "failed")
+    await store.flush()
+
+    const resumed = await openRunMetadata(ws, "/repo", pipeline)
+    expect(resumed.phaseStatus(step.name)).toBe("failed")
+    expect(resumed.repositoryBaseline(step.name)).toEqual({ head: "abc123", ref: "main" })
+  })
+
   test("rejects frozen pipelines whose artifact paths escape the run directory", async () => {
     const ws = await workspace()
     const path = join(ws.dir, "metadata.json")
