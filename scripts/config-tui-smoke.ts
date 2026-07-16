@@ -5,29 +5,29 @@
  *
  *   bun run scripts/config-tui-smoke.ts
  *
- * Everything is isolated under a temp ARCHER_HOME; no network is required
+ * Everything is isolated under a temp CONVOY_HOME; no network is required
  * (model pickers are exercised through typed free-form entries).
  */
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-const scratch = await mkdtemp(join(tmpdir(), "archer-config-tui-smoke-"))
-process.env.ARCHER_HOME = scratch
+const scratch = await mkdtemp(join(tmpdir(), "convoy-config-tui-smoke-"))
+process.env.CONVOY_HOME = scratch
 
 const { createTestRenderer } = await import("@opentui/core/testing")
-const { loadGlobalArcherConfig } = await import("../src/config")
+const { loadGlobalConvoyConfig } = await import("../src/config")
 const { ConfigEditor } = await import("../src/config-tui")
 
-const globalArcherDir = join(scratch, ".archer")
-await mkdir(globalArcherDir, { recursive: true })
-await writeFile(join(globalArcherDir, "config.yaml"), "version: 1\ndefaults:\n  model: openai/gpt-5.6-terra#xhigh\n")
-const projectDir = await mkdtemp(join(tmpdir(), "archer-config-tui-smoke-project-"))
+const globalConvoyDir = join(scratch, ".convoy")
+await mkdir(globalConvoyDir, { recursive: true })
+await writeFile(join(globalConvoyDir, "config.yaml"), "version: 1\ndefaults:\n  model: openai/gpt-5.6-terra#xhigh\n")
+const projectDir = await mkdtemp(join(tmpdir(), "convoy-config-tui-smoke-project-"))
 
 const setup = await createTestRenderer({ width: 120, height: 40 })
 const { renderer, mockInput, flush, captureCharFrame } = setup
 
-const globalConfig = await loadGlobalArcherConfig()
+const globalConfig = await loadGlobalConvoyConfig()
 const editor = new ConfigEditor(renderer, projectDir, globalConfig, undefined)
 
 let failures = 0
@@ -152,7 +152,7 @@ try {
   mockInput.pressKey("RETURN")
   await flush()
 
-  const saved = await readFile(join(globalArcherDir, "config.yaml"), "utf8")
+  const saved = await readFile(join(globalConvoyDir, "config.yaml"), "utf8")
   check("saved YAML contains the review override", saved.includes("review:"))
   check("saved YAML contains the parallel block", saved.includes("parallel:"))
   check("saved YAML contains the typed fan-out", saved.includes("smoke/model-a") && saved.includes("smoke/model-b"))

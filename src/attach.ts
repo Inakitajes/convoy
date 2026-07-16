@@ -15,7 +15,7 @@ import type { ProgressPhaseSnapshot, ProgressUI } from "./progress"
 const pollMs = 1_000
 
 /**
- * Re-enters a run's archer dashboard from `archer runs`, without resuming it:
+ * Re-enters a run's convoy dashboard from `convoy runs`, without resuming it:
  * - a **live** run (its server is still up) is *attached* — history is replayed
  *   from metadata and the running phase's opencode events are mirrored into the
  *   dashboard in real time, read-only. Ctrl+C detaches without touching the run.

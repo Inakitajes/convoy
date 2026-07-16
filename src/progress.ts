@@ -14,7 +14,7 @@ export type ProgressPhase = {
   plannedVariant?: string
   /** Execution engine for the step; absent means OpenCode. The TUI's session window ([o]) branches on this. */
   runner?: StepRunner
-  /** Whether Archer restricts this phase to audit-only behavior. */
+  /** Whether Convoy restricts this phase to audit-only behavior. */
   readOnly?: boolean
 }
 

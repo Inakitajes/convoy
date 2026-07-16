@@ -43,7 +43,7 @@ export async function runHooks(stage: HookStage, hooks: readonly HookSpec[], con
   if (selected.length > 0) {
     const noun = `${stage}-hook${selected.length === 1 ? "" : "s"}`
     context.progress.message(`running ${selected.length} ${noun}`)
-    log.section(`archer ${noun}`)
+    log.section(`convoy ${noun}`)
   }
 
   // Every hook has a dashboard phase (added by progressPhases), so each one is
@@ -129,14 +129,14 @@ async function runHookCommand(stage: HookStage, hook: HookSpec, context: RunHook
   const cwd = hook.cwd === "run" ? context.workspace.dir : context.targetDir
   const env = {
     ...process.env,
-    ARCHER_HOOK_STAGE: stage,
-    ARCHER_HOOK_NAME: hook.name ?? "",
-    ARCHER_PIPELINE: context.pipelineName,
-    ARCHER_RUN_ID: context.workspace.runID,
-    ARCHER_RUN_DIR: context.workspace.dir,
-    ARCHER_TARGET_DIR: context.targetDir,
-    ARCHER_PROMPT_FILE: join(context.workspace.dir, "prd.md"),
-    ...(context.status ? { ARCHER_RUN_STATUS: context.status } : {}),
+    CONVOY_HOOK_STAGE: stage,
+    CONVOY_HOOK_NAME: hook.name ?? "",
+    CONVOY_PIPELINE: context.pipelineName,
+    CONVOY_RUN_ID: context.workspace.runID,
+    CONVOY_RUN_DIR: context.workspace.dir,
+    CONVOY_TARGET_DIR: context.targetDir,
+    CONVOY_PROMPT_FILE: join(context.workspace.dir, "prd.md"),
+    ...(context.status ? { CONVOY_RUN_STATUS: context.status } : {}),
   }
 
   const proc = Bun.spawn([shell, "-lc", hook.command], {

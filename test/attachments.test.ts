@@ -8,7 +8,7 @@ import { fileParts } from "../src/attachments"
 
 describe("fileParts", () => {
   test("normalizes text attachments to text/plain", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "archer-attachments-"))
+    const dir = await mkdtemp(join(tmpdir(), "convoy-attachments-"))
     try {
       await writeFile(join(dir, "prd.md"), "# PRD")
       await writeFile(join(dir, "phase.diff"), "diff --git a/a b/a")

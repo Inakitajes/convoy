@@ -12,7 +12,7 @@ import type { Workspace } from "../src/workspace"
 const dirs: string[] = []
 
 async function workspace(): Promise<Workspace> {
-  const dir = await mkdtemp(join(tmpdir(), "archer-metadata-"))
+  const dir = await mkdtemp(join(tmpdir(), "convoy-metadata-"))
   dirs.push(dir)
   return { dir, runID: "20260612-103045-ab12" }
 }

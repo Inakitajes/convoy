@@ -213,9 +213,9 @@ async function fetchGptUsage(): Promise<FetchResult<GptLimits>> {
 }
 
 async function resolveOpenRouterKey(): Promise<string | undefined> {
-  // Keychain (archer auth openrouter) wins: it's the management key that
+  // Keychain (convoy auth openrouter) wins: it's the management key that
   // unlocks the exact /credits balance. Re-resolved every tick so a fresh
-  // `archer auth` is picked up without restarting the TUI.
+  // `convoy auth` is picked up without restarting the TUI.
   const fromKeychain = await readKeychainSecret("openrouter")
   if (fromKeychain) return fromKeychain
   let opencodeAuth: unknown
@@ -227,7 +227,7 @@ async function resolveOpenRouterKey(): Promise<string | undefined> {
   return openRouterKeyFrom(process.env, opencodeAuth)
 }
 
-/** Which key sources exist, for `archer auth status`. Never exposes the keys. */
+/** Which key sources exist, for `convoy auth status`. Never exposes the keys. */
 export async function openRouterKeySources(): Promise<{ keychain: boolean; env: boolean; opencode: boolean }> {
   const keychain = (await readKeychainSecret("openrouter")) !== undefined
   let opencodeAuth: unknown
@@ -283,7 +283,7 @@ async function fetchOpenRouter(): Promise<FetchResult<OpenRouterLimits>> {
 // ---------------------------------------------------------------------------
 // Poller.
 
-// Last snapshot fetched by any poller in this process: archer's TUIs open in
+// Last snapshot fetched by any poller in this process: convoy's TUIs open in
 // quick succession (launcher → run dashboard, runs browser → reopened run),
 // and each one starts its own poller — the cache gives the next header its
 // data instantly and skips re-hitting the endpoints seconds apart.

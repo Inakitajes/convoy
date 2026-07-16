@@ -126,11 +126,11 @@ export function initialContentTab(mode: TuiDashboardMode): ContentTab {
 
 // The [i] iterate window's opening message. Plain absolute paths on purpose:
 // the fresh opencode instance reads them with its own tools, so this works
-// without the run's server and survives archer exiting. Single line because
+// without the run's server and survives convoy exiting. Single line because
 // the whole command travels through `zsh -lc`.
 export function iteratePrompt(runID: string, files: string[]): string {
   return (
-    `Continuing archer run ${runID}. First read these context files: ${files.join(", ")}. ` +
+    `Continuing convoy run ${runID}. First read these context files: ${files.join(", ")}. ` +
     "prd.md is the original task; each report is one pipeline step's output. " +
     "The work is already applied in this directory. After reading, give a one-line status and wait for my instructions."
   )
@@ -348,7 +348,7 @@ export class TuiProgress implements ProgressUI {
     if (mode !== "dark" && mode !== "light") return
     setTheme(paletteForTerminal(mode, terminalBackgroundHex(this.renderer)))
     this.applyPalette()
-    this.addEvent("archer", "system", `terminal theme changed: ${mode}`)
+    this.addEvent("convoy", "system", `terminal theme changed: ${mode}`)
     this.render()
   }
 
@@ -363,7 +363,7 @@ export class TuiProgress implements ProgressUI {
         this.finished.resolve()
         return
       }
-      this.addEvent("archer", "system", "ctrl+c received; shutting down")
+      this.addEvent("convoy", "system", "ctrl+c received; shutting down")
       this.render()
       this.onAbort?.()
       return
@@ -555,7 +555,7 @@ export class TuiProgress implements ProgressUI {
     }))
 
     const shell = new BoxRenderable(renderer, {
-      id: "archer-shell",
+      id: "convoy-shell",
       width: "100%",
       height: "100%",
       backgroundColor: theme.bg,
@@ -568,7 +568,7 @@ export class TuiProgress implements ProgressUI {
     // bordered box, so the header holds just the run totals row and the
     // subscription-meter row beneath it.
     const dirLine = new TextRenderable(renderer, {
-      id: "archer-dir",
+      id: "convoy-dir",
       content: "",
       fg: theme.text,
       width: "100%",
@@ -576,14 +576,14 @@ export class TuiProgress implements ProgressUI {
     })
 
     const header = this.panel({
-      id: "archer-header",
+      id: "convoy-header",
       height: 4,
       borderColor: theme.border,
       backgroundColor: theme.bg,
     })
 
     const body = new BoxRenderable(renderer, {
-      id: "archer-body",
+      id: "convoy-body",
       width: "100%",
       flexGrow: 1,
       flexDirection: "row",
@@ -609,7 +609,7 @@ export class TuiProgress implements ProgressUI {
     }
 
     const pipeline = this.panel({
-      id: "archer-pipeline",
+      id: "convoy-pipeline",
       width: pipelineWidth,
       height: "100%",
       borderColor: theme.borderDim,
@@ -623,7 +623,7 @@ export class TuiProgress implements ProgressUI {
     pipeline.text.onMouseScroll = wheelFromPipeline
 
     const right = new BoxRenderable(renderer, {
-      id: "archer-right",
+      id: "convoy-right",
       height: "100%",
       flexGrow: 1,
       flexDirection: "column",
@@ -639,7 +639,7 @@ export class TuiProgress implements ProgressUI {
     }
 
     const step = this.panel({
-      id: "archer-step",
+      id: "convoy-step",
       width: "100%",
       height: 8,
       borderColor: theme.borderDim,
@@ -653,7 +653,7 @@ export class TuiProgress implements ProgressUI {
     // Todos live in their own panel below the detail meta, showing the focused
     // phase's list whenever it has one.
     const todos = this.panel({
-      id: "archer-todos",
+      id: "convoy-todos",
       width: "100%",
       height: 3,
       borderColor: theme.borderDim,
@@ -689,7 +689,7 @@ export class TuiProgress implements ProgressUI {
     }
 
     const feed = this.panel({
-      id: "archer-feed",
+      id: "convoy-feed",
       width: "100%",
       flexGrow: 1,
       borderColor: theme.borderDim,
@@ -707,7 +707,7 @@ export class TuiProgress implements ProgressUI {
     }
 
     const footer = this.panel({
-      id: "archer-footer",
+      id: "convoy-footer",
       height: 3,
       borderColor: theme.borderDim,
       backgroundColor: theme.bg,
@@ -749,7 +749,7 @@ export class TuiProgress implements ProgressUI {
     renderer.root.add(shell)
 
     this.overlay = new BoxRenderable(renderer, {
-      id: "archer-permission-overlay",
+      id: "convoy-permission-overlay",
       position: "absolute",
       left: 0,
       top: 0,
@@ -761,7 +761,7 @@ export class TuiProgress implements ProgressUI {
       visible: false,
     })
     this.modal = new BoxRenderable(renderer, {
-      id: "archer-permission-modal",
+      id: "convoy-permission-modal",
       border: true,
       borderStyle: "rounded",
       borderColor: theme.yellow,
@@ -793,13 +793,13 @@ export class TuiProgress implements ProgressUI {
     this.runID = runID
     this.targetDir = targetDir
     this.runDir = runDir
-    this.addEvent("archer", "system", `run ${runID} started`)
+    this.addEvent("convoy", "system", `run ${runID} started`)
     this.render()
   }
 
   serverReady(url: string) {
     this.serverUrl = url
-    this.addEvent("archer", "system", `opencode server at ${url}`)
+    this.addEvent("convoy", "system", `opencode server at ${url}`)
     this.render()
   }
 
@@ -969,14 +969,14 @@ export class TuiProgress implements ProgressUI {
     // "smart" decisions are made in the gate before this call, so reaching here
     // in smart mode means the judge already escalated — show the prompt.
     if (this.autoAccept?.mode === "all") {
-      this.addEvent("archer", "permission", `auto-allowed: ${permissionSummary(info)}`)
+      this.addEvent("convoy", "permission", `auto-allowed: ${permissionSummary(info)}`)
       this.render()
       return Promise.resolve("once")
     }
     return new Promise((resolve) => {
       this.permissionQueue.push({ info, resolve })
       if (this.permissionQueue.length === 1) this.permissionChoice = 0
-      this.addEvent("archer", "permission", `approval needed: ${permissionSummary(info)}`)
+      this.addEvent("convoy", "permission", `approval needed: ${permissionSummary(info)}`)
       this.render()
     })
   }
@@ -1017,7 +1017,7 @@ export class TuiProgress implements ProgressUI {
       this.resetContentScroll()
       for (const pending of this.permissionQueue.splice(0)) pending.resolve("reject")
       this.addEvent(
-        "archer",
+        "convoy",
         outcome.status === "completed" ? "system" : "error",
         outcome.status === "completed" ? "run completed" : `run failed: ${outcome.error ?? "unknown error"}`,
       )
@@ -1155,7 +1155,7 @@ export class TuiProgress implements ProgressUI {
     const lazygit = Bun.which("lazygit")
     const argv = lazygit ? [lazygit] : ["git", "log", "--graph", "--decorate", "--stat"]
     const label = lazygit ? "lazygit" : "git log"
-    if (!lazygit) this.addEvent("archer", "system", "lazygit not installed; falling back to git log")
+    if (!lazygit) this.addEvent("convoy", "system", "lazygit not installed; falling back to git log")
     this.inSubshell = true
     this.suspend()
     try {
@@ -1167,9 +1167,9 @@ export class TuiProgress implements ProgressUI {
         env: process.env,
       })
       const code = await proc.exited
-      if (code !== 0) this.addEvent("archer", "error", `${label} exited with code ${code}`)
+      if (code !== 0) this.addEvent("convoy", "error", `${label} exited with code ${code}`)
     } catch (error) {
-      this.addEvent("archer", "error", `couldn't launch ${label}: ${error instanceof Error ? error.message : String(error)}`)
+      this.addEvent("convoy", "error", `couldn't launch ${label}: ${error instanceof Error ? error.message : String(error)}`)
     } finally {
       this.inSubshell = false
       this.resume()
@@ -1201,7 +1201,7 @@ export class TuiProgress implements ProgressUI {
   }
 
   message(message: string) {
-    this.addEvent("archer", "system", message)
+    this.addEvent("convoy", "system", message)
     this.render()
   }
 
@@ -1301,12 +1301,12 @@ export class TuiProgress implements ProgressUI {
     const order = ["off", "all", "smart"] as const
     const next = order[(order.indexOf(this.autoAccept.mode) + 1) % order.length]!
     this.autoAccept.mode = next
-    this.addEvent("archer", "permission", autoAcceptAnnouncement[next])
+    this.addEvent("convoy", "permission", autoAcceptAnnouncement[next])
     // Only "all" clears the backlog blindly; "smart" leaves already-escalated
     // prompts for the user (re-judging an open prompt would be surprising).
     if (next === "all") {
       for (const pending of this.permissionQueue.splice(0)) {
-        this.addEvent("archer", "permission", `auto-allowed: ${permissionSummary(pending.info)}`)
+        this.addEvent("convoy", "permission", `auto-allowed: ${permissionSummary(pending.info)}`)
         pending.resolve("once")
       }
       this.permissionChoice = 0
@@ -1319,7 +1319,7 @@ export class TuiProgress implements ProgressUI {
     if (!pending) return
     this.permissionChoice = 0
     const verdict = reply === "once" ? "allowed once" : reply === "always" ? "always allowed" : "rejected"
-    this.addEvent("archer", "permission", `${verdict}: ${permissionSummary(pending.info)}`)
+    this.addEvent("convoy", "permission", `${verdict}: ${permissionSummary(pending.info)}`)
     pending.resolve(reply)
     this.render()
   }
@@ -1350,13 +1350,13 @@ export class TuiProgress implements ProgressUI {
   // back to any running phase if focus somehow lands on one without a session.
   private openActiveSessionWindow(source: "click" | "key") {
     if (this.selectedGroup) {
-      this.addEvent("archer", "system", "select a model row to open its OpenCode session")
+      this.addEvent("convoy", "system", "select a model row to open its OpenCode session")
       this.render()
       return
     }
     const active = this.focusedPhase() ?? this.phases.find((phase) => phase.status === "running")
     if (!active) {
-      this.addEvent("archer", "system", "no active opencode session to open yet")
+      this.addEvent("convoy", "system", "no active opencode session to open yet")
       this.render()
       return
     }
@@ -1370,18 +1370,18 @@ export class TuiProgress implements ProgressUI {
   private toggleInteractiveTakeover() {
     if (this.finished) return
     if (this.observer) {
-      this.addEvent("archer", "system", "interactive mode isn't available while attached read-only")
+      this.addEvent("convoy", "system", "interactive mode isn't available while attached read-only")
       this.render()
       return
     }
     if (this.selectedGroup) {
-      this.addEvent("archer", "system", "select a running model row before enabling interactive mode")
+      this.addEvent("convoy", "system", "select a running model row before enabling interactive mode")
       this.render()
       return
     }
     const phase = this.focusedPhase() ?? this.phases.find((candidate) => candidate.status === "running")
     if (!phase || phase.status !== "running") {
-      this.addEvent("archer", "system", "interactive mode needs a running step")
+      this.addEvent("convoy", "system", "interactive mode needs a running step")
       this.render()
       return
     }
@@ -1403,7 +1403,7 @@ export class TuiProgress implements ProgressUI {
       return
     }
     this.interactiveTakeover.add(phase.name)
-    this.addEvent(phase.name, "system", "interactive mode armed — esc in OpenCode stops the agent; archer will wait for you")
+    this.addEvent(phase.name, "system", "interactive mode armed — esc in OpenCode stops the agent; convoy will wait for you")
     this.openSessionWindowForPhase(phase.name, "key")
   }
 
@@ -1412,7 +1412,7 @@ export class TuiProgress implements ProgressUI {
     if (!phase) return
     const runner = stepRunnerFor(phase.runner)
     if (!phase.sessionID) {
-      this.addEvent("archer", "system", `no ${runner.sessionName} session for ${name} yet`)
+      this.addEvent("convoy", "system", `no ${runner.sessionName} session for ${name} yet`)
       this.render()
       return
     }
@@ -1432,20 +1432,20 @@ export class TuiProgress implements ProgressUI {
       offlineSessions: this.offlineSessions,
     })
     if (!open) {
-      this.addEvent("archer", "system", `${runner.sessionName} session is not ready yet`)
+      this.addEvent("convoy", "system", `${runner.sessionName} session is not ready yet`)
       this.render()
       return
     }
 
     if (!runner.capabilities.liveAttach) this.iterateRequested = true
-    this.addEvent("archer", "system", `${source === "key" ? "[o]" : "click"}: opening ${name} ${runner.sessionName} session ${shortID(phase.sessionID)}`)
+    this.addEvent("convoy", "system", `${source === "key" ? "[o]" : "click"}: opening ${name} ${runner.sessionName} session ${shortID(phase.sessionID)}`)
     open
       .then((backend) => {
-        this.addEvent("archer", "system", `${name} session opened in ${backend}`)
+        this.addEvent("convoy", "system", `${name} session opened in ${backend}`)
         this.render()
       })
       .catch((error: unknown) => {
-        this.addEvent("archer", "error", `couldn't open ${runner.sessionName} session: ${error instanceof Error ? error.message : String(error)}`)
+        this.addEvent("convoy", "error", `couldn't open ${runner.sessionName} session: ${error instanceof Error ? error.message : String(error)}`)
         this.render()
       })
     this.render()
@@ -1456,7 +1456,7 @@ export class TuiProgress implements ProgressUI {
   // step reports — so iterating continues from where the pipeline left off.
   private async openIterateWindow() {
     if (!this.runDir) {
-      this.addEvent("archer", "system", "no run directory to build iterate context from")
+      this.addEvent("convoy", "system", "no run directory to build iterate context from")
       this.render()
       return
     }
@@ -1466,23 +1466,23 @@ export class TuiProgress implements ProgressUI {
       if (await fileReadable(path)) files.push(path)
     }
     if (files.length === 0) {
-      this.addEvent("archer", "system", "no context files found in the run dir; was it cleaned up?")
+      this.addEvent("convoy", "system", "no context files found in the run dir; was it cleaned up?")
       this.render()
       return
     }
 
     this.iterateRequested = true
-    this.addEvent("archer", "system", `[i]: opening a new opencode session with ${files.length} context file${files.length === 1 ? "" : "s"}`)
+    this.addEvent("convoy", "system", `[i]: opening a new opencode session with ${files.length} context file${files.length === 1 ? "" : "s"}`)
     openIterateOpencodeWindow({
       targetDir: this.targetDir || process.cwd(),
       prompt: iteratePrompt(this.runID, files),
     })
       .then((backend) => {
-        this.addEvent("archer", "system", `iterate session opened in ${backend}`)
+        this.addEvent("convoy", "system", `iterate session opened in ${backend}`)
         this.render()
       })
       .catch((error: unknown) => {
-        this.addEvent("archer", "error", `couldn't open iterate session: ${error instanceof Error ? error.message : String(error)}`)
+        this.addEvent("convoy", "error", `couldn't open iterate session: ${error instanceof Error ? error.message : String(error)}`)
         this.render()
       })
     this.render()
@@ -1621,7 +1621,7 @@ export class TuiProgress implements ProgressUI {
       fg(theme.faint)("  ·  "),
       fg(theme.dim)(`↑${formatCount(usage.tokens.input)} ↓${formatCount(usage.tokens.output)} tokens`),
     ]
-    const title: TextChunk[] = [bold(fg(theme.accent)("◆ archer"))]
+    const title: TextChunk[] = [bold(fg(theme.accent)("◆ convoy"))]
     if (this.finished) {
       title.push(
         fg(theme.faint)("  ·  "),

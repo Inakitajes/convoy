@@ -9,7 +9,7 @@ import { builtInPrompts } from "../src/built-in-prompts"
 
 describe("opencode config", () => {
   test("disables total provider timeouts but keeps idle stream timeouts", () => {
-    const config = opencodeConfig("/tmp/archer-run")
+    const config = opencodeConfig("/tmp/convoy-run")
 
     for (const provider of ["anthropic", "openai", "openrouter"]) {
       expect(config.provider?.[provider]?.options?.timeout).toBe(false)
@@ -27,41 +27,41 @@ describe("opencode config", () => {
   })
 
   test("loads built-in markdown prompts with runtime safety guard rails", () => {
-    const prompt = loadAgentPrompt("implementer", "/tmp/non-existent-archer-target")
+    const prompt = loadAgentPrompt("implementer", "/tmp/non-existent-convoy-target")
 
     expect(prompt).toContain("# Implementer")
-    expect(prompt).toContain("# Archer Runtime Safety")
+    expect(prompt).toContain("# Convoy Runtime Safety")
     expect(prompt).toContain("not replaceable")
   })
 
   test("project agent prompts replace built-ins but keep runtime safety", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "archer-agents-"))
+    const dir = await mkdtemp(join(tmpdir(), "convoy-agents-"))
     try {
-      await mkdir(join(dir, ".archer", "agents"), { recursive: true })
-      await writeFile(join(dir, ".archer", "agents", "implementer.md"), "# Custom Implementer\n\nProject-specific prompt.")
+      await mkdir(join(dir, ".convoy", "agents"), { recursive: true })
+      await writeFile(join(dir, ".convoy", "agents", "implementer.md"), "# Custom Implementer\n\nProject-specific prompt.")
 
       const prompt = loadAgentPrompt("implementer", dir)
 
       expect(prompt.startsWith("# Custom Implementer")).toBe(true)
       expect(prompt).toContain("Project-specific prompt.")
       expect(prompt).not.toContain("# Implementer\n\nYou are the **implementer**")
-      expect(prompt).toContain("# Archer Runtime Safety")
+      expect(prompt).toContain("# Convoy Runtime Safety")
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
   })
 
   test("project agents need a prompt file", () => {
-    expect(() => loadAgentPrompt("ghost", "/tmp/non-existent-archer-target")).toThrow("create .archer/agents/ghost.md")
+    expect(() => loadAgentPrompt("ghost", "/tmp/non-existent-convoy-target")).toThrow("create .convoy/agents/ghost.md")
   })
 
   test("project agents land in the opencode config with their prompt and temperature", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "archer-custom-agent-"))
+    const dir = await mkdtemp(join(tmpdir(), "convoy-custom-agent-"))
     try {
-      await mkdir(join(dir, ".archer", "agents"), { recursive: true })
-      await writeFile(join(dir, ".archer", "agents", "api-reviewer.md"), "# API Reviewer\n\nReview the API surface.")
+      await mkdir(join(dir, ".convoy", "agents"), { recursive: true })
+      await writeFile(join(dir, ".convoy", "agents", "api-reviewer.md"), "# API Reviewer\n\nReview the API surface.")
 
-      const config = opencodeConfig("/tmp/archer-run", dir, [
+      const config = opencodeConfig("/tmp/convoy-run", dir, [
         { name: "implementer", description: "Implements", builtIn: true },
         { name: "api-reviewer", description: "Reviews APIs", temperature: 0.3, builtIn: false },
       ])
@@ -70,7 +70,7 @@ describe("opencode config", () => {
       expect(custom?.description).toBe("Reviews APIs")
       expect(custom?.temperature).toBe(0.3)
       expect(custom?.prompt).toContain("# API Reviewer")
-      expect(custom?.prompt).toContain("# Archer Runtime Safety")
+      expect(custom?.prompt).toContain("# Convoy Runtime Safety")
       expect(config.agent?.implementer?.temperature).toBeUndefined()
     } finally {
       await rm(dir, { recursive: true, force: true })
@@ -78,14 +78,14 @@ describe("opencode config", () => {
   })
 
   test("a synthesized forced-read-only agent (__ro suffix) loads the base agent's prompt, not its own", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "archer-ro-variant-"))
+    const dir = await mkdtemp(join(tmpdir(), "convoy-ro-variant-"))
     try {
-      await mkdir(join(dir, ".archer", "agents"), { recursive: true })
-      await writeFile(join(dir, ".archer", "agents", "clean-code.md"), "# Clean Code\n\nLook for unnecessary complexity.")
+      await mkdir(join(dir, ".convoy", "agents"), { recursive: true })
+      await writeFile(join(dir, ".convoy", "agents", "clean-code.md"), "# Clean Code\n\nLook for unnecessary complexity.")
 
       // Only "clean-code" has a prompt file on disk; "clean-code__ro" is
       // synthesized by synthesizeReadOnlyAgents and must not need its own.
-      const config = opencodeConfig("/tmp/archer-run", dir, [
+      const config = opencodeConfig("/tmp/convoy-run", dir, [
         { name: "clean-code", description: "Clean code review", builtIn: false },
         { name: "clean-code__ro", description: "Clean code review", readOnly: true, builtIn: false },
       ])
@@ -104,12 +104,12 @@ describe("opencode config", () => {
   })
 
   test("read-only agents cannot write, edit, or run shell commands", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "archer-readonly-agent-"))
+    const dir = await mkdtemp(join(tmpdir(), "convoy-readonly-agent-"))
     try {
-      await mkdir(join(dir, ".archer", "agents"), { recursive: true })
-      await writeFile(join(dir, ".archer", "agents", "audit-only.md"), "# Audit Only\n\nReview without editing.")
+      await mkdir(join(dir, ".convoy", "agents"), { recursive: true })
+      await writeFile(join(dir, ".convoy", "agents", "audit-only.md"), "# Audit Only\n\nReview without editing.")
 
-      const config = opencodeConfig("/tmp/archer-run", dir, [{ name: "audit-only", description: "Audits only", readOnly: true, builtIn: false }])
+      const config = opencodeConfig("/tmp/convoy-run", dir, [{ name: "audit-only", description: "Audits only", readOnly: true, builtIn: false }])
 
       const audit = config.agent?.["audit-only"]
       expect(audit?.tools?.read).toBe(true)

@@ -7,13 +7,13 @@ import {
   checkPipelineResolves,
   defaultConfigTemplate,
   isValidModelString,
-  loadArcherConfig,
-  loadGlobalArcherConfig,
+  loadConvoyConfig,
+  loadGlobalConvoyConfig,
   materializePipelineSpec,
-  mergeArcherConfigs,
-  writeArcherConfig,
-  type ArcherConfig,
-  type ArcherDefaults,
+  mergeConvoyConfigs,
+  writeConvoyConfig,
+  type ConvoyConfig,
+  type ConvoyDefaults,
   type ConfigAgent,
 } from "./config"
 import { listModels, type ModelChoice } from "./model-catalog"
@@ -44,7 +44,7 @@ import {
   theme,
   truncate,
 } from "./tui-theme"
-import { archerRoot, globalConfigPath } from "./workspace"
+import { convoyRoot, globalConfigPath } from "./workspace"
 
 import type { BoxOptions, CliRenderer, KeyEvent, TextChunk } from "@opentui/core"
 import type { PaletteColor } from "./tui-theme"
@@ -52,9 +52,9 @@ import type { HookSpec } from "./types"
 
 export async function editConfigTui(options: { targetDir: string }): Promise<void> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
-    throw new Error("archer config needs an interactive terminal")
+    throw new Error("convoy config needs an interactive terminal")
   }
-  const [globalConfig, projectConfig] = await Promise.all([loadGlobalArcherConfig(), loadArcherConfig(options.targetDir)])
+  const [globalConfig, projectConfig] = await Promise.all([loadGlobalConvoyConfig(), loadConvoyConfig(options.targetDir)])
 
   const renderer = await createCliRenderer({
     screenMode: "alternate-screen",
@@ -70,9 +70,9 @@ export async function editConfigTui(options: { targetDir: string }): Promise<voi
 type Tab = {
   readonly title: string
   readonly path: string
-  /** Where agent-prompt validation resolves on save: archerHome() for global, the repo for project. */
+  /** Where agent-prompt validation resolves on save: convoyHome() for global, the repo for project. */
   readonly validateDir: string
-  config?: ArcherConfig
+  config?: ConvoyConfig
   dirty: boolean
 }
 
@@ -108,7 +108,7 @@ type RowMeta =
   | { t: "add-pipeline" }
   | { t: "builtin"; name: string }
 
-type DefaultField = { key: keyof ArcherDefaults; type: "model" | "number" | "string" }
+type DefaultField = { key: keyof ConvoyDefaults; type: "model" | "number" | "string" }
 
 type Row = {
   chunks: (selected: boolean, width: number) => TextChunk[]
@@ -187,19 +187,19 @@ export class ConfigEditor {
   constructor(
     private readonly renderer: CliRenderer,
     targetDir: string,
-    globalConfig: ArcherConfig | undefined,
-    projectConfig: ArcherConfig | undefined,
+    globalConfig: ConvoyConfig | undefined,
+    projectConfig: ConvoyConfig | undefined,
   ) {
     this.tabs = [
-      { title: "Global", path: globalConfigPath(), validateDir: archerRoot(), config: globalConfig, dirty: false },
-      { title: "Project", path: join(targetDir, ".archer", "config.yaml"), validateDir: targetDir, config: projectConfig, dirty: false },
+      { title: "Global", path: globalConfigPath(), validateDir: convoyRoot(), config: globalConfig, dirty: false },
+      { title: "Project", path: join(targetDir, ".convoy", "config.yaml"), validateDir: targetDir, config: projectConfig, dirty: false },
     ]
     this.result = new Promise((resolve) => {
       this.resolveResult = resolve
     })
 
     const shell = new BoxRenderable(renderer, {
-      id: "archer-config-shell",
+      id: "convoy-config-shell",
       width: "100%",
       height: "100%",
       backgroundColor: theme.bg,
@@ -207,10 +207,10 @@ export class ConfigEditor {
       paddingX: 1,
     })
 
-    const header = this.panel({ id: "archer-config-header", height: 4, borderColor: theme.border, backgroundColor: theme.bg })
-    const body = new BoxRenderable(renderer, { id: "archer-config-body", width: "100%", flexGrow: 1, flexDirection: "row", gap: 1 })
+    const header = this.panel({ id: "convoy-config-header", height: 4, borderColor: theme.border, backgroundColor: theme.bg })
+    const body = new BoxRenderable(renderer, { id: "convoy-config-body", width: "100%", flexGrow: 1, flexDirection: "row", gap: 1 })
     const list = this.panel({
-      id: "archer-config-list",
+      id: "convoy-config-list",
       height: "100%",
       flexGrow: 1,
       borderColor: theme.borderDim,
@@ -219,7 +219,7 @@ export class ConfigEditor {
       titleAlignment: "left",
     })
     const detail = this.panel({
-      id: "archer-config-detail",
+      id: "convoy-config-detail",
       width: this.detailWidth(),
       height: "100%",
       borderColor: theme.borderDim,
@@ -227,7 +227,7 @@ export class ConfigEditor {
       title: " field ",
       titleAlignment: "left",
     })
-    const footer = this.panel({ id: "archer-config-footer", height: 3, borderColor: theme.borderDim, backgroundColor: theme.bg })
+    const footer = this.panel({ id: "convoy-config-footer", height: 3, borderColor: theme.borderDim, backgroundColor: theme.bg })
 
     this.headerText = header.text
     this.listText = list.text
@@ -251,7 +251,7 @@ export class ConfigEditor {
     renderer.root.add(shell)
 
     this.overlay = new BoxRenderable(renderer, {
-      id: "archer-config-overlay",
+      id: "convoy-config-overlay",
       position: "absolute",
       left: 0,
       top: 0,
@@ -263,7 +263,7 @@ export class ConfigEditor {
       visible: false,
     })
     this.modalBox = new BoxRenderable(renderer, {
-      id: "archer-config-modal",
+      id: "convoy-config-modal",
       border: true,
       borderStyle: "rounded",
       borderColor: theme.accent,
@@ -971,7 +971,7 @@ export class ConfigEditor {
 
   /**
    * The defaults.model a run would resolve steps against from this tab's
-   * viewpoint: project ?? global on the Project tab (mergeArcherConfigs lets
+   * viewpoint: project ?? global on the Project tab (mergeConvoyConfigs lets
    * project win), the global one on the Global tab. Drives whether built-in
    * agent model preferences must be pinned when materializing a built-in.
    */
@@ -981,9 +981,9 @@ export class ConfigEditor {
     return this.tabs[1].config?.defaults.model ?? global
   }
 
-  private effectiveConfig(): ArcherConfig | undefined {
+  private effectiveConfig(): ConvoyConfig | undefined {
     if (this.active === 0) return this.tabs[0].config
-    return mergeArcherConfigs(this.tabs[0].config, this.tabs[1].config)
+    return mergeConvoyConfigs(this.tabs[0].config, this.tabs[1].config)
   }
 
   private moveStep(direction: -1 | 1) {
@@ -1076,10 +1076,10 @@ export class ConfigEditor {
     await this.persist(config)
   }
 
-  private async persist(config: ArcherConfig) {
+  private async persist(config: ConvoyConfig) {
     const tab = this.tab()
     try {
-      await writeArcherConfig(tab.path, config, tab.validateDir)
+      await writeConvoyConfig(tab.path, config, tab.validateDir)
       tab.config = config
       tab.dirty = false
       this.message("Saved", tab.path)
@@ -1114,7 +1114,7 @@ export class ConfigEditor {
     this.modal = modal
     this.render()
     // Model edits target the project repo for provider resolution; the global tab has none of its own.
-    const dir = this.tab().validateDir === archerRoot() ? process.cwd() : this.tab().validateDir
+    const dir = this.tab().validateDir === convoyRoot() ? process.cwd() : this.tab().validateDir
     listModels(dir)
       .then((choices) => {
         if (this.modal !== modal) return
@@ -1153,7 +1153,7 @@ export class ConfigEditor {
     this.modal = modal
     this.render()
     // Same provider resolution as the single picker: the global tab has no repo of its own.
-    const dir = this.tab().validateDir === archerRoot() ? process.cwd() : this.tab().validateDir
+    const dir = this.tab().validateDir === convoyRoot() ? process.cwd() : this.tab().validateDir
     listModels(dir)
       .then((choices) => {
         if (this.modal !== modal) return
@@ -1274,10 +1274,10 @@ export class ConfigEditor {
       }
     }
 
-    rows.push(blankRow(), sectionRow("Permissions  (read-only — edit in .archer/config.yaml)"))
+    rows.push(blankRow(), sectionRow("Permissions  (read-only — edit in .convoy/config.yaml)"))
     rows.push(infoRow(readonlyList("allow", config.permissions.allow)))
     rows.push(infoRow(readonlyList("deny", config.permissions.deny)))
-    rows.push(blankRow(), sectionRow("Hooks  (read-only — edit in .archer/config.yaml)"))
+    rows.push(blankRow(), sectionRow("Hooks  (read-only — edit in .convoy/config.yaml)"))
     rows.push(infoRow(readonlyList("pre", config.hooks.pre.map(describeHook))))
     rows.push(infoRow(readonlyList("post", config.hooks.post.map(describeHook))))
     const pipelineHooks = Object.entries(config.hooks.pipelines).flatMap(([name, set]) => [
@@ -1285,7 +1285,7 @@ export class ConfigEditor {
       ...set.post.map((hook) => `${name}:post:${describeHook(hook)}`),
     ])
     rows.push(infoRow(readonlyList("pipeline", pipelineHooks)))
-    rows.push(blankRow(), sectionRow("Attachments  (read-only — edit in .archer/config.yaml)"))
+    rows.push(blankRow(), sectionRow("Attachments  (read-only — edit in .convoy/config.yaml)"))
     rows.push(infoRow(readonlyList("files", config.attachments)))
 
     return rows
@@ -1327,7 +1327,7 @@ export class ConfigEditor {
       const label = `${tab.title}${tab.dirty ? " ●" : ""}`
       tabs.push(index === this.active ? bold(fg(theme.accent)(`▸ ${label}`)) : fg(theme.dim)(`  ${label}`))
     })
-    const title: TextChunk[] = [bold(fg(theme.accent)("◆ archer")), fg(theme.faint)("  ·  "), fg(theme.text)("config")]
+    const title: TextChunk[] = [bold(fg(theme.accent)("◆ convoy")), fg(theme.faint)("  ·  "), fg(theme.text)("config")]
     const line1 = padBetween(title, tabs, width)
     const line2 = new StyledText([fg(theme.dim)(truncate(shortenPath(this.tab().path), width))])
     return joinLines([line1, line2])
@@ -1635,7 +1635,7 @@ function memberRow(pipeline: string, index: number, member: number, spec: string
 
 // ---- pure helpers ----------------------------------------------------------
 
-function setDefault(defaults: ArcherDefaults, key: keyof ArcherDefaults, value: string | number | undefined) {
+function setDefault(defaults: ConvoyDefaults, key: keyof ConvoyDefaults, value: string | number | undefined) {
   const record = defaults as Record<string, unknown>
   if (value === undefined) delete record[key]
   else record[key] = value
@@ -1857,7 +1857,7 @@ function wrapText(text: string, width: number): string[] {
 }
 
 /** Drops empty agent override entries so they don't serialize as `name: {}`. */
-function pruneConfig(config: ArcherConfig): ArcherConfig {
+function pruneConfig(config: ConvoyConfig): ConvoyConfig {
   const agents: Record<string, ConfigAgent> = {}
   for (const [name, agent] of Object.entries(config.agents)) {
     if (Object.keys(agent).length > 0) agents[name] = agent
@@ -1892,7 +1892,7 @@ function optionHint(option: ModelChoice | ChooseItem): string {
   return option.hint ?? ""
 }
 
-function describeDefault(key: keyof ArcherDefaults): string {
+function describeDefault(key: keyof ConvoyDefaults): string {
   switch (key) {
     case "model":
       return "Default model for steps with no model of their own."

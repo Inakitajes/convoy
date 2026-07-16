@@ -10,16 +10,16 @@ import {
   ConfigError,
   defaultConfigTemplate,
   isValidModelString,
-  loadArcherConfig,
-  loadGlobalArcherConfig,
-  loadMergedArcherConfig,
+  loadConvoyConfig,
+  loadGlobalConvoyConfig,
+  loadMergedConvoyConfig,
   materializePipelineSpec,
-  mergeArcherConfigs,
-  parseArcherConfig,
+  mergeConvoyConfigs,
+  parseConvoyConfig,
   selectPipelineSpec,
-  serializeArcherConfig,
-  writeArcherConfig,
-  writeDefaultArcherConfig,
+  serializeConvoyConfig,
+  writeConvoyConfig,
+  writeDefaultConvoyConfig,
   writeDefaultProjectConfig,
 } from "../src/config"
 import {
@@ -36,12 +36,12 @@ import {
 const dirs: string[] = []
 
 async function projectDir(config?: string, agentPrompts: string[] = []) {
-  const dir = await mkdtemp(join(tmpdir(), "archer-config-"))
+  const dir = await mkdtemp(join(tmpdir(), "convoy-config-"))
   dirs.push(dir)
-  await mkdir(join(dir, ".archer", "agents"), { recursive: true })
-  if (config !== undefined) await writeFile(join(dir, ".archer", "config.yaml"), config)
+  await mkdir(join(dir, ".convoy", "agents"), { recursive: true })
+  if (config !== undefined) await writeFile(join(dir, ".convoy", "config.yaml"), config)
   for (const agent of agentPrompts) {
-    await writeFile(join(dir, ".archer", "agents", `${agent}.md`), `# ${agent}\n\nProject prompt.`)
+    await writeFile(join(dir, ".convoy", "agents", `${agent}.md`), `# ${agent}\n\nProject prompt.`)
   }
   return dir
 }
@@ -50,12 +50,12 @@ afterAll(async () => {
   await Promise.all(dirs.map((dir) => rm(dir, { recursive: true, force: true })))
 })
 
-const parse = (body: string, targetDir = "/tmp/non-existent-archer-target") => parseArcherConfig(body, ".archer/config.yaml", targetDir)
+const parse = (body: string, targetDir = "/tmp/non-existent-convoy-target") => parseConvoyConfig(body, ".convoy/config.yaml", targetDir)
 
 describe("config loading", () => {
   test("no config file means no config", async () => {
     const dir = await projectDir()
-    expect(await loadArcherConfig(dir)).toBeUndefined()
+    expect(await loadConvoyConfig(dir)).toBeUndefined()
   })
 
   test("an empty file is a valid, empty config", () => {
@@ -190,7 +190,7 @@ describe("config loading", () => {
 
   test("project agents must bring a prompt file", async () => {
     const without = await projectDir()
-    expect(() => parse("agents:\n  ghost: {}", without)).toThrow("needs a prompt at .archer/agents/ghost.md")
+    expect(() => parse("agents:\n  ghost: {}", without)).toThrow("needs a prompt at .convoy/agents/ghost.md")
 
     const withPrompt = await projectDir(undefined, ["ghost"])
     expect(() => parse("agents:\n  ghost: {}", withPrompt)).not.toThrow()
@@ -294,7 +294,7 @@ describe("parallel steps and model fan-out", () => {
   })
 
   test("rejects agent names ending in the reserved read-only suffix", () => {
-    expect(() => parse("agents:\n  clean-code__ro:\n    model: anthropic/claude-opus-4-7")).toThrow('reserved for archer\'s forced-read-only variants')
+    expect(() => parse("agents:\n  clean-code__ro:\n    model: anthropic/claude-opus-4-7")).toThrow('reserved for convoy\'s forced-read-only variants')
   })
 
   test("a config with parallel/models round-trips through serialize + reparse", async () => {
@@ -315,8 +315,8 @@ describe("parallel steps and model fan-out", () => {
       dir,
     )
 
-    const path = join(dir, ".archer", "config.yaml")
-    await writeArcherConfig(path, config, dir)
+    const path = join(dir, ".convoy", "config.yaml")
+    await writeConvoyConfig(path, config, dir)
     const reparsed = parse(await readFile(path, "utf8"), dir)
     expect(reparsed.pipelines).toEqual(config.pipelines)
   })
@@ -403,7 +403,7 @@ describe("config merging", () => {
   test("defaults merge shallow by key; project wins", () => {
     const global = parse("defaults:\n  model: openai/gpt-5.5#xhigh\n  maxAttempts: 9\n  branchNameModel: anthropic/claude-haiku-4-5")
     const project = parse("defaults:\n  maxAttempts: 2\n  baseRef: dev\n  branchNameModel: openai/gpt-5.5-mini")
-    expect(mergeArcherConfigs(global, project)?.defaults).toEqual({
+    expect(mergeConvoyConfigs(global, project)?.defaults).toEqual({
       model: "openai/gpt-5.5#xhigh",
       maxAttempts: 2,
       baseRef: "dev",
@@ -414,7 +414,7 @@ describe("config merging", () => {
   test("agents and pipelines merge by name; project entry wins wholesale", () => {
     const global = parse("agents:\n  design-polisher:\n    model: openai/gpt-5.5#xhigh\npipelines:\n  default:\n    steps:\n      - tests\n  shared:\n    steps:\n      - implementer")
     const project = parse("agents:\n  design-polisher:\n    temperature: 0.2\npipelines:\n  default:\n    steps:\n      - implementer")
-    const merged = mergeArcherConfigs(global, project)!
+    const merged = mergeConvoyConfigs(global, project)!
     expect(merged.agents["design-polisher"]).toEqual({ temperature: 0.2 })
     expect(merged.pipelines.default?.steps).toEqual(["implementer"])
     expect(merged.pipelines.shared?.steps).toEqual(["implementer"])
@@ -423,7 +423,7 @@ describe("config merging", () => {
   test("permissions and attachments concatenate, global first", () => {
     const global = parse("permissions:\n  allow:\n    - 'a'\nattachments:\n  - 'g.md'")
     const project = parse("permissions:\n  allow:\n    - 'b'\n  deny:\n    - 'x'\nattachments:\n  - 'p.md'")
-    const merged = mergeArcherConfigs(global, project)!
+    const merged = mergeConvoyConfigs(global, project)!
     expect(merged.permissions).toEqual({ allow: ["a", "b"], deny: ["x"] })
     expect(merged.attachments).toEqual(["g.md", "p.md"])
   })
@@ -431,7 +431,7 @@ describe("config merging", () => {
   test("hooks concatenate globally and per pipeline, global first", () => {
     const global = parse("hooks:\n  pre:\n    - g-pre\n  pipelines:\n    implement:\n      post:\n        - g-impl-post")
     const project = parse("hooks:\n  post:\n    - p-post\n  pipelines:\n    implement:\n      pre:\n        - p-impl-pre\n      post:\n        - p-impl-post")
-    const merged = mergeArcherConfigs(global, project)!
+    const merged = mergeConvoyConfigs(global, project)!
     expect(merged.hooks.pre).toEqual([{ command: "g-pre" }])
     expect(merged.hooks.post).toEqual([{ command: "p-post" }])
     expect(merged.hooks.pipelines.implement).toEqual({
@@ -442,16 +442,16 @@ describe("config merging", () => {
 
   test("a missing side passes the other through unchanged", () => {
     const only = parse("defaults:\n  model: openai/gpt-5.5")
-    expect(mergeArcherConfigs(undefined, undefined)).toBeUndefined()
-    expect(mergeArcherConfigs(only, undefined)).toBe(only)
-    expect(mergeArcherConfigs(undefined, only)).toBe(only)
+    expect(mergeConvoyConfigs(undefined, undefined)).toBeUndefined()
+    expect(mergeConvoyConfigs(only, undefined)).toBe(only)
+    expect(mergeConvoyConfigs(undefined, only)).toBe(only)
   })
 })
 
 describe("serialization", () => {
   test("omits empty sections and round-trips through parse", () => {
     const config = parse("defaults:\n  model: openai/gpt-5.5#xhigh\npipelines:\n  default:\n    steps:\n      - implementer\n      - human-review")
-    const yaml = serializeArcherConfig(config)
+    const yaml = serializeConvoyConfig(config)
     expect(yaml).toContain("version: 1")
     expect(yaml).not.toContain("agents")
     expect(yaml).not.toContain("permissions")
@@ -476,7 +476,7 @@ describe("serialization", () => {
         "          continueOnError: true",
       ].join("\n"),
     )
-    const reparsed = parse(serializeArcherConfig(config))
+    const reparsed = parse(serializeConvoyConfig(config))
     expect(reparsed.hooks).toEqual(config.hooks)
   })
 
@@ -486,7 +486,7 @@ describe("serialization", () => {
     const steps = template.pipelines.implement!.steps
     expect(steps.find((step) => typeof step !== "string" && !isParallelSpec(step) && !isHumanStepSpec(step) && step.agent === "design")).toEqual({ agent: "design", model: defaultImplementReviewModel })
     expect(steps.find((step) => typeof step !== "string" && !isParallelSpec(step) && !isHumanStepSpec(step) && step.agent === "adversarial")).toEqual({ agent: "adversarial", model: defaultImplementReviewModel, reports: "all" })
-    const reparsed = parse(serializeArcherConfig(template))
+    const reparsed = parse(serializeConvoyConfig(template))
     expect(reparsed.defaults).toEqual(template.defaults)
     expect(reparsed.pipelines).toEqual(template.pipelines)
     expect(reparsed.hooks).toEqual(template.hooks)
@@ -496,28 +496,28 @@ describe("serialization", () => {
 describe("global config", () => {
   let savedHome: string | undefined
   beforeEach(() => {
-    savedHome = process.env.ARCHER_HOME
+    savedHome = process.env.CONVOY_HOME
   })
   afterEach(() => {
-    if (savedHome === undefined) delete process.env.ARCHER_HOME
-    else process.env.ARCHER_HOME = savedHome
+    if (savedHome === undefined) delete process.env.CONVOY_HOME
+    else process.env.CONVOY_HOME = savedHome
   })
 
-  // ARCHER_HOME points at the directory that contains .archer, like a repo root.
+  // CONVOY_HOME points at the directory that contains .convoy, like a repo root.
   async function globalHome(): Promise<string> {
-    const root = await mkdtemp(join(tmpdir(), "archer-home-"))
+    const root = await mkdtemp(join(tmpdir(), "convoy-home-"))
     dirs.push(root)
-    await mkdir(join(root, ".archer", "agents"), { recursive: true })
-    process.env.ARCHER_HOME = root
-    return join(root, ".archer")
+    await mkdir(join(root, ".convoy", "agents"), { recursive: true })
+    process.env.CONVOY_HOME = root
+    return join(root, ".convoy")
   }
 
-  test("loads ~/.archer/config.yaml and validates global agents against ~/.archer/agents", async () => {
+  test("loads ~/.convoy/config.yaml and validates global agents against ~/.convoy/agents", async () => {
     const home = await globalHome()
     await writeFile(join(home, "agents", "global-agent.md"), "# global-agent\n")
     await writeFile(join(home, "config.yaml"), "defaults:\n  model: openai/gpt-5.5#xhigh\nagents:\n  global-agent:\n    description: A global agent\n    model: anthropic/claude-opus-4-7\n")
 
-    const config = await loadGlobalArcherConfig()
+    const config = await loadGlobalConvoyConfig()
     expect(config?.defaults.model).toBe("openai/gpt-5.5#xhigh")
     expect(config?.agents["global-agent"]).toMatchObject({ model: "anthropic/claude-opus-4-7" })
   })
@@ -527,20 +527,20 @@ describe("global config", () => {
     await writeFile(join(home, "config.yaml"), "defaults:\n  model: openai/gpt-5.5#xhigh\n  maxAttempts: 9\n")
 
     const project = await projectDir("defaults:\n  maxAttempts: 2\n")
-    const merged = await loadMergedArcherConfig(project)
+    const merged = await loadMergedConvoyConfig(project)
     expect(merged?.defaults).toEqual({ model: "openai/gpt-5.5#xhigh", maxAttempts: 2 })
   })
 })
 
 describe("default config init", () => {
   test("the default config template is valid and explicit", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "archer-default-config-"))
+    const dir = await mkdtemp(join(tmpdir(), "convoy-default-config-"))
     dirs.push(dir)
     const path = join(dir, "config.yaml")
-    await writeDefaultArcherConfig(path)
+    await writeDefaultConvoyConfig(path)
 
     const body = await readFile(path, "utf8")
-    const config = parseArcherConfig(body, path, dir)
+    const config = parseConvoyConfig(body, path, dir)
 
     expect(body).toContain("# maxAttempts: 2")
     expect(body).toContain("# baseRef: main")
@@ -571,39 +571,39 @@ describe("default config init", () => {
   })
 
   test("writes default config without overwriting unless forced", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "archer-config-write-"))
+    const dir = await mkdtemp(join(tmpdir(), "convoy-config-write-"))
     dirs.push(dir)
     const path = join(dir, "config.yaml")
 
-    expect(await writeDefaultArcherConfig(path)).toEqual({ path, created: true })
+    expect(await writeDefaultConvoyConfig(path)).toEqual({ path, created: true })
     expect(await readFile(path, "utf8")).toContain("version: 1")
     expect(await readFile(join(dir, "agents", "implementer.md"), "utf8")).toContain("# Implementer")
 
     await writeFile(path, "version: 1\nattachments:\n  - custom.md\n")
     await writeFile(join(dir, "agents", "implementer.md"), "# Custom Implementer\n")
-    expect(await writeDefaultArcherConfig(path)).toEqual({ path, created: false })
+    expect(await writeDefaultConvoyConfig(path)).toEqual({ path, created: false })
     expect(await readFile(path, "utf8")).toContain("custom.md")
     expect(await readFile(join(dir, "agents", "implementer.md"), "utf8")).toContain("# Custom Implementer")
 
-    expect(await writeDefaultArcherConfig(path, true)).toEqual({ path, created: true })
+    expect(await writeDefaultConvoyConfig(path, true)).toEqual({ path, created: true })
     expect(await readFile(path, "utf8")).not.toContain("custom.md")
     expect(await readFile(join(dir, "agents", "implementer.md"), "utf8")).toContain("# Implementer")
   })
 
-  test("writes project default config under .archer", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "archer-project-config-"))
+  test("writes project default config under .convoy", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "convoy-project-config-"))
     dirs.push(dir)
-    const path = join(dir, ".archer", "config.yaml")
+    const path = join(dir, ".convoy", "config.yaml")
 
     expect(await writeDefaultProjectConfig(dir)).toEqual({ path, created: true })
     expect(await writeDefaultProjectConfig(dir)).toEqual({ path, created: false })
     expect(await readFile(path, "utf8")).toContain("pipelines:")
-    expect(await readFile(join(dir, ".archer", "agents", "implementer.md"), "utf8")).toContain("# Implementer")
+    expect(await readFile(join(dir, ".convoy", "agents", "implementer.md"), "utf8")).toContain("# Implementer")
   })
 })
 
 describe("runner field on steps", () => {
-  const parse = (yaml: string) => parseArcherConfig(yaml, ".archer/config.yaml", "/tmp/non-existent-archer-target")
+  const parse = (yaml: string) => parseConvoyConfig(yaml, ".convoy/config.yaml", "/tmp/non-existent-convoy-target")
 
   test("parses runner: claude-code with a bare CLI model alias", () => {
     const config = parse(
@@ -734,7 +734,7 @@ describe("materializing built-in pipelines", () => {
   test("every materialized built-in serializes, re-parses, and resolves", () => {
     for (const [name, spec] of Object.entries(builtInPipelines)) {
       const materialized = materializePipelineSpec(spec, fallback)
-      const config = parse(serializeArcherConfig(emptyConfig({ [name]: materialized })))
+      const config = parse(serializeConvoyConfig(emptyConfig({ [name]: materialized })))
       expect(config.pipelines[name]).toEqual(materialized)
       expect(checkPipelineResolves(name, config.pipelines[name]!, config)).toBeUndefined()
     }

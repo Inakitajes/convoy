@@ -416,7 +416,7 @@ export async function run(options: RunOptions) {
     if (shutdown.aborted) await shutdown.abortActiveSessions(progress)
     await permissions?.stop()
     // The server dies at the end of this block; clear its metadata entry now so
-    // `archer runs` stops offering to attach to a run that's shutting down.
+    // `convoy runs` stops offering to attach to a run that's shutting down.
     metadata?.serverStopped()
     await metadata?.flush().catch((error) => log.warn(`couldn't flush run metadata: ${String(error)}`))
     progress.stop()
@@ -576,7 +576,7 @@ export async function commitRecoveredPhase(
     await writeFile(reportAbs, recoveryReport(phase.name))
   }
 
-  const committed = await addAllAndCommit(`archer(${phase.name}): ${await summaryFromReport(reportAbs)}`, targetDir)
+  const committed = await addAllAndCommit(`convoy(${phase.name}): ${await summaryFromReport(reportAbs)}`, targetDir)
   if (committed) log.info(`[${phase.name}] recovered uncommitted changes into a commit; continuing from the next phase`)
   else log.warn(`[${phase.name}] nothing to commit during recovery`)
 
@@ -588,7 +588,7 @@ function recoveryReport(phaseName: string) {
   return [
     "# Recovered uncommitted changes",
     "",
-    `Phase "${phaseName}" was interrupted before archer committed its work. The`,
+    `Phase "${phaseName}" was interrupted before convoy committed its work. The`,
     "uncommitted changes left in the working tree were committed as this phase during a",
     "manual resume recovery, and the pipeline continued from the next phase.",
     "",
@@ -624,7 +624,7 @@ async function runPhase(
       if (phase.readOnly && !snapshot) {
         const porcelain = await statusPorcelain(options.targetDir)
         throw new Error(
-          `[${phase.name}] read-only steps require a clean working tree so Archer can detect unexpected side effects without discarding concurrent user work\n${dirtyFilesPreview(porcelain)}`,
+          `[${phase.name}] read-only steps require a clean working tree so Convoy can detect unexpected side effects without discarding concurrent user work\n${dirtyFilesPreview(porcelain)}`,
         )
       }
       return snapshot
@@ -925,7 +925,7 @@ async function persistPhaseReport(workspace: Workspace, phase: AgentStep, assist
 }
 
 async function commitPhase(phase: AgentStep, reportAbs: string, targetDir: string) {
-  const message = `archer(${phase.name}): ${await summaryFromReport(reportAbs)}`
+  const message = `convoy(${phase.name}): ${await summaryFromReport(reportAbs)}`
   const committed = await addAllAndCommit(message, targetDir)
   if (!committed) {
     log.info(`[${phase.name}] no changes - no commit`)
@@ -954,7 +954,7 @@ export async function finalizePhaseRepository(
   }
 
   if (originalError instanceof ReadOnlyRepositoryMutationError) throw originalError
-  const message = `[${phase.name}] repository changed during a read-only step; Archer left these changes intact to avoid discarding concurrent user work\n${difference}${
+  const message = `[${phase.name}] repository changed during a read-only step; Convoy left these changes intact to avoid discarding concurrent user work\n${difference}${
       originalError === undefined ? "" : `\nOriginal failure: ${formatSdkError(originalError)}`
     }`
   if (isUserAbortError(originalError)) throw new UserAbortError(message)
@@ -988,7 +988,7 @@ class ReadOnlyRepositoryMutationError extends Error {
 /**
  * Checks the read-only boundary in a finally block so aborts, failed attempts,
  * and report persistence errors cannot bypass mutation detection. Detection is
- * deliberately non-destructive because Archer cannot distinguish an extension
+ * deliberately non-destructive because Convoy cannot distinguish an extension
  * side effect from a user's concurrent edit in the same working tree.
  */
 export async function withReadOnlyRepositoryBoundary<T>(
@@ -1019,7 +1019,7 @@ export async function assertReadOnlyResumeBaseline(metadata: RunMetadataStore, p
   const difference = await describeRepoSnapshotDifference(baseline, targetDir)
   if (!difference) return
   throw new Error(
-    `[${phase.name}] repository changed since this read-only phase began; Archer left the changes intact. Restore the recorded HEAD/branch or start a new run before resuming\n${difference}`,
+    `[${phase.name}] repository changed since this read-only phase began; Convoy left the changes intact. Restore the recorded HEAD/branch or start a new run before resuming\n${difference}`,
   )
 }
 
@@ -1049,8 +1049,8 @@ async function promptPhase(
   input.shutdown.throwIfRequested()
   const session = await client.session.create({
     directory: input.targetDir,
-    title: `archer ${input.workspace.runID} ${input.phase.name}`,
-    metadata: { archerRunID: input.workspace.runID, archerPhase: input.phase.name },
+    title: `convoy ${input.workspace.runID} ${input.phase.name}`,
+    metadata: { convoyRunID: input.workspace.runID, convoyPhase: input.phase.name },
   }, { signal: input.shutdown.signal })
   if (session.error) throw new Error(formatSdkError(session.error))
   if (!session.data?.id) throw new Error("opencode didn't return session id")
@@ -1753,28 +1753,28 @@ function buildPhasePrompt(workspace: Workspace, phase: AgentStep) {
     "## Run context",
     `- Run dir: ${workspace.dir}`,
     phase.readOnly
-      ? `- Report: Archer saves your report itself as ${phase.reportPath}; you do not (and cannot) write it.`
+      ? `- Report: Convoy saves your report itself as ${phase.reportPath}; you do not (and cannot) write it.`
       : `- Write your final report to: ${join(workspace.dir, phase.reportPath)}`,
-    "- Working directory: the directory where `archer` was invoked (root of the target repo).",
+    "- Working directory: the directory where `convoy` was invoked (root of the target repo).",
     "",
     "## Access mode",
     phase.readOnly
-      ? "This phase is read-only: Archer gives you no write, edit, or bash tools, and that is expected — do not try to write any file, and do not apologize for or comment on being unable to. Archer saves your report itself by concatenating the text you emit and storing it verbatim, so your visible output for this phase must be the report and nothing else: no preamble (\"I'll review…\", \"Let me write the report…\"), no step-by-step narration, and no closing note about writing. Keep any planning in your private reasoning; begin your visible output at the report's first line (e.g. the `#` heading)."
+      ? "This phase is read-only: Convoy gives you no write, edit, or bash tools, and that is expected — do not try to write any file, and do not apologize for or comment on being unable to. Convoy saves your report itself by concatenating the text you emit and storing it verbatim, so your visible output for this phase must be the report and nothing else: no preamble (\"I'll review…\", \"Let me write the report…\"), no step-by-step narration, and no closing note about writing. Keep any planning in your private reasoning; begin your visible output at the report's first line (e.g. the `#` heading)."
       : "This phase may edit the target repository when the phase-specific instructions call for it.",
     "",
     "## Attachments",
     "You will receive as file attachments: project context files when present, the original PRD, previous phase reports, the cumulative diff against the base branch, and any `--file` passed by the user. Read them before acting.",
     "",
     "## Project context",
-    "Archer automatically attaches these target-repo files when they exist: `.archer/rules.md`, `AGENTS.md`, and `CLAUDE.md`.",
-    "Read them before making changes. `.archer/rules.md` is the project-specific Archer contract unless it conflicts with Archer runtime safety guard rails.",
+    "Convoy automatically attaches these target-repo files when they exist: `.convoy/rules.md`, `AGENTS.md`, and `CLAUDE.md`.",
+    "Read them before making changes. `.convoy/rules.md` is the project-specific Convoy contract unless it conflicts with Convoy runtime safety guard rails.",
     "",
     "## Closing",
     "Before finishing, make sure to:",
     phase.readOnly ? "1. Have not modified the target repository." : "1. Have applied necessary changes to the repo code.",
     phase.readOnly
-      ? "2. Make the report (markdown, max ~80 lines) your entire visible output — Archer persists it for you. Nothing before or after it."
-      : "2. Have written the report (markdown, max ~80 lines) at the absolute path indicated above. If you can't write it, respond with the exact report content and Archer will save it.",
+      ? "2. Make the report (markdown, max ~80 lines) your entire visible output — Convoy persists it for you. Nothing before or after it."
+      : "2. Have written the report (markdown, max ~80 lines) at the absolute path indicated above. If you can't write it, respond with the exact report content and Convoy will save it.",
     "3. Leave the tree in a compilable state.",
     "",
     "Follow your system prompt instructions for everything else.",
@@ -1814,7 +1814,7 @@ function ensureAgentsAvailable(pipeline: Pipeline, agents: readonly AgentSpec[])
   const available = new Set(agents.map((agent) => agent.name))
   for (const step of pipeline.steps) {
     if (step.type !== "agent" || available.has(step.agentName)) continue
-    throw new Error(`pipeline "${pipeline.name}" needs agent "${step.agentName}", which is not defined (removed from .archer/config.yaml?)`)
+    throw new Error(`pipeline "${pipeline.name}" needs agent "${step.agentName}", which is not defined (removed from .convoy/config.yaml?)`)
   }
 }
 

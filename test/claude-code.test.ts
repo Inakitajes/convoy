@@ -75,7 +75,7 @@ function executionShutdown(controller: AbortController) {
 }
 
 async function executionDir() {
-  const dir = await mkdtemp(join(tmpdir(), "archer-claude-execution-"))
+  const dir = await mkdtemp(join(tmpdir(), "convoy-claude-execution-"))
   await mkdir(join(dir, "logs"), { recursive: true })
   return dir
 }
@@ -279,7 +279,7 @@ describe("prompt and args assembly", () => {
   })
 
   test("external file attachments are copied into the isolated run directory", async () => {
-    const root = await mkdtemp(join(tmpdir(), "archer-claude-attachments-"))
+    const root = await mkdtemp(join(tmpdir(), "convoy-claude-attachments-"))
     const externalDir = join(root, "external")
     const runDir = join(root, "run")
     const targetDir = join(root, "repo")
@@ -304,7 +304,7 @@ describe("prompt and args assembly", () => {
   })
 
   test("parallel phases stage duplicate filenames in isolated directories", async () => {
-    const root = await mkdtemp(join(tmpdir(), "archer-claude-parallel-"))
+    const root = await mkdtemp(join(tmpdir(), "convoy-claude-parallel-"))
     const runDir = join(root, "run")
     const targetDir = join(root, "repo")
     const firstDir = join(root, "first")
@@ -333,7 +333,7 @@ describe("prompt and args assembly", () => {
 describe("headless execution lifecycle", () => {
   test("kills a child when abort lands while attachments are being staged", async () => {
     const runDir = await executionDir()
-    const targetDir = await mkdtemp(join(tmpdir(), "archer-claude-target-"))
+    const targetDir = await mkdtemp(join(tmpdir(), "convoy-claude-target-"))
     const controller = new AbortController()
     let kills = 0
 
@@ -375,7 +375,7 @@ describe("headless execution lifecycle", () => {
 
   test("persists the raw stream when Claude exits before a result", async () => {
     const runDir = await executionDir()
-    const targetDir = await mkdtemp(join(tmpdir(), "archer-claude-target-"))
+    const targetDir = await mkdtemp(join(tmpdir(), "convoy-claude-target-"))
     const rawEvent = JSON.stringify({ type: "system", subtype: "init", session_id: "session-raw" })
 
     try {
@@ -411,7 +411,7 @@ describe("headless execution lifecycle", () => {
 
   test("streams raw events to disk before Claude exits", async () => {
     const runDir = await executionDir()
-    const targetDir = await mkdtemp(join(tmpdir(), "archer-claude-target-"))
+    const targetDir = await mkdtemp(join(tmpdir(), "convoy-claude-target-"))
     const rawEvent = JSON.stringify({ type: "system", subtype: "init", session_id: "session-live" })
     let stdoutController: ReadableStreamDefaultController<Uint8Array> | undefined
     let resolveExit: ((code: number) => void) | undefined
@@ -474,7 +474,7 @@ describe("headless execution lifecycle", () => {
 
   test("publishes and returns usage from a failed Claude result", async () => {
     const runDir = await executionDir()
-    const targetDir = await mkdtemp(join(tmpdir(), "archer-claude-target-"))
+    const targetDir = await mkdtemp(join(tmpdir(), "convoy-claude-target-"))
     const usage: ProgressUsage[] = []
     const resultEvent = JSON.stringify({
       type: "result",

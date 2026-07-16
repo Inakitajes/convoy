@@ -27,7 +27,7 @@ async function git(args: string[], cwd: string) {
 }
 
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), "archer-human-review-"))
+  const root = await mkdtemp(join(tmpdir(), "convoy-human-review-"))
   dirs.push(root)
   const targetDir = join(root, "repo")
   const runDir = join(root, "run")

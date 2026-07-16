@@ -12,16 +12,16 @@ const homeDirs: string[] = []
 let savedHome: string | undefined
 
 beforeEach(async () => {
-  savedHome = process.env.ARCHER_HOME
-  const root = await mkdtemp(join(tmpdir(), "archer-cli-home-"))
+  savedHome = process.env.CONVOY_HOME
+  const root = await mkdtemp(join(tmpdir(), "convoy-cli-home-"))
   homeDirs.push(root)
-  await mkdir(join(root, ".archer"), { recursive: true })
-  process.env.ARCHER_HOME = root
+  await mkdir(join(root, ".convoy"), { recursive: true })
+  process.env.CONVOY_HOME = root
 })
 
 afterEach(() => {
-  if (savedHome === undefined) delete process.env.ARCHER_HOME
-  else process.env.ARCHER_HOME = savedHome
+  if (savedHome === undefined) delete process.env.CONVOY_HOME
+  else process.env.CONVOY_HOME = savedHome
 })
 
 afterAll(async () => {
@@ -52,7 +52,7 @@ describe("cli parsing", () => {
     const command = await parseCommand(["--help"])
 
     expect(command.type).toBe("help")
-    if (command.type === "help") expect(command.text).toContain("archer [prompt]")
+    if (command.type === "help") expect(command.text).toContain("convoy [prompt]")
   })
 
   test("parses the auth subcommand grammar", async () => {
@@ -61,8 +61,8 @@ describe("cli parsing", () => {
     expect(await parseCommand(["auth", "openrouter"])).toEqual({ type: "auth", provider: "openrouter", action: "set" })
     expect(await parseCommand(["auth", "openrouter", "--remove"])).toEqual({ type: "auth", provider: "openrouter", action: "remove" })
 
-    await expect(parseCommand(["auth", "anthropic"])).rejects.toThrow("usage: archer auth")
-    await expect(parseCommand(["auth", "openrouter", "--bogus"])).rejects.toThrow("usage: archer auth")
+    await expect(parseCommand(["auth", "anthropic"])).rejects.toThrow("usage: convoy auth")
+    await expect(parseCommand(["auth", "openrouter", "--bogus"])).rejects.toThrow("usage: convoy auth")
   })
 
   test("requires prompt unless resuming", async () => {
@@ -139,7 +139,7 @@ describe("cli parsing", () => {
 
   test("rejects bad runs subcommand arguments", async () => {
     await expect(parseCommand(["runs", "latest"])).rejects.toThrow("invalid run id")
-    await expect(parseCommand(["runs", "20260519-103045-x7q2", "extra"])).rejects.toThrow("usage: archer runs")
+    await expect(parseCommand(["runs", "20260519-103045-x7q2", "extra"])).rejects.toThrow("usage: convoy runs")
   })
 })
 
@@ -151,12 +151,12 @@ describe("config precedence", () => {
   })
 
   async function projectWithConfig() {
-    const dir = await mkdtemp(join(tmpdir(), "archer-cli-config-"))
+    const dir = await mkdtemp(join(tmpdir(), "convoy-cli-config-"))
     dirs.push(dir)
-    await mkdir(join(dir, ".archer"), { recursive: true })
+    await mkdir(join(dir, ".convoy"), { recursive: true })
     await writeFile(join(dir, "docs.md"), "# notes")
     await writeFile(
-      join(dir, ".archer", "config.yaml"),
+      join(dir, ".convoy", "config.yaml"),
       [
         "defaults:",
         "  maxAttempts: 5",
@@ -230,17 +230,17 @@ describe("base ref auto-detection", () => {
       stderr: "pipe",
       env: {
         ...process.env,
-        GIT_AUTHOR_NAME: "archer-test",
-        GIT_AUTHOR_EMAIL: "archer-test@example.invalid",
-        GIT_COMMITTER_NAME: "archer-test",
-        GIT_COMMITTER_EMAIL: "archer-test@example.invalid",
+        GIT_AUTHOR_NAME: "convoy-test",
+        GIT_AUTHOR_EMAIL: "convoy-test@example.invalid",
+        GIT_COMMITTER_NAME: "convoy-test",
+        GIT_COMMITTER_EMAIL: "convoy-test@example.invalid",
       },
     })
     if ((await proc.exited) !== 0) throw new Error(`git ${args.join(" ")}: ${await new Response(proc.stderr).text()}`)
   }
 
   async function repoOn(branch: string) {
-    const dir = await mkdtemp(join(tmpdir(), "archer-cli-base-"))
+    const dir = await mkdtemp(join(tmpdir(), "convoy-cli-base-"))
     dirs.push(dir)
     await git(["init", "-q", "-b", branch], dir)
     await git(["commit", "-q", "--allow-empty", "-m", "init"], dir)
@@ -257,7 +257,7 @@ describe("base ref auto-detection", () => {
   })
 
   test("falls back to HEAD outside a git repository", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "archer-cli-base-"))
+    const dir = await mkdtemp(join(tmpdir(), "convoy-cli-base-"))
     dirs.push(dir)
     const command = await parseCommand(["--dir", dir, "prompt"])
 
@@ -268,7 +268,7 @@ describe("base ref auto-detection", () => {
 
   test("worktree runs detect against the original repo, not the worktree", async () => {
     const repo = await repoOn("squad-x")
-    const worktree = await mkdtemp(join(tmpdir(), "archer-cli-base-wt-"))
+    const worktree = await mkdtemp(join(tmpdir(), "convoy-cli-base-wt-"))
     await rm(worktree, { recursive: true, force: true })
     dirs.push(worktree)
     await addWorktree(worktree, "agent-branch", "HEAD", repo)
@@ -290,7 +290,7 @@ describe("init command", () => {
   })
 
   test("parses init options without requiring a prompt", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "archer-cli-init-"))
+    const dir = await mkdtemp(join(tmpdir(), "convoy-cli-init-"))
     dirs.push(dir)
 
     const local = await parseCommand(["init", "--dir", dir, "--force", "--quiet"])
@@ -306,28 +306,28 @@ describe("init command", () => {
 
   test("rejects incompatible init options", async () => {
     await expect(parseCommand(["init", "--global", "--dir", "."])).rejects.toThrow("either --global or --dir")
-    await expect(parseCommand(["init", "extra"])).rejects.toThrow("usage: archer init")
+    await expect(parseCommand(["init", "extra"])).rejects.toThrow("usage: convoy init")
   })
 
   test("creates project config without overwriting unless forced", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "archer-cli-init-write-"))
+    const dir = await mkdtemp(join(tmpdir(), "convoy-cli-init-write-"))
     dirs.push(dir)
-    const path = join(dir, ".archer", "config.yaml")
+    const path = join(dir, ".convoy", "config.yaml")
 
     await parseAndRun(["init", "--dir", dir, "--quiet"])
     expect(await readFile(path, "utf8")).toContain("version: 1")
     expect(await readFile(path, "utf8")).toContain("#   implementer:")
     expect(await readFile(path, "utf8")).toContain("# maxAttempts: 2")
-    expect(await readFile(join(dir, ".archer", "agents", "implementer.md"), "utf8")).toContain("# Implementer")
+    expect(await readFile(join(dir, ".convoy", "agents", "implementer.md"), "utf8")).toContain("# Implementer")
 
     await writeFile(path, "version: 1\nattachments:\n  - custom.md\n")
-    await writeFile(join(dir, ".archer", "agents", "implementer.md"), "# Custom Implementer\n")
+    await writeFile(join(dir, ".convoy", "agents", "implementer.md"), "# Custom Implementer\n")
     await parseAndRun(["init", "--dir", dir, "--quiet"])
     expect(await readFile(path, "utf8")).toContain("custom.md")
-    expect(await readFile(join(dir, ".archer", "agents", "implementer.md"), "utf8")).toContain("# Custom Implementer")
+    expect(await readFile(join(dir, ".convoy", "agents", "implementer.md"), "utf8")).toContain("# Custom Implementer")
 
     await parseAndRun(["init", "--dir", dir, "--force", "--quiet"])
     expect(await readFile(path, "utf8")).not.toContain("custom.md")
-    expect(await readFile(join(dir, ".archer", "agents", "implementer.md"), "utf8")).toContain("# Implementer")
+    expect(await readFile(join(dir, ".convoy", "agents", "implementer.md"), "utf8")).toContain("# Implementer")
   })
 })

@@ -16,9 +16,9 @@ import type { Workspace } from "./workspace"
  * Runner for `runner: claude-code` steps: spawns the user's local `claude`
  * CLI headless instead of an OpenCode session. Authentication is whatever
  * that install already uses (subscription login or ANTHROPIC_API_KEY), so
- * Archer never touches credentials. v1 supports read-only audit steps only —
+ * Convoy never touches credentials. v1 supports read-only audit steps only —
  * the CLI runs with read/search tools exclusively, and the report is the
- * final assistant text, persisted by Archer like any other read-only step.
+ * final assistant text, persisted by Convoy like any other read-only step.
  */
 
 export const claudeBinaryName = "claude"
@@ -63,7 +63,7 @@ export function claudeModelLabel(model: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// stream-json → Archer signals
+// stream-json → Convoy signals
 // ---------------------------------------------------------------------------
 
 /** What one NDJSON event means for the dashboard/logs; promptClaudePhase maps these onto ProgressUI. */

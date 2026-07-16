@@ -67,17 +67,17 @@ describe("ensureRepoReady", () => {
       stderr: "pipe",
       env: {
         ...process.env,
-        GIT_AUTHOR_NAME: "archer-test",
-        GIT_AUTHOR_EMAIL: "archer-test@example.invalid",
-        GIT_COMMITTER_NAME: "archer-test",
-        GIT_COMMITTER_EMAIL: "archer-test@example.invalid",
+        GIT_AUTHOR_NAME: "convoy-test",
+        GIT_AUTHOR_EMAIL: "convoy-test@example.invalid",
+        GIT_COMMITTER_NAME: "convoy-test",
+        GIT_COMMITTER_EMAIL: "convoy-test@example.invalid",
       },
     })
     if ((await proc.exited) !== 0) throw new Error(`git ${args.join(" ")}: ${await new Response(proc.stderr).text()}`)
   }
 
   async function emptyRepo(): Promise<string> {
-    const dir = await mkdtemp(join(tmpdir(), "archer-ensure-repo-"))
+    const dir = await mkdtemp(join(tmpdir(), "convoy-ensure-repo-"))
     dirs.push(dir)
     await git(["init", "-q"], dir)
     // git reports the physical path; ensureRepoReady resolves symlinks too, but
@@ -139,17 +139,17 @@ describe("detectBaseRef", () => {
       stderr: "pipe",
       env: {
         ...process.env,
-        GIT_AUTHOR_NAME: "archer-test",
-        GIT_AUTHOR_EMAIL: "archer-test@example.invalid",
-        GIT_COMMITTER_NAME: "archer-test",
-        GIT_COMMITTER_EMAIL: "archer-test@example.invalid",
+        GIT_AUTHOR_NAME: "convoy-test",
+        GIT_AUTHOR_EMAIL: "convoy-test@example.invalid",
+        GIT_COMMITTER_NAME: "convoy-test",
+        GIT_COMMITTER_EMAIL: "convoy-test@example.invalid",
       },
     })
     if ((await proc.exited) !== 0) throw new Error(`git ${args.join(" ")}: ${await new Response(proc.stderr).text()}`)
   }
 
   async function repo(branch: string): Promise<string> {
-    const dir = await mkdtemp(join(tmpdir(), "archer-detect-base-"))
+    const dir = await mkdtemp(join(tmpdir(), "convoy-detect-base-"))
     dirs.push(dir)
     await git(["init", "-q", "-b", branch], dir)
     await git(["commit", "-q", "--allow-empty", "-m", "init"], dir)
@@ -204,14 +204,14 @@ describe("detectBaseRef", () => {
   })
 
   test("returns undefined for a repo with no commits", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "archer-detect-base-"))
+    const dir = await mkdtemp(join(tmpdir(), "convoy-detect-base-"))
     dirs.push(dir)
     await git(["init", "-q"], dir)
     expect(await detectBaseRef(dir)).toBeUndefined()
   })
 
   test("returns undefined outside a git repository", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "archer-detect-base-"))
+    const dir = await mkdtemp(join(tmpdir(), "convoy-detect-base-"))
     dirs.push(dir)
     expect(await detectBaseRef(dir)).toBeUndefined()
   })
@@ -224,7 +224,7 @@ describe("initializeRepoWithInitialCommit", () => {
   })
 
   async function tmpRepoDir() {
-    const dir = await mkdtemp(join(tmpdir(), "archer-init-repo-"))
+    const dir = await mkdtemp(join(tmpdir(), "convoy-init-repo-"))
     dirs.push(dir)
     return dir
   }
@@ -250,7 +250,7 @@ describe("initializeRepoWithInitialCommit", () => {
 
     expect(await repoBootstrapStatus(dir)).toBe("ready")
     expect(await gitOutput(["branch", "--show-current"], dir)).toBe("main")
-    expect(await gitOutput(["log", "-1", "--format=%s"], dir)).toBe("archer: initial commit")
+    expect(await gitOutput(["log", "-1", "--format=%s"], dir)).toBe("convoy: initial commit")
     await expect(ensureRepoReady(dir, { baseRef: "main" })).resolves.toBeUndefined()
   })
 
@@ -305,18 +305,18 @@ describe("addWorktree", () => {
       stderr: "pipe",
       env: {
         ...process.env,
-        GIT_AUTHOR_NAME: "archer-test",
-        GIT_AUTHOR_EMAIL: "archer-test@example.invalid",
-        GIT_COMMITTER_NAME: "archer-test",
-        GIT_COMMITTER_EMAIL: "archer-test@example.invalid",
+        GIT_AUTHOR_NAME: "convoy-test",
+        GIT_AUTHOR_EMAIL: "convoy-test@example.invalid",
+        GIT_COMMITTER_NAME: "convoy-test",
+        GIT_COMMITTER_EMAIL: "convoy-test@example.invalid",
       },
     })
     if ((await proc.exited) !== 0) throw new Error(`git ${args.join(" ")}: ${await new Response(proc.stderr).text()}`)
   }
 
   test("creates a branch checked out in a separate worktree", async () => {
-    const repo = await mkdtemp(join(tmpdir(), "archer-worktree-repo-"))
-    const worktree = await mkdtemp(join(tmpdir(), "archer-worktree-dir-"))
+    const repo = await mkdtemp(join(tmpdir(), "convoy-worktree-repo-"))
+    const worktree = await mkdtemp(join(tmpdir(), "convoy-worktree-dir-"))
     await rm(worktree, { recursive: true, force: true })
     dirs.push(repo, worktree)
 

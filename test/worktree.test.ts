@@ -74,7 +74,7 @@ describe("worktree branch name helpers", () => {
 
   test("fallbackBranchName is deterministic in shape and git-safe", () => {
     const name = fallbackBranchName()
-    expect(name).toMatch(/^archer-\d{8}-[a-z0-9]{4}$/)
+    expect(name).toMatch(/^convoy-\d{8}-[a-z0-9]{4}$/)
     expect(name.length).toBeLessThanOrEqual(40)
   })
 
@@ -82,7 +82,7 @@ describe("worktree branch name helpers", () => {
     expect(slugifyBranch("Add Onboarding Flow")).toBe("add-onboarding-flow")
     expect(slugifyBranch("feature/foo bar")).toBe("feature-foo-bar")
     // Always returns something, even for garbage input.
-    expect(slugifyBranch("!!!")).toMatch(/^archer-[a-z0-9]{6}$/)
+    expect(slugifyBranch("!!!")).toMatch(/^convoy-[a-z0-9]{6}$/)
   })
 })
 
@@ -97,7 +97,7 @@ describe("askForBranchName", () => {
     })
 
     await expect(askForBranchName(client, "build onboarding", "/repo", "openai/gpt-5.5")).resolves.toBe("add-onboarding-flow")
-    expect(createInput).toEqual({ directory: "/repo", title: "archer branch namer" })
+    expect(createInput).toEqual({ directory: "/repo", title: "convoy branch namer" })
     expect(promptInput?.sessionID).toBe("namer-session")
     expect(promptInput?.directory).toBe("/repo")
     expect(promptInput?.model).toEqual({ providerID: "openai", modelID: "gpt-5.5" })

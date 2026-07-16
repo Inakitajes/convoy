@@ -73,7 +73,7 @@ export async function runHumanReviewGate(
         progress.phaseRunning(stepName, "interactive OpenCode iteration")
         if (askInTui) {
           // The external OpenCode TUI owns its own permission prompts. Keep
-          // Archer's dashboard gate paused until the user returns to this gate
+          // Convoy's dashboard gate paused until the user returns to this gate
           // and chooses the next action.
           permissions?.pause()
           try {
@@ -196,7 +196,7 @@ async function runInteractiveIteration(
   permissions?: PermissionGate,
   runInteractive: typeof runInteractiveOpencode = runInteractiveOpencode,
 ) {
-  // The interactive OpenCode TUI answers its own permission prompts; Archer's
+  // The interactive OpenCode TUI answers its own permission prompts; Convoy's
   // gate must not race it for the same requests.
   permissions?.pause()
   try {
@@ -225,7 +225,7 @@ async function runInteractiveOpencode(options: RunOptions, opencodeUrl: string, 
 }
 
 async function commitHumanChanges(options: RunOptions, stepName: string) {
-  const committed = await addAllAndCommit(`archer(${stepName}): apply manual iteration`, options.targetDir)
+  const committed = await addAllAndCommit(`convoy(${stepName}): apply manual iteration`, options.targetDir)
   if (committed) log.info(`[${stepName}] committed manual changes`)
 }
 
