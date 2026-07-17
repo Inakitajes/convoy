@@ -1,10 +1,47 @@
 import { describe, expect, test } from "bun:test"
+import { createTestRenderer } from "@opentui/core/testing"
+import type { Selection } from "@opentui/core"
 
-import { autoFollowGroup, comparisonColumnCount, initialContentTab, iteratePrompt, phaseCapabilityBadges, phaseCapabilityLabel, pickBadge, pipelineSelectionTargets } from "../src/tui"
+import { TuiProgress, autoFollowGroup, comparisonColumnCount, initialContentTab, iteratePrompt, phaseCapabilityBadges, phaseCapabilityLabel, pickBadge, pipelineSelectionTargets } from "../src/tui"
 import { limitsRow } from "../src/tui-theme"
 
 import type { LimitsSnapshot } from "../src/limits"
 import type { ProgressPhase } from "../src/progress"
+
+type DashboardInternals = {
+  feedText: { x: number; y: number; plainText: string }
+  reports: Map<string, string[] | "loading" | "missing">
+  contentTab: "session" | "reports" | "logs"
+}
+
+async function createDashboard() {
+  const testRenderer = await createTestRenderer({ width: 120, height: 40 })
+  const dashboard = new TuiProgress(testRenderer.renderer, [{ name: "implement", description: "" }])
+  const copied: string[] = []
+  testRenderer.renderer.copyToClipboardOSC52 = (text) => {
+    copied.push(text)
+    return true
+  }
+  return { ...testRenderer, dashboard, copied }
+}
+
+async function selectText(
+  dashboard: TuiProgress,
+  mockMouse: Awaited<ReturnType<typeof createTestRenderer>>["mockMouse"],
+  text: string,
+) {
+  const feedText = (dashboard as unknown as DashboardInternals).feedText
+  const lines = feedText.plainText.split("\n")
+  const row = lines.findIndex((line) => line.includes(text))
+  expect(row).toBeGreaterThanOrEqual(2)
+  const column = lines[row]!.indexOf(text)
+  await mockMouse.drag(
+    feedText.x + column,
+    feedText.y + row,
+    feedText.x + column + text.length,
+    feedText.y + row,
+  )
+}
 
 describe("run dashboard defaults", () => {
   test("starts live runs on session and historical runs on reports, never logs", () => {
@@ -38,6 +75,87 @@ describe("run dashboard defaults", () => {
 
     // A writable phase never grows a badge, however much room there is.
     expect(pickBadge(phaseCapabilityBadges({}), 40, false)).toBeUndefined()
+  })
+})
+
+describe("dashboard content selection", () => {
+  test("copies selected session text and clears the successful selection", async () => {
+    const { dashboard, mockMouse, renderer, renderOnce, copied } = await createDashboard()
+    try {
+      const text = "session selection payload"
+      dashboard.phaseStarted("implement")
+      dashboard.phaseMessage("implement", { channel: "response", text })
+      dashboard.phaseActivity("implement", "session ready")
+      await renderOnce()
+
+      await selectText(dashboard, mockMouse, text)
+
+      expect(copied).toEqual([text])
+      expect(renderer.hasSelection).toBeFalse()
+    } finally {
+      dashboard.stop()
+    }
+  })
+
+  test("copies selected report text", async () => {
+    const { dashboard, mockMouse, renderOnce, copied } = await createDashboard()
+    try {
+      const text = "report selection payload"
+      const internals = dashboard as unknown as DashboardInternals
+      dashboard.start("run", "/target", "/run")
+      internals.reports.set("implement", [text])
+      internals.contentTab = "reports"
+      dashboard.phaseActivity("implement", "report ready")
+      await renderOnce()
+
+      await selectText(dashboard, mockMouse, text)
+
+      expect(copied).toEqual([text])
+    } finally {
+      dashboard.stop()
+    }
+  })
+
+  test("does not copy logs, tab-strip, empty, or cross-panel selections", async () => {
+    const { dashboard, mockMouse, renderer, renderOnce, copied } = await createDashboard()
+    try {
+      const sessionText = "session selection payload"
+      dashboard.phaseStarted("implement")
+      dashboard.phaseMessage("implement", { channel: "response", text: sessionText })
+      dashboard.phaseActivity("implement", "session ready")
+      await renderOnce()
+
+      const feedText = (dashboard as unknown as DashboardInternals).feedText
+      await mockMouse.drag(feedText.x, feedText.y, feedText.x + 3, feedText.y)
+      await mockMouse.drag(feedText.x, feedText.y + 2, feedText.x - 10, feedText.y + 2)
+      renderer.emit("selection", {
+        bounds: { x: feedText.x, y: feedText.y + 2, width: 0, height: 0 },
+        selectedRenderables: [feedText],
+        getSelectedText: () => "",
+      } as unknown as Selection)
+
+      ;(dashboard as unknown as DashboardInternals).contentTab = "logs"
+      dashboard.phaseActivity("implement", "log selection payload")
+      await renderOnce()
+      await selectText(dashboard, mockMouse, "log selection payload")
+
+      expect(copied).toEqual([])
+    } finally {
+      dashboard.stop()
+    }
+  })
+
+  test("removes its selection listener when stopped", async () => {
+    const { dashboard, renderer } = await createDashboard()
+    try {
+      expect(renderer.listenerCount("selection")).toBe(1)
+
+      dashboard.stop()
+
+      expect(renderer.listenerCount("selection")).toBe(0)
+    } finally {
+      if (!renderer.isDestroyed) dashboard.stop()
+    }
   })
 })
 

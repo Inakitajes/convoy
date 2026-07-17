@@ -45,7 +45,7 @@ import {
   wrapLines,
 } from "./tui-theme"
 
-import type { BoxOptions, CliRenderer, KeyEvent, TextChunk } from "@opentui/core"
+import type { BoxOptions, CliRenderer, KeyEvent, Selection, TextChunk } from "@opentui/core"
 import type { LimitsSnapshot } from "./limits"
 import type { PaletteColor, PhaseStatus } from "./tui-theme"
 import type {
@@ -350,6 +350,23 @@ export class TuiProgress implements ProgressUI {
     this.applyPalette()
     this.addEvent("convoy", "system", `terminal theme changed: ${mode}`)
     this.render()
+  }
+
+  private readonly handleSelection = (selection: Selection) => {
+    if (this.contentTab !== "session" && this.contentTab !== "reports") return
+    const { x, y, width, height } = selection.bounds
+    if (
+      x < this.feedText.x ||
+      x + width > this.feedText.x + this.feedText.width ||
+      y < this.feedText.y + 2 ||
+      y + height > this.feedText.y + this.feedText.height
+    ) {
+      return
+    }
+    if (selection.selectedRenderables.length !== 1 || selection.selectedRenderables[0] !== this.feedText) return
+
+    const text = selection.getSelectedText()
+    if (text && this.renderer.copyToClipboardOSC52(text)) this.renderer.clearSelection()
   }
 
   private readonly handleKeyPress = (key: KeyEvent) => {
@@ -780,6 +797,7 @@ export class TuiProgress implements ProgressUI {
     this.paletteTargets.push({ box: this.modal, background: "overlay", border: "yellow" })
 
     renderer.keyInput.on("keypress", this.handleKeyPress)
+    renderer.on("selection", this.handleSelection)
     renderer.on("theme_mode", this.handleThemeMode)
 
     this.ticker = setInterval(() => this.render(), 250)
@@ -1226,6 +1244,7 @@ export class TuiProgress implements ProgressUI {
     this.stopLimits()
     log.mute(false)
     this.renderer.keyInput.off("keypress", this.handleKeyPress)
+    this.renderer.off("selection", this.handleSelection)
     this.renderer.off("theme_mode", this.handleThemeMode)
     // A shutdown signal can tear the run down while the finish screen is still
     // up; resolving here keeps that promise from leaking.
