@@ -116,7 +116,24 @@ describe("dashboard content selection", () => {
     }
   })
 
-  test("does not copy logs, tab-strip, empty, or cross-panel selections", async () => {
+  test("copies selected log text", async () => {
+    const { dashboard, mockMouse, renderOnce, copied } = await createDashboard()
+    try {
+      const text = "Next command: /mr-comment 20260717-122207-c4cn 90"
+      const internals = dashboard as unknown as DashboardInternals
+      internals.contentTab = "logs"
+      dashboard.phaseActivity("implement", text)
+      await renderOnce()
+
+      await selectText(dashboard, mockMouse, text)
+
+      expect(copied).toEqual([text])
+    } finally {
+      dashboard.stop()
+    }
+  })
+
+  test("does not copy tab-strip, empty, or cross-panel selections", async () => {
     const { dashboard, mockMouse, renderer, renderOnce, copied } = await createDashboard()
     try {
       const sessionText = "session selection payload"
@@ -133,11 +150,6 @@ describe("dashboard content selection", () => {
         selectedRenderables: [feedText],
         getSelectedText: () => "",
       } as unknown as Selection)
-
-      ;(dashboard as unknown as DashboardInternals).contentTab = "logs"
-      dashboard.phaseActivity("implement", "log selection payload")
-      await renderOnce()
-      await selectText(dashboard, mockMouse, "log selection payload")
 
       expect(copied).toEqual([])
     } finally {

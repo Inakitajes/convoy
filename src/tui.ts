@@ -354,7 +354,7 @@ export class TuiProgress implements ProgressUI {
   }
 
   private readonly handleSelection = (selection: Selection) => {
-    if (this.contentTab !== "session" && this.contentTab !== "reports") return
+    if (this.contentTab !== "logs" && this.contentTab !== "session" && this.contentTab !== "reports") return
     const { x, y, width, height } = selection.bounds
     if (
       x < this.feedText.x ||
