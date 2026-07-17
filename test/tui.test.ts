@@ -145,6 +145,49 @@ describe("dashboard content selection", () => {
     }
   })
 
+  test("does not copy selections that include another renderable", async () => {
+    const { dashboard, renderer, renderOnce, copied } = await createDashboard()
+    try {
+      dashboard.phaseStarted("implement")
+      dashboard.phaseMessage("implement", { channel: "response", text: "session selection payload" })
+      await renderOnce()
+
+      const feedText = (dashboard as unknown as DashboardInternals).feedText
+      renderer.emit("selection", {
+        bounds: { x: feedText.x, y: feedText.y + 2, width: 1, height: 1 },
+        selectedRenderables: [feedText, {}],
+        getSelectedText: () => "mixed selection",
+      } as unknown as Selection)
+
+      expect(copied).toEqual([])
+    } finally {
+      dashboard.stop()
+    }
+  })
+
+  test("retains the selection when OSC52 copying is unavailable", async () => {
+    const { dashboard, mockMouse, renderer, renderOnce } = await createDashboard()
+    try {
+      const text = "uncopied session selection"
+      const failedCopies: string[] = []
+      renderer.copyToClipboardOSC52 = (selectedText) => {
+        failedCopies.push(selectedText)
+        return false
+      }
+      dashboard.phaseStarted("implement")
+      dashboard.phaseMessage("implement", { channel: "response", text })
+      dashboard.phaseActivity("implement", "session ready")
+      await renderOnce()
+
+      await selectText(dashboard, mockMouse, text)
+
+      expect(failedCopies).toEqual([text])
+      expect(renderer.hasSelection).toBeTrue()
+    } finally {
+      dashboard.stop()
+    }
+  })
+
   test("removes its selection listener when stopped", async () => {
     const { dashboard, renderer } = await createDashboard()
     try {
