@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { createTestRenderer } from "@opentui/core/testing"
 import type { Selection } from "@opentui/core"
 
-import { TuiProgress, autoFollowGroup, comparisonColumnCount, initialContentTab, iteratePrompt, phaseCapabilityBadges, phaseCapabilityLabel, pickBadge, pipelineSelectionTargets } from "../src/tui"
+import { TuiProgress, autoFollowGroup, comparisonColumnCount, initialContentTab, iteratePrompt, phaseCapabilityBadges, phaseCapabilityLabel, pickBadge, pipelineSelectionTargets, type ContentTab } from "../src/tui"
 import { limitsRow } from "../src/tui-theme"
 
 import type { LimitsSnapshot } from "../src/limits"
@@ -11,7 +11,7 @@ import type { ProgressPhase } from "../src/progress"
 type DashboardInternals = {
   feedText: { x: number; y: number; plainText: string }
   reports: Map<string, string[] | "loading" | "missing">
-  contentTab: "session" | "reports" | "logs"
+  contentTab: ContentTab
 }
 
 async function createDashboard() {

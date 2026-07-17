@@ -92,6 +92,7 @@ function kindStyle(kind: ActivityKind): { icon: string; color: string } {
 
 const pipelineWidth = 32
 const feedLimit = 100
+const contentTabBarRows = 2
 
 type RunnerSessionContext = {
   targetDir: string
@@ -358,7 +359,7 @@ export class TuiProgress implements ProgressUI {
     if (
       x < this.feedText.x ||
       x + width > this.feedText.x + this.feedText.width ||
-      y < this.feedText.y + 2 ||
+      y < this.feedText.y + contentTabBarRows ||
       y + height > this.feedText.y + this.feedText.height
     ) {
       return
@@ -687,7 +688,7 @@ export class TuiProgress implements ProgressUI {
     // Works live and on the finish screen alike.
     const switchTabFromFeed = (event: { x: number; y: number; preventDefault(): void; stopPropagation(): void }) => {
       const row = event.y - this.feedText.y
-      if (row !== 0 && row !== 1) return
+      if (row < 0 || row >= contentTabBarRows) return
       const col = event.x - this.feedText.x
       const hit = this.feedTabRegions.find((region) => col >= region.start && col < region.end)
       if (!hit) return
@@ -1602,7 +1603,7 @@ export class TuiProgress implements ProgressUI {
     // The content panel fills the rest: a two-row tab strip (labels, then a
     // rail) over the active tab's body, all scoped to the focused phase.
     const feedRows = Math.max(3, bodyHeight - usedHeight - 2)
-    const contentRows = feedRows - 2
+    const contentRows = feedRows - contentTabBarRows
     this.contentPageRows = contentRows
 
     this.dirText.content = this.dirContent(innerWidth)
