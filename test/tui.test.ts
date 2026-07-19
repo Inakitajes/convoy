@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
-import { autoFollowGroup, comparisonColumnCount, initialContentTab, iteratePrompt, phaseCapabilityLabel, pipelineSelectionTargets } from "../src/tui"
+import { autoFollowGroup, comparisonColumnCount, initialContentTab, iteratePrompt, phaseCapabilityBadges, phaseCapabilityLabel, pickBadge, pipelineSelectionTargets } from "../src/tui"
 import { limitsRow } from "../src/tui-theme"
 
 import type { LimitsSnapshot } from "../src/limits"
@@ -19,6 +19,25 @@ describe("run dashboard defaults", () => {
   test("labels audit-only phases without tagging writable work", () => {
     expect(phaseCapabilityLabel({ readOnly: true })).toBe("audit · read-only")
     expect(phaseCapabilityLabel({})).toBeUndefined()
+    expect(phaseCapabilityBadges({ readOnly: true })).toEqual(["audit · read-only", "read-only", "ro"])
+    expect(phaseCapabilityBadges({})).toEqual([])
+  })
+
+  test("the tree badge degrades to shorter forms and then disappears, never costing the name a column", () => {
+    const badges = phaseCapabilityBadges({ readOnly: true })
+
+    expect(pickBadge(badges, 20, false)).toBe("audit · read-only")
+    expect(pickBadge(badges, 12, false)).toBe("read-only")
+    expect(pickBadge(badges, 4, false)).toBe("ro")
+    expect(pickBadge(badges, 1, false)).toBeUndefined()
+
+    // With meta following, each form also pays for its ` · ` separator.
+    expect(pickBadge(badges, 12, true)).toBe("read-only")
+    expect(pickBadge(badges, 11, true)).toBe("ro")
+    expect(pickBadge(badges, 4, true)).toBeUndefined()
+
+    // A writable phase never grows a badge, however much room there is.
+    expect(pickBadge(phaseCapabilityBadges({}), 40, false)).toBeUndefined()
   })
 })
 

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 
 import type { CliRenderer } from "@opentui/core"
-import { displayWidth, fmtCountdown, paletteForMode, paletteForTerminal, terminalBackgroundHex, truncate, wrapLines } from "../src/tui-theme"
+import { displayWidth, fmtCountdown, padBetween, paletteForMode, paletteForTerminal, raw, terminalBackgroundHex, truncate, wrapLines } from "../src/tui-theme"
 
 // terminalBackgroundHex reaches into opentui internals; the adapter must read a
 // real reply but degrade to undefined (→ static palettes) on any shape change.
@@ -86,5 +86,34 @@ describe("palette derivation from the terminal background", () => {
     ]) {
       expect(palette.bg).toBe("transparent")
     }
+  })
+})
+
+describe("padBetween", () => {
+  const text = (chunks: { text: string }[], width: number) =>
+    padBetween(
+      chunks.slice(0, 1).map((c) => raw(c.text)),
+      chunks.slice(1).map((c) => raw(c.text)),
+      width,
+    )
+      .chunks.map((chunk) => chunk.text)
+      .join("")
+
+  test("pads left and right apart to the exact width", () => {
+    const row = text([{ text: "name" }, { text: "0:42" }], 20)
+    expect(row).toBe("name            0:42")
+    expect(displayWidth(row)).toBe(20)
+  })
+
+  test("clips the right side inside the width instead of overflowing past the border", () => {
+    const row = text([{ text: "name" }, { text: "audit · read-only" }, { text: " · 0:42" }], 20)
+    expect(displayWidth(row)).toBeLessThanOrEqual(20)
+    expect(row.endsWith("…")).toBe(true)
+    expect(row.startsWith("name ")).toBe(true)
+  })
+
+  test("drops the right side entirely when the left leaves it no room", () => {
+    const row = text([{ text: "a-very-long-left-side-label" }, { text: "0:42" }], 24)
+    expect(row).toBe("a-very-long-left-side-label")
   })
 })

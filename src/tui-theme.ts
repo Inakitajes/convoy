@@ -196,9 +196,34 @@ export function raw(text: string): TextChunk {
 }
 
 export function padBetween(left: TextChunk[], right: TextChunk[], width: number): StyledText {
-  const gap = Math.max(1, width - chunksLength(left) - chunksLength(right))
   if (right.length === 0) return new StyledText(left)
-  return new StyledText([...left, raw(" ".repeat(gap)), ...right])
+  // The right side clips (with an ellipsis) when both sides can't share the
+  // width; otherwise the line would exceed `width` and the panel border would
+  // chop the right side mid-value.
+  const fitted = clipChunks(right, width - chunksLength(left) - 1)
+  if (fitted.length === 0) return new StyledText(left)
+  const gap = Math.max(1, width - chunksLength(left) - chunksLength(fitted))
+  return new StyledText([...left, raw(" ".repeat(gap)), ...fitted])
+}
+
+// Keeps chunks from the start until `max` columns are filled; the chunk at the
+// cut keeps its own style and ends in the ellipsis.
+function clipChunks(chunks: TextChunk[], max: number): TextChunk[] {
+  if (chunksLength(chunks) <= max) return chunks
+  if (max <= 0) return []
+  const out: TextChunk[] = []
+  let budget = max
+  for (const chunk of chunks) {
+    const width = displayWidth(chunk.text)
+    if (width < budget) {
+      out.push(chunk)
+      budget -= width
+      continue
+    }
+    out.push({ ...chunk, text: `${takeDisplayCells(chunk.text, budget - 1).head}…` })
+    break
+  }
+  return out
 }
 
 function chunksLength(chunks: TextChunk[]) {

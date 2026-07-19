@@ -1701,6 +1701,7 @@ export class TuiProgress implements ProgressUI {
       labelStatus: PhaseStatus
       color?: (text: string) => TextChunk
       suffix?: TextChunk[]
+      badges?: readonly string[]
       right: TextChunk[]
     }) => {
       const selected = isTargetSelected(args.rowTarget)
@@ -1715,16 +1716,24 @@ export class TuiProgress implements ProgressUI {
       // Floored at 1 (not higher) so a very deep row shrinks its name to fit
       // rather than forcing extra columns that would push the meta off-panel.
       const budget = Math.max(1, width - plainLen(left) - plainLen(suffix) - plainLen(args.right) - 1)
+      // The name is the only per-row information; the capability badge is step
+      // config repeated down the tree. So the badge takes the longest form
+      // that fits beside the whole name and vanishes before costing it a
+      // single column.
+      const badge = pickBadge(args.badges ?? [], budget - displayWidth(args.labelText), args.right.length > 0)
+      const right = badge
+        ? [fg(theme.cyan)(badge), ...(args.right.length ? [fg(theme.faint)(" · ")] : []), ...args.right]
+        : args.right
       const label = truncate(args.labelText, budget)
       left.push(args.color ? args.color(label) : phaseNameChunk(label, args.labelStatus, selected))
       left.push(...suffix)
-      emit(left, args.right, args.rowTarget)
+      emit(left, right, args.rowTarget)
     }
 
     // A leaf row: a single phase (sequential step, human gate, or one member
     // of a concurrent group) labelled by `labelText`.
-    const emitRow = (phase: PhaseState, lasts: boolean[], labelText: string, right: TextChunk[]) =>
-      emitLine({ rowTarget: { kind: "phase", name: phase.name }, lasts, icon: statusIcon(phase.status, now), labelText, labelStatus: phase.status, right })
+    const emitRow = (phase: PhaseState, lasts: boolean[], labelText: string, right: TextChunk[], badges?: readonly string[]) =>
+      emitLine({ rowTarget: { kind: "phase", name: phase.name }, lasts, icon: statusIcon(phase.status, now), labelText, labelStatus: phase.status, badges, right })
 
     // A fanned-out member, labelled by its model with the variant (if any) as
     // a faint suffix.
@@ -1754,6 +1763,7 @@ export class TuiProgress implements ProgressUI {
       count: number,
       lasts: boolean[],
       target: GroupSelection,
+      badges?: readonly string[],
     ) => {
       const status = groupStatus(members)
       const onPath = members.some(isOnSelectedPath)
@@ -1765,26 +1775,44 @@ export class TuiProgress implements ProgressUI {
         labelStatus: status,
         color: onPath ? (text) => bold(fg(theme.accent)(text)) : kind === "parallel" ? (text) => fg(theme.teal)(text) : undefined,
         suffix: [fg(theme.faint)(` ×${count}`)],
+        badges,
         right: groupMetaChunks(members, now),
       })
     }
 
+    // The capability badge dedupes upward: uniform across the whole pipeline
+    // it lives in the panel title alone; uniform across a group it lives on
+    // that group's header; only a phase that differs from its siblings carries
+    // it on its own row. Repeating it down every row said nothing and starved
+    // the step names of columns.
+    const allReadOnly = this.phases.length > 0 && this.phases.every((phase) => phase.readOnly)
+    this.pipelineBox.title = allReadOnly ? " pipeline · read-only " : " pipeline "
+
     for (const group of groupPhases(this.phases)) {
       if (group.length === 1) {
         const phase = group[0]!
-        emitRow(phase, [], phase.name, phaseMetaChunks(phase, now))
+        emitRow(phase, [], phase.name, phaseMetaChunks(phase, now), allReadOnly ? [] : phaseCapabilityBadges(phase))
         continue
       }
 
       const stepGroups = chunkByStepName(group)
       if (stepGroups.length === 1) {
         // A single step fanned out across models: the header names the step,
-        // each member names just its model.
-        emitHeader(group, stepLabel(group[0]!), "step", group.length, [], {
-          kind: "group",
-          groupId: group[0]!.groupId!,
-          stepName: stepLabel(group[0]!),
-        })
+        // each member names just its model. All members share the step's
+        // capability, so the header carries the badge for all of them.
+        emitHeader(
+          group,
+          stepLabel(group[0]!),
+          "step",
+          group.length,
+          [],
+          {
+            kind: "group",
+            groupId: group[0]!.groupId!,
+            stepName: stepLabel(group[0]!),
+          },
+          allReadOnly ? [] : phaseCapabilityBadges(group[0]!),
+        )
         group.forEach((phase, index) => emitModelRow(phase, [index === group.length - 1]))
         continue
       }
@@ -1792,18 +1820,36 @@ export class TuiProgress implements ProgressUI {
       // A `parallel:` block of distinct steps; the header counts the steps,
       // and any step that is itself fanned out across models nests one level
       // deeper under its own ×N sub-header.
-      emitHeader(group, "parallel", "parallel", stepGroups.length, [], { kind: "group", groupId: group[0]!.groupId! })
+      const groupReadOnly = group.every((phase) => phase.readOnly)
+      emitHeader(
+        group,
+        "parallel",
+        "parallel",
+        stepGroups.length,
+        [],
+        { kind: "group", groupId: group[0]!.groupId! },
+        allReadOnly || !groupReadOnly ? [] : phaseCapabilityBadges(group[0]!),
+      )
+      const memberBadges = (phase: PhaseState) => (allReadOnly || groupReadOnly ? [] : phaseCapabilityBadges(phase))
       stepGroups.forEach((members, stepIndex) => {
         const lastStep = stepIndex === stepGroups.length - 1
         if (members.length === 1) {
-          emitRow(members[0]!, [lastStep], stepLabel(members[0]!), phaseMetaChunks(members[0]!, now))
+          emitRow(members[0]!, [lastStep], stepLabel(members[0]!), phaseMetaChunks(members[0]!, now), memberBadges(members[0]!))
           return
         }
-        emitHeader(members, stepLabel(members[0]!), "step", members.length, [lastStep], {
-          kind: "group",
-          groupId: members[0]!.groupId!,
-          stepName: stepLabel(members[0]!),
-        })
+        emitHeader(
+          members,
+          stepLabel(members[0]!),
+          "step",
+          members.length,
+          [lastStep],
+          {
+            kind: "group",
+            groupId: members[0]!.groupId!,
+            stepName: stepLabel(members[0]!),
+          },
+          memberBadges(members[0]!),
+        )
         members.forEach((phase, index) => emitModelRow(phase, [lastStep, index === members.length - 1]))
       })
     }
@@ -2065,7 +2111,7 @@ export class TuiProgress implements ProgressUI {
   ): StyledText[] {
     const baseLabel = selection.stepName === undefined ? phaseDisplayName(phase) : modelLabel(phase)
     const label = phase.plannedVariant ? `${baseLabel}#${phase.plannedVariant}` : baseLabel
-    const right = phaseMetaChunks(phase, now)
+    const right = phaseMetaWithCapability(phase, now)
     const labelBudget = Math.max(6, width - plainLen(right) - 8)
     const header = padBetween(
       [statusIcon(phase.status, now), raw(" "), bold(fg(theme.text)(truncate(label, labelBudget)))],
@@ -2524,23 +2570,43 @@ function scrollPosition(topOffset: number, maxScroll: number) {
   return `${Math.round((topOffset / maxScroll) * 100)}%`
 }
 
+// Elapsed/cost/skipped only — the capability badge renders separately (the
+// tree degrades or dedupes it, the comparison cards keep it whole).
 function phaseMetaChunks(phase: PhaseState, now: number): TextChunk[] {
+  if (phase.status === "pending") return []
+  if (phase.status === "skipped" && phase.restoredDurationMs === undefined) return [fg(theme.faint)("skipped")]
   const parts: TextChunk[] = []
-  const capability = phaseCapabilityLabel(phase)
-  if (capability) parts.push(fg(theme.cyan)(capability))
-  if (phase.status === "pending") return parts
-  if (phase.status === "skipped" && phase.restoredDurationMs === undefined) return [...parts, fg(theme.faint)(`${parts.length ? " · " : ""}skipped`)]
   const elapsed = phaseElapsed(phase, now)
-  if (elapsed !== undefined) {
-    parts.push(fg(phase.status === "failed" ? theme.red : theme.dim)(`${parts.length ? " · " : ""}${formatElapsed(elapsed)}`))
-  }
+  if (elapsed !== undefined) parts.push(fg(phase.status === "failed" ? theme.red : theme.dim)(formatElapsed(elapsed)))
   // Live cost belongs to the current-step panel; a phase's final cost lands here once it ends.
   if (phase.usageReported && phase.status !== "running") parts.push(fg(theme.faint)(` ${formatMoney(phase.cost)}`))
   return parts
 }
 
+// The wide panes (comparison cards, detail header) show the full badge inline
+// with the meta; only the narrow pipeline tree degrades it.
+function phaseMetaWithCapability(phase: PhaseState, now: number): TextChunk[] {
+  const meta = phaseMetaChunks(phase, now)
+  const capability = phaseCapabilityLabel(phase)
+  if (!capability) return meta
+  const badge = fg(theme.cyan)(capability)
+  return meta.length ? [badge, fg(theme.faint)(" · "), ...meta] : [badge]
+}
+
 export function phaseCapabilityLabel(phase: Pick<ProgressPhase, "readOnly">): string | undefined {
   return phase.readOnly ? "audit · read-only" : undefined
+}
+
+// The same badge in shrinking forms for the pipeline tree, longest first.
+export function phaseCapabilityBadges(phase: Pick<ProgressPhase, "readOnly">): string[] {
+  return phase.readOnly ? ["audit · read-only", "read-only", "ro"] : []
+}
+
+// The longest badge form that fits in `spare` columns (what a tree row has
+// left after the marker, name, suffix and right-aligned meta), or none.
+// `separated` accounts for the ` · ` joining the badge to meta that follows.
+export function pickBadge(forms: readonly string[], spare: number, separated: boolean): string | undefined {
+  return forms.find((form) => displayWidth(form) + (separated ? 3 : 0) <= spare)
 }
 
 function phaseElapsed(phase: PhaseState, now: number): number | undefined {
