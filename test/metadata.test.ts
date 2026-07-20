@@ -55,6 +55,69 @@ describe("run metadata", () => {
     expect(resumed.pipeline.steps).toHaveLength(1)
   })
 
+  test("a filtered resume executes its reviewed subset without discarding frozen phases", async () => {
+    const ws = await workspace()
+    const full: Pipeline = {
+      ...quick,
+      steps: [
+        quick.steps[0]!,
+        { ...quick.steps[0]!, name: "tests", stepName: "tests", agentName: "tests", reportPath: "reports/tests.md", groupId: "g2" },
+      ],
+    }
+    const first = await openRunMetadata(ws, "/repo", full, { gateway: "vercel" })
+    await first.flush()
+
+    const reviewed: Pipeline = { ...full, steps: [full.steps[1]!] }
+    const resumed = await openRunMetadata(ws, "/repo", reviewed, { useExecutionPipeline: true })
+    expect(resumed.pipeline.steps.map((step) => step.name)).toEqual(["tests"])
+    await resumed.flush()
+
+    const persisted = await readRunMetadata(join(ws.dir, "metadata.json"))
+    expect(persisted?.pipeline?.steps.map((step) => step.name)).toEqual(["implementer", "tests"])
+  })
+
+  test("a resume model override persists only new targets for unfinished phases", async () => {
+    const ws = await workspace()
+    const full: Pipeline = {
+      ...quick,
+      steps: [
+        { ...quick.steps[0]!, resolvedModel: { configured: "openai/gpt-old", logical: "openai/gpt-old", gateway: "vercel", providerID: "vercel", modelID: "openai/gpt-old", target: "vercel/openai/gpt-old" } },
+        {
+          ...quick.steps[0]!,
+          name: "tests",
+          stepName: "tests",
+          agentName: "tests",
+          reportPath: "reports/tests.md",
+          groupId: "g2",
+          resolvedModel: { configured: "openai/gpt-old", logical: "openai/gpt-old", gateway: "vercel", providerID: "vercel", modelID: "openai/gpt-old", target: "vercel/openai/gpt-old" },
+        },
+      ],
+    }
+    const first = await openRunMetadata(ws, "/repo", full, { gateway: "vercel" })
+    first.phaseEnded("implementer", "completed")
+    await first.flush()
+
+    const overridden: Pipeline = {
+      ...full,
+      steps: full.steps.map((step) =>
+        step.type === "agent"
+          ? {
+              ...step,
+              model: "vercel/openai/gpt-new",
+              resolvedModel: { configured: "openai/gpt-new", logical: "openai/gpt-new", gateway: "vercel", providerID: "vercel", modelID: "openai/gpt-new", target: "vercel/openai/gpt-new" },
+            }
+          : step,
+      ),
+    }
+    const resumed = await openRunMetadata(ws, "/repo", overridden, { gateway: "vercel", modelOverride: true, useExecutionPipeline: true })
+    await resumed.flush()
+
+    const persisted = await readRunMetadata(join(ws.dir, "metadata.json"))
+    const targets = persisted?.pipeline?.steps.map((step) => step.type === "agent" ? step.resolvedModel?.target : undefined)
+    expect(targets).toEqual(["vercel/openai/gpt-old", "vercel/openai/gpt-new"])
+    expect(persisted?.modelRouting?.gateway).toBe("vercel")
+  })
+
   test("fails closed when a repository baseline cannot be persisted", async () => {
     const ws = await workspace()
     const store = await openRunMetadata(ws, "/repo", quick)

@@ -16,24 +16,24 @@ export function renderRunPlan(plan: RunPlan, compact = false): string {
     "",
     `Prompt: ${plan.prompt.source} · ${prompt.length} characters · ${prompt.split("\n").length} lines`,
     `  ${preview}${preview.length < prompt.replace(/\s+/g, " ").length ? "…" : ""}`,
-    `Target: ${plan.target.directory}`,
-    `  Diff base: ${plan.target.baseRef} · working tree: ${plan.target.dirty ? "include dirty" : "clean required"}`,
-    `Pipeline: ${plan.pipeline.name} · ${plan.pipeline.steps.length} steps`,
+    `Target: ${sanitizeInline(plan.target.directory)}`,
+    `  Diff base: ${sanitizeInline(plan.target.baseRef)} · working tree: ${plan.target.dirty ? "include dirty" : "clean required"}`,
+    `Pipeline: ${sanitizeInline(plan.pipeline.name)} · ${plan.pipeline.steps.length} steps`,
     `Gateway: ${gatewayLabel(plan.modelRouting.gateway)}`,
   ]
   if (!compact) {
     plan.pipeline.steps.forEach((step, index) => {
-      if (step.type === "human") lines.push(`  ${index + 1}. ${step.name} · human gate`)
+      if (step.type === "human") lines.push(`  ${index + 1}. ${sanitizeInline(step.name)} · human gate`)
       else {
-        lines.push(`  ${index + 1}. ${step.name} · ${stepRunnerFor(step.runner).displayName} · ${step.readOnly ? "read-only" : "writable"} · ${step.maxAttempts ?? plan.maxAttempts} attempts`)
-        if (step.resolvedModel) lines.push(`     Logical: ${step.resolvedModel.logical}`, `     Target:  ${step.resolvedModel.target}`)
-        else lines.push(`     Model: ${plannedStepModel(step)}`)
+        lines.push(`  ${index + 1}. ${sanitizeInline(step.name)} · ${stepRunnerFor(step.runner).displayName} · ${step.readOnly ? "read-only" : "writable"} · ${step.maxAttempts ?? plan.maxAttempts} attempts`)
+        if (step.resolvedModel) lines.push(`     Logical: ${sanitizeInline(step.resolvedModel.logical)}`, `     Target:  ${sanitizeInline(step.resolvedModel.target)}`)
+        else lines.push(`     Model: ${sanitizeInline(plannedStepModel(step))}`)
       }
     })
     if (plan.hooks.pre.length || plan.hooks.post.length) {
       lines.push("Hooks:")
-      for (const hook of plan.hooks.pre) lines.push(`  pre: ${sanitize(hook.command)}`)
-      for (const hook of plan.hooks.post) lines.push(`  post: ${sanitize(hook.command)}${hook.when ? ` (${hook.when})` : ""}`)
+      for (const hook of plan.hooks.pre) lines.push(`  pre: ${sanitizeInline(hook.command)}`)
+      for (const hook of plan.hooks.post) lines.push(`  post: ${sanitizeInline(hook.command)}${hook.when ? ` (${sanitizeInline(hook.when)})` : ""}`)
     }
     lines.push(`Runtime: ${plan.permissions} permissions · ${plan.attachments.length} attachments`)
   }
@@ -67,6 +67,10 @@ export async function confirmRunPlan(plan: RunPlan): Promise<boolean> {
 
 function sanitize(value: string) {
   return value.replace(ansiSequences, "").replace(controlCharacters, "")
+}
+
+function sanitizeInline(value: string) {
+  return sanitize(value).replace(/\s+/g, " ").trim()
 }
 
 function gatewayLabel(gateway: RunPlan["modelRouting"]["gateway"]) {

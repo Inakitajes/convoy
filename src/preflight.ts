@@ -11,12 +11,16 @@ export async function preflightRunPlan(plan: RunPlan): Promise<void> {
   if (plan.smartJudge) targets.push(plan.smartJudge.model)
   if (targets.length === 0) return
 
-  const handle = await startOpencode({}, AbortSignal.timeout(preflightTimeoutMs))
+  const timeout = AbortSignal.timeout(preflightTimeoutMs)
+  const handle = await startOpencode({}, timeout)
   try {
-    const [providerResult, modelResult] = await Promise.all([
-      handle.client.v2.provider.list({ location: { directory: plan.target.directory } }),
-      handle.client.v2.model.list({ location: { directory: plan.target.directory } }),
-    ])
+    const [providerResult, modelResult] = await withinPreflightTimeout(
+      Promise.all([
+        handle.client.v2.provider.list({ location: { directory: plan.target.directory } }),
+        handle.client.v2.model.list({ location: { directory: plan.target.directory } }),
+      ]),
+      timeout,
+    )
     if (providerResult.error || modelResult.error) throw new Error("OpenCode could not list enabled providers and models")
     const providers = providerResult.data ?? []
     const models = modelResult.data ?? []
@@ -37,4 +41,14 @@ export async function preflightRunPlan(plan: RunPlan): Promise<void> {
   } finally {
     handle.close()
   }
+}
+
+function withinPreflightTimeout<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(new Error("OpenCode preflight timed out"))
+  return Promise.race([
+    operation,
+    new Promise<never>((_, reject) => {
+      signal.addEventListener("abort", () => reject(new Error("OpenCode preflight timed out")), { once: true })
+    }),
+  ])
 }

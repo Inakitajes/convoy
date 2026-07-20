@@ -34,4 +34,9 @@ describe("model gateway routing", () => {
     )
     expect(() => resolveModel("custom/private-model", "vercel")).toThrow("modelRouting.overrides")
   })
+
+  test("rejects whitespace and terminal controls in model references", () => {
+    expect(() => resolveModel("openai/gpt-5.6\nforged", "vercel")).toThrow("without whitespace or control characters")
+    expect(() => resolveModel("openai/gpt-5.6#high\u001b[2J", "vercel")).toThrow("without whitespace or control characters")
+  })
 })

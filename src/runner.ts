@@ -220,6 +220,7 @@ function installShutdownSignals(shutdown: RunShutdown) {
 export async function run(options: RunOptions) {
   // CLI callers hand the exact reviewed plan to the runner. Keep accepting
   // legacy programmatic RunOptions for API/tests, but never re-resolve a plan.
+  const modelOverride = options.modelOverride
   if (options.plan) {
     options.pipeline = options.plan.pipeline
     options.onlySteps = []
@@ -244,7 +245,7 @@ export async function run(options: RunOptions) {
   let progress: ProgressUI = noopProgress
   let permissions: PermissionGate | undefined
   let metadata: RunMetadataStore | undefined
-  let hookSet = hooksForPipeline(options.hooks, options.pipeline.name)
+  let hookSet = options.plan?.hooks ?? hooksForPipeline(options.hooks, options.pipeline.name)
   let pipelineNameForHooks = options.pipeline.name
   let postHooksStarted = false
   const shutdown = new RunShutdown()
@@ -256,12 +257,17 @@ export async function run(options: RunOptions) {
   const judgeModel = parseModel(splitModelVariant(options.smartJudgeModel).model)
 
   try {
-    metadata = await openRunMetadata(workspace, options.targetDir, options.pipeline, options.plan?.modelRouting.gateway ?? options.gateway ?? "configured", options.gatewayExplicit ?? false)
-    // Resumed runs replay the pipeline frozen in their metadata, so the steps
-    // (and thus --only/--skip names and required agents) come from there.
+    metadata = await openRunMetadata(workspace, options.targetDir, options.pipeline, {
+      gateway: options.plan?.modelRouting.gateway ?? options.gateway ?? "configured",
+      gatewayOverride: options.gatewayExplicit ?? false,
+      modelOverride: Boolean(modelOverride),
+      // The plan has already applied --only/--skip. Never re-expand a reviewed
+      // resume back to the entire persisted pipeline.
+      useExecutionPipeline: Boolean(options.resumeRunID && options.plan),
+    })
     const pipeline = metadata.pipeline
     pipelineNameForHooks = pipeline.name
-    hookSet = hooksForPipeline(options.hooks, pipeline.name)
+    hookSet = options.plan?.hooks ?? hooksForPipeline(options.hooks, pipeline.name)
     validateStepFilters(pipeline, options)
     // Parallel/multi-model steps are forced read-only and point at a synthesized
     // "<agent>__ro" variant when their base agent isn't already read-only;
@@ -1794,8 +1800,14 @@ function buildPhasePrompt(workspace: Workspace, phase: AgentStep) {
 export function parseModel(value: string) {
   const [providerID, ...rest] = value.split("/")
   const modelID = rest.join("/")
-  if (!providerID || !modelID) throw new Error(`invalid model: ${value}`)
+  if (!providerID || !modelID || !isSafeModelSegment(providerID) || rest.some((segment) => !isSafeModelSegment(segment))) {
+    throw new Error(`invalid model: ${value}`)
+  }
   return { providerID, modelID }
+}
+
+function isSafeModelSegment(value: string) {
+  return value.length > 0 && !/[\s/#\u0000-\u001f\u007f-\u009f]/u.test(value)
 }
 
 function selectedModel(phase: AgentStep, override: string): ModelSelection {

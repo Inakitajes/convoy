@@ -314,6 +314,9 @@ export async function parseCommand(argv: string[]): Promise<CliCommand> {
       // Legacy/incomplete workspaces retain the empty resume prompt.
     }
   }
+  // Resume filters can only be checked after metadata has restored its frozen
+  // pipeline. Validate them before building a potentially empty review plan.
+  validateStepFilters(options.pipeline, options)
   options.plan = buildRunPlan({ ...options, promptSource: parsed.resumeRunID ? "resume" : parsed.promptFile ? "file" : "inline" })
   return { type: "run", options }
 }

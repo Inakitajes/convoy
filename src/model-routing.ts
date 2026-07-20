@@ -36,8 +36,15 @@ export function logicalModel(value: string): { model: string; variant?: string }
   if (parts.length < 2) throw new Error(`model must look like provider/model[#variant], got "${value}"`)
   if (gatewayProviders.has(parts[0]!)) parts.shift()
   if (parts.length < 2) throw new Error(`gateway model must include its logical provider, got "${value}"`)
+  if (parts.some((part) => !isSafeModelPart(part)) || (parsed.variant !== undefined && !isSafeModelPart(parsed.variant))) {
+    throw new Error(`model must contain non-empty provider, model, and variant segments without whitespace or control characters, got "${value}"`)
+  }
   parts[0] = directAliases[parts[0]!] ?? parts[0]!
   return { model: parts.join("/"), ...(parsed.variant ? { variant: parsed.variant } : {}) }
+}
+
+function isSafeModelPart(value: string) {
+  return value.length > 0 && !/[\s/#\u0000-\u001f\u007f-\u009f]/u.test(value)
 }
 
 export function resolveModel(configured: string, gateway: ModelGateway, overrides: ModelRoutingOverrides = {}): ResolvedModel {
