@@ -7,7 +7,7 @@ import { hooksForPipeline } from "./hooks"
 import { startLimitsPoller } from "./limits"
 import { builtInPipelines, defaultPipelineName, resolvePipeline } from "./pipeline"
 import { stepRunnerFor } from "./step-runners"
-import { modelGateways, type ModelGateway } from "./model-routing"
+import { gatewayLabel, modelGateways, type ModelGateway } from "./model-routing"
 import { joinLines, limitsRow, padBetween, paletteForTerminal, plain, raw, setTheme, spinnerFrame, terminalBackgroundHex, theme, truncate } from "./tui-theme"
 
 import type { ConvoyConfig } from "./config"
@@ -972,7 +972,7 @@ class LaunchPicker {
     lines.push(new StyledText([fg(theme.faint)("prompt   "), fg(theme.text)(truncate(this.prompt, Math.max(10, width - 9)))]))
     lines.push(plain(""))
     lines.push(t`${fg(theme.dim)("Toggle extra run parameters, then press Enter to start.")}`)
-    lines.push(new StyledText([fg(theme.faint)("Gateway  "), bold(fg(theme.accent)(this.gateway)), fg(theme.dim)("  (g to change)")]))
+    lines.push(new StyledText([fg(theme.faint)("gateway  "), bold(fg(theme.text)(gatewayLabel(this.gateway))), fg(theme.dim)("  (g to change)")]))
     lines.push(plain(""))
 
     this.optionRows = Array(lines.length).fill(undefined)

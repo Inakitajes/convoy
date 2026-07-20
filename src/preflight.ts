@@ -1,4 +1,5 @@
 import { startOpencode } from "./opencode"
+import { gatewayLabel } from "./model-routing"
 import type { RunPlan } from "./types"
 
 const preflightTimeoutMs = 15_000
@@ -34,7 +35,7 @@ export async function preflightRunPlan(plan: RunPlan): Promise<void> {
       }
       if (!models.some((model) => model.providerID === target.providerID && model.id === target.modelID)) {
         throw new Error(
-          `Model unavailable through ${target.gateway}:\n\n  logical: ${target.logical}\n  target:  ${target.target}\n\nAdd modelRouting.overrides or select --gateway configured.`,
+          `Model unavailable through ${gatewayLabel(target.gateway)}:\n\n  logical: ${target.logical}\n  target:  ${target.target}\n\nAdd modelRouting.overrides or select --gateway configured.`,
         )
       }
     }

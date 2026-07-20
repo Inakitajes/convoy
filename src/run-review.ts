@@ -1,6 +1,7 @@
 import { createInterface } from "node:readline/promises"
 import { stdin, stdout } from "node:process"
 
+import { gatewayLabel } from "./model-routing"
 import { plannedStepModel } from "./run-plan"
 import { stepRunnerFor } from "./step-runners"
 import type { RunPlan } from "./types"
@@ -71,8 +72,4 @@ function sanitize(value: string) {
 
 function sanitizeInline(value: string) {
   return sanitize(value).replace(/\s+/g, " ").trim()
-}
-
-function gatewayLabel(gateway: RunPlan["modelRouting"]["gateway"]) {
-  return gateway === "vercel" ? "Vercel AI Gateway" : gateway === "openrouter" ? "OpenRouter" : gateway === "direct" ? "Direct" : "As configured"
 }

@@ -29,6 +29,17 @@ export function isModelGateway(value: unknown): value is ModelGateway {
   return typeof value === "string" && modelGateways.includes(value as ModelGateway)
 }
 
+/** Single display label shared by the launcher, config editor, review, and errors. */
+export function gatewayLabel(gateway: ModelGateway): string {
+  return gateway === "vercel"
+    ? "Vercel AI Gateway"
+    : gateway === "openrouter"
+      ? "OpenRouter"
+      : gateway === "direct"
+        ? "Direct"
+        : "As configured"
+}
+
 /** Recover the provider-owned model identity from a direct or gateway-wrapped OpenCode model. */
 export function logicalModel(value: string): { model: string; variant?: string } {
   const parsed = splitModelVariant(value)

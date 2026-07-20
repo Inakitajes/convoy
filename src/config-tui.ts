@@ -31,6 +31,7 @@ import {
   type PipelineSpec,
   type StepSpec,
 } from "./pipeline"
+import { gatewayLabel } from "./model-routing"
 import { claudeCodeModelAliases, normalizeStepRunnerModel, stepRunnerFor } from "./step-runners"
 import {
   joinLines,
@@ -610,10 +611,10 @@ export class ConfigEditor {
       index: 0,
       options: [
         { value: "", label: "inherit", hint: "clear this scope's override" },
-        { value: "configured", label: "As configured", hint: "preserve pipeline model IDs literally" },
-        { value: "direct", label: "Direct", hint: "use the model owner's provider" },
-        { value: "openrouter", label: "OpenRouter" },
-        { value: "vercel", label: "Vercel AI Gateway" },
+        { value: "configured", label: gatewayLabel("configured"), hint: "preserve pipeline model IDs literally" },
+        { value: "direct", label: gatewayLabel("direct"), hint: "use the model owner's provider" },
+        { value: "openrouter", label: gatewayLabel("openrouter") },
+        { value: "vercel", label: gatewayLabel("vercel") },
       ],
       commit: (value) => {
         config.modelRouting ??= { overrides: {} }
@@ -1253,7 +1254,7 @@ export class ConfigEditor {
     const rows: Row[] = []
 
     rows.push(sectionRow("Defaults"))
-    rows.push(fieldRow("Gateway", config.modelRouting?.gateway ?? "(inherits configured)", { t: "gateway" }))
+    rows.push(fieldRow("Gateway", config.modelRouting?.gateway ? gatewayLabel(config.modelRouting.gateway) : "(inherits)", { t: "gateway" }))
     for (const field of defaultFields) {
       const value = config.defaults[field.key]
       rows.push(fieldRow(field.key, value === undefined ? "(unset)" : String(value), { t: "default", field }))
