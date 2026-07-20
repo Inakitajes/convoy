@@ -27,6 +27,7 @@ import {
 } from "./pipeline"
 import { isStepRunnerId, normalizeStepRunnerModel, stepRunnerFor, type StepRunnerId } from "./step-runners"
 import type { AgentSpec, HookSet, HookSpec, HooksConfig, HookWhen, PermissionAdditions } from "./types"
+import { isModelGateway, type ModelRoutingConfig, type ModelRoutingOverrides } from "./model-routing"
 import { convoyHome, convoyRoot, globalConfigPath } from "./workspace"
 
 /**
@@ -40,6 +41,7 @@ export type ConvoyConfig = {
   permissions: PermissionAdditions
   hooks: HooksConfig
   attachments: string[]
+  modelRouting?: ModelRoutingConfig
 }
 
 export type ConvoyDefaults = {
@@ -123,6 +125,11 @@ export function mergeConvoyConfigs(global: ConvoyConfig | undefined, project: Co
     },
     hooks: mergeHooksConfig(global.hooks, project.hooks),
     attachments: [...global.attachments, ...project.attachments],
+    modelRouting: {
+      ...(global.modelRouting?.gateway !== undefined ? { gateway: global.modelRouting.gateway } : {}),
+      ...(project.modelRouting?.gateway !== undefined ? { gateway: project.modelRouting.gateway } : {}),
+      overrides: mergeRoutingOverrides(global.modelRouting?.overrides ?? {}, project.modelRouting?.overrides ?? {}),
+    },
   }
 }
 
@@ -164,6 +171,14 @@ export const defaultConvoyConfig = `# Convoy configuration.
 # Project override path: .convoy/config.yaml
 
 version: 1
+
+# Route OpenCode models without rewriting pipelines. Project config overrides the global choice.
+# modelRouting:
+#   gateway: configured # configured | direct | openrouter | vercel
+#   overrides:
+#     zai/glm-5.2:
+#       openrouter: openrouter/z-ai/glm-5.2
+#       vercel: vercel/zai/glm-5.2
 
 defaults:
   # model: openai/gpt-5.6-terra#xhigh # optional: uncomment to force every agent unless a step/agent overrides it
@@ -321,14 +336,14 @@ export function parseConvoyConfig(body: string, source: string, targetDir: strin
     throw new ConfigError(`${source}: invalid YAML: ${error instanceof Error ? error.message : String(error)}`)
   }
 
-  const config: ConvoyConfig = { defaults: {}, agents: {}, pipelines: {}, permissions: { allow: [], deny: [] }, hooks: emptyHooksConfig(), attachments: [] }
+  const config: ConvoyConfig = { defaults: {}, agents: {}, pipelines: {}, permissions: { allow: [], deny: [] }, hooks: emptyHooksConfig(), attachments: [], modelRouting: { overrides: {} } }
   if (raw === null || raw === undefined) return config
 
   const v = new Validator(source)
   const root = v.record(raw, "")
   // Unknown keys warn instead of failing so configs written for a newer
   // convoy still load; typos surface in the warning either way.
-  v.knownKeys(root, "", ["version", "defaults", "agents", "pipelines", "permissions", "hooks", "attachments"])
+  v.knownKeys(root, "", ["version", "defaults", "agents", "pipelines", "permissions", "hooks", "attachments", "modelRouting"])
 
   if (root.version !== undefined && root.version !== 1) v.fail("version", `unsupported value ${JSON.stringify(root.version)}; this convoy reads version 1`)
 
@@ -338,8 +353,40 @@ export function parseConvoyConfig(body: string, source: string, targetDir: strin
   if (root.permissions !== undefined) config.permissions = validatePermissions(v, root.permissions)
   if (root.hooks !== undefined) config.hooks = validateHooks(v, root.hooks)
   if (root.attachments !== undefined) config.attachments = v.stringArray(root.attachments, "attachments")
+  if (root.modelRouting !== undefined) config.modelRouting = validateModelRouting(v, root.modelRouting)
 
   return config
+}
+
+function validateModelRouting(v: Validator, raw: unknown): ModelRoutingConfig {
+  const record = v.record(raw, "modelRouting")
+  v.knownKeys(record, "modelRouting", ["gateway", "overrides"])
+  const routing: ModelRoutingConfig = { overrides: {} }
+  if (record.gateway !== undefined) {
+    if (!isModelGateway(record.gateway)) v.fail("modelRouting.gateway", 'must be "configured", "direct", "openrouter", or "vercel"')
+    routing.gateway = record.gateway
+  }
+  if (record.overrides !== undefined) {
+    const overrides = v.record(record.overrides, "modelRouting.overrides")
+    for (const [logical, rawTargets] of Object.entries(overrides)) {
+      if (!isValidModelString(logical)) v.fail(`modelRouting.overrides.${logical}`, "key must be a provider/model")
+      const targets = v.record(rawTargets, `modelRouting.overrides.${logical}`)
+      v.knownKeys(targets, `modelRouting.overrides.${logical}`, ["configured", "direct", "openrouter", "vercel"])
+      const parsed: Partial<Record<import("./model-routing").ModelGateway, string>> = {}
+      for (const [gateway, target] of Object.entries(targets)) {
+        if (!isModelGateway(gateway)) continue
+        parsed[gateway] = v.model(target, `modelRouting.overrides.${logical}.${gateway}`)
+      }
+      routing.overrides[splitModelVariant(logical).model] = parsed
+    }
+  }
+  return routing
+}
+
+function mergeRoutingOverrides(global: ModelRoutingOverrides, project: ModelRoutingOverrides): ModelRoutingOverrides {
+  const result: ModelRoutingOverrides = structuredClone(global)
+  for (const [model, targets] of Object.entries(project)) result[model] = { ...(result[model] ?? {}), ...targets }
+  return result
 }
 
 function validateDefaults(v: Validator, raw: unknown): ConvoyDefaults {
@@ -624,6 +671,7 @@ export function serializeConvoyConfig(config: ConvoyConfig): string {
   const hooks = serializeHooks(config.hooks)
   if (hooks) out.hooks = hooks
   if (config.attachments.length > 0) out.attachments = config.attachments
+  if (config.modelRouting && (config.modelRouting.gateway !== undefined || Object.keys(config.modelRouting.overrides).length > 0)) out.modelRouting = config.modelRouting
   return Bun.YAML.stringify(out, null, 2)
 }
 
@@ -666,6 +714,7 @@ export function defaultConfigTemplate(): ConvoyConfig {
     permissions: { allow: [], deny: [] },
     hooks: emptyHooksConfig(),
     attachments: [],
+    modelRouting: { overrides: {} },
   }
 }
 

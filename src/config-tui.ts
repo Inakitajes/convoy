@@ -99,6 +99,7 @@ type Modal =
 type RowMeta =
   | { t: "initialize" }
   | { t: "default"; field: DefaultField }
+  | { t: "gateway" }
   | { t: "agent"; name: string }
   | { t: "pipeline"; name: string }
   /** member set: the row is `steps[index].parallel[member]`; unset: `steps[index]` (a parallel group's header when that spec is a parallel block). */
@@ -508,6 +509,9 @@ export class ConfigEditor {
       case "default":
         this.editDefault(meta.field)
         return
+      case "gateway":
+        this.editGateway()
+        return
       case "agent":
         this.editAgentModel(meta.name)
         return
@@ -594,6 +598,31 @@ export class ConfigEditor {
         this.markDirty()
       },
     })
+  }
+
+  private editGateway() {
+    const config = this.tab().config
+    if (!config) return
+    this.modal = {
+      kind: "choose",
+      title: "modelRouting.gateway",
+      filter: "",
+      index: 0,
+      options: [
+        { value: "", label: "inherit", hint: "clear this scope's override" },
+        { value: "configured", label: "As configured", hint: "preserve pipeline model IDs literally" },
+        { value: "direct", label: "Direct", hint: "use the model owner's provider" },
+        { value: "openrouter", label: "OpenRouter" },
+        { value: "vercel", label: "Vercel AI Gateway" },
+      ],
+      commit: (value) => {
+        config.modelRouting ??= { overrides: {} }
+        if (value === "") delete config.modelRouting.gateway
+        else config.modelRouting.gateway = value as "configured" | "direct" | "openrouter" | "vercel"
+        this.markDirty()
+      },
+    }
+    this.render()
   }
 
   private editAgentModel(name: string) {
@@ -1224,6 +1253,7 @@ export class ConfigEditor {
     const rows: Row[] = []
 
     rows.push(sectionRow("Defaults"))
+    rows.push(fieldRow("Gateway", config.modelRouting?.gateway ?? "(inherits configured)", { t: "gateway" }))
     for (const field of defaultFields) {
       const value = config.defaults[field.key]
       rows.push(fieldRow(field.key, value === undefined ? "(unset)" : String(value), { t: "default", field }))
@@ -1366,6 +1396,12 @@ export class ConfigEditor {
         push([fg(theme.faint)(describeDefault(meta.field.key))])
         lines.push(plain(""))
         push([fg(theme.accent)("enter"), fg(theme.dim)(meta.field.type === "model" ? " pick a model" : " edit value")])
+        break
+      case "gateway":
+        push([fg(theme.text)("modelRouting.gateway")])
+        push([fg(theme.faint)("Routes every OpenCode model without changing pipeline YAML.")])
+        lines.push(plain(""))
+        push([fg(theme.accent)("enter"), fg(theme.dim)(" choose gateway")])
         break
       case "agent":
         push([fg(theme.text)(`agent: ${meta.name}`)])

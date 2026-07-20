@@ -7,6 +7,7 @@ import { hooksForPipeline } from "./hooks"
 import { startLimitsPoller } from "./limits"
 import { builtInPipelines, defaultPipelineName, resolvePipeline } from "./pipeline"
 import { stepRunnerFor } from "./step-runners"
+import { modelGateways, type ModelGateway } from "./model-routing"
 import { joinLines, limitsRow, padBetween, paletteForTerminal, plain, raw, setTheme, spinnerFrame, terminalBackgroundHex, theme, truncate } from "./tui-theme"
 
 import type { ConvoyConfig } from "./config"
@@ -25,8 +26,13 @@ export type LaunchRunSelection = {
   keepRunDir: boolean
   yolo: boolean
   smart: boolean
+  gateway: ModelGateway
   /** When set, Convoy ran against an isolated worktree created on launch. */
   worktree?: { dir: string; branch: string }
+  /** Worktree creation is intentionally deferred until after plan confirmation. */
+  isolateWorktree?: boolean
+  /** Empty repositories are initialized only after the review is confirmed. */
+  initializeGit?: boolean
 }
 
 export type LaunchNavigationSelection =
@@ -152,7 +158,7 @@ export async function launchRunTui(options: { targetDir: string }): Promise<Laun
   })
   const mode = await renderer.waitForThemeMode(1_000).catch(() => null)
   setTheme(paletteForTerminal(mode, terminalBackgroundHex(renderer)))
-  return new LaunchPicker(renderer, options.targetDir, choices, baseRef, config?.defaults.branchNameModel).result
+  return new LaunchPicker(renderer, options.targetDir, choices, baseRef, config?.modelRouting?.gateway ?? "configured").result
 }
 
 function pipelineChoices(config: ConvoyConfig | undefined, agents: readonly AgentSpec[]): PipelineChoice[] {
@@ -323,7 +329,7 @@ class LaunchPicker {
     private readonly targetDir: string,
     private readonly choices: PipelineChoice[],
     private readonly baseRef: string | undefined,
-    private readonly branchNameModel: string | undefined,
+    private gateway: ModelGateway,
   ) {
     const defaultIndex = choices.findIndex((choice) => choice.isDefault)
     this.selected = defaultIndex >= 0 ? defaultIndex : 0
@@ -593,6 +599,10 @@ class LaunchPicker {
       case "s":
         this.startRun()
         return
+      case "g":
+        this.gateway = modelGateways[(modelGateways.indexOf(this.gateway) + 1) % modelGateways.length]!
+        this.render()
+        return
       case "p":
       case "escape":
         this.mode = "prompt"
@@ -635,14 +645,7 @@ class LaunchPicker {
       const { repoBootstrapStatus } = await import("./git")
       const status = await repoBootstrapStatus(this.targetDir)
       if (status !== "ready") {
-        this.modal = {
-          kind: "confirm",
-          title: "Initialize Git",
-          message: status === "no-repo" ? "This project has no Git repository. Initialize it now with an initial commit?" : "This Git repository has no commits. Create an initial commit now?",
-          footer: "enter initialize · esc cancel",
-          onConfirm: () => void this.initializeGitAndStart(choice.name),
-        }
-        this.render()
+        this.finishRunSelection(choice.name, true)
         return
       }
     } catch (error) {
@@ -653,20 +656,6 @@ class LaunchPicker {
     }
 
     await this.startReadyRun(choice.name)
-  }
-
-  private async initializeGitAndStart(pipelineName: string) {
-    this.modal = { kind: "loading", title: "initializing Git", message: "creating initial commit…", footer: "please wait…" }
-    this.render()
-    try {
-      const { initializeRepoWithInitialCommit } = await import("./git")
-      await initializeRepoWithInitialCommit(this.targetDir, { baseRef: this.baseRef })
-      await this.startReadyRun(pipelineName)
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      this.modal = { kind: "message", title: "git init failed", message }
-      this.render()
-    }
   }
 
   // Mirrors the checks `run()` re-does after the launcher closes (ensureRepoReady
@@ -689,10 +678,10 @@ class LaunchPicker {
       this.render()
       return
     }
-    if (this.toggleState.worktree) {
-      void this.startWorktreeRun(pipelineName)
-      return
-    }
+    this.finishRunSelection(pipelineName)
+  }
+
+  private finishRunSelection(pipelineName: string, initializeGit = false) {
     this.finish({
       targetDir: this.targetDir,
       prompt: this.prompt,
@@ -703,45 +692,10 @@ class LaunchPicker {
       keepRunDir: this.toggleState.keepRunDir,
       yolo: this.toggleState.yolo,
       smart: this.toggleState.smart,
+      gateway: this.gateway,
+      isolateWorktree: this.toggleState.worktree,
+      ...(initializeGit ? { initializeGit: true } : {}),
     })
-  }
-
-  // The AI naming call + `git worktree add` happen here, behind a blocking
-  // loading modal so the user can't toggle options mid-creation. Any failure
-  // falls back to the options screen with an explanatory message modal.
-  private async startWorktreeRun(pipelineName: string) {
-    try {
-      const { createIsolatedWorktree, defaultBranchNameModel } = await import("./worktree")
-      const namerModel = this.branchNameModel ?? defaultBranchNameModel
-      this.modal = {
-        kind: "loading",
-        title: "isolating worktree",
-        message: `investigating prompt & naming branch… (${namerModel})`,
-        footer: "creating a new branch + worktree…",
-      }
-      this.render()
-      const result = await createIsolatedWorktree({
-        targetDir: this.targetDir,
-        prompt: this.prompt,
-        model: namerModel,
-      })
-      this.finish({
-        targetDir: result.dir,
-        prompt: this.prompt,
-        pipeline: pipelineName,
-        humanReview: this.toggleState.humanReview,
-        tui: this.toggleState.tui,
-        includeDirty: false,
-        keepRunDir: this.toggleState.keepRunDir,
-        yolo: this.toggleState.yolo,
-        smart: this.toggleState.smart,
-        worktree: { dir: result.dir, branch: result.branch },
-      })
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      this.modal = { kind: "message", title: "worktree failed", message }
-      this.render()
-    }
   }
 
   private toggleOption() {
@@ -1018,6 +972,7 @@ class LaunchPicker {
     lines.push(new StyledText([fg(theme.faint)("prompt   "), fg(theme.text)(truncate(this.prompt, Math.max(10, width - 9)))]))
     lines.push(plain(""))
     lines.push(t`${fg(theme.dim)("Toggle extra run parameters, then press Enter to start.")}`)
+    lines.push(new StyledText([fg(theme.faint)("Gateway  "), bold(fg(theme.accent)(this.gateway)), fg(theme.dim)("  (g to change)")]))
     lines.push(plain(""))
 
     this.optionRows = Array(lines.length).fill(undefined)
@@ -1044,6 +999,7 @@ class LaunchPicker {
 
   private enabledFlags() {
     const flags = [`--pipeline ${this.currentChoice().name}`]
+    flags.push(`--gateway ${this.gateway}`)
     if (this.toggleState.smart) flags.push("--smart")
     if (this.toggleState.yolo) flags.push("--yolo")
     flags.push(this.toggleState.humanReview ? "--human-step" : "--no-human-step")
@@ -1071,7 +1027,7 @@ class LaunchPicker {
       )
     }
     return padBetween(
-      [fg(theme.dim)("↑/↓ select · "), fg(theme.accent)("space"), fg(theme.dim)(" toggle · "), fg(theme.accent)("enter"), fg(theme.dim)(" start · "), fg(theme.accent)("p"), fg(theme.dim)(" prompt · "), fg(theme.accent)("r"), fg(theme.dim)(" runs · "), fg(theme.accent)("c"), fg(theme.dim)(" config · "), fg(theme.accent)("q"), fg(theme.dim)(" quit")],
+      [fg(theme.dim)("↑/↓ select · "), fg(theme.accent)("space"), fg(theme.dim)(" toggle · "), fg(theme.accent)("g"), fg(theme.dim)(" gateway · "), fg(theme.accent)("enter"), fg(theme.dim)(" start · "), fg(theme.accent)("p"), fg(theme.dim)(" prompt · "), fg(theme.accent)("q"), fg(theme.dim)(" quit")],
       [fg(theme.faint)(`${this.optionIndex + 1}/${toggles.length}`)],
       width,
     )

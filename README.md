@@ -459,3 +459,32 @@ convoy/
 ├── tsconfig.json
 └── Makefile
 ```
+# Model gateways and run review
+
+Convoy can change how every OpenCode model is reached without rewriting a pipeline:
+
+```sh
+convoy "Implement the feature" --gateway direct
+convoy "Implement the feature" --gateway openrouter
+convoy "Implement the feature" --gateway vercel
+convoy "Implement the feature" --gateway configured
+```
+
+`configured` (the default) preserves model IDs literally. `direct` uses the model owner's provider; `openrouter` and `vercel` wrap the logical provider/model. Claude Code steps are never rerouted. A `--model` selects the logical model first, then the gateway is applied.
+
+Persist the choice globally in `~/.convoy/config.yaml` or per project in `.convoy/config.yaml` (CLI > project > global > configured):
+
+```yaml
+version: 1
+modelRouting:
+  gateway: vercel
+  overrides:
+    zai/glm-5.2:
+      direct: zai/glm-5.2
+      openrouter: openrouter/z-ai/glm-5.2
+      vercel: vercel/zai/glm-5.2
+```
+
+Unknown model namespaces require an explicit override when rerouting; `configured` always remains literal. Authenticate Vercel through `opencode providers login` (choose Vercel AI Gateway) or set `AI_GATEWAY_API_KEY`; Convoy never stores gateway credentials.
+
+Every interactive manual run now displays its fully resolved plan before repository effects. `--plan` prints that plan and exits without creating a run, running hooks, or starting OpenCode. `--no-confirm` prints a compact plan and starts immediately. Non-TTY environments continue automatically after the compact summary.

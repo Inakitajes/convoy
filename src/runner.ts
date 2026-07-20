@@ -218,6 +218,16 @@ function installShutdownSignals(shutdown: RunShutdown) {
 }
 
 export async function run(options: RunOptions) {
+  // CLI callers hand the exact reviewed plan to the runner. Keep accepting
+  // legacy programmatic RunOptions for API/tests, but never re-resolve a plan.
+  if (options.plan) {
+    options.pipeline = options.plan.pipeline
+    options.onlySteps = []
+    options.skipSteps = []
+    options.modelOverride = ""
+    if (options.plan.smartJudge) options.smartJudgeModel = options.plan.smartJudge.model.target
+  }
+  if (options.plan) ensureClaudeAvailable(options.plan.pipeline)
   await ensureRepoReady(options.targetDir, {
     includeDirty: options.includeDirty,
     maxAttempts: options.maxAttempts,
@@ -246,7 +256,7 @@ export async function run(options: RunOptions) {
   const judgeModel = parseModel(splitModelVariant(options.smartJudgeModel).model)
 
   try {
-    metadata = await openRunMetadata(workspace, options.targetDir, options.pipeline)
+    metadata = await openRunMetadata(workspace, options.targetDir, options.pipeline, options.plan?.modelRouting.gateway ?? options.gateway ?? "configured", options.gatewayExplicit ?? false)
     // Resumed runs replay the pipeline frozen in their metadata, so the steps
     // (and thus --only/--skip names and required agents) come from there.
     const pipeline = metadata.pipeline

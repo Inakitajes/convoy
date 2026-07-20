@@ -7,10 +7,15 @@ import { openRouterKeySources } from "./limits"
 import { log } from "./log"
 import { defaultGptModel, defaultGptVariant, defaultPipeline, defaultPipelineName, resolvePipeline, splitModelVariant, validateStepFilters } from "./pipeline"
 import { parseModel, run } from "./runner"
+import { buildRunPlan } from "./run-plan"
+import { confirmRunPlan, renderRunPlan } from "./run-review"
+import { isModelGateway, resolveModel, type ModelGateway } from "./model-routing"
 import { browseRuns } from "./runs"
 import { deleteKeychainSecret, keychainAvailable, storeKeychainSecret } from "./secrets"
 import type { Pipeline, RunOptions } from "./types"
-import { isValidRunID } from "./workspace"
+import { isValidRunID, resumeWorkspace } from "./workspace"
+import { readRunMetadata } from "./metadata"
+import { preflightRunPlan } from "./preflight"
 
 /**
  * Flags as written: every scalar stays undefined until the user sets it, so
@@ -44,6 +49,9 @@ export type ParsedArgs = {
   yolo?: boolean
   smart?: boolean
   smartModel?: string
+  gateway?: ModelGateway
+  planOnly?: boolean
+  noConfirm?: boolean
 }
 
 export type InitOptions = {
@@ -95,7 +103,22 @@ export async function parseAndRun(argv: string[]) {
     return
   }
 
-  await run(command.options)
+  const plan = command.options.plan ?? buildRunPlan(command.options)
+  if (command.options.planOnly) {
+    process.stdout.write(renderRunPlan(plan))
+    return
+  }
+  const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY)
+  if (interactive && !command.options.noConfirm) {
+    if (!(await confirmRunPlan(plan))) {
+      log.info("Run cancelled")
+      return
+    }
+  } else {
+    process.stdout.write(renderRunPlan(plan, true))
+  }
+  await preflightRunPlan(plan)
+  await run({ ...command.options, plan })
 }
 
 async function launchInteractiveRun(targetDir: string) {
@@ -121,6 +144,7 @@ async function launchInteractiveRun(targetDir: string) {
   parsed.keepRunDir = selection.keepRunDir
   parsed.yolo = selection.yolo
   parsed.smart = selection.smart
+  parsed.gateway = selection.gateway
   if (selection.includeDirty) parsed.maxAttempts = 1
 
   if (selection.worktree) {
@@ -128,7 +152,24 @@ async function launchInteractiveRun(targetDir: string) {
     log.info(`  dir: ${selection.worktree.dir}`)
   }
 
-  await run({ ...(await resolveRunOptions(parsed)), prompt: selection.prompt })
+  let options = { ...(await resolveRunOptions(parsed)), prompt: selection.prompt }
+  const plan = buildRunPlan({ ...options, worktree: Boolean(selection.worktree || selection.isolateWorktree) })
+  if (!(await confirmRunPlan(plan))) return
+  await preflightRunPlan(plan)
+  if (selection.initializeGit) {
+    const { initializeRepoWithInitialCommit } = await import("./git")
+    await initializeRepoWithInitialCommit(targetDir, { baseRef: options.baseRef === "HEAD" ? undefined : options.baseRef })
+  }
+  if (selection.isolateWorktree) {
+    const { createIsolatedWorktree, defaultBranchNameModel } = await import("./worktree")
+    const config = await loadMergedConvoyConfig(targetDir)
+    const namer = resolveModel(config?.defaults.branchNameModel ?? defaultBranchNameModel, parsed.gateway ?? "configured", config?.modelRouting?.overrides ?? {}).target
+    const worktree = await createIsolatedWorktree({ targetDir, prompt: selection.prompt, model: namer })
+    options = { ...options, targetDir: worktree.dir, includeDirty: false }
+    log.info(`running in isolated worktree (branch: ${worktree.branch})`)
+    log.info(`  dir: ${worktree.dir}`)
+  }
+  await run({ ...options, plan, noConfirm: true })
 }
 
 async function openRunsBrowser(initialRunID?: string) {
@@ -138,7 +179,11 @@ async function openRunsBrowser(initialRunID?: string) {
   for (;;) {
     const resolution = await browseRuns(currentRunID)
     if (resolution.type === "resume") {
-      await run(await resumeOptions(resolution.runID, resolution.targetDir))
+      const options = await resumeOptions(resolution.runID, resolution.targetDir)
+      const plan = options.plan ?? buildRunPlan({ ...options, promptSource: "resume" })
+      if (!(await confirmRunPlan(plan))) return
+      await preflightRunPlan(plan)
+      await run({ ...options, plan })
       return
     }
     if (resolution.type === "open") {
@@ -164,7 +209,18 @@ async function resumeOptions(runID: string, targetDir?: string): Promise<RunOpti
   const parsed = parseArgs([])
   parsed.resumeRunID = runID
   if (targetDir) parsed.targetDir = targetDir
-  return { ...(await resolveRunOptions(parsed)), prompt: "" }
+  const options: RunOptions = { ...(await resolveRunOptions(parsed)), prompt: "" }
+  const workspace = await resumeWorkspace(runID)
+  const metadata = await readRunMetadata(resolve(workspace.dir, "metadata.json"))
+  if (metadata?.pipeline) options.pipeline = metadata.pipeline
+  options.gateway = metadata?.modelRouting?.gateway ?? "configured"
+  try {
+    options.prompt = await readFile(resolve(workspace.dir, "prd.md"), "utf8")
+  } catch {
+    // Legacy/incomplete workspace.
+  }
+  options.plan = buildRunPlan({ ...options, promptSource: "resume" })
+  return options
 }
 
 /**
@@ -246,7 +302,20 @@ export async function parseCommand(argv: string[]): Promise<CliCommand> {
     throw new Error("need a prompt (positional or --prompt-file) or --resume <id>")
   }
 
-  return { type: "run", options: { ...(await resolveRunOptions(parsed)), prompt } }
+  const options: RunOptions = { ...(await resolveRunOptions(parsed)), prompt }
+  if (parsed.resumeRunID) {
+    const workspace = await resumeWorkspace(parsed.resumeRunID)
+    const metadata = await readRunMetadata(resolve(workspace.dir, "metadata.json"))
+    if (metadata?.pipeline) options.pipeline = metadata.pipeline
+    if (parsed.gateway === undefined) options.gateway = metadata?.modelRouting?.gateway ?? "configured"
+    try {
+      options.prompt = await readFile(resolve(workspace.dir, "prd.md"), "utf8")
+    } catch {
+      // Legacy/incomplete workspaces retain the empty resume prompt.
+    }
+  }
+  options.plan = buildRunPlan({ ...options, promptSource: parsed.resumeRunID ? "resume" : parsed.promptFile ? "file" : "inline" })
+  return { type: "run", options }
 }
 
 type ParsedInitArgs = InitOptions & { help?: boolean }
@@ -351,6 +420,11 @@ export async function resolveRunOptions(parsed: ParsedArgs): Promise<Omit<RunOpt
     yolo: parsed.yolo ?? false,
     smart: parsed.smart ?? false,
     smartJudgeModel,
+    gateway: parsed.gateway ?? config?.modelRouting?.gateway ?? "configured",
+    gatewayExplicit: parsed.gateway !== undefined,
+    modelRoutingOverrides: config?.modelRouting?.overrides ?? {},
+    planOnly: parsed.planOnly ?? false,
+    noConfirm: parsed.noConfirm ?? false,
     pipeline,
     agents,
     permissions: config?.permissions ?? { allow: [], deny: [] },
@@ -452,6 +526,20 @@ export function parseArgs(argv: string[]): ParsedArgs {
       case "--model":
         parsed.modelOverride = takeValue()
         break
+      case "--gateway": {
+        const gateway = takeValue()
+        if (!isModelGateway(gateway)) throw new Error('--gateway must be "configured", "direct", "openrouter", or "vercel"')
+        parsed.gateway = gateway
+        break
+      }
+      case "--plan":
+        if (value !== undefined) throw new Error("--plan does not take a value")
+        parsed.planOnly = true
+        break
+      case "--no-confirm":
+        if (value !== undefined) throw new Error("--no-confirm does not take a value")
+        parsed.noConfirm = true
+        break
       case "--tui":
         parsed.tui = true
         break
@@ -542,6 +630,9 @@ Flags:
   --smart-model <provider/model[#variant]> Model for the smart auto-accept judge (default: defaults.autoAcceptJudgeModel, else the run's model)
   --include-dirty          Include existing changes in the first commit (requires --max-attempts 1)
   --model <provider/model[#variant]> Force a model for OpenCode steps (Claude Code steps keep their CLI model)
+  --gateway <configured|direct|openrouter|vercel> Route all OpenCode models through the selected gateway
+  --plan                   Print the complete resolved plan without creating or running anything
+  --no-confirm             Show a compact plan and start without the interactive confirmation
   --tui                    Show visual phase progress (default in interactive terminals)
   --no-tui                 Disable visual phase progress
   --human-step             Enable human steps (alias: --human-review; default in interactive terminals)
@@ -557,6 +648,7 @@ Config files:
 
 Config keys:
   defaults:                model, maxAttempts, baseRef, pipeline, autoAcceptJudgeModel, branchNameModel
+  modelRouting:            gateway and explicit per-logical-model overrides
   agents:                  project agents or built-in overrides; prompts live at agents/<name>.md
   pipelines:               named step lists mixing agents and human gates
   permissions:             allow/deny additions to the bash policy (deny always wins)

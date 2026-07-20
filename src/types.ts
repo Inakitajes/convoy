@@ -1,4 +1,5 @@
 import type { StepRunnerId } from "./step-runners"
+import type { ModelGateway, ModelRoutingOverrides, ResolvedModel } from "./model-routing"
 
 export type RunOptions = {
   prompt: string
@@ -8,6 +9,13 @@ export type RunOptions = {
   resumeRunID: string
   keepRunDir: boolean
   modelOverride: string
+  gateway?: ModelGateway
+  gatewayExplicit?: boolean
+  modelRoutingOverrides?: ModelRoutingOverrides
+  /** The immutable, reviewed execution description. Legacy programmatic callers may omit it. */
+  plan?: RunPlan
+  planOnly?: boolean
+  noConfirm?: boolean
   tui: boolean
   humanReview: boolean
   maxAttempts: number
@@ -98,6 +106,8 @@ export type AgentStep = {
   /** Empty string on claude-code steps that defer to the CLI's default model. */
   model: string
   variant?: string
+  /** Frozen logical and physical OpenCode model. Absent only on legacy metadata and Claude Code steps. */
+  resolvedModel?: ResolvedModel
   /** Absent for OpenCode (the default engine). */
   runner?: StepRunner
   inputFiles: readonly string[]
@@ -125,4 +135,17 @@ export type Pipeline = {
   name: string
   description?: string
   steps: Step[]
+}
+
+export type RunPlan = {
+  prompt: { source: "inline" | "file" | "resume"; text: string }
+  target: { directory: string; baseRef: string; worktree: boolean; dirty: boolean }
+  pipeline: Pipeline
+  modelRouting: { gateway: ModelGateway }
+  smartJudge?: { model: ResolvedModel }
+  hooks: HookSet
+  attachments: string[]
+  permissions: "interactive" | "smart" | "yolo"
+  maxAttempts: number
+  resume?: { runID: string }
 }
