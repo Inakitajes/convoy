@@ -23,7 +23,7 @@ export type ResolvedModel = {
 const gatewayProviders = new Set(["openrouter", "vercel"])
 const directAliases: Record<string, string> = { "z-ai": "zai" }
 const openRouterAliases: Record<string, string> = { zai: "z-ai" }
-const safelyRoutableProviders = new Set(["openai", "anthropic", "zai"])
+const safelyRoutableProviders = new Set(["openai", "anthropic", "moonshotai", "zai"])
 
 export function isModelGateway(value: unknown): value is ModelGateway {
   return typeof value === "string" && modelGateways.includes(value as ModelGateway)

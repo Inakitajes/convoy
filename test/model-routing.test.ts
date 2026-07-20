@@ -37,6 +37,11 @@ describe("model gateway routing", () => {
     expect(resolveModel("openrouter/z-ai/glm-5.2", "vercel").target).toBe("vercel/zai/glm-5.2")
   })
 
+  test("routes Moonshot Kimi through gateways without an override", () => {
+    expect(resolveModel("moonshotai/kimi-k3", "openrouter").target).toBe("openrouter/moonshotai/kimi-k3")
+    expect(resolveModel("openrouter/moonshotai/kimi-k3", "vercel").target).toBe("vercel/moonshotai/kimi-k3")
+  })
+
   test("configured remains literal", () => {
     expect(resolveModel("openrouter/z-ai/glm-5.2#high", "configured")).toMatchObject({
       logical: "zai/glm-5.2#high",
