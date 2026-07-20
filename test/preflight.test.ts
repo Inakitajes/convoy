@@ -41,7 +41,7 @@ function plan(): RunPlan {
 }
 
 describe("OpenCode run-plan preflight", () => {
-  test("collects OpenCode steps and smart judge targets, never Claude Code", () => {
+  test("collects OpenCode steps, smart judge, and branch namer targets — never Claude Code", () => {
     const reviewed = plan()
     reviewed.pipeline.steps.push({
       type: "agent",
@@ -67,10 +67,21 @@ describe("OpenCode run-plan preflight", () => {
         target: "vercel/anthropic/claude-haiku-4.5",
       },
     }
+    reviewed.branchNamer = {
+      model: {
+        configured: "anthropic/claude-haiku-4-5",
+        logical: "anthropic/claude-haiku-4-5",
+        gateway: "vercel",
+        providerID: "vercel",
+        modelID: "anthropic/claude-haiku-4-5",
+        target: "vercel/anthropic/claude-haiku-4-5",
+      },
+    }
 
     expect(preflightTargets(reviewed).map((target) => target.target)).toEqual([
       "vercel/openai/gpt-5.6-sol",
       "vercel/anthropic/claude-haiku-4.5",
+      "vercel/anthropic/claude-haiku-4-5",
     ])
   })
 

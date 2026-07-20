@@ -9,7 +9,7 @@ import { defaultGptModel, defaultGptVariant, defaultPipeline, defaultPipelineNam
 import { parseModel, run } from "./runner"
 import { buildRunPlan } from "./run-plan"
 import { confirmRunPlan, renderRunPlan } from "./run-review"
-import { isModelGateway, resolveModel, type ModelGateway } from "./model-routing"
+import { isModelGateway, type ModelGateway } from "./model-routing"
 import { browseRuns } from "./runs"
 import { deleteKeychainSecret, keychainAvailable, storeKeychainSecret } from "./secrets"
 import type { Pipeline, RunOptions } from "./types"
@@ -147,13 +147,21 @@ async function launchInteractiveRun(targetDir: string) {
   parsed.gateway = selection.gateway
   if (selection.includeDirty) parsed.maxAttempts = 1
 
-  if (selection.worktree) {
-    log.info(`running in isolated worktree (branch: ${selection.worktree.branch})`)
-    log.info(`  dir: ${selection.worktree.dir}`)
-  }
-
   let options = { ...(await resolveRunOptions(parsed)), prompt: selection.prompt }
-  const plan = buildRunPlan({ ...options, worktree: Boolean(selection.worktree || selection.isolateWorktree) })
+  // Resolve the branch namer before the review so the exact routed target is
+  // part of the confirmed plan; the AI naming call itself stays behind the
+  // confirmation gate.
+  let branchNameModel: string | undefined
+  if (selection.isolateWorktree) {
+    const { defaultBranchNameModel } = await import("./worktree")
+    const config = await loadMergedConvoyConfig(targetDir)
+    branchNameModel = config?.defaults.branchNameModel ?? defaultBranchNameModel
+  }
+  const plan = buildRunPlan({
+    ...options,
+    worktree: Boolean(selection.isolateWorktree),
+    ...(branchNameModel ? { branchNameModel } : {}),
+  })
   if (!(await confirmRunPlan(plan))) return
   await preflightRunPlan(plan)
   if (selection.initializeGit) {
@@ -161,9 +169,9 @@ async function launchInteractiveRun(targetDir: string) {
     await initializeRepoWithInitialCommit(targetDir, { baseRef: options.baseRef === "HEAD" ? undefined : options.baseRef })
   }
   if (selection.isolateWorktree) {
-    const { createIsolatedWorktree, defaultBranchNameModel } = await import("./worktree")
-    const config = await loadMergedConvoyConfig(targetDir)
-    const namer = resolveModel(config?.defaults.branchNameModel ?? defaultBranchNameModel, parsed.gateway ?? "configured", config?.modelRouting?.overrides ?? {}).target
+    const { createIsolatedWorktree } = await import("./worktree")
+    const namer = plan.branchNamer?.model.target
+    if (!namer) throw new Error("worktree plan is missing its branch-namer model")
     const worktree = await createIsolatedWorktree({ targetDir, prompt: selection.prompt, model: namer })
     options = { ...options, targetDir: worktree.dir, includeDirty: false }
     log.info(`running in isolated worktree (branch: ${worktree.branch})`)
@@ -303,11 +311,14 @@ export async function parseCommand(argv: string[]): Promise<CliCommand> {
   }
 
   const options: RunOptions = { ...(await resolveRunOptions(parsed)), prompt }
+  // The gateway the run froze at launch, for the review's resume-override banner.
+  let resumeGateway: ModelGateway | undefined
   if (parsed.resumeRunID) {
     const workspace = await resumeWorkspace(parsed.resumeRunID)
     const metadata = await readRunMetadata(resolve(workspace.dir, "metadata.json"))
     if (metadata?.pipeline) options.pipeline = metadata.pipeline
     if (parsed.gateway === undefined) options.gateway = metadata?.modelRouting?.gateway ?? "configured"
+    else resumeGateway = metadata?.modelRouting?.gateway ?? "configured"
     try {
       options.prompt = await readFile(resolve(workspace.dir, "prd.md"), "utf8")
     } catch {
@@ -317,7 +328,11 @@ export async function parseCommand(argv: string[]): Promise<CliCommand> {
   // Resume filters can only be checked after metadata has restored its frozen
   // pipeline. Validate them before building a potentially empty review plan.
   validateStepFilters(options.pipeline, options)
-  options.plan = buildRunPlan({ ...options, promptSource: parsed.resumeRunID ? "resume" : parsed.promptFile ? "file" : "inline" })
+  options.plan = buildRunPlan({
+    ...options,
+    promptSource: parsed.resumeRunID ? "resume" : parsed.promptFile ? "file" : "inline",
+    ...(resumeGateway ? { resumeGateway } : {}),
+  })
   return { type: "run", options }
 }
 

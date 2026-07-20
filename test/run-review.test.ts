@@ -104,3 +104,39 @@ test("review renders the exact target, worktree intent, and routed smart judge",
   expect(compact).toContain("Convoy run plan")
   expect(compact).not.toContain("Target:  vercel/openai/gpt-5.6-sol")
 })
+
+test("review marks a resume gateway override in every format and shows the routed branch namer", () => {
+  const plan: RunPlan = {
+    prompt: { source: "resume", text: "continue the work" },
+    target: { directory: "/repo", baseRef: "main", worktree: true, dirty: false },
+    pipeline: { name: "implement", steps: [] },
+    modelRouting: { gateway: "openrouter" },
+    branchNamer: {
+      model: {
+        configured: "anthropic/claude-haiku-4-5",
+        logical: "anthropic/claude-haiku-4-5",
+        gateway: "openrouter",
+        providerID: "openrouter",
+        modelID: "anthropic/claude-haiku-4-5",
+        target: "openrouter/anthropic/claude-haiku-4-5",
+      },
+    },
+    hooks: { pre: [], post: [] },
+    attachments: [],
+    permissions: "interactive",
+    maxAttempts: 2,
+    resume: { runID: "20260720-135802-5bbh", gatewayOverride: { original: "vercel", pending: "openrouter" } },
+  }
+
+  const detailed = renderRunPlan(plan)
+  const compact = renderRunPlan(plan, true)
+
+  expect(detailed).toContain("Resume gateway override:")
+  expect(detailed).toContain("original: Vercel AI Gateway")
+  expect(detailed).toContain("pending phases: OpenRouter")
+  expect(compact).toContain("Resume gateway override:")
+  expect(compact).toContain("pending phases: OpenRouter")
+
+  expect(detailed).toContain("Branch naming: openrouter/anthropic/claude-haiku-4-5 (generated after confirmation)")
+  expect(compact).not.toContain("Branch naming:")
+})

@@ -5,6 +5,10 @@ import type { AgentStep, Pipeline, RunOptions, RunPlan, Step } from "./types"
 export type BuildRunPlanInput = RunOptions & {
   promptSource?: RunPlan["prompt"]["source"]
   worktree?: boolean
+  /** Configured branch-naming model; resolved into the plan so the post-confirmation naming call uses the reviewed target. */
+  branchNameModel?: string
+  /** The run's frozen gateway when resuming; recorded in the plan when an explicit --gateway replaces it. */
+  resumeGateway?: ModelGateway
 }
 
 /** Purely resolves the complete execution shape; it performs no filesystem or process effects. */
@@ -16,6 +20,7 @@ export function buildRunPlan(input: BuildRunPlanInput): RunPlan {
   const judge = input.smart
     ? resolveModel(input.smartJudgeModel, gateway, overrides)
     : undefined
+  const branchNamer = input.branchNameModel ? resolveModel(input.branchNameModel, gateway, overrides) : undefined
   const hooks = hooksForPlan(input, pipeline.name)
   return deepFreeze({
     prompt: { source: input.promptSource ?? (input.resumeRunID ? "resume" : "inline"), text: input.prompt },
@@ -28,11 +33,21 @@ export function buildRunPlan(input: BuildRunPlanInput): RunPlan {
     pipeline,
     modelRouting: { gateway },
     ...(judge ? { smartJudge: { model: judge } } : {}),
+    ...(branchNamer ? { branchNamer: { model: branchNamer } } : {}),
     hooks,
     attachments: [...input.files],
     permissions: input.yolo ? "yolo" : input.smart ? "smart" : "interactive",
     maxAttempts: input.maxAttempts,
-    ...(input.resumeRunID ? { resume: { runID: input.resumeRunID } } : {}),
+    ...(input.resumeRunID
+      ? {
+          resume: {
+            runID: input.resumeRunID,
+            ...(input.resumeGateway && input.resumeGateway !== gateway
+              ? { gatewayOverride: { original: input.resumeGateway, pending: gateway } }
+              : {}),
+          },
+        }
+      : {}),
   })
 }
 

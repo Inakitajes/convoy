@@ -19,7 +19,6 @@ import {
   isSafeStepName,
   readOnlyAgentSuffix,
   resolvePipeline,
-  splitModelVariant,
   type AgentStepSpec,
   type HumanStepSpec,
   type PipelineSpec,
@@ -27,7 +26,7 @@ import {
 } from "./pipeline"
 import { isStepRunnerId, normalizeStepRunnerModel, stepRunnerFor, type StepRunnerId } from "./step-runners"
 import type { AgentSpec, HookSet, HookSpec, HooksConfig, HookWhen, PermissionAdditions } from "./types"
-import { isModelGateway, type ModelRoutingConfig, type ModelRoutingOverrides } from "./model-routing"
+import { isModelGateway, logicalModel, type ModelRoutingConfig, type ModelRoutingOverrides } from "./model-routing"
 import { convoyHome, convoyRoot, globalConfigPath } from "./workspace"
 
 /**
@@ -370,6 +369,16 @@ function validateModelRouting(v: Validator, raw: unknown): ModelRoutingConfig {
     const overrides = v.record(record.overrides, "modelRouting.overrides")
     for (const [logical, rawTargets] of Object.entries(overrides)) {
       if (!isValidModelString(logical)) v.fail(`modelRouting.overrides.${logical}`, "key must be a provider/model")
+      // Keys name the canonical logical model, exactly as resolveModel recovers
+      // it: wrapped gateway prefixes are unwrapped and known aliases (z-ai/zai)
+      // are normalized, so "openrouter/z-ai/glm-5.2" and "zai/glm-5.2" are the
+      // same override.
+      let canonical: string
+      try {
+        canonical = logicalModel(logical).model
+      } catch (error) {
+        v.fail(`modelRouting.overrides.${logical}`, error instanceof Error ? error.message : String(error))
+      }
       const targets = v.record(rawTargets, `modelRouting.overrides.${logical}`)
       v.knownKeys(targets, `modelRouting.overrides.${logical}`, ["configured", "direct", "openrouter", "vercel"])
       const parsed: Partial<Record<import("./model-routing").ModelGateway, string>> = {}
@@ -377,7 +386,7 @@ function validateModelRouting(v: Validator, raw: unknown): ModelRoutingConfig {
         if (!isModelGateway(gateway)) continue
         parsed[gateway] = v.model(target, `modelRouting.overrides.${logical}.${gateway}`)
       }
-      routing.overrides[splitModelVariant(logical).model] = parsed
+      routing.overrides[canonical] = parsed
     }
   }
   return routing

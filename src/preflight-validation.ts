@@ -10,6 +10,7 @@ export function preflightTargets(plan: RunPlan): ResolvedModel[] {
     step.type === "agent" && step.runner !== "claude-code" && step.resolvedModel ? [step.resolvedModel] : [],
   )
   if (plan.smartJudge) targets.push(plan.smartJudge.model)
+  if (plan.branchNamer) targets.push(plan.branchNamer.model)
   return targets
 }
 

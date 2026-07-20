@@ -80,9 +80,25 @@ describe("cli parsing", () => {
   test("requires prompt unless resuming", async () => {
     await expect(parseCommand([])).rejects.toThrow("need a prompt")
 
+    // Building the resumed plan reads the run's frozen metadata, so the run
+    // must exist at parse time.
+    const runDir = join(process.env.CONVOY_HOME!, ".convoy", "runs", "20260519-103045-x7q2")
+    await mkdir(runDir, { recursive: true })
+    await writeFile(
+      join(runDir, "metadata.json"),
+      JSON.stringify({ schemaVersion: 2, runID: "20260519-103045-x7q2", targetDir: "/repo", createdAt: 0, updatedAt: 0, phases: {} }),
+    )
+    await writeFile(join(runDir, "prd.md"), "original prompt")
+
     const command = await parseCommand(["--resume", "20260519-103045-x7q2"])
     expect(command.type).toBe("run")
-    if (command.type === "run") expect(command.options.resumeRunID).toBe("20260519-103045-x7q2")
+    if (command.type === "run") {
+      expect(command.options.resumeRunID).toBe("20260519-103045-x7q2")
+      expect(command.options.prompt).toBe("original prompt")
+      expect(command.options.plan?.prompt.source).toBe("resume")
+    }
+
+    await expect(parseCommand(["--resume", "20260519-103045-zz99"])).rejects.toThrow("doesn't exist")
   })
 
   test("rejects invalid max attempts", () => {

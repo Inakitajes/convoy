@@ -287,7 +287,9 @@ export async function run(options: RunOptions) {
     )
     progress.start(workspace.runID, options.targetDir, workspace.dir)
     log.info(`Run ${workspace.runID} - dir: ${workspace.dir}`)
-    const overrideNotice = modelOverrideNotice(pipeline, options.modelOverride)
+    // Use the captured flag: options.modelOverride was already cleared when a
+    // reviewed plan took over, but the Claude Code notice must still fire.
+    const overrideNotice = modelOverrideNotice(pipeline, modelOverride)
     if (overrideNotice) {
       progress.message(overrideNotice)
       log.warn(overrideNotice)

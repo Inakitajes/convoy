@@ -518,6 +518,29 @@ describe("model routing config", () => {
     expect(yaml).toContain("modelRouting:")
     expect(parse(yaml).modelRouting).toEqual(config.modelRouting)
   })
+
+  test("override keys canonicalize wrapped gateways, aliases, and variants to the logical model", () => {
+    const config = parse(
+      [
+        "modelRouting:",
+        "  overrides:",
+        "    openrouter/z-ai/glm-5.2#high:",
+        "      vercel: vercel/zai/glm-5.2",
+      ].join("\n"),
+    )
+
+    // resolveModel looks up the canonical logical identity "zai/glm-5.2".
+    expect(config.modelRouting?.overrides).toEqual({ "zai/glm-5.2": { vercel: "vercel/zai/glm-5.2" } })
+  })
+
+  test("global and project overrides merge after canonicalization", () => {
+    const global = parse("modelRouting:\n  overrides:\n    z-ai/glm-5.2:\n      openrouter: openrouter/z-ai/glm-5.2")
+    const project = parse("modelRouting:\n  overrides:\n    zai/glm-5.2:\n      vercel: vercel/zai/glm-5.2")
+
+    expect(mergeConvoyConfigs(global, project)?.modelRouting?.overrides).toEqual({
+      "zai/glm-5.2": { openrouter: "openrouter/z-ai/glm-5.2", vercel: "vercel/zai/glm-5.2" },
+    })
+  })
 })
 
 describe("serialization", () => {

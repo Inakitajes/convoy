@@ -27,8 +27,6 @@ export type LaunchRunSelection = {
   yolo: boolean
   smart: boolean
   gateway: ModelGateway
-  /** When set, Convoy ran against an isolated worktree created on launch. */
-  worktree?: { dir: string; branch: string }
   /** Worktree creation is intentionally deferred until after plan confirmation. */
   isolateWorktree?: boolean
   /** Empty repositories are initialized only after the review is confirmed. */

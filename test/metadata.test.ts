@@ -6,7 +6,7 @@ import { afterAll, describe, expect, test } from "bun:test"
 
 import { openRunMetadata, readRunMetadata } from "../src/metadata"
 import { defaultPipeline } from "../src/pipeline"
-import type { Pipeline } from "../src/types"
+import type { AgentStep, Pipeline } from "../src/types"
 import type { Workspace } from "../src/workspace"
 
 const dirs: string[] = []
@@ -21,23 +21,23 @@ afterAll(async () => {
   await Promise.all(dirs.map((dir) => rm(dir, { recursive: true, force: true })))
 })
 
+const implementer: AgentStep = {
+  type: "agent",
+  name: "implementer",
+  agentName: "implementer",
+  description: "Implements",
+  model: "openai/gpt-5.5",
+  variant: "xhigh",
+  inputFiles: ["prd.md"],
+  inputDiff: false,
+  reportPath: "reports/implementer.md",
+  groupId: "g1",
+  stepName: "implementer",
+}
+
 const quick: Pipeline = {
   name: "quick",
-  steps: [
-    {
-      type: "agent",
-      name: "implementer",
-      agentName: "implementer",
-      description: "Implements",
-      model: "openai/gpt-5.5",
-      variant: "xhigh",
-      inputFiles: ["prd.md"],
-      inputDiff: false,
-      reportPath: "reports/implementer.md",
-      groupId: "g1",
-      stepName: "implementer",
-    },
-  ],
+  steps: [implementer],
 }
 
 describe("run metadata", () => {
@@ -60,8 +60,8 @@ describe("run metadata", () => {
     const full: Pipeline = {
       ...quick,
       steps: [
-        quick.steps[0]!,
-        { ...quick.steps[0]!, name: "tests", stepName: "tests", agentName: "tests", reportPath: "reports/tests.md", groupId: "g2" },
+        implementer,
+        { ...implementer, name: "tests", stepName: "tests", agentName: "tests", reportPath: "reports/tests.md", groupId: "g2" },
       ],
     }
     const first = await openRunMetadata(ws, "/repo", full, { gateway: "vercel" })
@@ -81,9 +81,9 @@ describe("run metadata", () => {
     const full: Pipeline = {
       ...quick,
       steps: [
-        { ...quick.steps[0]!, resolvedModel: { configured: "openai/gpt-old", logical: "openai/gpt-old", gateway: "vercel", providerID: "vercel", modelID: "openai/gpt-old", target: "vercel/openai/gpt-old" } },
+        { ...implementer, resolvedModel: { configured: "openai/gpt-old", logical: "openai/gpt-old", gateway: "vercel", providerID: "vercel", modelID: "openai/gpt-old", target: "vercel/openai/gpt-old" } },
         {
-          ...quick.steps[0]!,
+          ...implementer,
           name: "tests",
           stepName: "tests",
           agentName: "tests",

@@ -143,9 +143,15 @@ export type RunPlan = {
   pipeline: Pipeline
   modelRouting: { gateway: ModelGateway }
   smartJudge?: { model: ResolvedModel }
+  /** Resolved branch-naming model for worktree runs: the AI naming call happens after confirmation with exactly this target. */
+  branchNamer?: { model: ResolvedModel }
   hooks: HookSet
   attachments: string[]
   permissions: "interactive" | "smart" | "yolo"
   maxAttempts: number
-  resume?: { runID: string }
+  resume?: {
+    runID: string
+    /** Set when an explicit --gateway reroutes pending phases away from the run's frozen gateway. */
+    gatewayOverride?: { original: ModelGateway; pending: ModelGateway }
+  }
 }

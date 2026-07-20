@@ -23,7 +23,17 @@ export function renderRunPlan(plan: RunPlan, compact = false): string {
     `Pipeline: ${sanitizeInline(plan.pipeline.name)} · ${plan.pipeline.steps.length} steps`,
     `Gateway: ${gatewayLabel(plan.modelRouting.gateway)}`,
   ]
+  // A resumed run rerouted by an explicit --gateway must say so in every
+  // review format: pending phases will not use the original gateway.
+  if (plan.resume?.gatewayOverride) {
+    lines.push(
+      "Resume gateway override:",
+      `  original: ${gatewayLabel(plan.resume.gatewayOverride.original)}`,
+      `  pending phases: ${gatewayLabel(plan.resume.gatewayOverride.pending)}`,
+    )
+  }
   if (!compact) {
+    if (plan.branchNamer) lines.push(`Branch naming: ${sanitizeInline(plan.branchNamer.model.target)} (generated after confirmation)`)
     plan.pipeline.steps.forEach((step, index) => {
       if (step.type === "human") lines.push(`  ${index + 1}. ${sanitizeInline(step.name)} · human gate`)
       else {

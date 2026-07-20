@@ -41,7 +41,9 @@ test("the immutable plan filters and freezes exact routed targets", () => {
   expect(step?.type === "agent" && step.resolvedModel?.target).toBe("vercel/anthropic/claude-opus-4.8")
   expect(Object.isFrozen(plan)).toBe(true)
   expect(Object.isFrozen(plan.pipeline.steps)).toBe(true)
-  expect(Object.isFrozen(options.pipeline.steps[0]?.inputFiles)).toBe(false)
+  const originalStep = options.pipeline.steps[0]
+  if (originalStep?.type !== "agent") throw new Error("expected an agent step")
+  expect(Object.isFrozen(originalStep.inputFiles)).toBe(false)
   expect(Object.isFrozen(options.hooks.pre[0])).toBe(false)
 })
 
@@ -131,4 +133,46 @@ test("the plan routes fan-out and the smart judge while leaving Claude Code unto
   expect(claude).toMatchObject({ runner: "claude-code", model: "opus" })
   expect(claude).not.toHaveProperty("resolvedModel")
   expect(plan.smartJudge?.model).toMatchObject({ logical: "anthropic/claude-haiku-4.5", target: "vercel/anthropic/claude-haiku-4.5" })
+})
+
+test("the plan freezes the routed branch namer and marks an explicit resume gateway override", () => {
+  const options: RunOptions = {
+    prompt: "review the change",
+    files: [],
+    onlySteps: [],
+    skipSteps: [],
+    resumeRunID: "20260720-135802-5bbh",
+    keepRunDir: true,
+    modelOverride: "",
+    gateway: "openrouter",
+    modelRoutingOverrides: {},
+    tui: false,
+    humanReview: false,
+    maxAttempts: 2,
+    baseRef: "main",
+    targetDir: "/repo",
+    includeDirty: false,
+    yolo: false,
+    smart: false,
+    smartJudgeModel: "openai/gpt-5.6-sol",
+    pipeline: {
+      name: "review",
+      steps: [
+        { type: "agent", name: "audit", stepName: "audit", groupId: "g1", agentName: "audit", description: "Audit", model: "openai/gpt-5.6-sol", inputFiles: ["prd.md"], inputDiff: true, reportPath: "reports/audit.md", readOnly: true },
+      ],
+    },
+    agents: [],
+    permissions: { allow: [], deny: [] },
+    hooks: { pre: [], post: [], pipelines: {} },
+  }
+
+  const overridden = buildRunPlan({ ...options, promptSource: "resume", resumeGateway: "vercel", branchNameModel: "anthropic/claude-haiku-4-5" })
+  expect(overridden.resume).toEqual({ runID: "20260720-135802-5bbh", gatewayOverride: { original: "vercel", pending: "openrouter" } })
+  expect(overridden.branchNamer?.model).toMatchObject({ logical: "anthropic/claude-haiku-4-5", target: "openrouter/anthropic/claude-haiku-4-5" })
+  expect(Object.isFrozen(overridden.branchNamer)).toBe(true)
+
+  // Resuming with the frozen gateway (or no explicit override) leaves no banner.
+  const unchanged = buildRunPlan({ ...options, gateway: "vercel", promptSource: "resume", resumeGateway: "vercel" })
+  expect(unchanged.resume).toEqual({ runID: "20260720-135802-5bbh" })
+  expect(unchanged).not.toHaveProperty("branchNamer")
 })
