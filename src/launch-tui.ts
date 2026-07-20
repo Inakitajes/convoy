@@ -8,7 +8,7 @@ import { startLimitsPoller } from "./limits"
 import { builtInPipelines, defaultPipelineName, resolvePipeline } from "./pipeline"
 import { stepRunnerFor } from "./step-runners"
 import { gatewayLabel, modelGateways, type ModelGateway } from "./model-routing"
-import { renderRunPlan } from "./run-review"
+import { runReviewLines } from "./review-tui"
 import { joinLines, limitsRow, padBetween, paletteForTerminal, plain, raw, setTheme, spinnerFrame, terminalBackgroundHex, theme, truncate } from "./tui-theme"
 
 import type { ConvoyConfig } from "./config"
@@ -826,12 +826,16 @@ class LaunchPicker {
   private render() {
     if (this.renderer.isDestroyed) return
     const innerWidth = Math.max(40, this.renderer.width - 6)
+    const reviewing = this.mode === "review"
+    // The Review step owns the whole screen: the pipeline list would only
+    // repeat what the plan already freezes, and the plan needs the width.
+    this.pipelineBox.visible = !reviewing
     const pipelineWidth = this.pipelineWidth()
-    const detailWidth = Math.max(40, this.renderer.width - pipelineWidth - 7)
+    const detailWidth = reviewing ? innerWidth : Math.max(40, this.renderer.width - pipelineWidth - 7)
 
     this.pipelineBox.width = pipelineWidth
     this.detailBox.width = detailWidth
-    this.detailBox.title = this.mode === "review" ? " review " : " run setup "
+    this.detailBox.title = reviewing ? " review " : " run setup "
     // Mirror the dashboard focus cue: the accented border marks where Enter,
     // Esc, and the navigation keys apply in the current setup step.
     this.pipelineBox.borderColor = this.mode === "pipelines" ? theme.accent : theme.borderDim
@@ -1071,17 +1075,13 @@ class LaunchPicker {
     const prepared = this.prepared
     if (!prepared) return joinLines([t`${fg(theme.red)("Unable to load the run review.")}`])
 
-    const rendered = renderRunPlan(prepared.plan, false, { fullPrompt: this.reviewFullPrompt })
-    const reviewLines = rendered
-      .trimEnd()
-      .split("\n")
-      .flatMap((line) => wrapReviewLine(line, width))
+    const reviewRows = runReviewLines(prepared.plan, width, { fullPrompt: this.reviewFullPrompt })
     const visible = this.listHeight()
-    const maxScroll = Math.max(0, reviewLines.length - visible)
+    const maxScroll = Math.max(0, reviewRows.length - visible)
     this.reviewScroll = clamp(this.reviewScroll, 0, maxScroll)
-    this.reviewTotalLines = reviewLines.length
+    this.reviewTotalLines = reviewRows.length
 
-    const lines = reviewLines.slice(this.reviewScroll, this.reviewScroll + visible).map(reviewTextLine)
+    const lines = reviewRows.slice(this.reviewScroll, this.reviewScroll + visible)
     while (lines.length < visible) lines.push(plain(""))
     return joinLines(lines)
   }
@@ -1136,7 +1136,7 @@ class LaunchPicker {
       )
     }
     return padBetween(
-      [fg(theme.dim)("↑/↓ select · "), fg(theme.accent)("space"), fg(theme.dim)(" toggle · "), fg(theme.accent)("g"), fg(theme.dim)(" gateway · "), fg(theme.accent)("enter"), fg(theme.dim)(" start · "), fg(theme.accent)("p"), fg(theme.dim)(" prompt · "), fg(theme.accent)("q"), fg(theme.dim)(" quit")],
+      [fg(theme.dim)("↑/↓ select · "), fg(theme.accent)("space"), fg(theme.dim)(" toggle · "), fg(theme.accent)("g"), fg(theme.dim)(" gateway · "), fg(theme.accent)("enter"), fg(theme.dim)(" review · "), fg(theme.accent)("p"), fg(theme.dim)(" prompt · "), fg(theme.accent)("q"), fg(theme.dim)(" quit")],
       [fg(theme.faint)(`${this.optionIndex + 1}/${toggles.length}`)],
       width,
     )
@@ -1192,38 +1192,6 @@ export function reviewActionForKey(key: Pick<KeyEvent, "name" | "shift">): Revie
       return "cancel"
   }
   return undefined
-}
-
-// Preserve the hierarchy from renderRunPlan while fitting every long, dynamic
-// value into the review panel. renderRunPlan has already removed terminal
-// controls; this only handles ordinary layout wrapping.
-export function wrapReviewLine(line: string, width: number): string[] {
-  if (!line) return [""]
-  const indent = line.match(/^\s*/)?.[0] ?? ""
-  const prefix = indent.length < Math.max(1, width - 8) ? indent : ""
-  const content = line.slice(indent.length).trim()
-  const available = Math.max(1, width - prefix.length)
-  const wrapped: string[] = []
-  let remaining = content
-
-  while (remaining.length > available) {
-    let breakAt = remaining.lastIndexOf(" ", available)
-    if (breakAt < 1) breakAt = available
-    wrapped.push(remaining.slice(0, breakAt).trimEnd())
-    remaining = remaining.slice(breakAt).trimStart()
-  }
-  wrapped.push(remaining)
-
-  return wrapped.map((part, index) => `${index === 0 ? prefix : " ".repeat(prefix.length)}${part}`)
-}
-
-function reviewTextLine(line: string): StyledText {
-  if (line === "Review Convoy run") return new StyledText([bold(fg(theme.accent)(line))])
-  if (/^(Prompt|Target|Pipeline|Gateway|Branch naming|Runtime|Hooks|Resume gateway override):/.test(line)) {
-    return new StyledText([bold(fg(theme.text)(line))])
-  }
-  if (/^\s*(Logical|Target|Model|Judge|pre|post):/.test(line)) return new StyledText([fg(theme.dim)(line)])
-  return new StyledText([fg(theme.text)(line)])
 }
 
 type LauncherWheelEvent = {

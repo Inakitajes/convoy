@@ -93,3 +93,13 @@ function sanitize(value: string) {
 function sanitizeInline(value: string) {
   return sanitize(value).replace(/\s+/g, " ").trim()
 }
+
+/** Multi-line sanitize for untrusted plan fields (prompt text), shared with the TUI review. */
+export function sanitizeReviewText(value: string) {
+  return sanitize(value)
+}
+
+/** Single-line sanitize for untrusted plan fields (paths, names, commands), shared with the TUI review. */
+export function sanitizeReviewInline(value: string) {
+  return sanitizeInline(value)
+}
