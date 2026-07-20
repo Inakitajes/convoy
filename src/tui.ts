@@ -45,7 +45,7 @@ import {
   wrapLines,
 } from "./tui-theme"
 
-import type { BoxOptions, CliRenderer, KeyEvent, TextChunk } from "@opentui/core"
+import type { BoxOptions, CliRenderer, KeyEvent, Selection, TextChunk } from "@opentui/core"
 import type { LimitsSnapshot } from "./limits"
 import type { PaletteColor, PhaseStatus } from "./tui-theme"
 import type {
@@ -92,6 +92,7 @@ function kindStyle(kind: ActivityKind): { icon: string; color: string } {
 
 const pipelineWidth = 32
 const feedLimit = 100
+const contentTabBarRows = 2
 
 type RunnerSessionContext = {
   targetDir: string
@@ -350,6 +351,23 @@ export class TuiProgress implements ProgressUI {
     this.applyPalette()
     this.addEvent("convoy", "system", `terminal theme changed: ${mode}`)
     this.render()
+  }
+
+  private readonly handleSelection = (selection: Selection) => {
+    if (this.contentTab !== "logs" && this.contentTab !== "session" && this.contentTab !== "reports") return
+    const { x, y, width, height } = selection.bounds
+    if (
+      x < this.feedText.x ||
+      x + width > this.feedText.x + this.feedText.width ||
+      y < this.feedText.y + contentTabBarRows ||
+      y + height > this.feedText.y + this.feedText.height
+    ) {
+      return
+    }
+    if (selection.selectedRenderables.length !== 1 || selection.selectedRenderables[0] !== this.feedText) return
+
+    const text = selection.getSelectedText()
+    if (text && this.renderer.copyToClipboardOSC52(text)) this.renderer.clearSelection()
   }
 
   private readonly handleKeyPress = (key: KeyEvent) => {
@@ -670,7 +688,7 @@ export class TuiProgress implements ProgressUI {
     // Works live and on the finish screen alike.
     const switchTabFromFeed = (event: { x: number; y: number; preventDefault(): void; stopPropagation(): void }) => {
       const row = event.y - this.feedText.y
-      if (row !== 0 && row !== 1) return
+      if (row < 0 || row >= contentTabBarRows) return
       const col = event.x - this.feedText.x
       const hit = this.feedTabRegions.find((region) => col >= region.start && col < region.end)
       if (!hit) return
@@ -780,6 +798,7 @@ export class TuiProgress implements ProgressUI {
     this.paletteTargets.push({ box: this.modal, background: "overlay", border: "yellow" })
 
     renderer.keyInput.on("keypress", this.handleKeyPress)
+    renderer.on("selection", this.handleSelection)
     renderer.on("theme_mode", this.handleThemeMode)
 
     this.ticker = setInterval(() => this.render(), 250)
@@ -1226,6 +1245,7 @@ export class TuiProgress implements ProgressUI {
     this.stopLimits()
     log.mute(false)
     this.renderer.keyInput.off("keypress", this.handleKeyPress)
+    this.renderer.off("selection", this.handleSelection)
     this.renderer.off("theme_mode", this.handleThemeMode)
     // A shutdown signal can tear the run down while the finish screen is still
     // up; resolving here keeps that promise from leaking.
@@ -1583,7 +1603,7 @@ export class TuiProgress implements ProgressUI {
     // The content panel fills the rest: a two-row tab strip (labels, then a
     // rail) over the active tab's body, all scoped to the focused phase.
     const feedRows = Math.max(3, bodyHeight - usedHeight - 2)
-    const contentRows = feedRows - 2
+    const contentRows = feedRows - contentTabBarRows
     this.contentPageRows = contentRows
 
     this.dirText.content = this.dirContent(innerWidth)
