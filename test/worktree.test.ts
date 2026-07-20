@@ -16,6 +16,7 @@ type NamerPromptInput = {
   sessionID: string
   directory: string
   model: { providerID: string; modelID: string }
+  variant?: string
   tools: Record<string, boolean>
   parts: Array<{ type: string; text: string }>
 }
@@ -114,6 +115,16 @@ describe("askForBranchName", () => {
     const sent = promptInput?.parts[0]?.text ?? ""
     expect(sent.length).toBe("Prompt:\n".length + 1_200)
     expect(sent.endsWith("…")).toBe(true)
+  })
+
+  test("preserves a reviewed branch-namer model variant", async () => {
+    let promptInput: NamerPromptInput | undefined
+    const client = fakeNamerClient({ promptText: "add-onboarding", onPrompt: (input) => (promptInput = input as NamerPromptInput) })
+
+    await askForBranchName(client, "build onboarding", "/repo", "vercel/openai/gpt-5.6-sol#xhigh")
+
+    expect(promptInput?.model).toEqual({ providerID: "vercel", modelID: "openai/gpt-5.6-sol" })
+    expect(promptInput?.variant).toBe("xhigh")
   })
 
   test("cleans up the throwaway session when the provider call fails", async () => {

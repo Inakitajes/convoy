@@ -6,6 +6,7 @@ import type { Config, OpencodeClient } from "@opencode-ai/sdk/v2"
 import { addWorktree } from "./git"
 import { log } from "./log"
 import { startOpencode } from "./opencode"
+import { splitModelVariant } from "./pipeline"
 import { parseModel } from "./runner"
 import { convoyHome } from "./workspace"
 
@@ -110,6 +111,7 @@ export async function askForBranchName(
   model: string,
   signal?: AbortSignal,
 ): Promise<string> {
+  const parsedModel = splitModelVariant(model)
   const session = await client.session.create(
     { directory: targetDir, title: "convoy branch namer" },
     { signal: signal ?? undefined },
@@ -121,7 +123,8 @@ export async function askForBranchName(
       {
         sessionID,
         directory: targetDir,
-        model: parseModel(model),
+        model: parseModel(parsedModel.model),
+        ...(parsedModel.variant ? { variant: parsedModel.variant } : {}),
         system: branchNameSystemPrompt,
         tools: { read: true, list: true, glob: true, grep: true, webfetch: true, write: false, edit: false, bash: false, todoread: false, todowrite: false },
         parts: [{ type: "text", text: `Prompt:\n${truncate(prompt, 1200)}` }],

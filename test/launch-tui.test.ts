@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
-import { cursorPosition, hookLines, launcherStepModelLabel, promptEnterAction, sanitizePaste, stepTree, typedText, wrapPromptLines } from "../src/launch-tui"
+import { cursorPosition, hookLines, launcherStepModelLabel, promptEnterAction, reviewActionForKey, sanitizePaste, stepTree, typedText, wrapPromptLines } from "../src/launch-tui"
 
 import type { KeyEvent } from "@opentui/core"
 
@@ -48,6 +48,20 @@ describe("launch TUI prompt input", () => {
     expect(promptEnterAction(key({ name: "linefeed" }))).toBe("submit")
     expect(promptEnterAction(key({ name: "return", shift: true }))).toBe("newline")
     expect(promptEnterAction(key({ name: "a" }))).toBeUndefined()
+  })
+})
+
+describe("launch TUI review", () => {
+  test("maps review controls to start, back, cancellation, and scrolling actions", () => {
+    expect(reviewActionForKey(key({ name: "return" }))).toBe("start")
+    expect(reviewActionForKey(key({ name: "s" }))).toBe("start")
+    expect(reviewActionForKey(key({ name: "escape" }))).toBe("back")
+    expect(reviewActionForKey(key({ name: "q" }))).toBe("cancel")
+    expect(reviewActionForKey(key({ name: "p" }))).toBe("toggle-prompt")
+    expect(reviewActionForKey(key({ name: "up" }))).toBe("scroll-back")
+    expect(reviewActionForKey(key({ name: "pagedown" }))).toBe("page-forward")
+    expect(reviewActionForKey(key({ name: "home" }))).toBe("top")
+    expect(reviewActionForKey(key({ name: "end" }))).toBe("bottom")
   })
 })
 

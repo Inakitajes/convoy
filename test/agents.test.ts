@@ -11,7 +11,7 @@ describe("opencode config", () => {
   test("disables total provider timeouts but keeps idle stream timeouts", () => {
     const config = opencodeConfig("/tmp/convoy-run")
 
-    for (const provider of ["anthropic", "openai", "openrouter"]) {
+    for (const provider of ["anthropic", "openai", "openrouter", "vercel", "zai"]) {
       expect(config.provider?.[provider]?.options?.timeout).toBe(false)
       expect(config.provider?.[provider]?.options?.chunkTimeout).toBe(600_000)
     }

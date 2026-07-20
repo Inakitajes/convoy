@@ -13,6 +13,7 @@ import type {
   ProgressUsage,
 } from "./progress"
 import type { Pipeline } from "./types"
+import type { ModelGateway } from "./model-routing"
 import { PhaseUsage } from "./usage"
 import type { Workspace } from "./workspace"
 
@@ -27,6 +28,8 @@ export type PhaseMetadata = {
   cost?: number
   tokens?: ProgressTokens
   model?: string
+  logicalModel?: string
+  targetModel?: string
   repositoryBaseline?: RepoSnapshot
 }
 
@@ -38,6 +41,7 @@ export type RunMetadata = {
   updatedAt: number
   /** The resolved pipeline this run executes; resume replays it even if the project config changed since. */
   pipeline?: Pipeline
+  modelRouting?: { gateway: ModelGateway }
   /** The live opencode server for this run while it executes; cleared on shutdown, so a lingering entry means the run process died mid-flight. Lets `convoy runs` attach to a running run. */
   server?: { url: string; pid: number; startedAt: number }
   phases: Record<string, PhaseMetadata>
@@ -61,9 +65,25 @@ export type RunMetadataStore = {
   flush(): Promise<void>
 }
 
+export type OpenRunMetadataOptions = {
+  gateway?: ModelGateway
+  /** A CLI gateway override reroutes only phases that have not finished. */
+  gatewayOverride?: boolean
+  /** A CLI model override reroutes only phases that have not finished. */
+  modelOverride?: boolean
+  /** Execute the reviewed resume subset without replacing the stored full pipeline. */
+  useExecutionPipeline?: boolean
+}
+
 const saveDebounceMs = 2_000
 
-export async function openRunMetadata(workspace: Workspace, targetDir: string, pipeline: Pipeline): Promise<RunMetadataStore> {
+export async function openRunMetadata(
+  workspace: Workspace,
+  targetDir: string,
+  pipeline: Pipeline,
+  options: OpenRunMetadataOptions = {},
+): Promise<RunMetadataStore> {
+  const gateway = options.gateway ?? "configured"
   const path = join(workspace.dir, "metadata.json")
   const data = (await loadMetadata(path, workspace.runID)) ?? newMetadata(workspace.runID, targetDir)
   // Step names are user-configurable safe identifiers and may still equal
@@ -71,7 +91,25 @@ export async function openRunMetadata(workspace: Workspace, targetDir: string, p
   data.phases = Object.assign(Object.create(null) as Record<string, PhaseMetadata>, data.phases)
   // First open freezes the pipeline; pre-pipeline (v1) runs adopt the current
   // one, whose default step names match what those runs executed.
-  const effectivePipeline = (data.pipeline ??= pipeline)
+  let frozenPipeline = (data.pipeline ??= pipeline)
+  if (options.gatewayOverride || options.modelOverride) {
+    const routedByName = new Map(pipeline.steps.map((step) => [step.name, step]))
+    frozenPipeline = data.pipeline = {
+      ...frozenPipeline,
+      steps: frozenPipeline.steps.map((step) => {
+        const status = data.phases[step.name]?.status
+        return status === "completed" || status === "skipped" ? step : (routedByName.get(step.name) ?? step)
+      }),
+    }
+    if (options.gatewayOverride) data.modelRouting = { gateway }
+  } else {
+    data.modelRouting ??= { gateway }
+  }
+  // A filtered resume is deliberately transient: it executes exactly the
+  // reviewed subset, while metadata retains the complete frozen pipeline for
+  // future resumes.
+  const effectivePipeline = options.useExecutionPipeline ? pipeline : frozenPipeline
+  assertSafePipelineArtifacts(frozenPipeline)
   assertSafePipelineArtifacts(effectivePipeline)
   // One accumulator per phase. Kept out of the persisted shape — PhaseUsage holds
   // cumulative per-session totals, so re-counting them on resume would double up.
@@ -109,6 +147,17 @@ export async function openRunMetadata(workspace: Workspace, targetDir: string, p
   }
 
   const phase = (name: string) => (data.phases[name] ??= { status: "pending" })
+  for (const step of effectivePipeline.steps) {
+    if (step.type !== "agent" || !step.resolvedModel) continue
+    const entry = phase(step.name)
+    if ((options.gatewayOverride || options.modelOverride) && entry.status !== "completed" && entry.status !== "skipped") {
+      entry.logicalModel = step.resolvedModel.logical
+      entry.targetModel = step.resolvedModel.target
+    } else {
+      entry.logicalModel ??= step.resolvedModel.logical
+      entry.targetModel ??= step.resolvedModel.target
+    }
+  }
 
   const recalculate = (name: string) => {
     const accumulator = usage.get(name)

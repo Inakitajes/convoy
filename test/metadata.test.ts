@@ -6,7 +6,7 @@ import { afterAll, describe, expect, test } from "bun:test"
 
 import { openRunMetadata, readRunMetadata } from "../src/metadata"
 import { defaultPipeline } from "../src/pipeline"
-import type { Pipeline } from "../src/types"
+import type { AgentStep, Pipeline } from "../src/types"
 import type { Workspace } from "../src/workspace"
 
 const dirs: string[] = []
@@ -21,23 +21,23 @@ afterAll(async () => {
   await Promise.all(dirs.map((dir) => rm(dir, { recursive: true, force: true })))
 })
 
+const implementer: AgentStep = {
+  type: "agent",
+  name: "implementer",
+  agentName: "implementer",
+  description: "Implements",
+  model: "openai/gpt-5.5",
+  variant: "xhigh",
+  inputFiles: ["prd.md"],
+  inputDiff: false,
+  reportPath: "reports/implementer.md",
+  groupId: "g1",
+  stepName: "implementer",
+}
+
 const quick: Pipeline = {
   name: "quick",
-  steps: [
-    {
-      type: "agent",
-      name: "implementer",
-      agentName: "implementer",
-      description: "Implements",
-      model: "openai/gpt-5.5",
-      variant: "xhigh",
-      inputFiles: ["prd.md"],
-      inputDiff: false,
-      reportPath: "reports/implementer.md",
-      groupId: "g1",
-      stepName: "implementer",
-    },
-  ],
+  steps: [implementer],
 }
 
 describe("run metadata", () => {
@@ -53,6 +53,69 @@ describe("run metadata", () => {
     const resumed = await openRunMetadata(ws, "/repo", defaultPipeline())
     expect(resumed.pipeline.name).toBe("quick")
     expect(resumed.pipeline.steps).toHaveLength(1)
+  })
+
+  test("a filtered resume executes its reviewed subset without discarding frozen phases", async () => {
+    const ws = await workspace()
+    const full: Pipeline = {
+      ...quick,
+      steps: [
+        implementer,
+        { ...implementer, name: "tests", stepName: "tests", agentName: "tests", reportPath: "reports/tests.md", groupId: "g2" },
+      ],
+    }
+    const first = await openRunMetadata(ws, "/repo", full, { gateway: "vercel" })
+    await first.flush()
+
+    const reviewed: Pipeline = { ...full, steps: [full.steps[1]!] }
+    const resumed = await openRunMetadata(ws, "/repo", reviewed, { useExecutionPipeline: true })
+    expect(resumed.pipeline.steps.map((step) => step.name)).toEqual(["tests"])
+    await resumed.flush()
+
+    const persisted = await readRunMetadata(join(ws.dir, "metadata.json"))
+    expect(persisted?.pipeline?.steps.map((step) => step.name)).toEqual(["implementer", "tests"])
+  })
+
+  test("a resume model override persists only new targets for unfinished phases", async () => {
+    const ws = await workspace()
+    const full: Pipeline = {
+      ...quick,
+      steps: [
+        { ...implementer, resolvedModel: { configured: "openai/gpt-old", logical: "openai/gpt-old", gateway: "vercel", providerID: "vercel", modelID: "openai/gpt-old", target: "vercel/openai/gpt-old" } },
+        {
+          ...implementer,
+          name: "tests",
+          stepName: "tests",
+          agentName: "tests",
+          reportPath: "reports/tests.md",
+          groupId: "g2",
+          resolvedModel: { configured: "openai/gpt-old", logical: "openai/gpt-old", gateway: "vercel", providerID: "vercel", modelID: "openai/gpt-old", target: "vercel/openai/gpt-old" },
+        },
+      ],
+    }
+    const first = await openRunMetadata(ws, "/repo", full, { gateway: "vercel" })
+    first.phaseEnded("implementer", "completed")
+    await first.flush()
+
+    const overridden: Pipeline = {
+      ...full,
+      steps: full.steps.map((step) =>
+        step.type === "agent"
+          ? {
+              ...step,
+              model: "vercel/openai/gpt-new",
+              resolvedModel: { configured: "openai/gpt-new", logical: "openai/gpt-new", gateway: "vercel", providerID: "vercel", modelID: "openai/gpt-new", target: "vercel/openai/gpt-new" },
+            }
+          : step,
+      ),
+    }
+    const resumed = await openRunMetadata(ws, "/repo", overridden, { gateway: "vercel", modelOverride: true, useExecutionPipeline: true })
+    await resumed.flush()
+
+    const persisted = await readRunMetadata(join(ws.dir, "metadata.json"))
+    const targets = persisted?.pipeline?.steps.map((step) => step.type === "agent" ? step.resolvedModel?.target : undefined)
+    expect(targets).toEqual(["vercel/openai/gpt-old", "vercel/openai/gpt-new"])
+    expect(persisted?.modelRouting?.gateway).toBe("vercel")
   })
 
   test("fails closed when a repository baseline cannot be persisted", async () => {

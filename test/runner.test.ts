@@ -108,6 +108,7 @@ describe("runner helpers", () => {
     })
     expect(parseModel("custom/provider/model")).toEqual({ providerID: "custom", modelID: "provider/model" })
     expect(() => parseModel("claude-sonnet-4-6")).toThrow("invalid model")
+    expect(() => parseModel("openai/gpt-5.6\nforged")).toThrow("invalid model")
   })
 
   test("applies only and skip phase filters", () => {
