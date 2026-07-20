@@ -459,7 +459,7 @@ convoy/
 ├── tsconfig.json
 └── Makefile
 ```
-# Model gateways and run review
+## Model gateways and run review
 
 Convoy can change how every OpenCode model is reached without rewriting a pipeline:
 

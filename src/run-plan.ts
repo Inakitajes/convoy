@@ -11,7 +11,8 @@ export type BuildRunPlanInput = RunOptions & {
 export function buildRunPlan(input: BuildRunPlanInput): RunPlan {
   const gateway = input.gateway ?? "configured"
   const overrides = input.modelRoutingOverrides ?? {}
-  const pipeline = routePipeline(filterPipeline(input.pipeline, input.onlySteps, input.skipSteps), gateway, overrides, input.modelOverride)
+  // The immutable plan must never recursively freeze caller-owned config.
+  const pipeline = routePipeline(filterPipeline(structuredClone(input.pipeline), input.onlySteps, input.skipSteps), gateway, overrides, input.modelOverride)
   const judge = input.smart
     ? resolveModel(input.smartJudgeModel, gateway, overrides)
     : undefined
@@ -63,10 +64,10 @@ function filterPipeline(pipeline: Pipeline, only: string[], skip: string[]): Pip
 
 function hooksForPlan(input: RunOptions, pipelineName: string) {
   const pipeline = input.hooks.pipelines[pipelineName]
-  return {
+  return structuredClone({
     pre: [...input.hooks.pre, ...(pipeline?.pre ?? [])],
     post: [...input.hooks.post, ...(pipeline?.post ?? [])],
-  }
+  })
 }
 
 function deepFreeze<T>(value: T): T {

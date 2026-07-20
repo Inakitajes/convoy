@@ -43,9 +43,23 @@ export function renderRunPlan(plan: RunPlan, compact = false): string {
 export async function confirmRunPlan(plan: RunPlan): Promise<boolean> {
   stdout.write(renderRunPlan(plan))
   const prompt = createInterface({ input: stdin, output: stdout })
+  const controller = new AbortController()
+  let interrupted = false
+  // In raw-mode terminals readline emits SIGINT instead of process-level SIGINT.
+  // Handle it here so confirmation follows the other interactive prompts.
+  prompt.on("SIGINT", () => {
+    interrupted = true
+    controller.abort()
+  })
   try {
-    const answer = (await prompt.question("Start run? [y/N] ")).trim().toLowerCase()
+    const answer = (await prompt.question("Start run? [y/N] ", { signal: controller.signal })).trim().toLowerCase()
     return answer === "y" || answer === "yes" || answer === "s" || answer === "sí" || answer === "si"
+  } catch (error) {
+    if (interrupted && error instanceof Error && error.name === "AbortError") {
+      stdout.write("\n")
+      return false
+    }
+    throw error
   } finally {
     prompt.close()
   }

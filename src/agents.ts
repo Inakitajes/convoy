@@ -87,6 +87,7 @@ function providerTimeouts(): Config["provider"] {
     openai: { options },
     openrouter: { options },
     vercel: { options },
+    zai: { options },
   }
 }
 

@@ -31,7 +31,7 @@ test("the immutable plan filters and freezes exact routed targets", () => {
     },
     agents: [],
     permissions: { allow: [], deny: [] },
-    hooks: { pre: [], post: [], pipelines: {} },
+    hooks: { pre: [{ command: "bun test" }], post: [], pipelines: {} },
   }
   const plan = buildRunPlan(options)
   expect(plan.pipeline.steps).toHaveLength(1)
@@ -39,4 +39,6 @@ test("the immutable plan filters and freezes exact routed targets", () => {
   expect(step?.type === "agent" && step.resolvedModel?.target).toBe("vercel/anthropic/claude-opus-4.8")
   expect(Object.isFrozen(plan)).toBe(true)
   expect(Object.isFrozen(plan.pipeline.steps)).toBe(true)
+  expect(Object.isFrozen(options.pipeline.steps[0]?.inputFiles)).toBe(false)
+  expect(Object.isFrozen(options.hooks.pre[0])).toBe(false)
 })
