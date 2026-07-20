@@ -102,7 +102,7 @@ This leaves `convoy` in `~/.local/bin/convoy` and creates `~/.convoy/config.yaml
 From the root of the target repo, ideally on a working branch:
 
 ```bash
-# interactive launcher: choose a pipeline, enter the prompt, then toggle options
+# interactive launcher: choose a pipeline, enter the prompt, set options, then review
 convoy
 
 # inline prompt
@@ -487,4 +487,4 @@ modelRouting:
 
 Unknown model namespaces require an explicit override when rerouting; `configured` always remains literal. Authenticate Vercel through `opencode providers login` (choose Vercel AI Gateway) or set `AI_GATEWAY_API_KEY`; Convoy never stores gateway credentials.
 
-Every interactive manual run now displays its fully resolved plan before repository effects. `--plan` prints that plan and exits without creating a run, running hooks, or starting OpenCode. `--no-confirm` prints a compact plan and starts immediately. Non-TTY environments continue automatically after the compact summary.
+Every interactive manual run now displays its fully resolved plan before repository effects. The launcher has a native **Review** step after Options: use Enter or `s` to start, Escape to return to Options, `q` to cancel, arrow/page keys or the mouse wheel to scroll, and `p` to expand the complete prompt. `--plan` prints that plan and exits without creating a run, running hooks, or starting OpenCode. `--no-confirm` prints a compact plan and starts immediately. Non-TTY environments continue automatically after the compact summary.

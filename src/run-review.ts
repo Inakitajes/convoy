@@ -9,20 +9,28 @@ import type { RunPlan } from "./types"
 const controlCharacters = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g
 const ansiSequences = /\u001b\[[0-?]*[ -/]*[@-~]/g
 
-export function renderRunPlan(plan: RunPlan, compact = false): string {
+export type RunPlanReviewRenderOptions = {
+  /** Show the complete sanitized prompt rather than its normal terminal-safe excerpt. */
+  fullPrompt?: boolean
+}
+
+export function renderRunPlan(plan: RunPlan, compact = false, options: RunPlanReviewRenderOptions = {}): string {
   const prompt = sanitize(plan.prompt.text)
   const preview = prompt.replace(/\s+/g, " ").slice(0, compact ? 100 : 180)
   const lines = [
     compact ? "Convoy run plan" : "Review Convoy run",
     "",
     `Prompt: ${plan.prompt.source} · ${prompt.length} characters · ${prompt.split("\n").length} lines`,
-    `  ${preview}${preview.length < prompt.replace(/\s+/g, " ").length ? "…" : ""}`,
     `Target: ${sanitizeInline(plan.target.directory)}`,
     `  Diff base: ${sanitizeInline(plan.target.baseRef)} · working tree: ${plan.target.dirty ? "include dirty" : "clean required"}`,
     `  Worktree: ${plan.target.worktree ? "yes (created after confirmation)" : "no"}`,
     `Pipeline: ${sanitizeInline(plan.pipeline.name)} · ${plan.pipeline.steps.length} steps`,
     `Gateway: ${gatewayLabel(plan.modelRouting.gateway)}`,
   ]
+  const promptLines = options.fullPrompt && !compact
+    ? prompt.split("\n").map((line) => `  ${line}`)
+    : [`  ${preview}${preview.length < prompt.replace(/\s+/g, " ").length ? "…" : ""}`]
+  lines.splice(3, 0, ...promptLines)
   // A resumed run rerouted by an explicit --gateway must say so in every
   // review format: pending phases will not use the original gateway.
   if (plan.resume?.gatewayOverride) {
@@ -79,7 +87,7 @@ export async function confirmRunPlan(plan: RunPlan): Promise<boolean> {
 }
 
 function sanitize(value: string) {
-  return value.replace(ansiSequences, "").replace(controlCharacters, "")
+  return value.replace(ansiSequences, "").replace(controlCharacters, "").replace(/\t/g, " ")
 }
 
 function sanitizeInline(value: string) {

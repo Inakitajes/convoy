@@ -140,3 +140,23 @@ test("review marks a resume gateway override in every format and shows the route
   expect(detailed).toContain("Branch naming: openrouter/anthropic/claude-haiku-4-5 (generated after confirmation)")
   expect(compact).not.toContain("Branch naming:")
 })
+
+test("review can expand the complete sanitized prompt for the launcher", () => {
+  const plan: RunPlan = {
+    prompt: { source: "inline", text: "first requirement\nsecond\trequirement\u001b[31m" },
+    target: { directory: "/repo", baseRef: "main", worktree: false, dirty: false },
+    pipeline: { name: "quick", steps: [] },
+    modelRouting: { gateway: "configured" },
+    hooks: { pre: [], post: [] },
+    attachments: [],
+    permissions: "interactive",
+    maxAttempts: 1,
+  }
+
+  const excerpt = renderRunPlan(plan)
+  const expanded = renderRunPlan(plan, false, { fullPrompt: true })
+
+  expect(excerpt).toContain("first requirement second requirement")
+  expect(expanded).toContain("  first requirement\n  second requirement")
+  expect(expanded).not.toContain("\u001b")
+})

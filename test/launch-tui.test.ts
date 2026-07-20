@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
-import { cursorPosition, hookLines, launcherStepModelLabel, promptEnterAction, sanitizePaste, stepTree, typedText, wrapPromptLines } from "../src/launch-tui"
+import { cursorPosition, hookLines, launcherStepModelLabel, promptEnterAction, reviewActionForKey, sanitizePaste, stepTree, typedText, wrapPromptLines, wrapReviewLine } from "../src/launch-tui"
 
 import type { KeyEvent } from "@opentui/core"
 
@@ -48,6 +48,29 @@ describe("launch TUI prompt input", () => {
     expect(promptEnterAction(key({ name: "linefeed" }))).toBe("submit")
     expect(promptEnterAction(key({ name: "return", shift: true }))).toBe("newline")
     expect(promptEnterAction(key({ name: "a" }))).toBeUndefined()
+  })
+})
+
+describe("launch TUI review", () => {
+  test("maps review controls to start, back, cancellation, and scrolling actions", () => {
+    expect(reviewActionForKey(key({ name: "return" }))).toBe("start")
+    expect(reviewActionForKey(key({ name: "s" }))).toBe("start")
+    expect(reviewActionForKey(key({ name: "escape" }))).toBe("back")
+    expect(reviewActionForKey(key({ name: "q" }))).toBe("cancel")
+    expect(reviewActionForKey(key({ name: "p" }))).toBe("toggle-prompt")
+    expect(reviewActionForKey(key({ name: "up" }))).toBe("scroll-back")
+    expect(reviewActionForKey(key({ name: "pagedown" }))).toBe("page-forward")
+    expect(reviewActionForKey(key({ name: "home" }))).toBe("top")
+    expect(reviewActionForKey(key({ name: "end" }))).toBe("bottom")
+  })
+
+  test("wraps long review fields without losing their indentation or overflowing the panel", () => {
+    const lines = wrapReviewLine(`     Target:  ${"vercel/openai/very-long-model/".repeat(3)}`, 30)
+
+    expect(lines.length).toBeGreaterThan(1)
+    expect(lines[0]).toStartWith("     Target:")
+    expect(lines.slice(1).every((line) => line.startsWith("     "))).toBe(true)
+    expect(lines.every((line) => line.length <= 30)).toBe(true)
   })
 })
 

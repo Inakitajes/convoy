@@ -8,12 +8,13 @@ import { startLimitsPoller } from "./limits"
 import { builtInPipelines, defaultPipelineName, resolvePipeline } from "./pipeline"
 import { stepRunnerFor } from "./step-runners"
 import { gatewayLabel, modelGateways, type ModelGateway } from "./model-routing"
+import { renderRunPlan } from "./run-review"
 import { joinLines, limitsRow, padBetween, paletteForTerminal, plain, raw, setTheme, spinnerFrame, terminalBackgroundHex, theme, truncate } from "./tui-theme"
 
 import type { ConvoyConfig } from "./config"
 import type { BoxOptions, CliRenderer, KeyEvent, PasteEvent, TextChunk } from "@opentui/core"
 import type { LimitsSnapshot } from "./limits"
-import type { AgentSpec, AgentStep, HookSet, HookSpec, Step } from "./types"
+import type { AgentSpec, AgentStep, HookSet, HookSpec, RunOptions, RunPlan, Step } from "./types"
 import type { PaletteColor } from "./tui-theme"
 
 export type LaunchRunSelection = {
@@ -37,7 +38,24 @@ export type LaunchNavigationSelection =
   | { action: "runs" }
   | { action: "config" }
 
-export type LaunchRunTuiResult = LaunchRunSelection | LaunchNavigationSelection | undefined
+export type LaunchRunPreparation = {
+  /** The exact options and immutable plan that will be handed to the runner. */
+  options: RunOptions
+  plan: RunPlan
+}
+
+export type LaunchReviewedRun = LaunchRunPreparation & {
+  action: "run"
+  selection: LaunchRunSelection
+}
+
+export type LaunchRunTuiResult = LaunchReviewedRun | LaunchNavigationSelection | undefined
+
+export type LaunchRunTuiOptions = {
+  targetDir: string
+  /** Resolves the run without effects so Review and the runner share one frozen plan. */
+  prepareRun(selection: LaunchRunSelection): Promise<LaunchRunPreparation>
+}
 
 // One resolved step, flattened for the preview: `groupId` ties concurrent
 // steps together (the runner batches same-groupId steps), and `stepName` is
@@ -83,7 +101,7 @@ type ToggleSpec = {
   description: string
 }
 
-type Mode = "pipelines" | "prompt" | "options"
+type Mode = "pipelines" | "prompt" | "options" | "review"
 
 type Modal =
   | { kind: "message"; title: string; message: string; footer?: string }
@@ -135,16 +153,13 @@ const toggles: readonly ToggleSpec[] = [
   },
 ]
 
-export async function launchRunTui(options: { targetDir: string }): Promise<LaunchRunTuiResult> {
+export async function launchRunTui(options: LaunchRunTuiOptions): Promise<LaunchRunTuiResult> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     throw new Error("convoy needs an interactive terminal to open the launcher")
   }
 
   const config = await loadMergedConvoyConfig(options.targetDir)
   const choices = pipelineChoices(config, buildAgentRegistry(config))
-  // No "main" fallback: a brand-new repo initialized without a baseRef keeps
-  // the user's own init.defaultBranch, and the run auto-detects it afterwards.
-  const baseRef = config?.defaults.baseRef
 
   // No backgroundColor yet: the palette is only chosen after the terminal
   // answers the background query, so a light terminal never flashes dark.
@@ -156,7 +171,7 @@ export async function launchRunTui(options: { targetDir: string }): Promise<Laun
   })
   const mode = await renderer.waitForThemeMode(1_000).catch(() => null)
   setTheme(paletteForTerminal(mode, terminalBackgroundHex(renderer)))
-  return new LaunchPicker(renderer, options.targetDir, choices, baseRef, config?.modelRouting?.gateway ?? "configured").result
+  return new LaunchPicker(renderer, options.targetDir, choices, config?.modelRouting?.gateway ?? "configured", options.prepareRun).result
 }
 
 function pipelineChoices(config: ConvoyConfig | undefined, agents: readonly AgentSpec[]): PipelineChoice[] {
@@ -235,6 +250,10 @@ class LaunchPicker {
   private optionIndex = 0
   private message = ""
   private modal?: Modal
+  private prepared?: LaunchReviewedRun
+  private reviewScroll = 0
+  private reviewTotalLines = 0
+  private reviewFullPrompt = false
 
   private readonly toggleState: Record<ToggleKey, boolean> = {
     smart: true,
@@ -319,6 +338,9 @@ class LaunchPicker {
       case "options":
         this.handleOptionsKey(key)
         break
+      case "review":
+        this.handleReviewKey(key)
+        break
     }
   }
 
@@ -326,8 +348,8 @@ class LaunchPicker {
     private readonly renderer: CliRenderer,
     private readonly targetDir: string,
     private readonly choices: PipelineChoice[],
-    private readonly baseRef: string | undefined,
     private gateway: ModelGateway,
+    private readonly prepareRun: (selection: LaunchRunSelection) => Promise<LaunchRunPreparation>,
   ) {
     const defaultIndex = choices.findIndex((choice) => choice.isDefault)
     this.selected = defaultIndex >= 0 ? defaultIndex : 0
@@ -350,8 +372,9 @@ class LaunchPicker {
     const selectFromList = (event: { y: number; preventDefault(): void; stopPropagation(): void }) => {
       event.preventDefault()
       event.stopPropagation()
-      // Ignore clicks while a loading/message modal is up.
-      if (this.modal) return
+      // Review is deliberately a committed, read-only screen: use Escape to
+      // return to Options instead of changing the pipeline behind its plan.
+      if (this.modal || this.mode === "review") return
       const row = event.y - this.pipelineText.y
       const index = this.pipelineRows[row]
       if (index === undefined) return
@@ -385,6 +408,15 @@ class LaunchPicker {
       this.toggleOption()
     }
 
+    const scrollReview = (event: LauncherWheelEvent) => {
+      if (this.mode !== "review" || this.modal) return
+      const delta = wheelDelta(event)
+      if (delta === 0) return
+      event.preventDefault()
+      event.stopPropagation()
+      this.scrollReview(delta)
+    }
+
     const detail = this.panel({
       id: "convoy-launch-detail",
       flexGrow: 1,
@@ -394,8 +426,10 @@ class LaunchPicker {
       title: " run setup ",
       titleAlignment: "left",
       onMouseDown: selectOption,
+      onMouseScroll: scrollReview,
     })
     detail.text.onMouseDown = selectOption
+    detail.text.onMouseScroll = scrollReview
     const footer = this.panel({ id: "convoy-launch-footer", height: 3, borderColor: theme.borderDim, backgroundColor: theme.bg })
 
     this.headerText = header.text
@@ -619,6 +653,55 @@ class LaunchPicker {
     }
   }
 
+  private handleReviewKey(key: KeyEvent) {
+    switch (reviewActionForKey(key)) {
+      case "scroll-back":
+        this.scrollReview(-1)
+        return
+      case "scroll-forward":
+        this.scrollReview(1)
+        return
+      case "page-back":
+        this.scrollReview(-this.listHeight())
+        return
+      case "page-forward":
+        this.scrollReview(this.listHeight())
+        return
+      case "top":
+        this.reviewScroll = 0
+        this.render()
+        return
+      case "bottom":
+        this.reviewScroll = Math.max(0, this.reviewTotalLines - this.listHeight())
+        this.render()
+        return
+      case "toggle-prompt":
+        this.reviewFullPrompt = !this.reviewFullPrompt
+        this.reviewScroll = 0
+        this.render()
+        return
+      case "start":
+        if (this.prepared) this.finish(this.prepared)
+        return
+      case "back":
+        this.prepared = undefined
+        this.mode = "options"
+        this.reviewScroll = 0
+        this.reviewTotalLines = 0
+        this.render()
+        return
+      case "cancel":
+        this.finish(undefined)
+        return
+    }
+  }
+
+  private scrollReview(delta: number) {
+    const maxScroll = Math.max(0, this.reviewTotalLines - this.listHeight())
+    this.reviewScroll = clamp(this.reviewScroll + delta, 0, maxScroll)
+    this.render()
+  }
+
   private openPrompt() {
     const choice = this.currentChoice()
     if (!choice.valid) {
@@ -634,53 +717,39 @@ class LaunchPicker {
   }
 
   private startRun() {
-    void this.startRunAfterGitCheck()
+    const choice = this.currentChoice()
+    if (!choice.valid) {
+      this.message = `Pipeline "${choice.name}" is invalid: ${choice.error ?? "unknown error"}`
+      this.render()
+      return
+    }
+    void this.prepareReview(choice.name)
   }
 
-  private async startRunAfterGitCheck() {
-    const choice = this.currentChoice()
+  private async prepareReview(pipelineName: string) {
+    this.modal = { kind: "loading", title: "preparing review", message: "Resolving the exact run plan…" }
+    this.render()
     try {
       const { repoBootstrapStatus } = await import("./git")
       const status = await repoBootstrapStatus(this.targetDir)
-      if (status !== "ready") {
-        this.finishRunSelection(choice.name, true)
-        return
-      }
+      const selection = this.runSelection(pipelineName, status !== "ready")
+      const preparation = await this.prepareRun(selection)
+      this.prepared = { action: "run", selection, ...preparation }
+      this.mode = "review"
+      this.reviewScroll = 0
+      this.reviewTotalLines = 0
+      this.reviewFullPrompt = false
+      this.modal = undefined
+      this.render()
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      this.modal = { kind: "message", title: "git check failed", message }
+      this.modal = { kind: "message", title: "can't prepare the review", message, footer: "esc dismiss · adjust options and try again" }
       this.render()
-      return
     }
-
-    await this.startReadyRun(choice.name)
   }
 
-  // Mirrors the checks `run()` re-does after the launcher closes (ensureRepoReady
-  // in runner.ts): failing here keeps the wizard open, so the typed prompt and
-  // toggles survive a bad base ref or a dirty tree instead of dying with the process.
-  private async startReadyRun(pipelineName: string) {
-    try {
-      const { ensureRepoReady } = await import("./git")
-      await ensureRepoReady(this.targetDir, {
-        baseRef: this.baseRef,
-        includeDirty: this.toggleState.includeDirty,
-        // The interactive flow always forces max attempts to 1 with includeDirty.
-        maxAttempts: 1,
-        // A fresh worktree is always clean, so worktree runs tolerate a dirty source tree.
-        allowDirty: this.toggleState.worktree,
-      })
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      this.modal = { kind: "message", title: "can't start the run", message, footer: "esc dismiss · fix and press enter to retry" }
-      this.render()
-      return
-    }
-    this.finishRunSelection(pipelineName)
-  }
-
-  private finishRunSelection(pipelineName: string, initializeGit = false) {
-    this.finish({
+  private runSelection(pipelineName: string, initializeGit = false): LaunchRunSelection {
+    return {
       targetDir: this.targetDir,
       prompt: this.prompt,
       pipeline: pipelineName,
@@ -693,7 +762,7 @@ class LaunchPicker {
       gateway: this.gateway,
       isolateWorktree: this.toggleState.worktree,
       ...(initializeGit ? { initializeGit: true } : {}),
-    })
+    }
   }
 
   private toggleOption() {
@@ -762,6 +831,7 @@ class LaunchPicker {
 
     this.pipelineBox.width = pipelineWidth
     this.detailBox.width = detailWidth
+    this.detailBox.title = this.mode === "review" ? " review " : " run setup "
     // Mirror the dashboard focus cue: the accented border marks where Enter,
     // Esc, and the navigation keys apply in the current setup step.
     this.pipelineBox.borderColor = this.mode === "pipelines" ? theme.accent : theme.borderDim
@@ -814,9 +884,9 @@ class LaunchPicker {
     const project = basename(this.targetDir) || this.targetDir
     const title: TextChunk[] = [fg(theme.faint)("target "), bold(fg(theme.text)(truncate(project, Math.max(12, width - 32))))]
     const stage: TextChunk[] = []
-    for (const [index, step] of ["pipeline", "prompt", "options"].entries()) {
+    for (const [index, step] of ["pipeline", "prompt", "options", "review"].entries()) {
       if (index > 0) stage.push(fg(theme.faint)(" → "))
-      const active = (this.mode === "pipelines" && index === 0) || (this.mode === "prompt" && index === 1) || (this.mode === "options" && index === 2)
+      const active = (this.mode === "pipelines" && index === 0) || (this.mode === "prompt" && index === 1) || (this.mode === "options" && index === 2) || (this.mode === "review" && index === 3)
       stage.push(active ? bold(fg(theme.accent)(step)) : fg(theme.dim)(step))
     }
     const line1 = padBetween(title, stage, width)
@@ -867,6 +937,8 @@ class LaunchPicker {
         return this.promptDetail(width)
       case "options":
         return this.optionsDetail(width)
+      case "review":
+        return this.reviewDetail(width)
     }
   }
 
@@ -969,7 +1041,7 @@ class LaunchPicker {
     lines.push(new StyledText([fg(theme.faint)("pipeline "), bold(fg(theme.text)(choice.name))]))
     lines.push(new StyledText([fg(theme.faint)("prompt   "), fg(theme.text)(truncate(this.prompt, Math.max(10, width - 9)))]))
     lines.push(plain(""))
-    lines.push(t`${fg(theme.dim)("Toggle extra run parameters, then press Enter to start.")}`)
+    lines.push(t`${fg(theme.dim)("Toggle extra run parameters, then press Enter to review.")}`)
     lines.push(new StyledText([fg(theme.faint)("gateway  "), bold(fg(theme.text)(gatewayLabel(this.gateway))), fg(theme.dim)("  (g to change)")]))
     lines.push(plain(""))
 
@@ -992,6 +1064,25 @@ class LaunchPicker {
     this.optionRows.push(undefined)
     lines.push(new StyledText([fg(theme.faint)("will run with "), fg(theme.text)(flags.length ? flags.join(" ") : "no extra flags")]))
     this.optionRows.push(undefined)
+    return joinLines(lines)
+  }
+
+  private reviewDetail(width: number) {
+    const prepared = this.prepared
+    if (!prepared) return joinLines([t`${fg(theme.red)("Unable to load the run review.")}`])
+
+    const rendered = renderRunPlan(prepared.plan, false, { fullPrompt: this.reviewFullPrompt })
+    const reviewLines = rendered
+      .trimEnd()
+      .split("\n")
+      .flatMap((line) => wrapReviewLine(line, width))
+    const visible = this.listHeight()
+    const maxScroll = Math.max(0, reviewLines.length - visible)
+    this.reviewScroll = clamp(this.reviewScroll, 0, maxScroll)
+    this.reviewTotalLines = reviewLines.length
+
+    const lines = reviewLines.slice(this.reviewScroll, this.reviewScroll + visible).map(reviewTextLine)
+    while (lines.length < visible) lines.push(plain(""))
     return joinLines(lines)
   }
 
@@ -1024,6 +1115,26 @@ class LaunchPicker {
         width,
       )
     }
+    if (this.mode === "review") {
+      const end = Math.min(this.reviewScroll + this.listHeight(), this.reviewTotalLines)
+      return padBetween(
+        [
+          fg(theme.dim)("↑/↓ scroll · "),
+          fg(theme.accent)("pgup/pgdn"),
+          fg(theme.dim)(" page · "),
+          fg(theme.accent)("p"),
+          fg(theme.dim)(this.reviewFullPrompt ? " collapse prompt · " : " expand prompt · "),
+          fg(theme.accent)("enter/s"),
+          fg(theme.dim)(" start · "),
+          fg(theme.accent)("esc"),
+          fg(theme.dim)(" options · "),
+          fg(theme.accent)("q"),
+          fg(theme.dim)(" cancel"),
+        ],
+        [fg(theme.faint)(`${end}/${this.reviewTotalLines}`)],
+        width,
+      )
+    }
     return padBetween(
       [fg(theme.dim)("↑/↓ select · "), fg(theme.accent)("space"), fg(theme.dim)(" toggle · "), fg(theme.accent)("g"), fg(theme.dim)(" gateway · "), fg(theme.accent)("enter"), fg(theme.dim)(" start · "), fg(theme.accent)("p"), fg(theme.dim)(" prompt · "), fg(theme.accent)("q"), fg(theme.dim)(" quit")],
       [fg(theme.faint)(`${this.optionIndex + 1}/${toggles.length}`)],
@@ -1047,6 +1158,85 @@ class LaunchPicker {
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value))
+}
+
+export type ReviewAction = "scroll-back" | "scroll-forward" | "page-back" | "page-forward" | "top" | "bottom" | "toggle-prompt" | "start" | "back" | "cancel"
+
+/** Keyboard contract for the launcher's native Review step. */
+export function reviewActionForKey(key: Pick<KeyEvent, "name" | "shift">): ReviewAction | undefined {
+  switch (key.name) {
+    case "up":
+    case "k":
+      return "scroll-back"
+    case "down":
+    case "j":
+      return "scroll-forward"
+    case "pageup":
+      return "page-back"
+    case "pagedown":
+    case "space":
+      return "page-forward"
+    case "home":
+      return "top"
+    case "end":
+      return "bottom"
+    case "p":
+      return "toggle-prompt"
+    case "return":
+    case "linefeed":
+    case "s":
+      return "start"
+    case "escape":
+      return "back"
+    case "q":
+      return "cancel"
+  }
+  return undefined
+}
+
+// Preserve the hierarchy from renderRunPlan while fitting every long, dynamic
+// value into the review panel. renderRunPlan has already removed terminal
+// controls; this only handles ordinary layout wrapping.
+export function wrapReviewLine(line: string, width: number): string[] {
+  if (!line) return [""]
+  const indent = line.match(/^\s*/)?.[0] ?? ""
+  const prefix = indent.length < Math.max(1, width - 8) ? indent : ""
+  const content = line.slice(indent.length).trim()
+  const available = Math.max(1, width - prefix.length)
+  const wrapped: string[] = []
+  let remaining = content
+
+  while (remaining.length > available) {
+    let breakAt = remaining.lastIndexOf(" ", available)
+    if (breakAt < 1) breakAt = available
+    wrapped.push(remaining.slice(0, breakAt).trimEnd())
+    remaining = remaining.slice(breakAt).trimStart()
+  }
+  wrapped.push(remaining)
+
+  return wrapped.map((part, index) => `${index === 0 ? prefix : " ".repeat(prefix.length)}${part}`)
+}
+
+function reviewTextLine(line: string): StyledText {
+  if (line === "Review Convoy run") return new StyledText([bold(fg(theme.accent)(line))])
+  if (/^(Prompt|Target|Pipeline|Gateway|Branch naming|Runtime|Hooks|Resume gateway override):/.test(line)) {
+    return new StyledText([bold(fg(theme.text)(line))])
+  }
+  if (/^\s*(Logical|Target|Model|Judge|pre|post):/.test(line)) return new StyledText([fg(theme.dim)(line)])
+  return new StyledText([fg(theme.text)(line)])
+}
+
+type LauncherWheelEvent = {
+  scroll?: { direction: string; delta: number }
+  preventDefault(): void
+  stopPropagation(): void
+}
+
+function wheelDelta(event: LauncherWheelEvent): number {
+  const scroll = event.scroll
+  if (!scroll || (scroll.direction !== "up" && scroll.direction !== "down")) return 0
+  const magnitude = Math.max(1, Math.round(scroll.delta || 1))
+  return scroll.direction === "up" ? -magnitude : magnitude
 }
 
 // A slider-style toggle: the knob (●) sits on the right when on, left when

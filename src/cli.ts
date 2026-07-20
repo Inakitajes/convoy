@@ -16,6 +16,7 @@ import type { Pipeline, RunOptions } from "./types"
 import { isValidRunID, resumeWorkspace } from "./workspace"
 import { readRunMetadata } from "./metadata"
 import { preflightRunPlan } from "./preflight"
+import type { LaunchRunPreparation, LaunchRunSelection } from "./launch-tui"
 
 /**
  * Flags as written: every scalar stays undefined until the user sets it, so
@@ -125,14 +126,52 @@ async function launchInteractiveRun(targetDir: string) {
   // Imported lazily so normal CLI invocations don't pull in OpenTUI until they
   // explicitly ask for the zero-argument interactive launcher.
   const { launchRunTui } = await import("./launch-tui")
-  const selection = await launchRunTui({ targetDir })
+  const selection = await launchRunTui({
+    targetDir,
+    prepareRun: (runSelection) => prepareInteractiveRun(targetDir, runSelection),
+  })
   if (!selection) return
-  if ("action" in selection) {
-    if (selection.action === "runs") await openRunsBrowser()
-    else await openConfigEditor(targetDir)
+  if (selection.action === "runs") {
+    await openRunsBrowser()
+    return
+  }
+  if (selection.action === "config") {
+    await openConfigEditor(targetDir)
     return
   }
 
+  let options = selection.options
+  const plan = selection.plan
+  const runSelection = selection.selection
+  await preflightRunPlan(plan)
+  if (runSelection.initializeGit) {
+    const { initializeRepoWithInitialCommit } = await import("./git")
+    await initializeRepoWithInitialCommit(targetDir, { baseRef: options.baseRef === "HEAD" ? undefined : options.baseRef })
+  }
+  // Revalidate Git only after the native Review has been accepted. In
+  // particular, validate the source before a worktree can create a branch.
+  const { ensureRepoReady } = await import("./git")
+  await ensureRepoReady(targetDir, {
+    baseRef: options.baseRef,
+    includeDirty: options.includeDirty,
+    maxAttempts: options.maxAttempts,
+    // A fresh worktree starts clean, so source changes are intentionally left
+    // untouched and don't need to be included in this run.
+    allowDirty: Boolean(runSelection.isolateWorktree),
+  })
+  if (runSelection.isolateWorktree) {
+    const { createIsolatedWorktree } = await import("./worktree")
+    const namer = plan.branchNamer?.model.target
+    if (!namer) throw new Error("worktree plan is missing its branch-namer model")
+    const worktree = await createIsolatedWorktree({ targetDir, prompt: runSelection.prompt, model: namer })
+    options = { ...options, targetDir: worktree.dir, includeDirty: false }
+    log.info(`running in isolated worktree (branch: ${worktree.branch})`)
+    log.info(`  dir: ${worktree.dir}`)
+  }
+  await run({ ...options, plan, noConfirm: true })
+}
+
+async function prepareInteractiveRun(targetDir: string, selection: LaunchRunSelection): Promise<LaunchRunPreparation> {
   const parsed = parseArgs([])
   parsed.targetDir = selection.targetDir
   parsed.baseDetectionDir = targetDir
@@ -162,22 +201,7 @@ async function launchInteractiveRun(targetDir: string) {
     worktree: Boolean(selection.isolateWorktree),
     ...(branchNameModel ? { branchNameModel } : {}),
   })
-  if (!(await confirmRunPlan(plan))) return
-  await preflightRunPlan(plan)
-  if (selection.initializeGit) {
-    const { initializeRepoWithInitialCommit } = await import("./git")
-    await initializeRepoWithInitialCommit(targetDir, { baseRef: options.baseRef === "HEAD" ? undefined : options.baseRef })
-  }
-  if (selection.isolateWorktree) {
-    const { createIsolatedWorktree } = await import("./worktree")
-    const namer = plan.branchNamer?.model.target
-    if (!namer) throw new Error("worktree plan is missing its branch-namer model")
-    const worktree = await createIsolatedWorktree({ targetDir, prompt: selection.prompt, model: namer })
-    options = { ...options, targetDir: worktree.dir, includeDirty: false }
-    log.info(`running in isolated worktree (branch: ${worktree.branch})`)
-    log.info(`  dir: ${worktree.dir}`)
-  }
-  await run({ ...options, plan, noConfirm: true })
+  return { options, plan }
 }
 
 async function openRunsBrowser(initialRunID?: string) {
