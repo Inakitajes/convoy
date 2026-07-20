@@ -62,7 +62,8 @@ export function resolveModel(configured: string, gateway: ModelGateway, override
   const configuredParts = splitModelVariant(configured)
   const recovered = logicalModel(configured)
   const logical = recovered.model
-  const variant = recovered.variant
+  const logicalVariant = recovered.variant
+  let variant = logicalVariant
 
   let physical: string
   if (gateway === "configured") {
@@ -71,10 +72,14 @@ export function resolveModel(configured: string, gateway: ModelGateway, override
     const override = overrides[logical]?.[gateway]
     if (override) {
       const overrideParts = splitModelVariant(override)
-      if (overrideParts.variant && variant && overrideParts.variant !== variant) {
-        throw new Error(`modelRouting override for ${logical}.${gateway} must not replace variant #${variant}`)
+      if (overrideParts.variant && logicalVariant && overrideParts.variant !== logicalVariant) {
+        throw new Error(`modelRouting override for ${logical}.${gateway} must not replace variant #${logicalVariant}`)
       }
       physical = overrideParts.model
+      // An override can select a provider-specific default variant when the
+      // configured logical model does not name one. A caller-selected variant
+      // still wins (and conflicting values above remain an error).
+      variant ??= overrideParts.variant
     } else {
       const [provider, ...model] = logical.split("/")
       if (!provider || model.length === 0) throw unsafeConversion(configured, gateway)
@@ -91,7 +96,7 @@ export function resolveModel(configured: string, gateway: ModelGateway, override
   const target = `${physical}${variant ? `#${variant}` : ""}`
   return {
     configured,
-    logical: `${logical}${variant ? `#${variant}` : ""}`,
+    logical: `${logical}${logicalVariant ? `#${logicalVariant}` : ""}`,
     gateway,
     providerID,
     modelID,

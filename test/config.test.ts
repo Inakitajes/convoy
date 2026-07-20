@@ -448,6 +448,78 @@ describe("config merging", () => {
   })
 })
 
+describe("model routing config", () => {
+  test("parses gateway choices and explicit model targets", () => {
+    const config = parse(
+      [
+        "modelRouting:",
+        "  gateway: vercel",
+        "  overrides:",
+        "    zai/glm-5.2:",
+        "      direct: zai/glm-5.2",
+        "      openrouter: openrouter/z-ai/glm-5.2",
+        "      vercel: vercel/zai/glm-5.2#high",
+      ].join("\n"),
+    )
+
+    expect(config.modelRouting).toEqual({
+      gateway: "vercel",
+      overrides: {
+        "zai/glm-5.2": {
+          direct: "zai/glm-5.2",
+          openrouter: "openrouter/z-ai/glm-5.2",
+          vercel: "vercel/zai/glm-5.2#high",
+        },
+      },
+    })
+    expect(() => parse("modelRouting:\n  gateway: automatic")).toThrow("modelRouting.gateway")
+    expect(() => parse("modelRouting:\n  overrides:\n    missing-provider: {} ")).toThrow("modelRouting.overrides.missing-provider")
+  })
+
+  test("project routing can explicitly return to configured and deep-merges overrides", () => {
+    const global = parse(
+      [
+        "modelRouting:",
+        "  gateway: openrouter",
+        "  overrides:",
+        "    custom/private-model:",
+        "      direct: custom/private-model",
+        "      openrouter: openrouter/acme/private-model",
+      ].join("\n"),
+    )
+    const project = parse(
+      [
+        "modelRouting:",
+        "  gateway: configured",
+        "  overrides:",
+        "    custom/private-model:",
+        "      vercel: vercel/acme/private-model",
+      ].join("\n"),
+    )
+
+    expect(mergeConvoyConfigs(global, project)?.modelRouting).toEqual({
+      gateway: "configured",
+      overrides: {
+        "custom/private-model": {
+          direct: "custom/private-model",
+          openrouter: "openrouter/acme/private-model",
+          vercel: "vercel/acme/private-model",
+        },
+      },
+    })
+  })
+
+  test("serializes routing without dropping gateway targets or variants", () => {
+    const config = parse(
+      "modelRouting:\n  gateway: vercel\n  overrides:\n    custom/private-model:\n      vercel: vercel/acme/private-model#fast",
+    )
+
+    const yaml = serializeConvoyConfig(config)
+    expect(yaml).toContain("modelRouting:")
+    expect(parse(yaml).modelRouting).toEqual(config.modelRouting)
+  })
+})
+
 describe("serialization", () => {
   test("omits empty sections and round-trips through parse", () => {
     const config = parse("defaults:\n  model: openai/gpt-5.5#xhigh\npipelines:\n  default:\n    steps:\n      - implementer\n      - human-review")

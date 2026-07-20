@@ -19,6 +19,7 @@ export function renderRunPlan(plan: RunPlan, compact = false): string {
     `  ${preview}${preview.length < prompt.replace(/\s+/g, " ").length ? "…" : ""}`,
     `Target: ${sanitizeInline(plan.target.directory)}`,
     `  Diff base: ${sanitizeInline(plan.target.baseRef)} · working tree: ${plan.target.dirty ? "include dirty" : "clean required"}`,
+    `  Worktree: ${plan.target.worktree ? "yes (created after confirmation)" : "no"}`,
     `Pipeline: ${sanitizeInline(plan.pipeline.name)} · ${plan.pipeline.steps.length} steps`,
     `Gateway: ${gatewayLabel(plan.modelRouting.gateway)}`,
   ]
@@ -37,6 +38,7 @@ export function renderRunPlan(plan: RunPlan, compact = false): string {
       for (const hook of plan.hooks.post) lines.push(`  post: ${sanitizeInline(hook.command)}${hook.when ? ` (${sanitizeInline(hook.when)})` : ""}`)
     }
     lines.push(`Runtime: ${plan.permissions} permissions · ${plan.attachments.length} attachments`)
+    if (plan.smartJudge) lines.push(`  Judge: ${sanitizeInline(plan.smartJudge.model.target)}`)
   }
   return `${lines.join("\n")}\n`
 }

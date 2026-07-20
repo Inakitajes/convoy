@@ -48,6 +48,18 @@ describe("cli parsing", () => {
     expect(parsed.prompt).toBe("add onboarding")
   })
 
+  test("parses gateway and review flags and rejects invalid combinations", () => {
+    expect(parseArgs(["--gateway", "vercel", "--plan", "--no-confirm", "prompt"])).toMatchObject({
+      gateway: "vercel",
+      planOnly: true,
+      noConfirm: true,
+      prompt: "prompt",
+    })
+    expect(() => parseArgs(["--gateway", "automatic", "prompt"])).toThrow("--gateway must be")
+    expect(() => parseArgs(["--plan=json", "prompt"])).toThrow("--plan does not take a value")
+    expect(() => parseArgs(["--no-confirm=yes", "prompt"])).toThrow("--no-confirm does not take a value")
+  })
+
   test("returns help as a command", async () => {
     const command = await parseCommand(["--help"])
 
@@ -206,6 +218,27 @@ describe("config precedence", () => {
     expect(command.options.maxAttempts).toBe(1)
     expect(command.options.baseRef).toBe("main")
     expect(command.options.pipeline.name).toBe("implement")
+  })
+
+  test("gateway precedence is CLI, then project, then global", async () => {
+    const dir = await projectWithConfig()
+    await writeFile(join(process.env.CONVOY_HOME!, ".convoy", "config.yaml"), "modelRouting:\n  gateway: openrouter\n")
+    await writeFile(join(dir, ".convoy", "config.yaml"), "modelRouting:\n  gateway: configured\n")
+
+    const project = await parseCommand(["--dir", dir, "prompt"])
+    expect(project.type).toBe("run")
+    if (project.type === "run") {
+      expect(project.options.gateway).toBe("configured")
+      expect(project.options.plan?.modelRouting.gateway).toBe("configured")
+    }
+
+    const cli = await parseCommand(["--dir", dir, "--gateway", "vercel", "prompt"])
+    expect(cli.type).toBe("run")
+    if (cli.type === "run") {
+      expect(cli.options.gateway).toBe("vercel")
+      expect(cli.options.gatewayExplicit).toBe(true)
+      expect(cli.options.plan?.modelRouting.gateway).toBe("vercel")
+    }
   })
 
   test("an unknown pipeline lists what exists", async () => {

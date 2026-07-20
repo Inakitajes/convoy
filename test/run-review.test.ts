@@ -45,3 +45,62 @@ test("run review renders untrusted plan fields without terminal or layout inject
   expect(rendered).toContain("audit forged")
   expect(rendered).toContain("bun test rm -rf /")
 })
+
+test("review renders the exact target, worktree intent, and routed smart judge", () => {
+  const plan: RunPlan = {
+    prompt: { source: "file", text: "Audit the checkout flow" },
+    target: { directory: "/repo", baseRef: "main", worktree: true, dirty: false },
+    pipeline: {
+      name: "audit",
+      steps: [
+        {
+          type: "agent",
+          name: "security",
+          stepName: "security",
+          groupId: "g1",
+          agentName: "security-auditor",
+          description: "Security audit",
+          model: "vercel/openai/gpt-5.6-sol",
+          resolvedModel: {
+            configured: "openai/gpt-5.6-sol",
+            logical: "openai/gpt-5.6-sol",
+            gateway: "vercel",
+            providerID: "vercel",
+            modelID: "openai/gpt-5.6-sol",
+            target: "vercel/openai/gpt-5.6-sol",
+          },
+          inputFiles: ["prd.md"],
+          inputDiff: true,
+          reportPath: "reports/security.md",
+          maxAttempts: 3,
+        },
+      ],
+    },
+    modelRouting: { gateway: "vercel" },
+    smartJudge: {
+      model: {
+        configured: "anthropic/claude-haiku-4.5",
+        logical: "anthropic/claude-haiku-4.5",
+        gateway: "vercel",
+        providerID: "vercel",
+        modelID: "anthropic/claude-haiku-4.5",
+        target: "vercel/anthropic/claude-haiku-4.5",
+      },
+    },
+    hooks: { pre: [{ command: "bun run lint" }], post: [] },
+    attachments: ["docs/architecture.md"],
+    permissions: "smart",
+    maxAttempts: 2,
+  }
+
+  const detailed = renderRunPlan(plan)
+  const compact = renderRunPlan(plan, true)
+
+  expect(detailed).toContain("Worktree: yes (created after confirmation)")
+  expect(detailed).toContain("Logical: openai/gpt-5.6-sol")
+  expect(detailed).toContain("Target:  vercel/openai/gpt-5.6-sol")
+  expect(detailed).toContain("Judge: vercel/anthropic/claude-haiku-4.5")
+  expect(detailed).toContain("pre: bun run lint")
+  expect(compact).toContain("Convoy run plan")
+  expect(compact).not.toContain("Target:  vercel/openai/gpt-5.6-sol")
+})
