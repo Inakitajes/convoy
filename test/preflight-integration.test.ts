@@ -4,18 +4,12 @@ import type { RunPlan } from "../src/types"
 
 const close = mock(() => {})
 let providerResponseData: unknown
-let modelResponseData: unknown
 
 mock.module("../src/opencode", () => ({
   startOpencode: async () => ({
     client: {
-      v2: {
-        provider: {
-          list: async () => ({ data: providerResponseData }),
-        },
-        model: {
-          list: async () => ({ data: modelResponseData }),
-        },
+      provider: {
+        list: async () => ({ data: providerResponseData }),
       },
     },
     url: "http://127.0.0.1:1234",
@@ -26,16 +20,20 @@ mock.module("../src/opencode", () => ({
 beforeEach(() => {
   close.mockClear()
   providerResponseData = {
-    location: { directory: "/repo" },
-    data: [{ id: "vercel", disabled: false }],
-  }
-  modelResponseData = {
-    location: { directory: "/repo" },
-    data: [{ providerID: "vercel", id: "openai/gpt-5.6-sol" }],
+    all: [
+      {
+        id: "vercel",
+        models: {
+          "openai/gpt-5.6-sol": { name: "GPT-5.6 Sol", variants: {} },
+        },
+      },
+    ],
+    connected: ["vercel"],
+    default: {},
   }
 })
 
-test("preflight accepts location-scoped provider and model discovery", async () => {
+test("preflight accepts connected providers and their models", async () => {
   const { preflightRunPlan } = await import("../src/preflight")
 
   await expect(preflightRunPlan(plan())).resolves.toBeUndefined()
@@ -43,8 +41,7 @@ test("preflight accepts location-scoped provider and model discovery", async () 
 })
 
 test("preflight reports an incompatible OpenCode discovery contract", async () => {
-  providerResponseData = [{ id: "vercel", enabled: true }]
-  modelResponseData = [{ providerID: "vercel", id: "openai/gpt-5.6-sol" }]
+  providerResponseData = []
   const { preflightRunPlan } = await import("../src/preflight")
 
   await expect(preflightRunPlan(plan())).rejects.toThrow("OpenCode 1.18.4 or newer is required")

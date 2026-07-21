@@ -1,8 +1,6 @@
 import { gatewayLabel, type ResolvedModel } from "./model-routing"
+import type { DiscoveredModel, DiscoveredProvider } from "./opencode-discovery"
 import type { RunPlan } from "./types"
-
-type DiscoveredProvider = { id?: unknown; disabled?: unknown }
-type DiscoveredModel = { providerID?: unknown; id?: unknown }
 
 /** The exact OpenCode targets that must be available before a run can begin. */
 export function preflightTargets(plan: RunPlan): ResolvedModel[] {
@@ -17,8 +15,8 @@ export function preflightTargets(plan: RunPlan): ResolvedModel[] {
 /** Throws actionable errors for provider and physical-model discovery results. */
 export function validatePreflightTargets(
   targets: readonly ResolvedModel[],
-  providers: readonly DiscoveredProvider[],
-  models: readonly DiscoveredModel[],
+  providers: readonly Pick<DiscoveredProvider, "id" | "disabled">[],
+  models: readonly (Pick<DiscoveredModel, "providerID" | "id"> & { variants?: readonly { id: string }[] })[],
 ): void {
   for (const target of targets) {
     const provider = providers.find((entry) => entry.id === target.providerID)
@@ -28,9 +26,15 @@ export function validatePreflightTargets(
         : `Authenticate provider ${target.providerID} with \`opencode providers login\`.`
       throw new Error(`Cannot start run\n\nMissing provider credentials: ${target.providerID}\n\n${auth}`)
     }
-    if (!models.some((model) => model.providerID === target.providerID && model.id === target.modelID)) {
+    const model = models.find((entry) => entry.providerID === target.providerID && entry.id === target.modelID)
+    if (!model) {
       throw new Error(
         `Model unavailable through ${gatewayLabel(target.gateway)}:\n\n  logical: ${target.logical}\n  target:  ${target.target}\n\nAdd modelRouting.overrides or select --gateway configured.`,
+      )
+    }
+    if (target.variant && !model.variants?.some((variant) => variant.id === target.variant)) {
+      throw new Error(
+        `Model variant unavailable through ${gatewayLabel(target.gateway)}:\n\n  logical: ${target.logical}\n  target:  ${target.target}\n\nSelect a variant reported by OpenCode.`,
       )
     }
   }

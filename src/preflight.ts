@@ -1,5 +1,5 @@
 import { startOpencode } from "./opencode"
-import { discoveryData } from "./opencode-discovery"
+import { providerDiscovery } from "./opencode-discovery"
 import type { RunPlan } from "./types"
 import { preflightTargets, validatePreflightTargets } from "./preflight-validation"
 
@@ -13,19 +13,13 @@ export async function preflightRunPlan(plan: RunPlan): Promise<void> {
   const timeout = AbortSignal.timeout(preflightTimeoutMs)
   const handle = await startOpencode({}, timeout)
   try {
-    const [providerResult, modelResult] = await withinPreflightTimeout(
-      Promise.all([
-        handle.client.v2.provider.list({ location: { directory: plan.target.directory } }),
-        handle.client.v2.model.list({ location: { directory: plan.target.directory } }),
-      ]),
+    const providerResult = await withinPreflightTimeout(
+      handle.client.provider.list({ directory: plan.target.directory }),
       timeout,
     )
-    if (providerResult.error || modelResult.error) throw new Error("OpenCode could not list enabled providers and models")
-    validatePreflightTargets(
-      targets,
-      discoveryData(providerResult.data, "providers"),
-      discoveryData(modelResult.data, "models"),
-    )
+    if (providerResult.error) throw new Error("OpenCode could not list connected providers and models")
+    const discovery = providerDiscovery(providerResult.data)
+    validatePreflightTargets(targets, discovery.providers, discovery.models)
   } finally {
     handle.close()
   }

@@ -1,19 +1,18 @@
 import { describe, expect, test } from "bun:test"
 
-import type { ModelV2Info, ProviderV2Info } from "@opencode-ai/sdk/v2"
-
 import { parseModelsDev, toModelChoices } from "../src/model-catalog"
+import type { DiscoveredModel, DiscoveredProvider } from "../src/opencode-discovery"
 
 describe("toModelChoices", () => {
   test("keeps enabled providers, expands variants, preserves SDK order", () => {
     const providers = [
       { id: "openai", disabled: false },
       { id: "anthropic", disabled: true },
-    ] as unknown as ProviderV2Info[]
+    ] as DiscoveredProvider[]
     const models = [
       { providerID: "openai", id: "gpt-5.5", name: "GPT-5.5", status: "active", limit: { context: 400_000 }, variants: [{ id: "xhigh" }, { id: "high" }] },
       { providerID: "anthropic", id: "claude-opus-4-7", name: "Opus", status: "active", variants: [] },
-    ] as unknown as ModelV2Info[]
+    ] as DiscoveredModel[]
 
     const choices = toModelChoices(providers, models)
     expect(choices.map((choice) => choice.value)).toEqual(["openai/gpt-5.5", "openai/gpt-5.5#xhigh", "openai/gpt-5.5#high"])
@@ -21,17 +20,17 @@ describe("toModelChoices", () => {
     expect(choices[1]).toMatchObject({ value: "openai/gpt-5.5#xhigh", label: "GPT-5.5 (xhigh)" })
   })
 
-  test("with no provider info, keeps every model", () => {
-    const models = [{ providerID: "x", id: "m", name: "M", variants: [] }] as unknown as ModelV2Info[]
-    expect(toModelChoices([], models).map((choice) => choice.value)).toEqual(["x/m"])
+  test("with no connected provider, keeps no models", () => {
+    const models = [{ providerID: "x", id: "m", name: "M", variants: [] }] as DiscoveredModel[]
+    expect(toModelChoices([], models)).toEqual([])
   })
 
   test("surfaces a non-active status and skips it when active", () => {
     const models = [
       { providerID: "x", id: "beta", name: "Beta", status: "beta", variants: [] },
       { providerID: "x", id: "stable", name: "Stable", status: "active", variants: [] },
-    ] as unknown as ModelV2Info[]
-    const choices = toModelChoices([], models)
+    ] as DiscoveredModel[]
+    const choices = toModelChoices([{ id: "x", disabled: false }], models)
     expect(choices[0]).toMatchObject({ status: "beta" })
     expect(choices[1]?.status).toBeUndefined()
   })
@@ -40,8 +39,8 @@ describe("toModelChoices", () => {
     const models = [
       { providerID: "x", id: "m", name: "M", variants: [] },
       { providerID: "x", id: "m", name: "M again", variants: [] },
-    ] as unknown as ModelV2Info[]
-    expect(toModelChoices([], models).map((choice) => choice.value)).toEqual(["x/m"])
+    ] as DiscoveredModel[]
+    expect(toModelChoices([{ id: "x", disabled: false }], models).map((choice) => choice.value)).toEqual(["x/m"])
   })
 })
 

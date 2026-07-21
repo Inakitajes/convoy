@@ -1,8 +1,6 @@
-import type { ModelV2Info, ProviderV2Info } from "@opencode-ai/sdk/v2"
-
 import { log } from "./log"
 import { startOpencode } from "./opencode"
-import { discoveryData } from "./opencode-discovery"
+import { providerDiscovery, type DiscoveredModel, type DiscoveredProvider } from "./opencode-discovery"
 
 /** A selectable model for the config TUI's picker. `value` is what gets written to config. */
 export type ModelChoice = {
@@ -44,12 +42,10 @@ export async function listModels(targetDir: string): Promise<ModelChoice[]> {
 async function listModelsFromSdk(targetDir: string): Promise<ModelChoice[]> {
   const handle = await startOpencode({}, AbortSignal.timeout(catalogTimeoutMs))
   try {
-    const [providers, models] = await Promise.all([
-      handle.client.v2.provider.list({ location: { directory: targetDir } }),
-      handle.client.v2.model.list({ location: { directory: targetDir } }),
-    ])
-    if (providers.error || models.error) throw new Error("opencode returned an error listing providers/models")
-    return toModelChoices(discoveryData(providers.data, "providers"), discoveryData(models.data, "models"))
+    const result = await handle.client.provider.list({ directory: targetDir })
+    if (result.error) throw new Error("opencode returned an error listing providers/models")
+    const discovery = providerDiscovery(result.data)
+    return toModelChoices(discovery.providers, discovery.models)
   } finally {
     handle.close()
   }
@@ -60,7 +56,7 @@ async function listModelsFromSdk(targetDir: string): Promise<ModelChoice[]> {
  * only models whose provider is enabled, preserves the SDK's release-date order,
  * and expands each model into its base entry plus one per variant.
  */
-export function toModelChoices(providers: readonly ProviderV2Info[], models: readonly ModelV2Info[]): ModelChoice[] {
+export function toModelChoices(providers: readonly DiscoveredProvider[], models: readonly DiscoveredModel[]): ModelChoice[] {
   const available = new Set(providers.filter((provider) => provider.disabled !== true).map((provider) => provider.id))
   const choices: ModelChoice[] = []
   const seen = new Set<string>()
@@ -72,8 +68,7 @@ export function toModelChoices(providers: readonly ProviderV2Info[], models: rea
   }
 
   for (const model of models) {
-    // When provider info is present, keep only enabled providers; otherwise keep all.
-    if (available.size > 0 && !available.has(model.providerID)) continue
+    if (!available.has(model.providerID)) continue
     const base = `${model.providerID}/${model.id}`
     const status = model.status && model.status !== "active" ? model.status : undefined
     const contextK = model.limit?.context ? Math.round(model.limit.context / 1000) : undefined

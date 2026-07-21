@@ -107,4 +107,32 @@ describe("OpenCode run-plan preflight", () => {
     expect(() => validatePreflightTargets(targets, [{ id: "vercel", disabled: false }], [])).toThrow("logical: openai/gpt-5.6-sol")
     expect(() => validatePreflightTargets(targets, [{ id: "vercel", disabled: false }], [])).toThrow("target:  vercel/openai/gpt-5.6-sol")
   })
+
+  test("accepts a discovered model variant", () => {
+    const targets = preflightTargets(plan())
+    targets[0]!.variant = "xhigh"
+    targets[0]!.target = "vercel/openai/gpt-5.6-sol#xhigh"
+
+    expect(() =>
+      validatePreflightTargets(
+        targets,
+        [{ id: "vercel", disabled: false }],
+        [{ providerID: "vercel", id: "openai/gpt-5.6-sol", variants: [{ id: "xhigh" }] }],
+      ),
+    ).not.toThrow()
+  })
+
+  test("rejects a model variant absent from discovery", () => {
+    const targets = preflightTargets(plan())
+    targets[0]!.variant = "turbo"
+    targets[0]!.target = "vercel/openai/gpt-5.6-sol#turbo"
+
+    expect(() =>
+      validatePreflightTargets(
+        targets,
+        [{ id: "vercel", disabled: false }],
+        [{ providerID: "vercel", id: "openai/gpt-5.6-sol", variants: [{ id: "xhigh" }] }],
+      ),
+    ).toThrow("Model variant unavailable through Vercel AI Gateway")
+  })
 })
