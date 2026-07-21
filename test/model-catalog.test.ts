@@ -1,70 +1,55 @@
 import { describe, expect, test } from "bun:test"
 
-import type { ModelV2Info, ProviderV2Info } from "@opencode-ai/sdk/v2"
+import type { Provider } from "@opencode-ai/sdk/v2"
 
 import { parseModelsDev, toModelChoices } from "../src/model-catalog"
 
-describe("toModelChoices", () => {
-  test("keeps enabled providers, expands variants, preserves SDK order", () => {
-    const providers = [
-      { id: "openai", disabled: false },
-      { id: "anthropic", disabled: true },
-    ] as unknown as ProviderV2Info[]
-    const models = [
-      { providerID: "openai", id: "gpt-5.5", name: "GPT-5.5", status: "active", limit: { context: 400_000 }, variants: [{ id: "xhigh" }, { id: "high" }] },
-      { providerID: "anthropic", id: "claude-opus-4-7", name: "Opus", status: "active", variants: [] },
-    ] as unknown as ModelV2Info[]
+function provider(id: string, models: Array<{ id: string; name: string; status?: string; context?: number; variants?: string[] }>): Provider {
+  return {
+    id,
+    models: Object.fromEntries(
+      models.map((model) => [
+        model.id,
+        {
+          id: model.id,
+          providerID: id,
+          name: model.name,
+          status: model.status ?? "active",
+          limit: { context: model.context ?? 0 },
+          variants: Object.fromEntries((model.variants ?? []).map((variant) => [variant, {}])),
+        },
+      ]),
+    ),
+  } as unknown as Provider
+}
 
-    const choices = toModelChoices(providers, models)
+describe("toModelChoices", () => {
+  test("keeps connected providers and expands classic catalog variants", () => {
+    const providers = [
+      provider("openai", [{ id: "gpt-5.5", name: "GPT-5.5", context: 400_000, variants: ["xhigh", "high"] }]),
+      provider("anthropic", [{ id: "claude-opus-4-7", name: "Opus" }]),
+    ]
+
+    const choices = toModelChoices(providers, ["openai"])
     expect(choices.map((choice) => choice.value)).toEqual(["openai/gpt-5.5", "openai/gpt-5.5#xhigh", "openai/gpt-5.5#high"])
     expect(choices[0]).toMatchObject({ value: "openai/gpt-5.5", label: "GPT-5.5", providerID: "openai", contextK: 400 })
     expect(choices[1]).toMatchObject({ value: "openai/gpt-5.5#xhigh", label: "GPT-5.5 (xhigh)" })
   })
 
-  test("still recognizes the former enabled provider field", () => {
-    const providers = [
-      { id: "openai", enabled: { via: "env", name: "OPENAI_API_KEY" } },
-      { id: "anthropic", enabled: false },
-    ] as unknown as ProviderV2Info[]
-    const models = [
-      { providerID: "openai", id: "gpt", name: "GPT", variants: [] },
-      { providerID: "anthropic", id: "claude", name: "Claude", variants: [] },
-    ] as unknown as ModelV2Info[]
-
-    expect(toModelChoices(providers, models).map((choice) => choice.value)).toEqual(["openai/gpt"])
-  })
-
-  test("uses current model availability when the provider list does not match", () => {
-    const providers = [{ id: "opencode", disabled: false }] as unknown as ProviderV2Info[]
-    const models = [
-      { providerID: "openai", id: "gpt", name: "GPT", enabled: true, variants: [] },
-      { providerID: "anthropic", id: "claude", name: "Claude", enabled: false, variants: [] },
-    ] as unknown as ModelV2Info[]
-
-    expect(toModelChoices(providers, models).map((choice) => choice.value)).toEqual(["openai/gpt"])
-  })
-
-  test("with no provider info, keeps every model", () => {
-    const models = [{ providerID: "x", id: "m", name: "M", variants: [] }] as unknown as ModelV2Info[]
-    expect(toModelChoices([], models).map((choice) => choice.value)).toEqual(["x/m"])
+  test("with no connected providers, keeps no models", () => {
+    expect(toModelChoices([provider("x", [{ id: "m", name: "M" }])], [])).toEqual([])
   })
 
   test("surfaces a non-active status and skips it when active", () => {
-    const models = [
-      { providerID: "x", id: "beta", name: "Beta", status: "beta", variants: [] },
-      { providerID: "x", id: "stable", name: "Stable", status: "active", variants: [] },
-    ] as unknown as ModelV2Info[]
-    const choices = toModelChoices([], models)
+    const providers = [provider("x", [{ id: "beta", name: "Beta", status: "beta" }, { id: "stable", name: "Stable" }])]
+    const choices = toModelChoices(providers, ["x"])
     expect(choices[0]).toMatchObject({ status: "beta" })
     expect(choices[1]?.status).toBeUndefined()
   })
 
   test("dedupes repeated values", () => {
-    const models = [
-      { providerID: "x", id: "m", name: "M", variants: [] },
-      { providerID: "x", id: "m", name: "M again", variants: [] },
-    ] as unknown as ModelV2Info[]
-    expect(toModelChoices([], models).map((choice) => choice.value)).toEqual(["x/m"])
+    const providers = [provider("x", [{ id: "m", name: "M" }]), provider("x", [{ id: "m", name: "M again" }])]
+    expect(toModelChoices(providers, ["x"]).map((choice) => choice.value)).toEqual(["x/m"])
   })
 })
 

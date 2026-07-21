@@ -1,9 +1,9 @@
 import { gatewayLabel, type ResolvedModel } from "./model-routing"
-import { type OpenCodeList, unwrapOpenCodeList } from "./opencode-response"
 import type { RunPlan } from "./types"
 
-type DiscoveredProvider = { id?: unknown; integrationID?: unknown; disabled?: unknown; enabled?: unknown }
-type DiscoveredModel = { providerID?: unknown; id?: unknown; enabled?: unknown }
+type DiscoveredModel = { variants?: unknown }
+type DiscoveredProvider = { id?: unknown; models?: unknown }
+export type ProviderCatalog = { all: readonly DiscoveredProvider[]; connected: readonly string[] }
 
 /** The exact OpenCode targets that must be available before a run can begin. */
 export function preflightTargets(plan: RunPlan): ResolvedModel[] {
@@ -18,31 +18,38 @@ export function preflightTargets(plan: RunPlan): ResolvedModel[] {
 /** Throws actionable errors for provider and physical-model discovery results. */
 export function validatePreflightTargets(
   targets: readonly ResolvedModel[],
-  providers: OpenCodeList<DiscoveredProvider>,
-  models: OpenCodeList<DiscoveredModel>,
+  catalog: ProviderCatalog,
 ): void {
-  const discoveredProviders = unwrapOpenCodeList(providers)
-  const discoveredModels = unwrapOpenCodeList(models)
+  const connected = new Set(catalog.connected)
 
   for (const target of targets) {
-    const model = discoveredModels.find((entry) => entry.providerID === target.providerID && entry.id === target.modelID)
-
-    // OpenCode 1.18 exposes availability on each model. Treat that as the
-    // source of truth because the provider list no longer maps one-to-one to
-    // model provider IDs. Older OpenCode versions need the provider fallback.
-    if (model?.enabled === true) continue
-
-    const provider = discoveredProviders.find((entry) => entry.id === target.providerID || entry.integrationID === target.providerID)
-    if (!provider || provider.disabled === true || provider.enabled === false || model?.enabled === false) {
+    const provider = catalog.all.find((entry) => entry.id === target.providerID)
+    if (!provider) throw modelUnavailable(target)
+    if (!connected.has(target.providerID)) {
       const auth = target.providerID === "vercel"
         ? "Authenticate with `opencode providers login` (Vercel AI Gateway) or set AI_GATEWAY_API_KEY."
         : `Authenticate provider ${target.providerID} with \`opencode providers login\`.`
       throw new Error(`Cannot start run\n\nMissing provider credentials: ${target.providerID}\n\n${auth}`)
     }
-    if (!model) {
-      throw new Error(
-        `Model unavailable through ${gatewayLabel(target.gateway)}:\n\n  logical: ${target.logical}\n  target:  ${target.target}\n\nAdd modelRouting.overrides or select --gateway configured.`,
-      )
+
+    const models = isRecord(provider.models) ? provider.models : {}
+    if (!Object.hasOwn(models, target.modelID)) throw modelUnavailable(target)
+    const model = models[target.modelID] as DiscoveredModel | undefined
+    if (!model) throw modelUnavailable(target)
+
+    if (target.variant) {
+      const variants = isRecord(model.variants) ? model.variants : {}
+      if (!Object.hasOwn(variants, target.variant)) throw modelUnavailable(target)
     }
   }
+}
+
+function modelUnavailable(target: ResolvedModel) {
+  return new Error(
+    `Model unavailable through ${gatewayLabel(target.gateway)}:\n\n  logical: ${target.logical}\n  target:  ${target.target}\n\nAdd modelRouting.overrides or select --gateway configured.`,
+  )
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value)
 }

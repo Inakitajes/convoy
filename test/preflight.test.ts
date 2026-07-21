@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 
 import { preflightTargets, validatePreflightTargets } from "../src/preflight-validation"
+import { preflightRunPlan } from "../src/preflight"
 import type { RunPlan } from "../src/types"
 
 function plan(): RunPlan {
@@ -37,6 +38,41 @@ function plan(): RunPlan {
     attachments: [],
     permissions: "interactive",
     maxAttempts: 2,
+  }
+}
+
+function directOpenAIPlan(): RunPlan {
+  const result = plan()
+  const step = result.pipeline.steps[0]!
+  if (step.type !== "agent") throw new Error("expected agent step")
+  step.model = "openai/gpt-5.6-terra"
+  step.variant = "xhigh"
+  step.resolvedModel = {
+    configured: "openai/gpt-5.6-terra#xhigh",
+    logical: "openai/gpt-5.6-terra#xhigh",
+    gateway: "configured",
+    providerID: "openai",
+    modelID: "gpt-5.6-terra",
+    variant: "xhigh",
+    target: "openai/gpt-5.6-terra#xhigh",
+  }
+  result.modelRouting.gateway = "configured"
+  return result
+}
+
+function catalog(input: { providerID?: string; connected?: boolean; modelID?: string; variants?: string[] } = {}) {
+  const providerID = input.providerID ?? "vercel"
+  const modelID = input.modelID ?? "openai/gpt-5.6-sol"
+  return {
+    all: [
+      {
+        id: providerID,
+        models: {
+          [modelID]: { variants: Object.fromEntries((input.variants ?? []).map((variant) => [variant, {}])) },
+        },
+      },
+    ],
+    connected: input.connected === false ? [] : [providerID],
   }
 }
 
@@ -85,62 +121,52 @@ describe("OpenCode run-plan preflight", () => {
     ])
   })
 
-  test("accepts discovered providers and physical model IDs", () => {
-    expect(() =>
-      validatePreflightTargets(preflightTargets(plan()), [{ id: "vercel", enabled: true }], [{ providerID: "vercel", id: "openai/gpt-5.6-sol" }]),
-    ).not.toThrow()
+  test("accepts connected providers and exact physical model IDs", () => {
+    expect(() => validatePreflightTargets(preflightTargets(plan()), catalog())).not.toThrow()
   })
 
-  test("accepts an enabled OpenCode 1.18 model without a matching provider entry", () => {
+  test("accepts the classic connected OpenAI catalog used by session.prompt", () => {
     expect(() =>
       validatePreflightTargets(
-        preflightTargets(plan()),
-        { data: [{ id: "some-other-provider" }] },
-        { data: [{ providerID: "vercel", id: "openai/gpt-5.6-sol", enabled: true }] },
+        preflightTargets(directOpenAIPlan()),
+        catalog({ providerID: "openai", modelID: "gpt-5.6-terra", variants: ["xhigh"] }),
       ),
     ).not.toThrow()
   })
 
-  test("recognizes an integration provider ID for legacy model responses", () => {
-    expect(() =>
-      validatePreflightTargets(
-        preflightTargets(plan()),
-        { data: [{ id: "connection-1", integrationID: "vercel" }] },
-        { data: [{ providerID: "vercel", id: "openai/gpt-5.6-sol" }] },
-      ),
-    ).not.toThrow()
+  test("preflights the resolved run against classic discovery in its target directory", async () => {
+    const reviewed = directOpenAIPlan()
+    let discoveredDirectory: string | undefined
+
+    await preflightRunPlan(reviewed, async (directory) => {
+      discoveredDirectory = directory
+      return catalog({ providerID: "openai", modelID: "gpt-5.6-terra", variants: ["xhigh"] })
+    })
+
+    expect(discoveredDirectory).toBe("/repo")
   })
 
-  test("reports Vercel authentication guidance when its provider is disabled", () => {
-    expect(() => validatePreflightTargets(preflightTargets(plan()), [{ id: "vercel", enabled: false }], [])).toThrow(
+  test("reports Vercel authentication guidance when it is not connected", () => {
+    expect(() => validatePreflightTargets(preflightTargets(plan()), catalog({ connected: false }))).toThrow(
       "Missing provider credentials: vercel",
     )
-    expect(() => validatePreflightTargets(preflightTargets(plan()), [{ id: "vercel", enabled: false }], [])).toThrow(
+    expect(() => validatePreflightTargets(preflightTargets(plan()), catalog({ connected: false }))).toThrow(
       "AI_GATEWAY_API_KEY",
     )
   })
 
-  test("recognizes the current disabled provider field", () => {
-    expect(() => validatePreflightTargets(preflightTargets(plan()), { data: [{ id: "vercel", disabled: true }] }, { data: [] })).toThrow(
-      "Missing provider credentials: vercel",
-    )
-  })
-
-  test("reports missing credentials when the exact model is disabled", () => {
+  test("reports unavailable variants from the exact classic model catalog", () => {
     expect(() =>
-      validatePreflightTargets(
-        preflightTargets(plan()),
-        { data: [{ id: "vercel" }] },
-        { data: [{ providerID: "vercel", id: "openai/gpt-5.6-sol", enabled: false }] },
-      ),
-    ).toThrow("Missing provider credentials: vercel")
+      validatePreflightTargets(preflightTargets(directOpenAIPlan()), catalog({ providerID: "openai", modelID: "gpt-5.6-terra", variants: ["high"] })),
+    ).toThrow("Model unavailable through As configured")
   })
 
   test("reports the logical and exact physical target when a model is unavailable", () => {
     const targets = preflightTargets(plan())
+    const withoutTarget = catalog({ modelID: "some-other-model" })
 
-    expect(() => validatePreflightTargets(targets, [{ id: "vercel", enabled: true }], [])).toThrow("Model unavailable through Vercel AI Gateway")
-    expect(() => validatePreflightTargets(targets, [{ id: "vercel", enabled: true }], [])).toThrow("logical: openai/gpt-5.6-sol")
-    expect(() => validatePreflightTargets(targets, [{ id: "vercel", enabled: true }], [])).toThrow("target:  vercel/openai/gpt-5.6-sol")
+    expect(() => validatePreflightTargets(targets, withoutTarget)).toThrow("Model unavailable through Vercel AI Gateway")
+    expect(() => validatePreflightTargets(targets, withoutTarget)).toThrow("logical: openai/gpt-5.6-sol")
+    expect(() => validatePreflightTargets(targets, withoutTarget)).toThrow("target:  vercel/openai/gpt-5.6-sol")
   })
 })

@@ -1,8 +1,7 @@
-import type { ModelV2Info, ProviderV2Info } from "@opencode-ai/sdk/v2"
+import type { Provider } from "@opencode-ai/sdk/v2"
 
 import { log } from "./log"
 import { startOpencode } from "./opencode"
-import { unwrapOpenCodeList } from "./opencode-response"
 
 /** A selectable model for the config TUI's picker. `value` is what gets written to config. */
 export type ModelChoice = {
@@ -22,12 +21,9 @@ const modelsDevUrl = "https://models.dev/api.json"
 
 let cached: ModelChoice[] | undefined
 
-type CatalogProvider = ProviderV2Info & { enabled?: unknown }
-type CatalogModel = ModelV2Info & { enabled?: unknown }
-
 /**
  * The models offered in the picker: first the OpenCode SDK (filtered to the
- * user's enabled providers, with variants expanded), falling back to the full
+ * user's connected providers, with variants expanded), falling back to the full
  * models.dev catalog when the SDK can't answer (no auth / offline). Returns []
  * if both fail, since the picker always also accepts free-typed text. Cached
  * per process once a non-empty list is obtained.
@@ -47,26 +43,21 @@ export async function listModels(targetDir: string): Promise<ModelChoice[]> {
 async function listModelsFromSdk(targetDir: string): Promise<ModelChoice[]> {
   const handle = await startOpencode({}, AbortSignal.timeout(catalogTimeoutMs))
   try {
-    const [providers, models] = await Promise.all([
-      handle.client.v2.provider.list({ location: { directory: targetDir } }),
-      handle.client.v2.model.list({ location: { directory: targetDir } }),
-    ])
-    if (providers.error || models.error) throw new Error("opencode returned an error listing providers/models")
-    return toModelChoices(unwrapOpenCodeList(providers.data), unwrapOpenCodeList(models.data))
+    const result = await handle.client.provider.list({ directory: targetDir })
+    if (result.error || !result.data) throw new Error("opencode returned an error listing providers/models")
+    return toModelChoices(result.data.all, result.data.connected)
   } finally {
     handle.close()
   }
 }
 
 /**
- * Pure transform from the SDK's provider/model lists to picker choices. Keeps
- * only models whose provider is enabled, preserves the SDK's release-date order,
- * and expands each model into its base entry plus one per variant.
+ * Pure transform from OpenCode's classic provider catalog to picker choices.
+ * This is the same catalog consumed by session.prompt, so stored credentials,
+ * custom providers, model IDs, and variants match what a run can actually use.
  */
-export function toModelChoices(providers: readonly CatalogProvider[], models: readonly CatalogModel[]): ModelChoice[] {
-  const enabled = new Set(
-    providers.filter((provider) => provider.disabled !== true && provider.enabled !== false).map((provider) => provider.id),
-  )
+export function toModelChoices(providers: readonly Provider[], connectedProviders: readonly string[]): ModelChoice[] {
+  const connected = new Set(connectedProviders)
   const choices: ModelChoice[] = []
   const seen = new Set<string>()
 
@@ -76,23 +67,23 @@ export function toModelChoices(providers: readonly CatalogProvider[], models: re
     choices.push(choice)
   }
 
-  for (const model of models) {
-    // Current model responses carry their own availability. Fall back to the
-    // provider list only for older OpenCode versions that omit this field.
-    if (model.enabled === false || (model.enabled !== true && enabled.size > 0 && !enabled.has(model.providerID))) continue
-    const base = `${model.providerID}/${model.id}`
-    const status = model.status && model.status !== "active" ? model.status : undefined
-    const contextK = model.limit?.context ? Math.round(model.limit.context / 1000) : undefined
+  for (const provider of providers) {
+    if (!connected.has(provider.id)) continue
+    for (const model of Object.values(provider.models)) {
+      const base = `${model.providerID}/${model.id}`
+      const status = model.status && model.status !== "active" ? model.status : undefined
+      const contextK = model.limit?.context ? Math.round(model.limit.context / 1000) : undefined
 
-    push({ value: base, label: model.name, providerID: model.providerID, ...(status ? { status } : {}), ...(contextK ? { contextK } : {}) })
-    for (const variant of model.variants ?? []) {
-      push({
-        value: `${base}#${variant.id}`,
-        label: `${model.name} (${variant.id})`,
-        providerID: model.providerID,
-        ...(status ? { status } : {}),
-        ...(contextK ? { contextK } : {}),
-      })
+      push({ value: base, label: model.name, providerID: model.providerID, ...(status ? { status } : {}), ...(contextK ? { contextK } : {}) })
+      for (const variant of Object.keys(model.variants ?? {})) {
+        push({
+          value: `${base}#${variant}`,
+          label: `${model.name} (${variant})`,
+          providerID: model.providerID,
+          ...(status ? { status } : {}),
+          ...(contextK ? { contextK } : {}),
+        })
+      }
     }
   }
   return choices
