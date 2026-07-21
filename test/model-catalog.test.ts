@@ -34,6 +34,16 @@ describe("toModelChoices", () => {
     expect(toModelChoices(providers, models).map((choice) => choice.value)).toEqual(["openai/gpt"])
   })
 
+  test("uses current model availability when the provider list does not match", () => {
+    const providers = [{ id: "opencode", disabled: false }] as unknown as ProviderV2Info[]
+    const models = [
+      { providerID: "openai", id: "gpt", name: "GPT", enabled: true, variants: [] },
+      { providerID: "anthropic", id: "claude", name: "Claude", enabled: false, variants: [] },
+    ] as unknown as ModelV2Info[]
+
+    expect(toModelChoices(providers, models).map((choice) => choice.value)).toEqual(["openai/gpt"])
+  })
+
   test("with no provider info, keeps every model", () => {
     const models = [{ providerID: "x", id: "m", name: "M", variants: [] }] as unknown as ModelV2Info[]
     expect(toModelChoices([], models).map((choice) => choice.value)).toEqual(["x/m"])

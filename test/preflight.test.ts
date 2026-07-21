@@ -91,11 +91,21 @@ describe("OpenCode run-plan preflight", () => {
     ).not.toThrow()
   })
 
-  test("accepts OpenCode 1.18 location-enveloped discovery lists", () => {
+  test("accepts an enabled OpenCode 1.18 model without a matching provider entry", () => {
     expect(() =>
       validatePreflightTargets(
         preflightTargets(plan()),
-        { data: [{ id: "vercel" }] },
+        { data: [{ id: "some-other-provider" }] },
+        { data: [{ providerID: "vercel", id: "openai/gpt-5.6-sol", enabled: true }] },
+      ),
+    ).not.toThrow()
+  })
+
+  test("recognizes an integration provider ID for legacy model responses", () => {
+    expect(() =>
+      validatePreflightTargets(
+        preflightTargets(plan()),
+        { data: [{ id: "connection-1", integrationID: "vercel" }] },
         { data: [{ providerID: "vercel", id: "openai/gpt-5.6-sol" }] },
       ),
     ).not.toThrow()
@@ -114,6 +124,16 @@ describe("OpenCode run-plan preflight", () => {
     expect(() => validatePreflightTargets(preflightTargets(plan()), { data: [{ id: "vercel", disabled: true }] }, { data: [] })).toThrow(
       "Missing provider credentials: vercel",
     )
+  })
+
+  test("reports missing credentials when the exact model is disabled", () => {
+    expect(() =>
+      validatePreflightTargets(
+        preflightTargets(plan()),
+        { data: [{ id: "vercel" }] },
+        { data: [{ providerID: "vercel", id: "openai/gpt-5.6-sol", enabled: false }] },
+      ),
+    ).toThrow("Missing provider credentials: vercel")
   })
 
   test("reports the logical and exact physical target when a model is unavailable", () => {

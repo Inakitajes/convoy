@@ -23,6 +23,7 @@ const modelsDevUrl = "https://models.dev/api.json"
 let cached: ModelChoice[] | undefined
 
 type CatalogProvider = ProviderV2Info & { enabled?: unknown }
+type CatalogModel = ModelV2Info & { enabled?: unknown }
 
 /**
  * The models offered in the picker: first the OpenCode SDK (filtered to the
@@ -62,7 +63,7 @@ async function listModelsFromSdk(targetDir: string): Promise<ModelChoice[]> {
  * only models whose provider is enabled, preserves the SDK's release-date order,
  * and expands each model into its base entry plus one per variant.
  */
-export function toModelChoices(providers: readonly CatalogProvider[], models: readonly ModelV2Info[]): ModelChoice[] {
+export function toModelChoices(providers: readonly CatalogProvider[], models: readonly CatalogModel[]): ModelChoice[] {
   const enabled = new Set(
     providers.filter((provider) => provider.disabled !== true && provider.enabled !== false).map((provider) => provider.id),
   )
@@ -76,8 +77,9 @@ export function toModelChoices(providers: readonly CatalogProvider[], models: re
   }
 
   for (const model of models) {
-    // When provider info is present, keep only enabled providers; otherwise keep all.
-    if (enabled.size > 0 && !enabled.has(model.providerID)) continue
+    // Current model responses carry their own availability. Fall back to the
+    // provider list only for older OpenCode versions that omit this field.
+    if (model.enabled === false || (model.enabled !== true && enabled.size > 0 && !enabled.has(model.providerID))) continue
     const base = `${model.providerID}/${model.id}`
     const status = model.status && model.status !== "active" ? model.status : undefined
     const contextK = model.limit?.context ? Math.round(model.limit.context / 1000) : undefined
