@@ -7,8 +7,8 @@ import { parseModelsDev, toModelChoices } from "../src/model-catalog"
 describe("toModelChoices", () => {
   test("keeps enabled providers, expands variants, preserves SDK order", () => {
     const providers = [
-      { id: "openai", enabled: { via: "env", name: "OPENAI_API_KEY" } },
-      { id: "anthropic", enabled: false },
+      { id: "openai", disabled: false },
+      { id: "anthropic", disabled: true },
     ] as unknown as ProviderV2Info[]
     const models = [
       { providerID: "openai", id: "gpt-5.5", name: "GPT-5.5", status: "active", limit: { context: 400_000 }, variants: [{ id: "xhigh" }, { id: "high" }] },
@@ -19,6 +19,19 @@ describe("toModelChoices", () => {
     expect(choices.map((choice) => choice.value)).toEqual(["openai/gpt-5.5", "openai/gpt-5.5#xhigh", "openai/gpt-5.5#high"])
     expect(choices[0]).toMatchObject({ value: "openai/gpt-5.5", label: "GPT-5.5", providerID: "openai", contextK: 400 })
     expect(choices[1]).toMatchObject({ value: "openai/gpt-5.5#xhigh", label: "GPT-5.5 (xhigh)" })
+  })
+
+  test("still recognizes the former enabled provider field", () => {
+    const providers = [
+      { id: "openai", enabled: { via: "env", name: "OPENAI_API_KEY" } },
+      { id: "anthropic", enabled: false },
+    ] as unknown as ProviderV2Info[]
+    const models = [
+      { providerID: "openai", id: "gpt", name: "GPT", variants: [] },
+      { providerID: "anthropic", id: "claude", name: "Claude", variants: [] },
+    ] as unknown as ModelV2Info[]
+
+    expect(toModelChoices(providers, models).map((choice) => choice.value)).toEqual(["openai/gpt"])
   })
 
   test("with no provider info, keeps every model", () => {

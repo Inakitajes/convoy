@@ -2,6 +2,7 @@ import type { ModelV2Info, ProviderV2Info } from "@opencode-ai/sdk/v2"
 
 import { log } from "./log"
 import { startOpencode } from "./opencode"
+import { unwrapOpenCodeList } from "./opencode-response"
 
 /** A selectable model for the config TUI's picker. `value` is what gets written to config. */
 export type ModelChoice = {
@@ -20,6 +21,8 @@ const catalogTimeoutMs = 12_000
 const modelsDevUrl = "https://models.dev/api.json"
 
 let cached: ModelChoice[] | undefined
+
+type CatalogProvider = ProviderV2Info & { enabled?: unknown }
 
 /**
  * The models offered in the picker: first the OpenCode SDK (filtered to the
@@ -48,7 +51,7 @@ async function listModelsFromSdk(targetDir: string): Promise<ModelChoice[]> {
       handle.client.v2.model.list({ location: { directory: targetDir } }),
     ])
     if (providers.error || models.error) throw new Error("opencode returned an error listing providers/models")
-    return toModelChoices(providers.data ?? [], models.data ?? [])
+    return toModelChoices(unwrapOpenCodeList(providers.data), unwrapOpenCodeList(models.data))
   } finally {
     handle.close()
   }
@@ -59,8 +62,10 @@ async function listModelsFromSdk(targetDir: string): Promise<ModelChoice[]> {
  * only models whose provider is enabled, preserves the SDK's release-date order,
  * and expands each model into its base entry plus one per variant.
  */
-export function toModelChoices(providers: readonly ProviderV2Info[], models: readonly ModelV2Info[]): ModelChoice[] {
-  const enabled = new Set(providers.filter((provider) => provider.enabled !== false).map((provider) => provider.id))
+export function toModelChoices(providers: readonly CatalogProvider[], models: readonly ModelV2Info[]): ModelChoice[] {
+  const enabled = new Set(
+    providers.filter((provider) => provider.disabled !== true && provider.enabled !== false).map((provider) => provider.id),
+  )
   const choices: ModelChoice[] = []
   const seen = new Set<string>()
 

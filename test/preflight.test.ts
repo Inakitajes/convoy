@@ -91,12 +91,28 @@ describe("OpenCode run-plan preflight", () => {
     ).not.toThrow()
   })
 
+  test("accepts OpenCode 1.18 location-enveloped discovery lists", () => {
+    expect(() =>
+      validatePreflightTargets(
+        preflightTargets(plan()),
+        { data: [{ id: "vercel" }] },
+        { data: [{ providerID: "vercel", id: "openai/gpt-5.6-sol" }] },
+      ),
+    ).not.toThrow()
+  })
+
   test("reports Vercel authentication guidance when its provider is disabled", () => {
     expect(() => validatePreflightTargets(preflightTargets(plan()), [{ id: "vercel", enabled: false }], [])).toThrow(
       "Missing provider credentials: vercel",
     )
     expect(() => validatePreflightTargets(preflightTargets(plan()), [{ id: "vercel", enabled: false }], [])).toThrow(
       "AI_GATEWAY_API_KEY",
+    )
+  })
+
+  test("recognizes the current disabled provider field", () => {
+    expect(() => validatePreflightTargets(preflightTargets(plan()), { data: [{ id: "vercel", disabled: true }] }, { data: [] })).toThrow(
+      "Missing provider credentials: vercel",
     )
   })
 

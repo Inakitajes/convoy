@@ -1,7 +1,8 @@
 import { gatewayLabel, type ResolvedModel } from "./model-routing"
+import { type OpenCodeList, unwrapOpenCodeList } from "./opencode-response"
 import type { RunPlan } from "./types"
 
-type DiscoveredProvider = { id?: unknown; enabled?: unknown }
+type DiscoveredProvider = { id?: unknown; disabled?: unknown; enabled?: unknown }
 type DiscoveredModel = { providerID?: unknown; id?: unknown }
 
 /** The exact OpenCode targets that must be available before a run can begin. */
@@ -17,18 +18,21 @@ export function preflightTargets(plan: RunPlan): ResolvedModel[] {
 /** Throws actionable errors for provider and physical-model discovery results. */
 export function validatePreflightTargets(
   targets: readonly ResolvedModel[],
-  providers: readonly DiscoveredProvider[],
-  models: readonly DiscoveredModel[],
+  providers: OpenCodeList<DiscoveredProvider>,
+  models: OpenCodeList<DiscoveredModel>,
 ): void {
+  const discoveredProviders = unwrapOpenCodeList(providers)
+  const discoveredModels = unwrapOpenCodeList(models)
+
   for (const target of targets) {
-    const provider = providers.find((entry) => entry.id === target.providerID)
-    if (!provider || provider.enabled === false) {
+    const provider = discoveredProviders.find((entry) => entry.id === target.providerID)
+    if (!provider || provider.disabled === true || provider.enabled === false) {
       const auth = target.providerID === "vercel"
         ? "Authenticate with `opencode providers login` (Vercel AI Gateway) or set AI_GATEWAY_API_KEY."
         : `Authenticate provider ${target.providerID} with \`opencode providers login\`.`
       throw new Error(`Cannot start run\n\nMissing provider credentials: ${target.providerID}\n\n${auth}`)
     }
-    if (!models.some((model) => model.providerID === target.providerID && model.id === target.modelID)) {
+    if (!discoveredModels.some((model) => model.providerID === target.providerID && model.id === target.modelID)) {
       throw new Error(
         `Model unavailable through ${gatewayLabel(target.gateway)}:\n\n  logical: ${target.logical}\n  target:  ${target.target}\n\nAdd modelRouting.overrides or select --gateway configured.`,
       )
