@@ -1,4 +1,5 @@
 import { startOpencode } from "./opencode"
+import { discoveryData } from "./opencode-discovery"
 import type { RunPlan } from "./types"
 import { preflightTargets, validatePreflightTargets } from "./preflight-validation"
 
@@ -20,7 +21,11 @@ export async function preflightRunPlan(plan: RunPlan): Promise<void> {
       timeout,
     )
     if (providerResult.error || modelResult.error) throw new Error("OpenCode could not list enabled providers and models")
-    validatePreflightTargets(targets, providerResult.data ?? [], modelResult.data ?? [])
+    validatePreflightTargets(
+      targets,
+      discoveryData(providerResult.data, "providers"),
+      discoveryData(modelResult.data, "models"),
+    )
   } finally {
     handle.close()
   }

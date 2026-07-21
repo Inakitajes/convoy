@@ -7,8 +7,8 @@ import { parseModelsDev, toModelChoices } from "../src/model-catalog"
 describe("toModelChoices", () => {
   test("keeps enabled providers, expands variants, preserves SDK order", () => {
     const providers = [
-      { id: "openai", enabled: { via: "env", name: "OPENAI_API_KEY" } },
-      { id: "anthropic", enabled: false },
+      { id: "openai", disabled: false },
+      { id: "anthropic", disabled: true },
     ] as unknown as ProviderV2Info[]
     const models = [
       { providerID: "openai", id: "gpt-5.5", name: "GPT-5.5", status: "active", limit: { context: 400_000 }, variants: [{ id: "xhigh" }, { id: "high" }] },

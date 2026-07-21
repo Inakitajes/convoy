@@ -87,15 +87,15 @@ describe("OpenCode run-plan preflight", () => {
 
   test("accepts discovered providers and physical model IDs", () => {
     expect(() =>
-      validatePreflightTargets(preflightTargets(plan()), [{ id: "vercel", enabled: true }], [{ providerID: "vercel", id: "openai/gpt-5.6-sol" }]),
+      validatePreflightTargets(preflightTargets(plan()), [{ id: "vercel", disabled: false }], [{ providerID: "vercel", id: "openai/gpt-5.6-sol" }]),
     ).not.toThrow()
   })
 
   test("reports Vercel authentication guidance when its provider is disabled", () => {
-    expect(() => validatePreflightTargets(preflightTargets(plan()), [{ id: "vercel", enabled: false }], [])).toThrow(
+    expect(() => validatePreflightTargets(preflightTargets(plan()), [{ id: "vercel", disabled: true }], [])).toThrow(
       "Missing provider credentials: vercel",
     )
-    expect(() => validatePreflightTargets(preflightTargets(plan()), [{ id: "vercel", enabled: false }], [])).toThrow(
+    expect(() => validatePreflightTargets(preflightTargets(plan()), [{ id: "vercel", disabled: true }], [])).toThrow(
       "AI_GATEWAY_API_KEY",
     )
   })
@@ -103,8 +103,8 @@ describe("OpenCode run-plan preflight", () => {
   test("reports the logical and exact physical target when a model is unavailable", () => {
     const targets = preflightTargets(plan())
 
-    expect(() => validatePreflightTargets(targets, [{ id: "vercel", enabled: true }], [])).toThrow("Model unavailable through Vercel AI Gateway")
-    expect(() => validatePreflightTargets(targets, [{ id: "vercel", enabled: true }], [])).toThrow("logical: openai/gpt-5.6-sol")
-    expect(() => validatePreflightTargets(targets, [{ id: "vercel", enabled: true }], [])).toThrow("target:  vercel/openai/gpt-5.6-sol")
+    expect(() => validatePreflightTargets(targets, [{ id: "vercel", disabled: false }], [])).toThrow("Model unavailable through Vercel AI Gateway")
+    expect(() => validatePreflightTargets(targets, [{ id: "vercel", disabled: false }], [])).toThrow("logical: openai/gpt-5.6-sol")
+    expect(() => validatePreflightTargets(targets, [{ id: "vercel", disabled: false }], [])).toThrow("target:  vercel/openai/gpt-5.6-sol")
   })
 })

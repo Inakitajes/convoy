@@ -1,7 +1,7 @@
 import { gatewayLabel, type ResolvedModel } from "./model-routing"
 import type { RunPlan } from "./types"
 
-type DiscoveredProvider = { id?: unknown; enabled?: unknown }
+type DiscoveredProvider = { id?: unknown; disabled?: unknown }
 type DiscoveredModel = { providerID?: unknown; id?: unknown }
 
 /** The exact OpenCode targets that must be available before a run can begin. */
@@ -22,7 +22,7 @@ export function validatePreflightTargets(
 ): void {
   for (const target of targets) {
     const provider = providers.find((entry) => entry.id === target.providerID)
-    if (!provider || provider.enabled === false) {
+    if (!provider || provider.disabled === true) {
       const auth = target.providerID === "vercel"
         ? "Authenticate with `opencode providers login` (Vercel AI Gateway) or set AI_GATEWAY_API_KEY."
         : `Authenticate provider ${target.providerID} with \`opencode providers login\`.`

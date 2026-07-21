@@ -67,7 +67,7 @@ Convoy ships these pipelines; select one with `-p/--pipeline` (no config needed)
 ## Requirements
 
 - Bun 1.0+
-- `opencode` installed and authenticated (`opencode auth login`)
+- OpenCode 1.18.4+ installed and authenticated (`opencode auth login`)
 - `git`
 
 ## Authentication And Providers

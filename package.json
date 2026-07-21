@@ -13,7 +13,7 @@
     "build": "bun build --compile src/main.ts --outfile convoy"
   },
   "dependencies": {
-    "@opencode-ai/sdk": "1.15.13",
+    "@opencode-ai/sdk": "1.18.4",
     "@opentui/core": "0.3.0"
   },
   "devDependencies": {

@@ -2,6 +2,7 @@ import type { ModelV2Info, ProviderV2Info } from "@opencode-ai/sdk/v2"
 
 import { log } from "./log"
 import { startOpencode } from "./opencode"
+import { discoveryData } from "./opencode-discovery"
 
 /** A selectable model for the config TUI's picker. `value` is what gets written to config. */
 export type ModelChoice = {
@@ -48,7 +49,7 @@ async function listModelsFromSdk(targetDir: string): Promise<ModelChoice[]> {
       handle.client.v2.model.list({ location: { directory: targetDir } }),
     ])
     if (providers.error || models.error) throw new Error("opencode returned an error listing providers/models")
-    return toModelChoices(providers.data ?? [], models.data ?? [])
+    return toModelChoices(discoveryData(providers.data, "providers"), discoveryData(models.data, "models"))
   } finally {
     handle.close()
   }
@@ -60,7 +61,7 @@ async function listModelsFromSdk(targetDir: string): Promise<ModelChoice[]> {
  * and expands each model into its base entry plus one per variant.
  */
 export function toModelChoices(providers: readonly ProviderV2Info[], models: readonly ModelV2Info[]): ModelChoice[] {
-  const enabled = new Set(providers.filter((provider) => provider.enabled !== false).map((provider) => provider.id))
+  const available = new Set(providers.filter((provider) => provider.disabled !== true).map((provider) => provider.id))
   const choices: ModelChoice[] = []
   const seen = new Set<string>()
 
@@ -72,7 +73,7 @@ export function toModelChoices(providers: readonly ProviderV2Info[], models: rea
 
   for (const model of models) {
     // When provider info is present, keep only enabled providers; otherwise keep all.
-    if (enabled.size > 0 && !enabled.has(model.providerID)) continue
+    if (available.size > 0 && !available.has(model.providerID)) continue
     const base = `${model.providerID}/${model.id}`
     const status = model.status && model.status !== "active" ? model.status : undefined
     const contextK = model.limit?.context ? Math.round(model.limit.context / 1000) : undefined
