@@ -59,6 +59,7 @@ export async function openOpencodeSessionWindow(input: {
 }): Promise<SessionWindowBackend> {
   return openSessionCommand(
     ["opencode", "attach", input.url, "--dir", input.targetDir, "--session", input.sessionID].map(shellQuote).join(" "),
+    input.targetDir,
   )
 }
 
@@ -70,7 +71,7 @@ export async function openInteractiveOpencodeWindow(input: {
   targetDir: string
 }): Promise<SessionWindowBackend> {
   const args = ["opencode", "attach", input.url, "--dir", input.targetDir, "--continue"]
-  return openSessionCommand(args.map(shellQuote).join(" "))
+  return openSessionCommand(args.map(shellQuote).join(" "), input.targetDir)
 }
 
 // Opens a standalone opencode TUI on a stored session — it starts its own
@@ -80,7 +81,7 @@ export async function openStoredSessionWindow(input: {
   targetDir: string
   sessionID: string
 }): Promise<SessionWindowBackend> {
-  return openSessionCommand(["opencode", input.targetDir, "--session", input.sessionID].map(shellQuote).join(" "))
+  return openSessionCommand(["opencode", input.targetDir, "--session", input.sessionID].map(shellQuote).join(" "), input.targetDir)
 }
 
 // Opens a standalone opencode TUI on a brand-new session seeded with an
@@ -91,16 +92,24 @@ export async function openIterateOpencodeWindow(input: {
   targetDir: string
   prompt: string
 }): Promise<SessionWindowBackend> {
-  return openSessionCommand(["opencode", input.targetDir, "--prompt", input.prompt].map(shellQuote).join(" "))
+  return openShellCommand(iterateSessionShellCommand(input))
+}
+
+/** Builds an iterate-window command that makes the target project the shell's working directory. */
+export function iterateSessionShellCommand(input: { targetDir: string; prompt: string }, path = process.env.PATH): string {
+  const coreCommand = ["opencode", input.targetDir, "--prompt", input.prompt].map(shellQuote).join(" ")
+  return sessionShellCommand(coreCommand, input.targetDir, path)
 }
 
 /** Runs a command in a new macOS terminal window (Ghostty when installed, Terminal.app otherwise). Shared with the claude-code runner. */
 export async function openSessionCommand(coreCommand: string, cwd?: string): Promise<SessionWindowBackend> {
+  return openShellCommand(sessionShellCommand(coreCommand, cwd))
+}
+
+async function openShellCommand(command: string): Promise<SessionWindowBackend> {
   if (process.platform !== "darwin") {
     throw new Error("opening a new terminal window is currently implemented for macOS only")
   }
-
-  const command = sessionShellCommand(coreCommand, cwd)
 
   const forced = process.env.CONVOY_TERMINAL?.toLowerCase()
   if (forced === "terminal") {

@@ -4,7 +4,7 @@ import { join } from "node:path"
 
 import { describe, expect, test } from "bun:test"
 
-import { sessionShellCommand, shellQuote } from "../src/opencode"
+import { iterateSessionShellCommand, sessionShellCommand, shellQuote } from "../src/opencode"
 
 describe("session terminal command", () => {
   test("does not launch the session command when changing directory fails", async () => {
@@ -22,5 +22,16 @@ describe("session terminal command", () => {
     } finally {
       await rm(root, { recursive: true, force: true })
     }
+  })
+
+  test("starts a new iterate session from the target project", () => {
+    const command = iterateSessionShellCommand(
+      { targetDir: "/projects/my app", prompt: "Read the run reports, then wait." },
+      "/usr/bin:/bin",
+    )
+
+    expect(command).toBe(
+      "export PATH='/usr/bin:/bin':$PATH && cd '/projects/my app' && 'opencode' '/projects/my app' '--prompt' 'Read the run reports, then wait.'",
+    )
   })
 })

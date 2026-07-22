@@ -1640,7 +1640,7 @@ export class TuiProgress implements ProgressUI {
     this.render()
   }
 
-  // [i] on the finish screen: a fresh opencode window in the run's directory,
+  // [i] on the finish screen: a fresh opencode window in the target project's directory,
   // opened on a new session whose first message points at the run's prd and
   // step reports — so iterating continues from where the pipeline left off.
   private async openIterateWindow() {
