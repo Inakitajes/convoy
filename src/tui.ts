@@ -3,6 +3,7 @@ import { join } from "node:path"
 
 import {
   BoxRenderable,
+  ScrollBarRenderable,
   StyledText,
   TextRenderable,
   bg,
@@ -89,9 +90,11 @@ function kindStyle(kind: ActivityKind): { icon: string; color: string } {
   return { icon: style.icon, color: theme[style.color] }
 }
 
-const pipelineWidth = 32
 const feedLimit = 100
 const contentTabBarRows = 2
+// Side-by-side panels become too cramped around a conventional 80-column
+// terminal, so the dashboard switches to a stacked, single-column layout.
+const compactDashboardMaxWidth = 84
 
 type RunnerSessionContext = {
   targetDir: string
@@ -114,6 +117,13 @@ const runnerSessionOpeners: Record<StepRunnerId, (context: RunnerSessionContext)
 // The right-hand content panel is a three-tab view of the focused phase.
 export type ContentTab = "logs" | "reports" | "session"
 const contentTabOrder: readonly ContentTab[] = ["session", "reports", "logs"]
+
+type FullscreenView = {
+  phase: string
+  tab: ContentTab
+  scroll: number
+  copyStatus?: "copied" | "unavailable"
+}
 
 export type TuiDashboardMode = "historical" | "live"
 
@@ -285,8 +295,10 @@ export class TuiProgress implements ProgressUI {
   private limits?: LimitsSnapshot
   private readonly dirText: TextRenderable
   private readonly headerText: TextRenderable
+  private readonly bodyBox: BoxRenderable
   private readonly pipelineBox: BoxRenderable
   private readonly pipelineText: TextRenderable
+  private readonly rightBox: BoxRenderable
   // The detail panel: header (name, status, model, cost, tokens, diff) of the
   // one focused phase. A single pane now — concurrent phases are browsed via
   // the pipeline tab selector rather than each getting their own live pane.
@@ -305,6 +317,7 @@ export class TuiProgress implements ProgressUI {
   private readonly modalText: TextRenderable
   private readonly reportOverlay: BoxRenderable
   private readonly reportOverlayText: TextRenderable
+  private readonly fullscreenScrollbar: ScrollBarRenderable
   // Panels repainted when the terminal reports a theme change mid-run.
   private readonly paletteTargets: Array<{ box: BoxRenderable; background: PaletteColor; border?: PaletteColor }> = []
   private readonly permissionQueue: PendingPermission[] = []
@@ -325,7 +338,11 @@ export class TuiProgress implements ProgressUI {
   // Phase reports read lazily from the run dir; the cache entry is dropped when
   // a phase finishes so a report written mid-run is picked up on the next view.
   private readonly reports = new Map<string, string[] | "loading" | "missing">()
-  private reportFullscreen?: { phase: string; scroll: number; copyStatus?: "copied" | "unavailable" }
+  private fullscreen?: FullscreenView
+  // ScrollBarRenderable emits change events for programmatic state updates as
+  // well as mouse drags. Ignore the former so a layout recalculation cannot
+  // overwrite the reader's just-computed scroll position.
+  private syncingFullscreenScrollbar = false
   // Identity token for each async report read. Terminal phase transitions
   // invalidate it so an older failed read cannot repopulate a stale "missing".
   private readonly reportLoads = new Map<string, object>()
@@ -372,6 +389,15 @@ export class TuiProgress implements ProgressUI {
     if (text && this.renderer.copyToClipboardOSC52(text)) this.renderer.clearSelection()
   }
 
+  private readonly handleFullscreenWheel = (event: WheelEvent) => {
+    const delta = wheelDelta(event)
+    if (!this.fullscreen || delta === 0) return
+    event.preventDefault()
+    event.stopPropagation()
+    this.scrollFullscreen(delta)
+    this.render()
+  }
+
   private readonly handleKeyPress = (key: KeyEvent) => {
     if (this.inSubshell) return
     if ((key.ctrl && key.name === "c") || key.raw === "\u0003") {
@@ -401,8 +427,8 @@ export class TuiProgress implements ProgressUI {
       this.handlePermissionKey(key)
       return
     }
-    if (this.reportFullscreen) {
-      this.handleFullscreenReportKey(key)
+    if (this.fullscreen) {
+      this.handleFullscreenKey(key)
       return
     }
     if (this.humanReviewQueue.length > 0 && this.handleHumanReviewKey(key)) return
@@ -465,9 +491,9 @@ export class TuiProgress implements ProgressUI {
         this.openActiveSessionWindow("key")
         return
       case "v":
-        if (this.contentTab === "reports" && !this.selectedGroup) {
+        if (!this.selectedGroup) {
           consume()
-          this.openFullscreenReport()
+          this.openFullscreenView()
         }
         return
       case "i":
@@ -552,17 +578,18 @@ export class TuiProgress implements ProgressUI {
     return false
   }
 
-  private openFullscreenReport() {
+  private openFullscreenView() {
     const phase = this.focusedPhase()
-    if (!phase || !this.runDir) return
-    const report = this.reports.get(phase.name)
-    this.reportFullscreen = { phase: phase.name, scroll: this.reportScroll }
-    if (!report) this.loadReport(phase.name, this.runDir)
+    if (!phase) return
+    const tab = this.contentTab
+    const scroll = tab === "session" ? Number.MAX_SAFE_INTEGER : tab === "reports" ? this.reportScroll : this.logScroll
+    this.fullscreen = { phase: phase.name, tab, scroll }
+    if (tab === "reports" && !this.reports.get(phase.name) && this.runDir) this.loadReport(phase.name, this.runDir)
     this.render()
   }
 
-  private handleFullscreenReportKey(key: KeyEvent) {
-    const view = this.reportFullscreen
+  private handleFullscreenKey(key: KeyEvent) {
+    const view = this.fullscreen
     if (!view) return
     key.preventDefault()
     key.stopPropagation()
@@ -570,18 +597,18 @@ export class TuiProgress implements ProgressUI {
     switch (key.name) {
       case "up":
       case "k":
-        view.scroll -= 1
+        this.scrollFullscreen(-1)
         break
       case "down":
       case "j":
-        view.scroll += 1
+        this.scrollFullscreen(1)
         break
       case "pageup":
-        view.scroll -= page
+        this.scrollFullscreen(-page)
         break
       case "pagedown":
       case "space":
-        view.scroll += page
+        this.scrollFullscreen(page)
         break
       case "home":
         view.scroll = 0
@@ -593,17 +620,25 @@ export class TuiProgress implements ProgressUI {
         view.scroll = key.shift ? Number.MAX_SAFE_INTEGER : 0
         break
       case "c": {
-        const report = this.reports.get(view.phase)
-        if (Array.isArray(report)) view.copyStatus = this.renderer.copyToClipboardOSC52(report.join("\n")) ? "copied" : "unavailable"
+        if (view.tab === "reports") {
+          const report = this.reports.get(view.phase)
+          if (Array.isArray(report)) view.copyStatus = this.renderer.copyToClipboardOSC52(report.join("\n")) ? "copied" : "unavailable"
+        }
         break
       }
       case "v":
       case "q":
       case "escape":
-        this.reportFullscreen = undefined
+        this.fullscreen = undefined
         break
     }
     this.render()
+  }
+
+  private scrollFullscreen(delta: number) {
+    const view = this.fullscreen
+    if (!view) return
+    view.scroll = Math.max(0, view.scroll + delta)
   }
 
   constructor(
@@ -694,7 +729,7 @@ export class TuiProgress implements ProgressUI {
 
     const pipeline = this.panel({
       id: "convoy-pipeline",
-      width: pipelineWidth,
+      width: this.pipelineWidth(),
       height: "100%",
       borderColor: theme.borderDim,
       backgroundColor: theme.bg,
@@ -801,8 +836,10 @@ export class TuiProgress implements ProgressUI {
 
     this.dirText = dirLine
     this.headerText = header.text
+    this.bodyBox = body
     this.pipelineBox = pipeline.box
     this.pipelineText = pipeline.text
+    this.rightBox = right
     this.stepBox = step.box
     this.stepText = step.text
     this.todosBox = todos.box
@@ -883,8 +920,30 @@ export class TuiProgress implements ProgressUI {
     })
     this.reportOverlayText = new TextRenderable(renderer, { content: "", fg: theme.text, width: "100%", height: "100%" })
     this.reportOverlay.add(this.reportOverlayText)
+    this.fullscreenScrollbar = new ScrollBarRenderable(renderer, {
+      id: "convoy-fullscreen-scrollbar",
+      position: "absolute",
+      top: 2,
+      right: 2,
+      width: 1,
+      height: Math.max(1, renderer.height - 4),
+      orientation: "vertical",
+      trackOptions: { backgroundColor: theme.faint, foregroundColor: theme.accent },
+      onChange: (scroll) => {
+        if (this.syncingFullscreenScrollbar || !this.fullscreen) return
+        this.fullscreen.scroll = scroll
+        this.render()
+      },
+    })
+    this.reportOverlay.add(this.fullscreenScrollbar)
     renderer.root.add(this.reportOverlay)
     this.paletteTargets.push({ box: this.reportOverlay, background: "overlay", border: "accent" })
+
+    // The full-screen reader owns the wheel just as the inline content panel
+    // does. Attach to both the frame and text child because terminals can send
+    // a wheel event to either depending on the pointer's exact cell.
+    this.reportOverlay.onMouseScroll = this.handleFullscreenWheel
+    this.reportOverlayText.onMouseScroll = this.handleFullscreenWheel
 
     renderer.keyInput.on("keypress", this.handleKeyPress)
     renderer.on("selection", this.handleSelection)
@@ -1350,6 +1409,8 @@ export class TuiProgress implements ProgressUI {
       target.box.backgroundColor = theme[target.background]
       if (target.border) target.box.borderColor = theme[target.border]
     }
+    this.fullscreenScrollbar.slider.backgroundColor = theme.faint
+    this.fullscreenScrollbar.slider.foregroundColor = theme.accent
   }
 
   private panel(options: BoxOptions) {
@@ -1372,6 +1433,25 @@ export class TuiProgress implements ProgressUI {
     })
     box.add(text)
     return { box, text }
+  }
+
+  // Give the phase selector a full third of ordinary dashboards instead of a
+  // narrow fixed sidebar, but cap it on wide terminals so the reader continues
+  // to own most of the screen once names have ample room.
+  private pipelineWidth() {
+    const innerWidth = Math.max(40, this.renderer.width - 6)
+    return Math.min(44, Math.max(22, Math.floor(innerWidth / 3)))
+  }
+
+  private usesCompactLayout() {
+    return this.renderer.width <= compactDashboardMaxWidth
+  }
+
+  // The stacked pipeline keeps enough rows for its progress bar and a few
+  // steps, while the rest of the dashboard remains usable. Existing pipeline
+  // navigation automatically scrolls this window as selection moves.
+  private compactPipelineHeight(bodyHeight: number) {
+    return Math.max(5, Math.min(10, Math.floor(bodyHeight * 0.4)))
   }
 
   private handlePermissionKey(key: KeyEvent) {
@@ -1644,11 +1724,15 @@ export class TuiProgress implements ProgressUI {
     if (this.renderer.isDestroyed) return
     const now = Date.now()
     const innerWidth = Math.max(40, this.renderer.width - 6)
-    const rightWidth = Math.max(40, this.renderer.width - pipelineWidth - 9)
+    const compact = this.usesCompactLayout()
+    const pipelineWidth = compact ? innerWidth + 4 : this.pipelineWidth()
+    const rightWidth = compact ? innerWidth : Math.max(40, this.renderer.width - pipelineWidth - 9)
     // Body rows left after the dir line (1), header (4), and footer (3); the
     // detail and todos panels grow with their content but never starve the
     // content panel below them.
     const bodyHeight = Math.max(8, this.renderer.height - 8)
+    const pipelineHeight = compact ? this.compactPipelineHeight(bodyHeight) : bodyHeight
+    const rightBodyHeight = compact ? Math.max(8, bodyHeight - pipelineHeight - 1) : bodyHeight
 
     // Auto-follow the active phase until the user takes over navigation; after
     // that the selection stays put so any step (past, present, scheduled) can
@@ -1665,6 +1749,10 @@ export class TuiProgress implements ProgressUI {
     }
     const group = this.focusedGroup()
     const focus = group ? undefined : this.focusedPhase()
+    this.bodyBox.flexDirection = compact ? "column" : "row"
+    this.pipelineBox.width = compact ? "100%" : pipelineWidth
+    this.pipelineBox.height = compact ? pipelineHeight : "100%"
+    this.rightBox.height = compact ? "auto" : "100%"
     this.pipelineBox.borderColor = this.contentFocused ? theme.borderDim : theme.accent
     this.feedBox.borderColor = this.contentFocused ? theme.accent : theme.borderDim
 
@@ -1678,7 +1766,7 @@ export class TuiProgress implements ProgressUI {
     this.stepText.content = joinLines(detailLines)
 
     // Todos panel: the focused phase's list, whenever it has one.
-    const todoBudget = Math.max(3, Math.floor(bodyHeight * 0.5) - detailLines.length - 4)
+    const todoBudget = Math.max(3, Math.floor(rightBodyHeight * 0.5) - detailLines.length - 4)
     const todoRows = focus && focus.todos.length > 0 ? todoLines(focus.todos, todoBudget, rightWidth) : []
     this.todosBox.visible = todoRows.length > 0
     if (focus && todoRows.length > 0) {
@@ -1691,13 +1779,13 @@ export class TuiProgress implements ProgressUI {
 
     // The content panel fills the rest: a two-row tab strip (labels, then a
     // rail) over the active tab's body, all scoped to the focused phase.
-    const feedRows = Math.max(3, bodyHeight - usedHeight - 2)
+    const feedRows = Math.max(3, rightBodyHeight - usedHeight - 2)
     const contentRows = feedRows - contentTabBarRows
     this.contentPageRows = contentRows
 
     this.dirText.content = this.dirContent(innerWidth)
     this.headerText.content = this.headerContent(now, innerWidth)
-    this.pipelineText.content = this.pipelineContent(now, bodyHeight - 2)
+    this.pipelineText.content = this.pipelineContent(now, pipelineHeight - 2, pipelineWidth)
 
     // Body first: the active content tab computes the scroll indicator the rail shows.
     const body = group
@@ -1710,7 +1798,7 @@ export class TuiProgress implements ProgressUI {
     this.feedText.content = joinLines([...this.contentTabBar(rightWidth), ...body])
 
     this.footerText.content = this.footerContent(now, innerWidth)
-    this.renderFullscreenReport()
+    this.renderFullscreenView()
     this.renderPermissionModal()
     this.renderer.requestRender()
   }
@@ -1761,8 +1849,8 @@ export class TuiProgress implements ProgressUI {
   // `parallel:` block, or a step fanned out across `models:`) renders as an
   // indented sub-tree under a group header, so the nesting is visible instead
   // of a flat list of `step__model` names all sitting at the same level.
-  private pipelineContent(now: number, visibleRows: number) {
-    const width = pipelineWidth - 4
+  private pipelineContent(now: number, visibleRows: number, panelWidth: number) {
+    const width = panelWidth - 4
     const done = this.phases.filter((phase) => phase.status === "completed" || phase.status === "skipped").length
     const failed = this.phases.some((phase) => phase.status === "failed")
     const finished = this.phases.length > 0 && done === this.phases.length
@@ -2142,27 +2230,48 @@ export class TuiProgress implements ProgressUI {
     return markdownLines(report, Math.max(20, width))
   }
 
-  private renderFullscreenReport() {
-    const view = this.reportFullscreen
+  private renderFullscreenView() {
+    const view = this.fullscreen
     this.reportOverlay.visible = Boolean(view)
     if (!view) return
-    const report = this.reports.get(view.phase)
-    if (!Array.isArray(report)) {
-      if (!report && this.runDir) this.loadReport(view.phase, this.runDir)
-      const message = report === "missing" ? "this step wrote no report" : "loading report…"
-      this.reportOverlay.title = ` report · ${view.phase} · v/esc close `
-      this.reportOverlayText.content = t`${fg(theme.dim)(message)}`
-      return
-    }
-    const width = Math.max(20, this.renderer.width - 6)
+    // Reserve two blank cells between the text and the scrollbar, then keep
+    // the bar against the reader's right edge rather than in the copy column.
+    const width = Math.max(20, this.renderer.width - 9)
     const visible = Math.max(1, this.renderer.height - 4)
-    const lines = markdownLines(report, width)
+    const lines = this.fullscreenSourceLines(view, width)
     const maxScroll = Math.max(0, lines.length - visible)
     view.scroll = Math.max(0, Math.min(view.scroll, maxScroll))
     const position = scrollPosition(view.scroll, maxScroll) || "all"
     const copy = view.copyStatus === "copied" ? " · copied" : view.copyStatus === "unavailable" ? " · clipboard unavailable" : ""
-    this.reportOverlay.title = ` report · ${view.phase} · ↑/↓ scroll · c copy · v/esc close · ${position}${copy} `
+    const label = view.tab === "reports" ? "report" : view.tab
+    const copyHint = view.tab === "reports" ? " · c copy" : ""
+    this.reportOverlay.title = ` ${label} · ${view.phase} · ↑/↓ scroll${copyHint} · v/esc close · ${position}${copy} `
     this.reportOverlayText.content = joinLines(lines.slice(view.scroll, view.scroll + visible))
+    this.syncingFullscreenScrollbar = true
+    try {
+      this.fullscreenScrollbar.top = 2
+      this.fullscreenScrollbar.right = 1
+      this.fullscreenScrollbar.height = visible
+      this.fullscreenScrollbar.scrollSize = lines.length
+      this.fullscreenScrollbar.viewportSize = visible
+      this.fullscreenScrollbar.scrollPosition = view.scroll
+      this.fullscreenScrollbar.resetVisibilityControl()
+    } finally {
+      this.syncingFullscreenScrollbar = false
+    }
+  }
+
+  private fullscreenSourceLines(view: FullscreenView, width: number): StyledText[] {
+    const phase = this.findPhase(view.phase)
+    if (!phase) return [t`${fg(theme.dim)("this step is no longer available")}`]
+    switch (view.tab) {
+      case "reports":
+        return this.reportSourceLines(phase, width)
+      case "session":
+        return this.sessionSourceLines(phase, width)
+      case "logs":
+        return this.phaseFeedSourceLines(phase, width)
+    }
   }
 
   // The logs tab: the focused phase's activity, newest first. Scoped to one
@@ -2373,7 +2482,7 @@ export class TuiProgress implements ProgressUI {
           fg(theme.accent)("q"),
           fg(theme.dim)("] close"),
         ]
-        if (this.contentTab === "reports" && !this.selectedGroup) left.push(...fullReportHint())
+        if (!this.selectedGroup) left.push(...fullscreenHint(this.contentTab))
         const right: TextChunk[] = [fg(theme.faint)(this.runID ? `run ${this.runID}` : "run …")]
         return padBetween(left, right, width)
       }
@@ -2410,7 +2519,7 @@ export class TuiProgress implements ProgressUI {
             fg(theme.accent)("q"),
             fg(theme.dim)("] close"),
           ]
-      if (this.contentTab === "reports" && !this.selectedGroup) left.push(...fullReportHint())
+      if (!this.selectedGroup) left.push(...fullscreenHint(this.contentTab))
       const right: TextChunk[] = [fg(theme.faint)(this.runID ? `run ${this.runID}` : "run …")]
       return padBetween(left, right, width)
     }
@@ -2496,7 +2605,7 @@ export class TuiProgress implements ProgressUI {
       left.push(fg(theme.dim)(" · "), fg(theme.accent)("shift+tab"))
       left.push(autoAcceptStatusChunk(this.autoAccept.mode))
     }
-    if (this.contentTab === "reports" && !this.selectedGroup) left.push(...fullReportHint())
+    if (!this.selectedGroup) left.push(...fullscreenHint(this.contentTab))
     const quiet = now - this.lastActivityAt
     const right: TextChunk[] = [
       fg(theme.faint)(this.runID ? `run ${this.runID}` : "run …"),
@@ -2546,8 +2655,8 @@ export class TuiProgress implements ProgressUI {
   }
 }
 
-function fullReportHint(): TextChunk[] {
-  return [fg(theme.dim)(" · ["), fg(theme.accent)("v"), fg(theme.dim)("] full report")]
+function fullscreenHint(tab: ContentTab): TextChunk[] {
+  return [fg(theme.dim)(" · ["), fg(theme.accent)("v"), fg(theme.dim)(`] full ${tab}`)]
 }
 
 // The detail panel's status word — "ongoing or not" at a glance. A running

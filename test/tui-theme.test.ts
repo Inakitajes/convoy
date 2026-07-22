@@ -134,6 +134,14 @@ describe("markdown rendering", () => {
     expect(lines.every((line) => displayWidth(line) <= 4)).toBeTrue()
   })
 
+  test("wraps prose between words, only splitting an unbroken over-wide token", () => {
+    const prose = markdownLines("Pack words without splitting them", 10).map(text)
+    const longToken = markdownLines("supercalifragilistic", 8).map(text)
+
+    expect(prose).toEqual(["Pack words", "without", "splitting", "them"])
+    expect(longToken).toEqual(["supercal", "ifragili", "stic"])
+  })
+
   test("renders inline typography plus ordered, task, rule, and fenced-code blocks", () => {
     const inline = markdownLines("**strong** _emphasis_ ~~deleted~~ `code` [site](https://example.com)", 80)[0]!.chunks
     const blocks = markdownLines("1. first\n2) second\n- [ ] queued\n* [x] done\n---\n```ts\nconst value = 1\n```", 20).map(text)

@@ -251,7 +251,7 @@ export function progressBar(fraction: number, width: number, color: string): Tex
 }
 
 export function formatMoney(cost: number) {
-  return `$${cost.toFixed(cost >= 1 ? 2 : 4)}`
+  return `$${cost.toFixed(2)}`
 }
 
 export function formatCount(value: number) {
@@ -480,42 +480,89 @@ function wrapStyled(styled: StyledText, width: number): StyledText[] {
   const lines: StyledText[] = []
   let row: TextChunk[] = []
   let cells = 0
+  let rowHasWord = false
+  // Keep separating whitespace out of the current row until the following
+  // word fits. That prevents a wrapping row from ending in a space, and lets
+  // the word move as a whole to the next line rather than splitting mid-word.
+  let pendingWhitespace: TextChunk[] = []
   const flush = () => {
     lines.push(new StyledText(row.length > 0 ? row : [raw("")]))
     row = []
     cells = 0
+    rowHasWord = false
+    pendingWhitespace = []
   }
-  for (const chunk of styled.chunks) {
-    let rest = chunk.text
+
+  const appendWhitespace = (chunk: TextChunk, text: string) => {
+    if (row.length === 0) {
+      // Leading indentation is meaningful for nested Markdown lists and code.
+      row.push({ ...chunk, text })
+      cells += displayWidth(text)
+    } else {
+      pendingWhitespace.push({ ...chunk, text })
+    }
+  }
+
+  const appendWord = (chunk: TextChunk, text: string) => {
+    let rest = text
     while (rest) {
-      const newline = rest.indexOf("\n")
-      const segment = newline >= 0 ? rest.slice(0, newline) : rest
-      let pending = segment
-      while (pending) {
-        const available = width - cells
-        const part = takeDisplayCells(pending, available)
-        if (!part.head) {
-          if (cells > 0) {
-            flush()
-            continue
-          }
-          // A glyph wider than the column would loop forever; emit it on its
-          // own row (one cell over) exactly like wrapLines does.
-          const first = [...graphemes.segment(pending)][0]?.segment ?? ""
-          if (!first) break
-          row.push({ ...chunk, text: first })
-          flush()
-          pending = pending.slice(first.length)
-          continue
+      const wordCells = displayWidth(rest)
+      const whitespaceCells = rowHasWord ? chunksLength(pendingWhitespace) : 0
+      if (cells + whitespaceCells + wordCells <= width) {
+        if (rowHasWord) {
+          row.push(...pendingWhitespace)
+          cells += whitespaceCells
+          pendingWhitespace = []
         }
-        row.push({ ...chunk, text: part.head })
-        cells += displayWidth(part.head)
-        pending = part.tail
-        if (pending) flush()
+        row.push({ ...chunk, text: rest })
+        cells += wordCells
+        rowHasWord = true
+        return
       }
-      if (newline < 0) break
-      flush()
-      rest = rest.slice(newline + 1)
+
+      if (rowHasWord) {
+        // The complete word fits on a fresh row, so leave any separator behind
+        // and start it there instead of cutting the word in two.
+        flush()
+        continue
+      }
+
+      // An over-wide leading indentation would otherwise create an empty row.
+      // Drop it in this exceptional case; the word itself remains readable.
+      if (cells > 0) {
+        row = []
+        cells = 0
+      }
+
+      // A single unbroken token (a URL, path, or an unusually long word) still
+      // needs a hard split to stay inside the panel. This also preserves the
+      // wide-glyph fallback that prevents an infinite loop in one-cell widths.
+      const part = takeDisplayCells(rest, width)
+      if (!part.head) {
+        const first = [...graphemes.segment(rest)][0]?.segment ?? ""
+        if (!first) return
+        row.push({ ...chunk, text: first })
+        cells = displayWidth(first)
+        rowHasWord = true
+        rest = rest.slice(first.length)
+      } else {
+        row.push({ ...chunk, text: part.head })
+        cells = displayWidth(part.head)
+        rowHasWord = true
+        rest = part.tail
+      }
+      if (rest) flush()
+    }
+  }
+
+  for (const chunk of styled.chunks) {
+    // Newlines retain their original hard-break behavior. Every other run of
+    // whitespace becomes a deferred separator so normal prose wraps by words.
+    for (const part of chunk.text.split(/(\n|[^\S\n]+)/)) {
+      if (!part) continue
+      if (part === "\n") flush()
+      else if (/^[^\S\n]+$/.test(part)) appendWhitespace(chunk, part)
+      else appendWord(chunk, part)
     }
   }
   if (row.length > 0 || lines.length === 0) flush()

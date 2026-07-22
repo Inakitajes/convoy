@@ -3,23 +3,33 @@ import { createTestRenderer } from "@opentui/core/testing"
 import type { Selection } from "@opentui/core"
 
 import { TuiProgress, autoFollowGroup, comparisonColumnCount, initialContentTab, iteratePrompt, phaseCapabilityBadges, phaseCapabilityLabel, pickBadge, pipelineSelectionTargets, type ContentTab } from "../src/tui"
-import { limitsRow } from "../src/tui-theme"
+import { formatMoney, limitsRow } from "../src/tui-theme"
 
 import type { LimitsSnapshot } from "../src/limits"
 import type { ProgressPhase } from "../src/progress"
 
 type DashboardInternals = {
+  bodyBox: { primaryAxis: "row" | "column" }
   feedText: { x: number; y: number; plainText: string }
+  pipelineBox: { width: number; height: number; x: number; y: number }
+  pipelineScroll: number
+  rightBox: { x: number; y: number }
   reports: Map<string, string[] | "loading" | "missing">
   contentTab: ContentTab
-  reportFullscreen?: { phase: string }
-  openFullscreenReport(): void
-  handleFullscreenReportKey(key: { name: string; preventDefault(): void; stopPropagation(): void }): void
+  fullscreen?: { phase: string; tab: ContentTab; scroll: number }
+  fullscreenScrollbar: { visible: boolean; scrollSize: number; viewportSize: number; slider: { value: number } }
+  handleFullscreenKey(key: { name: string; preventDefault(): void; stopPropagation(): void }): void
+  handleNavKey(key: { name: string; preventDefault(): void; stopPropagation(): void }): void
+  handleFullscreenWheel(event: {
+    scroll?: { direction: string; delta: number }
+    preventDefault(): void
+    stopPropagation(): void
+  }): void
 }
 
-async function createDashboard() {
-  const testRenderer = await createTestRenderer({ width: 120, height: 40 })
-  const dashboard = new TuiProgress(testRenderer.renderer, [{ name: "implement", description: "" }])
+async function createDashboard(width = 120, height = 40, phases: ProgressPhase[] = [{ name: "implement", description: "" }]) {
+  const testRenderer = await createTestRenderer({ width, height })
+  const dashboard = new TuiProgress(testRenderer.renderer, phases)
   const copied: string[] = []
   testRenderer.renderer.copyToClipboardOSC52 = (text) => {
     copied.push(text)
@@ -61,6 +71,47 @@ describe("run dashboard defaults", () => {
     expect(phaseCapabilityLabel({})).toBeUndefined()
     expect(phaseCapabilityBadges({ readOnly: true })).toEqual(["audit · read-only", "read-only", "ro"])
     expect(phaseCapabilityBadges({})).toEqual([])
+  })
+
+  test("gives the pipeline sidebar one third of the dashboard width", async () => {
+    const { dashboard } = await createDashboard()
+    try {
+      const internals = dashboard as unknown as DashboardInternals
+      // Renderer width (120) less the shell chrome (6), split 1/3 for pipeline.
+      expect(internals.pipelineBox.width).toBe(38)
+    } finally {
+      dashboard.stop()
+    }
+  })
+
+  test("caps the pipeline sidebar on very wide terminals", async () => {
+    const { dashboard } = await createDashboard(240)
+    try {
+      const internals = dashboard as unknown as DashboardInternals
+      expect(internals.pipelineBox.width).toBe(44)
+    } finally {
+      dashboard.stop()
+    }
+  })
+
+  test("stacks narrow dashboards and keeps an overlong top pipeline scrollable", async () => {
+    const phases = Array.from({ length: 10 }, (_, index) => ({ name: `step-${index + 1}`, description: "" }))
+    const { dashboard, renderOnce } = await createDashboard(80, 24, phases)
+    try {
+      const internals = dashboard as unknown as DashboardInternals
+      await renderOnce()
+
+      expect(internals.bodyBox.primaryAxis).toBe("column")
+      expect(internals.pipelineBox.width).toBe(78)
+      expect(internals.pipelineBox.height).toBe(6)
+      expect(internals.rightBox.x).toBe(internals.pipelineBox.x)
+      expect(internals.rightBox.y).toBeGreaterThan(internals.pipelineBox.y)
+
+      for (let index = 0; index < 8; index++) internals.handleNavKey({ name: "down", preventDefault() {}, stopPropagation() {} })
+      expect(internals.pipelineScroll).toBeGreaterThan(0)
+    } finally {
+      dashboard.stop()
+    }
   })
 
   test("the tree badge degrades to shorter forms and then disappears, never costing the name a column", () => {
@@ -146,27 +197,61 @@ describe("dashboard content selection", () => {
     }
   })
 
-  test("opens the active report with v, copies its complete source with c, and closes with v or escape", async () => {
-    const { dashboard, copied, mockInput } = await createDashboard()
+  test("opens reports, session history, and logs with v; the reader scrolls by mouse and shows a scrollbar", async () => {
+    const { dashboard, copied, mockInput, renderOnce } = await createDashboard()
     try {
       const internals = dashboard as unknown as DashboardInternals
       const report = ["# Result", "", "- first", "- second"]
       dashboard.start("run", "/target", "/run")
+      dashboard.phaseStarted("implement")
+      dashboard.phaseMessage("implement", { channel: "response", text: "# Session\n\nmessage history" })
       internals.reports.set("implement", report)
       internals.contentTab = "reports"
 
       mockInput.pressKey("v")
-      expect(internals.reportFullscreen?.phase).toBe("implement")
+      expect(internals.fullscreen).toMatchObject({ phase: "implement", tab: "reports" })
 
       mockInput.pressKey("c")
       expect(copied).toEqual([report.join("\n")])
 
       mockInput.pressKey("v")
-      expect(internals.reportFullscreen).toBeUndefined()
+      expect(internals.fullscreen).toBeUndefined()
 
+      internals.contentTab = "session"
       mockInput.pressKey("v")
-      internals.handleFullscreenReportKey({ name: "escape", preventDefault() {}, stopPropagation() {} })
-      expect(internals.reportFullscreen).toBeUndefined()
+      expect(internals.fullscreen).toMatchObject({ phase: "implement", tab: "session" })
+      internals.handleFullscreenKey({ name: "escape", preventDefault() {}, stopPropagation() {} })
+      expect(internals.fullscreen).toBeUndefined()
+
+      for (let index = 0; index < 50; index++) dashboard.phaseActivity("implement", `log item ${index}`)
+      internals.contentTab = "logs"
+      mockInput.pressKey("v")
+      await renderOnce()
+      expect(internals.fullscreen).toMatchObject({ phase: "implement", tab: "logs", scroll: 0 })
+      expect(internals.fullscreenScrollbar.visible).toBeTrue()
+      expect(internals.fullscreenScrollbar.scrollSize).toBeGreaterThan(internals.fullscreenScrollbar.viewportSize)
+
+      let prevented = false
+      let stopped = false
+      internals.handleFullscreenWheel({
+        scroll: { direction: "down", delta: 3 },
+        preventDefault() {
+          prevented = true
+        },
+        stopPropagation() {
+          stopped = true
+        },
+      })
+      expect(internals.fullscreen?.scroll).toBe(3)
+      expect(prevented).toBeTrue()
+      expect(stopped).toBeTrue()
+
+      // Slider value changes come from track clicks and thumb drags.
+      internals.fullscreenScrollbar.slider.value = 8
+      expect(internals.fullscreen?.scroll).toBe(8)
+
+      internals.handleFullscreenKey({ name: "escape", preventDefault() {}, stopPropagation() {} })
+      expect(internals.fullscreen).toBeUndefined()
     } finally {
       dashboard.stop()
     }
@@ -337,6 +422,14 @@ describe("header limits row", () => {
   test("no data renders a quiet placeholder, never a crash", () => {
     expect(text(undefined, 80)).toBe("…")
     expect(text({ fetchedAt: now }, 80)).toBe("…")
+  })
+})
+
+describe("cost formatting", () => {
+  test("always shows exactly two decimal places", () => {
+    expect(formatMoney(12)).toBe("$12.00")
+    expect(formatMoney(0.004)).toBe("$0.00")
+    expect(formatMoney(0.126)).toBe("$0.13")
   })
 })
 
