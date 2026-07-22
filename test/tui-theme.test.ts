@@ -133,4 +133,13 @@ describe("markdown rendering", () => {
     expect(lines).toEqual(["界界", "界"])
     expect(lines.every((line) => displayWidth(line) <= 4)).toBeTrue()
   })
+
+  test("sanitizes terminal controls and only creates web hyperlinks", () => {
+    const lines = markdownLines("safe\u001b]52;c;dGVzdA\u0007text\n[local](file:///etc/passwd)\n[web](https://example.com)", 80)
+    const chunks = lines.flatMap((line) => line.chunks)
+
+    expect(chunks.map((chunk) => chunk.text).join("")).not.toMatch(/[\u0000-\u001F\u007F-\u009F]/)
+    expect(chunks.find((chunk) => chunk.text === "local")?.link).toBeUndefined()
+    expect(chunks.find((chunk) => chunk.text === "web")?.link).toEqual({ url: "https://example.com/" })
+  })
 })

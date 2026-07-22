@@ -379,7 +379,10 @@ export function truncate(value: string, max: number) {
  * dashboard retain its existing paging, group previews, and text selection.
  */
 export function markdownLines(markdown: string | string[], width: number, baseColor = theme.text): StyledText[] {
-  const source = Array.isArray(markdown) ? markdown : markdown.replace(/\r\n/g, "\n").split("\n")
+  // Model responses and reports are untrusted terminal content. OpenTUI keeps
+  // chunk text verbatim, so strip control bytes before it can reach the
+  // renderer and turn links into terminal OSC-8 sequences.
+  const source = (Array.isArray(markdown) ? markdown : markdown.replace(/\r\n/g, "\n").split("\n")).map(sanitizeMarkdownLine)
   const out: StyledText[] = []
   let fenced = false
 
@@ -439,12 +442,32 @@ function inlineMarkdown(text: string, color: string): TextChunk[] {
     else if (value.startsWith("~~")) chunks.push(strikethrough(fg(theme.dim)(value.slice(2, -2))))
     else if (value.startsWith("[")) {
       const parsed = /^\[([^\]]+)\]\(([^)]+)\)$/.exec(value)!
-      chunks.push(underline(link(parsed[2]!)(fg(theme.cyan)(parsed[1]!))))
+      const label = underline(fg(theme.cyan)(parsed[1]!))
+      const url = safeHyperlinkUrl(parsed[2]!)
+      chunks.push(url ? link(url)(label) : label)
     } else chunks.push(italic(fg(color)(value.slice(1, -1))))
     cursor = index + value.length
   }
   if (cursor < text.length) chunks.push(fg(color)(text.slice(cursor)))
   return chunks
+}
+
+function sanitizeMarkdownLine(line: string) {
+  // Preserve tabs as indentation without passing a tab control to the terminal.
+  return line.replace(/\t/g, "    ").replace(/[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/g, "")
+}
+
+function safeHyperlinkUrl(value: string): string | undefined {
+  // Terminal link handlers can open arbitrary URI schemes. Markdown supplied by
+  // a model may only produce network links, and a bounded normalized URL also
+  // prevents OSC-8 control-sequence injection through the link target.
+  if (value.length > 2_048) return undefined
+  try {
+    const url = new URL(value)
+    return url.protocol === "https:" || url.protocol === "http:" ? url.href : undefined
+  } catch {
+    return undefined
+  }
 }
 
 function wrapStyled(styled: StyledText, width: number): StyledText[] {
