@@ -158,4 +158,22 @@ describe("markdown rendering", () => {
     expect(chunks.find((chunk) => chunk.text === "local")?.link).toBeUndefined()
     expect(chunks.find((chunk) => chunk.text === "web")?.link).toEqual({ url: "https://example.com/" })
   })
+
+  test("keeps intra-word underscores literal instead of italicizing identifiers", () => {
+    const lines = markdownLines("use foo_bar_baz or report_fullscreen_flag, but _real emphasis_ stays", 80).map(text)
+
+    expect(lines).toEqual(["use foo_bar_baz or report_fullscreen_flag, but real emphasis stays"])
+    expect(lines[0]).toContain("foo_bar_baz")
+  })
+
+  test("bounds fence rows to width even with long info strings", () => {
+    const lines = markdownLines("```python { .annotate }\nx = 1\n```", 20).map(text)
+
+    expect(lines[0]!.startsWith("┄ python")).toBeTrue()
+    expect(lines.every((line) => displayWidth(line) <= 20)).toBeTrue()
+  })
+
+  test("never loops on a glyph wider than the column", () => {
+    expect(markdownLines("界面", 1).map(text)).toEqual(["界", "面"])
+  })
 })

@@ -391,7 +391,9 @@ export function markdownLines(markdown: string | string[], width: number, baseCo
     if (fence) {
       fenced = !fenced
       const language = sourceLine.trim().slice(3).trim()
-      const prefix = language ? `┄ ${language} ` : "┄"
+      // Info strings can be arbitrarily long (```python { .annotate }); keep
+      // the fence row inside the panel width instead of overflowing it.
+      const prefix = takeDisplayCells(language ? `┄ ${language} ` : "┄", width).head
       out.push(new StyledText([fg(theme.faint)(prefix), fg(theme.faint)("┄".repeat(Math.max(0, width - displayWidth(prefix))))]))
       continue
     }
@@ -432,7 +434,9 @@ export function markdownLines(markdown: string | string[], width: number, baseCo
 function inlineMarkdown(text: string, color: string): TextChunk[] {
   if (!text) return [fg(color)("")]
   const chunks: TextChunk[] = []
-  const token = /(`[^`]+`|\*\*[^*]+\*\*|__[^_]+__|~~[^~]+~~|\*[^*]+\*|_[^_]+_|\[[^\]]+\]\([^)]+\))/g
+  // Underscore emphasis, like CommonMark, cannot open or close inside a word;
+  // otherwise snake_case identifiers would lose their underscores to italics.
+  const token = /(`[^`]+`|\*\*[^*]+\*\*|(?<![A-Za-z0-9_])__[^_]+__(?![A-Za-z0-9_])|~~[^~]+~~|\*[^*]+\*|(?<![A-Za-z0-9_])_[^_]+_(?![A-Za-z0-9_])|\[[^\]]+\]\([^)]+\))/g
   let cursor = 0
   for (const match of text.matchAll(token)) {
     const index = match.index ?? 0
@@ -491,7 +495,17 @@ function wrapStyled(styled: StyledText, width: number): StyledText[] {
         const available = width - cells
         const part = takeDisplayCells(pending, available)
         if (!part.head) {
+          if (cells > 0) {
+            flush()
+            continue
+          }
+          // A glyph wider than the column would loop forever; emit it on its
+          // own row (one cell over) exactly like wrapLines does.
+          const first = [...graphemes.segment(pending)][0]?.segment ?? ""
+          if (!first) break
+          row.push({ ...chunk, text: first })
           flush()
+          pending = pending.slice(first.length)
           continue
         }
         row.push({ ...chunk, text: part.head })
