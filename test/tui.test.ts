@@ -119,25 +119,57 @@ describe("dashboard content selection", () => {
     }
   })
 
-  test("opens the active report fullscreen and copies the complete markdown source with c", () => {
-    const run = createDashboard()
-    return run.then(({ dashboard, copied }) => {
-      try {
-        const internals = dashboard as unknown as DashboardInternals
-        const report = ["# Result", "", "- first", "- second"]
-        dashboard.start("run", "/target", "/run")
-        internals.reports.set("implement", report)
-        internals.contentTab = "reports"
+  test("renders markdown in the session and report views", async () => {
+    const { dashboard, renderOnce } = await createDashboard()
+    try {
+      const internals = dashboard as unknown as DashboardInternals
+      dashboard.phaseStarted("implement")
+      dashboard.phaseMessage("implement", { channel: "response", text: "# Answer\n- **first**\n> quoted" })
+      dashboard.phaseActivity("implement", "response received")
+      await renderOnce()
 
-        internals.openFullscreenReport()
-        expect(internals.reportFullscreen?.phase).toBe("implement")
-        internals.handleFullscreenReportKey({ name: "c", preventDefault() {}, stopPropagation() {} })
+      expect(internals.feedText.plainText).toContain("Answer\n  • first\n  ▎ quoted")
+      expect(internals.feedText.plainText).not.toContain("# Answer")
+      expect(internals.feedText.plainText).not.toContain("**first**")
 
-        expect(copied).toEqual([report.join("\n")])
-      } finally {
-        dashboard.stop()
-      }
-    })
+      dashboard.start("run", "/target", "/run")
+      internals.reports.set("implement", ["## Report", "", "- `result`"])
+      internals.contentTab = "reports"
+      dashboard.phaseActivity("implement", "report ready")
+      await renderOnce()
+
+      expect(internals.feedText.plainText).toContain("Report\n\n• result")
+      expect(internals.feedText.plainText).not.toContain("## Report")
+      expect(internals.feedText.plainText).not.toContain("`result`")
+    } finally {
+      dashboard.stop()
+    }
+  })
+
+  test("opens the active report with v, copies its complete source with c, and closes with v or escape", async () => {
+    const { dashboard, copied, mockInput } = await createDashboard()
+    try {
+      const internals = dashboard as unknown as DashboardInternals
+      const report = ["# Result", "", "- first", "- second"]
+      dashboard.start("run", "/target", "/run")
+      internals.reports.set("implement", report)
+      internals.contentTab = "reports"
+
+      mockInput.pressKey("v")
+      expect(internals.reportFullscreen?.phase).toBe("implement")
+
+      mockInput.pressKey("c")
+      expect(copied).toEqual([report.join("\n")])
+
+      mockInput.pressKey("v")
+      expect(internals.reportFullscreen).toBeUndefined()
+
+      mockInput.pressKey("v")
+      internals.handleFullscreenReportKey({ name: "escape", preventDefault() {}, stopPropagation() {} })
+      expect(internals.reportFullscreen).toBeUndefined()
+    } finally {
+      dashboard.stop()
+    }
   })
 
   test("copies selected log text", async () => {

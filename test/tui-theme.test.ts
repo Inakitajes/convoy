@@ -134,6 +134,22 @@ describe("markdown rendering", () => {
     expect(lines.every((line) => displayWidth(line) <= 4)).toBeTrue()
   })
 
+  test("renders inline typography plus ordered, task, rule, and fenced-code blocks", () => {
+    const inline = markdownLines("**strong** _emphasis_ ~~deleted~~ `code` [site](https://example.com)", 80)[0]!.chunks
+    const blocks = markdownLines("1. first\n2) second\n- [ ] queued\n* [x] done\n---\n```ts\nconst value = 1\n```", 20).map(text)
+
+    expect(inline.find((chunk) => chunk.text === "strong")?.attributes).toBe(1)
+    expect(inline.find((chunk) => chunk.text === "emphasis")?.attributes).toBe(4)
+    expect(inline.find((chunk) => chunk.text === "deleted")?.attributes).toBe(128)
+    expect(inline.find((chunk) => chunk.text === "site")?.link).toEqual({ url: "https://example.com/" })
+    expect(blocks.slice(0, 4)).toEqual(["1. first", "2) second", "☐ queued", "☑ done"])
+    expect(blocks[4]).toBe("─".repeat(20))
+    expect(blocks[5]).toBe("┄ ts " + "┄".repeat(15))
+    expect(blocks[6]).toBe("│ const value = 1")
+    expect(blocks[7]).toBe("┄".repeat(20))
+    expect(blocks.every((line) => displayWidth(line) <= 20)).toBeTrue()
+  })
+
   test("sanitizes terminal controls and only creates web hyperlinks", () => {
     const lines = markdownLines("safe\u001b]52;c;dGVzdA\u0007text\n[local](file:///etc/passwd)\n[web](https://example.com)", 80)
     const chunks = lines.flatMap((line) => line.chunks)
