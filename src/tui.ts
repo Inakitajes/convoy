@@ -27,6 +27,7 @@ import {
   displayWidth,
   joinLines,
   limitsRow,
+  markdownLines,
   padBetween,
   paletteForTerminal,
   plain,
@@ -38,11 +39,9 @@ import {
   shortUrl,
   spinnerFrame,
   statusIcon,
-  styleSummaryLine,
   terminalBackgroundHex,
   theme,
   truncate,
-  wrapLines,
 } from "./tui-theme"
 
 import type { BoxOptions, CliRenderer, KeyEvent, Selection, TextChunk } from "@opentui/core"
@@ -304,6 +303,8 @@ export class TuiProgress implements ProgressUI {
   private readonly overlay: BoxRenderable
   private readonly modal: BoxRenderable
   private readonly modalText: TextRenderable
+  private readonly reportOverlay: BoxRenderable
+  private readonly reportOverlayText: TextRenderable
   // Panels repainted when the terminal reports a theme change mid-run.
   private readonly paletteTargets: Array<{ box: BoxRenderable; background: PaletteColor; border?: PaletteColor }> = []
   private readonly permissionQueue: PendingPermission[] = []
@@ -324,6 +325,7 @@ export class TuiProgress implements ProgressUI {
   // Phase reports read lazily from the run dir; the cache entry is dropped when
   // a phase finishes so a report written mid-run is picked up on the next view.
   private readonly reports = new Map<string, string[] | "loading" | "missing">()
+  private reportFullscreen?: { phase: string; scroll: number; copyStatus?: "copied" | "unavailable" }
   // Identity token for each async report read. Terminal phase transitions
   // invalidate it so an older failed read cannot repopulate a stale "missing".
   private readonly reportLoads = new Map<string, object>()
@@ -399,6 +401,10 @@ export class TuiProgress implements ProgressUI {
       this.handlePermissionKey(key)
       return
     }
+    if (this.reportFullscreen) {
+      this.handleFullscreenReportKey(key)
+      return
+    }
     if (this.humanReviewQueue.length > 0 && this.handleHumanReviewKey(key)) return
     // Everything else is navigation, shared by the live dashboard and the
     // finish screen: move the focused phase, switch the content tab, focus or
@@ -457,6 +463,12 @@ export class TuiProgress implements ProgressUI {
       case "o":
         consume()
         this.openActiveSessionWindow("key")
+        return
+      case "v":
+        if (this.contentTab === "reports" && !this.selectedGroup) {
+          consume()
+          this.openFullscreenReport()
+        }
         return
       case "i":
         consume()
@@ -538,6 +550,60 @@ export class TuiProgress implements ProgressUI {
         return true
     }
     return false
+  }
+
+  private openFullscreenReport() {
+    const phase = this.focusedPhase()
+    if (!phase || !this.runDir) return
+    const report = this.reports.get(phase.name)
+    this.reportFullscreen = { phase: phase.name, scroll: this.reportScroll }
+    if (!report) this.loadReport(phase.name, this.runDir)
+    this.render()
+  }
+
+  private handleFullscreenReportKey(key: KeyEvent) {
+    const view = this.reportFullscreen
+    if (!view) return
+    key.preventDefault()
+    key.stopPropagation()
+    const page = Math.max(1, this.renderer.height - 5)
+    switch (key.name) {
+      case "up":
+      case "k":
+        view.scroll -= 1
+        break
+      case "down":
+      case "j":
+        view.scroll += 1
+        break
+      case "pageup":
+        view.scroll -= page
+        break
+      case "pagedown":
+      case "space":
+        view.scroll += page
+        break
+      case "home":
+        view.scroll = 0
+        break
+      case "end":
+        view.scroll = Number.MAX_SAFE_INTEGER
+        break
+      case "g":
+        view.scroll = key.shift ? Number.MAX_SAFE_INTEGER : 0
+        break
+      case "c": {
+        const report = this.reports.get(view.phase)
+        if (Array.isArray(report)) view.copyStatus = this.renderer.copyToClipboardOSC52(report.join("\n")) ? "copied" : "unavailable"
+        break
+      }
+      case "v":
+      case "q":
+      case "escape":
+        this.reportFullscreen = undefined
+        break
+    }
+    this.render()
   }
 
   constructor(
@@ -796,6 +862,29 @@ export class TuiProgress implements ProgressUI {
     this.overlay.add(this.modal)
     renderer.root.add(this.overlay)
     this.paletteTargets.push({ box: this.modal, background: "overlay", border: "yellow" })
+
+    this.reportOverlay = new BoxRenderable(renderer, {
+      id: "convoy-report-overlay",
+      position: "absolute",
+      left: 0,
+      top: 0,
+      width: "100%",
+      height: "100%",
+      zIndex: 90,
+      border: true,
+      borderStyle: "rounded",
+      borderColor: theme.accent,
+      backgroundColor: theme.overlay,
+      title: " report ",
+      titleAlignment: "left",
+      paddingX: 2,
+      paddingY: 1,
+      visible: false,
+    })
+    this.reportOverlayText = new TextRenderable(renderer, { content: "", fg: theme.text, width: "100%", height: "100%" })
+    this.reportOverlay.add(this.reportOverlayText)
+    renderer.root.add(this.reportOverlay)
+    this.paletteTargets.push({ box: this.reportOverlay, background: "overlay", border: "accent" })
 
     renderer.keyInput.on("keypress", this.handleKeyPress)
     renderer.on("selection", this.handleSelection)
@@ -1621,6 +1710,7 @@ export class TuiProgress implements ProgressUI {
     this.feedText.content = joinLines([...this.contentTabBar(rightWidth), ...body])
 
     this.footerText.content = this.footerContent(now, innerWidth)
+    this.renderFullscreenReport()
     this.renderPermissionModal()
     this.renderer.requestRender()
   }
@@ -2049,8 +2139,30 @@ export class TuiProgress implements ProgressUI {
       return [t`${fg(theme.dim)(done ? "this step wrote no report" : "no report yet — it appears once the step finishes")}`]
     }
 
-    const wrapped = wrapLines(report, Math.max(20, width))
-    return wrapped.map(styleSummaryLine)
+    return markdownLines(report, Math.max(20, width))
+  }
+
+  private renderFullscreenReport() {
+    const view = this.reportFullscreen
+    this.reportOverlay.visible = Boolean(view)
+    if (!view) return
+    const report = this.reports.get(view.phase)
+    if (!Array.isArray(report)) {
+      if (!report && this.runDir) this.loadReport(view.phase, this.runDir)
+      const message = report === "missing" ? "this step wrote no report" : "loading report…"
+      this.reportOverlay.title = ` report · ${view.phase} · v/esc close `
+      this.reportOverlayText.content = t`${fg(theme.dim)(message)}`
+      return
+    }
+    const width = Math.max(20, this.renderer.width - 6)
+    const visible = Math.max(1, this.renderer.height - 4)
+    const lines = markdownLines(report, width)
+    const maxScroll = Math.max(0, lines.length - visible)
+    view.scroll = Math.max(0, Math.min(view.scroll, maxScroll))
+    const position = scrollPosition(view.scroll, maxScroll) || "all"
+    const copy = view.copyStatus === "copied" ? " · copied" : view.copyStatus === "unavailable" ? " · clipboard unavailable" : ""
+    this.reportOverlay.title = ` report · ${view.phase} · ↑/↓ scroll · c copy · v/esc close · ${position}${copy} `
+    this.reportOverlayText.content = joinLines(lines.slice(view.scroll, view.scroll + visible))
   }
 
   // The logs tab: the focused phase's activity, newest first. Scoped to one
@@ -2261,6 +2373,7 @@ export class TuiProgress implements ProgressUI {
           fg(theme.accent)("q"),
           fg(theme.dim)("] close"),
         ]
+        if (this.contentTab === "reports" && !this.selectedGroup) left.push(fg(theme.dim)(" · ["), fg(theme.accent)("v"), fg(theme.dim)("] full report"))
         const right: TextChunk[] = [fg(theme.faint)(this.runID ? `run ${this.runID}` : "run …")]
         return padBetween(left, right, width)
       }
@@ -2297,6 +2410,7 @@ export class TuiProgress implements ProgressUI {
             fg(theme.accent)("q"),
             fg(theme.dim)("] close"),
           ]
+      if (this.contentTab === "reports" && !this.selectedGroup) left.push(fg(theme.dim)(" · ["), fg(theme.accent)("v"), fg(theme.dim)("] full report"))
       const right: TextChunk[] = [fg(theme.faint)(this.runID ? `run ${this.runID}` : "run …")]
       return padBetween(left, right, width)
     }
@@ -2382,6 +2496,7 @@ export class TuiProgress implements ProgressUI {
       left.push(fg(theme.dim)(" · "), fg(theme.accent)("shift+tab"))
       left.push(autoAcceptStatusChunk(this.autoAccept.mode))
     }
+    if (this.contentTab === "reports" && !this.selectedGroup) left.push(fg(theme.dim)(" · ["), fg(theme.accent)("v"), fg(theme.dim)("] full report"))
     const quiet = now - this.lastActivityAt
     const right: TextChunk[] = [
       fg(theme.faint)(this.runID ? `run ${this.runID}` : "run …"),
@@ -2527,60 +2642,17 @@ function transcriptBlockLines(block: TranscriptBlock, width: number, live: boole
     new StyledText([fg(isReasoning ? theme.magenta : theme.accent)(isReasoning ? "✻ " : "✎ "), fg(theme.faint)(isReasoning ? "reasoning" : "response")]),
   ]
   const bodyColor = isReasoning ? theme.dim : theme.text
-  const wrapped = wrapMessageText(block.text, Math.max(12, width - 2))
-  if (wrapped.length === 0) {
+  const rendered = markdownLines(block.text, Math.max(12, width - 2), bodyColor)
+  if (rendered.length === 0) {
     if (live) lines.push(new StyledText([raw("  "), ...cursor]))
     return lines
   }
-  wrapped.forEach((segment, index) => {
-    const chunks: TextChunk[] = [raw("  "), fg(bodyColor)(segment)]
-    if (live && index === wrapped.length - 1) chunks.push(...cursor)
+  rendered.forEach((segment, index) => {
+    const chunks: TextChunk[] = [raw("  "), ...segment.chunks]
+    if (live && index === rendered.length - 1) chunks.push(...cursor)
     lines.push(new StyledText(chunks))
   })
   return lines
-}
-
-// Word-wraps the model's text while preserving its own line breaks, so
-// paragraphs and lists in the stream read the way the model wrote them.
-function wrapMessageText(text: string, width: number): string[] {
-  const out: string[] = []
-  for (const line of text.split("\n")) {
-    if (line.length === 0) out.push("")
-    else out.push(...wrapWords(line, width))
-  }
-  return out
-}
-
-// Greedy word wrap; a single word longer than the width is hard-split so it
-// never overflows the panel (whose text renderer never wraps on its own).
-function wrapWords(text: string, width: number): string[] {
-  const words = text.replace(/\s+/g, " ").trim().split(" ")
-  const lines: string[] = []
-  let current = ""
-  for (const word of words) {
-    const pieces = wrapLines([word], width)
-    if (pieces.length > 1) {
-      if (current) {
-        lines.push(current)
-        current = ""
-      }
-      lines.push(...pieces.slice(0, -1))
-      const last = pieces[pieces.length - 1]!
-      if (displayWidth(last) >= width) lines.push(last)
-      else current = last
-      continue
-    }
-    const piece = pieces[0] ?? ""
-    if (!piece) continue
-    if (!current) current = piece
-    else if (displayWidth(current) + 1 + displayWidth(piece) <= width) current += ` ${piece}`
-    else {
-      lines.push(current)
-      current = piece
-    }
-  }
-  if (current) lines.push(current)
-  return lines.length > 0 ? lines : [""]
 }
 
 function scrollPosition(topOffset: number, maxScroll: number) {

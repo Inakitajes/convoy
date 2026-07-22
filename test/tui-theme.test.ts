@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 
 import type { CliRenderer } from "@opentui/core"
-import { displayWidth, fmtCountdown, padBetween, paletteForMode, paletteForTerminal, raw, terminalBackgroundHex, truncate, wrapLines } from "../src/tui-theme"
+import { displayWidth, fmtCountdown, markdownLines, padBetween, paletteForMode, paletteForTerminal, raw, terminalBackgroundHex, truncate, wrapLines } from "../src/tui-theme"
 
 // terminalBackgroundHex reaches into opentui internals; the adapter must read a
 // real reply but degrade to undefined (→ static palettes) on any shape change.
@@ -115,5 +115,22 @@ describe("padBetween", () => {
   test("drops the right side entirely when the left leaves it no room", () => {
     const row = text([{ text: "a-very-long-left-side-label" }, { text: "0:42" }], 24)
     expect(row).toBe("a-very-long-left-side-label")
+  })
+})
+
+describe("markdown rendering", () => {
+  const text = (line: { chunks: { text: string }[] }) => line.chunks.map((chunk) => chunk.text).join("")
+
+  test("conceals common markdown markers while preserving document structure", () => {
+    const lines = markdownLines("# Heading\n\n- **bold** and `code`\n> quoted\n[docs](https://example.com)", 80).map(text)
+
+    expect(lines).toEqual(["Heading", "", "• bold and code", "▎ quoted", "docs"])
+  })
+
+  test("wraps styled content to terminal cell width", () => {
+    const lines = markdownLines("**界界界**", 4).map(text)
+
+    expect(lines).toEqual(["界界", "界"])
+    expect(lines.every((line) => displayWidth(line) <= 4)).toBeTrue()
   })
 })

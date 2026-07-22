@@ -1,4 +1,4 @@
-import { StyledText, bold, fg, stringToStyledText, t } from "@opentui/core"
+import { StyledText, bold, fg, italic, link, strikethrough, stringToStyledText, t, underline } from "@opentui/core"
 
 import type { CliRenderer, TextChunk } from "@opentui/core"
 import type { LimitsSnapshot } from "./limits"
@@ -373,13 +373,120 @@ export function truncate(value: string, max: number) {
   return `${takeDisplayCells(singleLine, max - 1).head}…`
 }
 
-// Markdown stays unrendered on purpose; headings get the accent so long
-// summaries are scannable without pulling in a parser.
+/**
+ * Render the Markdown subset model messages commonly use into styled terminal
+ * rows. Keeping this as StyledText (rather than a separate renderable) lets the
+ * dashboard retain its existing paging, group previews, and text selection.
+ */
+export function markdownLines(markdown: string | string[], width: number, baseColor = theme.text): StyledText[] {
+  const source = Array.isArray(markdown) ? markdown : markdown.replace(/\r\n/g, "\n").split("\n")
+  const out: StyledText[] = []
+  let fenced = false
+
+  for (const sourceLine of source) {
+    const fence = /^\s*```/.test(sourceLine)
+    if (fence) {
+      fenced = !fenced
+      const language = sourceLine.trim().slice(3).trim()
+      out.push(new StyledText([fg(theme.faint)(language ? `┄ ${language} ` : "┄"), fg(theme.faint)("┄".repeat(Math.max(0, width - language.length - 3)))]))
+      continue
+    }
+    if (fenced) {
+      out.push(...wrapStyled(new StyledText([fg(theme.faint)("│ "), fg(theme.yellow)(sourceLine)]), width))
+      continue
+    }
+
+    const heading = /^(#{1,6})\s+(.*)$/.exec(sourceLine)
+    if (heading) {
+      const color = heading[1]!.length <= 2 ? theme.accent : theme.magenta
+      out.push(...wrapStyled(new StyledText(inlineMarkdown(heading[2]!, color).map((chunk) => bold(chunk))), width))
+      continue
+    }
+    if (/^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/.test(sourceLine)) {
+      out.push(t`${fg(theme.faint)("─".repeat(Math.max(1, width)))}`)
+      continue
+    }
+
+    const quote = /^\s*>\s?(.*)$/.exec(sourceLine)
+    if (quote) {
+      out.push(...wrapStyled(new StyledText([fg(theme.teal)("▎ "), ...inlineMarkdown(quote[1]!, theme.dim).map((chunk) => italic(chunk))]), width))
+      continue
+    }
+
+    const list = /^(\s*)([-+*]|\d+[.)])\s+(?:\[([ xX])\]\s+)?(.*)$/.exec(sourceLine)
+    if (list) {
+      const marker = list[3] === undefined ? (list[2]!.startsWith("-") || list[2] === "+" || list[2] === "*" ? "•" : list[2]!) : list[3] === " " ? "☐" : "☑"
+      out.push(...wrapStyled(new StyledText([raw(list[1]!), fg(theme.teal)(`${marker} `), ...inlineMarkdown(list[4]!, baseColor)]), width))
+      continue
+    }
+
+    out.push(...wrapStyled(new StyledText(inlineMarkdown(sourceLine, baseColor)), width))
+  }
+  return out
+}
+
+/** Backwards-compatible one-line helper used by older summary callers. */
 export function styleSummaryLine(line: string): StyledText {
-  if (/^#{1,6}\s/.test(line)) return t`${bold(fg(theme.accent)(line))}`
-  if (/^(```|---+$)/.test(line.trim())) return t`${fg(theme.faint)(line)}`
-  if (/^\s*([-*+]|\d+\.)\s/.test(line)) return new StyledText([fg(theme.teal)(line.match(/^\s*/)![0] + "• "), raw(line.replace(/^\s*([-*+]|\d+\.)\s/, ""))])
-  return plain(line)
+  return markdownLines([line], Math.max(1, displayWidth(line)))[0] ?? plain("")
+}
+
+function inlineMarkdown(text: string, color: string): TextChunk[] {
+  if (!text) return [fg(color)("")]
+  const chunks: TextChunk[] = []
+  const token = /(`[^`]+`|\*\*[^*]+\*\*|__[^_]+__|~~[^~]+~~|\*[^*]+\*|_[^_]+_|\[[^\]]+\]\([^)]+\))/g
+  let cursor = 0
+  for (const match of text.matchAll(token)) {
+    const index = match.index ?? 0
+    if (index > cursor) chunks.push(fg(color)(text.slice(cursor, index)))
+    const value = match[0]
+    if (value.startsWith("`")) chunks.push(fg(theme.yellow)(value.slice(1, -1)))
+    else if (value.startsWith("**") || value.startsWith("__")) chunks.push(bold(fg(color)(value.slice(2, -2))))
+    else if (value.startsWith("~~")) chunks.push(strikethrough(fg(theme.dim)(value.slice(2, -2))))
+    else if (value.startsWith("[")) {
+      const parsed = /^\[([^\]]+)\]\(([^)]+)\)$/.exec(value)!
+      chunks.push(underline(link(parsed[2]!)(fg(theme.cyan)(parsed[1]!))))
+    } else chunks.push(italic(fg(color)(value.slice(1, -1))))
+    cursor = index + value.length
+  }
+  if (cursor < text.length) chunks.push(fg(color)(text.slice(cursor)))
+  return chunks
+}
+
+function wrapStyled(styled: StyledText, width: number): StyledText[] {
+  if (width <= 0) return [plain("")]
+  const lines: StyledText[] = []
+  let row: TextChunk[] = []
+  let cells = 0
+  const flush = () => {
+    lines.push(new StyledText(row.length > 0 ? row : [raw("")]))
+    row = []
+    cells = 0
+  }
+  for (const chunk of styled.chunks) {
+    let rest = chunk.text
+    while (rest) {
+      const newline = rest.indexOf("\n")
+      const segment = newline >= 0 ? rest.slice(0, newline) : rest
+      let pending = segment
+      while (pending) {
+        const available = width - cells
+        const part = takeDisplayCells(pending, available)
+        if (!part.head) {
+          flush()
+          continue
+        }
+        row.push({ ...chunk, text: part.head })
+        cells += displayWidth(part.head)
+        pending = part.tail
+        if (pending) flush()
+      }
+      if (newline < 0) break
+      flush()
+      rest = rest.slice(newline + 1)
+    }
+  }
+  if (row.length > 0 || lines.length === 0) flush()
+  return lines
 }
 
 export function wrapLines(lines: string[], width: number): string[] {

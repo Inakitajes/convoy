@@ -9,17 +9,16 @@ import {
   formatMoney,
   joinLines,
   limitsRow,
+  markdownLines,
   padBetween,
   paletteForTerminal,
   plain,
   raw,
   setTheme,
   statusIcon,
-  styleSummaryLine,
   terminalBackgroundHex,
   theme,
   truncate,
-  wrapLines,
 } from "./tui-theme"
 import { runsRoot } from "./workspace"
 
@@ -560,8 +559,8 @@ class RunsBrowser {
   private footerContent(width: number) {
     if (this.summary) {
       const summary = this.summary
-      const wrapped = wrapLines(summary.lines, Math.max(20, this.modalWidth() - 6))
-      const maxScroll = Math.max(0, wrapped.length - this.summaryHeight())
+      const rendered = markdownLines(summary.lines, Math.max(20, this.modalWidth() - 6))
+      const maxScroll = Math.max(0, rendered.length - this.summaryHeight())
       const position = maxScroll === 0 ? "all" : `${Math.min(100, Math.round((Math.min(summary.scroll, maxScroll) / maxScroll) * 100))}%`
       const left: TextChunk[] = [
         fg(theme.dim)("↑/↓ scroll · "),
@@ -602,10 +601,10 @@ class RunsBrowser {
     const boxWidth = this.modalWidth()
     const width = boxWidth - 6
     const visible = this.summaryHeight()
-    const wrapped = wrapLines(summary.lines, width)
-    summary.scroll = Math.max(0, Math.min(summary.scroll, wrapped.length - visible))
+    const rendered = markdownLines(summary.lines, width)
+    summary.scroll = Math.max(0, Math.min(summary.scroll, rendered.length - visible))
 
-    const lines = wrapped.slice(summary.scroll, summary.scroll + visible).map(styleSummaryLine)
+    const lines = rendered.slice(summary.scroll, summary.scroll + visible)
     while (lines.length < visible) lines.push(plain(""))
 
     this.modal.title = ` summary · ${summary.runID} `

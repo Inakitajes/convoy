@@ -12,6 +12,9 @@ type DashboardInternals = {
   feedText: { x: number; y: number; plainText: string }
   reports: Map<string, string[] | "loading" | "missing">
   contentTab: ContentTab
+  reportFullscreen?: { phase: string }
+  openFullscreenReport(): void
+  handleFullscreenReportKey(key: { name: string; preventDefault(): void; stopPropagation(): void }): void
 }
 
 async function createDashboard() {
@@ -114,6 +117,27 @@ describe("dashboard content selection", () => {
     } finally {
       dashboard.stop()
     }
+  })
+
+  test("opens the active report fullscreen and copies the complete markdown source with c", () => {
+    const run = createDashboard()
+    return run.then(({ dashboard, copied }) => {
+      try {
+        const internals = dashboard as unknown as DashboardInternals
+        const report = ["# Result", "", "- first", "- second"]
+        dashboard.start("run", "/target", "/run")
+        internals.reports.set("implement", report)
+        internals.contentTab = "reports"
+
+        internals.openFullscreenReport()
+        expect(internals.reportFullscreen?.phase).toBe("implement")
+        internals.handleFullscreenReportKey({ name: "c", preventDefault() {}, stopPropagation() {} })
+
+        expect(copied).toEqual([report.join("\n")])
+      } finally {
+        dashboard.stop()
+      }
+    })
   })
 
   test("copies selected log text", async () => {
