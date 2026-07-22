@@ -425,11 +425,6 @@ export function markdownLines(markdown: string | string[], width: number, baseCo
   return out
 }
 
-/** Backwards-compatible one-line helper used by older summary callers. */
-export function styleSummaryLine(line: string): StyledText {
-  return markdownLines([line], Math.max(1, displayWidth(line)))[0] ?? plain("")
-}
-
 function inlineMarkdown(text: string, color: string): TextChunk[] {
   if (!text) return [fg(color)("")]
   const chunks: TextChunk[] = []

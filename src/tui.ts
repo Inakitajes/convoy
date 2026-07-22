@@ -2373,7 +2373,7 @@ export class TuiProgress implements ProgressUI {
           fg(theme.accent)("q"),
           fg(theme.dim)("] close"),
         ]
-        if (this.contentTab === "reports" && !this.selectedGroup) left.push(fg(theme.dim)(" · ["), fg(theme.accent)("v"), fg(theme.dim)("] full report"))
+        if (this.contentTab === "reports" && !this.selectedGroup) left.push(...fullReportHint())
         const right: TextChunk[] = [fg(theme.faint)(this.runID ? `run ${this.runID}` : "run …")]
         return padBetween(left, right, width)
       }
@@ -2410,7 +2410,7 @@ export class TuiProgress implements ProgressUI {
             fg(theme.accent)("q"),
             fg(theme.dim)("] close"),
           ]
-      if (this.contentTab === "reports" && !this.selectedGroup) left.push(fg(theme.dim)(" · ["), fg(theme.accent)("v"), fg(theme.dim)("] full report"))
+      if (this.contentTab === "reports" && !this.selectedGroup) left.push(...fullReportHint())
       const right: TextChunk[] = [fg(theme.faint)(this.runID ? `run ${this.runID}` : "run …")]
       return padBetween(left, right, width)
     }
@@ -2496,7 +2496,7 @@ export class TuiProgress implements ProgressUI {
       left.push(fg(theme.dim)(" · "), fg(theme.accent)("shift+tab"))
       left.push(autoAcceptStatusChunk(this.autoAccept.mode))
     }
-    if (this.contentTab === "reports" && !this.selectedGroup) left.push(fg(theme.dim)(" · ["), fg(theme.accent)("v"), fg(theme.dim)("] full report"))
+    if (this.contentTab === "reports" && !this.selectedGroup) left.push(...fullReportHint())
     const quiet = now - this.lastActivityAt
     const right: TextChunk[] = [
       fg(theme.faint)(this.runID ? `run ${this.runID}` : "run …"),
@@ -2544,6 +2544,10 @@ export class TuiProgress implements ProgressUI {
     this.modal.height = lines.length + 4
     this.modalText.content = joinLines(lines)
   }
+}
+
+function fullReportHint(): TextChunk[] {
+  return [fg(theme.dim)(" · ["), fg(theme.accent)("v"), fg(theme.dim)("] full report")]
 }
 
 // The detail panel's status word — "ongoing or not" at a glance. A running
