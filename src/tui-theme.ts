@@ -391,7 +391,8 @@ export function markdownLines(markdown: string | string[], width: number, baseCo
     if (fence) {
       fenced = !fenced
       const language = sourceLine.trim().slice(3).trim()
-      out.push(new StyledText([fg(theme.faint)(language ? `┄ ${language} ` : "┄"), fg(theme.faint)("┄".repeat(Math.max(0, width - language.length - 3)))]))
+      const prefix = language ? `┄ ${language} ` : "┄"
+      out.push(new StyledText([fg(theme.faint)(prefix), fg(theme.faint)("┄".repeat(Math.max(0, width - displayWidth(prefix))))]))
       continue
     }
     if (fenced) {
