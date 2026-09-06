@@ -54,7 +54,7 @@ import {
   proposeCommitMessage,
   type CommitMessageProposal,
 } from "./commit-message"
-import { stripControlBytes } from "./commit-text"
+import { maxCommitSubjectLength, stripControlBytes } from "./commit-text"
 import { listRuns } from "./runs"
 import { acquireMutationLease, LeaseUnavailableError, type MutationLease } from "./finalization/lease"
 
@@ -117,6 +117,19 @@ export type CloseMessageProposal = {
   error?: string
 }
 
+/**
+ * An open pull request detected for the feature branch (capability
+ * feature-close, PR-aware close): the probe's whole truth. Close never
+ * asserts merge state — it discloses what it found, rides the GitHub-recognized
+ * `(#N)` reference on the composed subject, and leaves every GitHub mutation
+ * to the operator's deliberate follow-ups.
+ */
+export type DetectedPullRequest = {
+  number: number
+  title?: string
+  url: string
+}
+
 export type CloseInput = {
   /** The repo (used to detect the base branch and reach the main checkout). */
   targetDir: string
@@ -155,6 +168,8 @@ export type CloseInput = {
   withTerminal?: <T>(action: () => Promise<T>) => Promise<T>
   /** Test seam: the commit writer behind composition. Defaults to `proposeCommitMessage`. */
   writer?: (input: Parameters<typeof proposeCommitMessage>[0]) => Promise<CommitMessageProposal>
+  /** Test seam: the open-PR probe. Defaults to the real GitHub CLI probe; undefined means none detected. */
+  probePullRequest?: (branch: string) => Promise<DetectedPullRequest | undefined>
 }
 
 export type ClosePreflightBlocker = {
@@ -182,6 +197,13 @@ export type CloseResult = {
    * of display-only git recipes.
    */
   featureId?: string
+  /**
+   * The open pull request this attempt detected for the feature branch
+   * (PR-aware close), present only when a landing happened this attempt: the
+   * composed subject carried its `(#N)` reference and the follow-up surface
+   * names the deliberate fallback close command. Never asserts merge state.
+   */
+  pullRequest?: DetectedPullRequest
 }
 
 export type CloseTarget = {
@@ -829,6 +851,13 @@ export async function runClose(input: CloseInput): Promise<CloseResult> {
   const { journalState, baseSha, snapshot, postArchiveTip, preparedTree } = prepared
   const journal = journalState.record
 
+  // The open-PR probe (PR-aware close, design D1): one tolerant lookup, run
+  // here because a landing is about to happen — never on no-content or
+  // already-landed dispositions, and never inside the mutation lease (design
+  // D9: no slow external waits while holding it). Its result rides the
+  // composed subject and, on landing, the result's follow-up facts.
+  const detectedPullRequest = await (input.probePullRequest ?? ((branch: string) => probeOpenPullRequest(branch, mainDir)))(target.branch)
+
   // A crash after candidate creation resumes the landing without a new
   // compose/review round-trip (design D6, task 5.7): the candidate is
   // verified against the journal before it is trusted.
@@ -854,7 +883,7 @@ export async function runClose(input: CloseInput): Promise<CloseResult> {
       // The composition await is real work the renderer must see as such
       // (design D8): a slow model produces no intermediate event of its own.
       emit({ type: "squash-phase", phase: "composing-message" })
-      const proposal = await composeCloseMessage({ target, snapshot, baseSha, diffStat: await diffStat(baseSha, postArchiveTip, target.worktreeDir) }, input.writer)
+      const proposal = await composeCloseMessage({ target, snapshot, baseSha, diffStat: await diffStat(baseSha, postArchiveTip, target.worktreeDir), ...(detectedPullRequest ? { pullRequest: detectedPullRequest } : {}) }, input.writer)
       if (input.resolveMessage) {
         emit({ type: "squash-phase", phase: "awaiting-message-review" })
         message = await input.resolveMessage(proposal)
@@ -957,7 +986,13 @@ export async function runClose(input: CloseInput): Promise<CloseResult> {
     await persistJournal(journalState, { checkoutMaterialized: true })
     await writeLandingReceipt(journalState, target, baseRef, baseSha, postArchiveTip, preparedTree, landedSha, mainDir)
 
-    emit({ type: "step-completed", step: "squash-merge", detail: `landed ${landedSha.slice(0, 8)} on ${baseRef}` })
+    emit({
+      type: "step-completed",
+      step: "squash-merge",
+      detail: detectedPullRequest
+        ? `landed ${landedSha.slice(0, 8)} on ${baseRef}; pull request #${detectedPullRequest.number} is open for ${target.branch} (${detectedPullRequest.url})`
+        : `landed ${landedSha.slice(0, 8)} on ${baseRef}`,
+    })
     const result: CloseResult = {
       changeID: target.changeID,
       branch: target.branch,
@@ -966,6 +1001,7 @@ export async function runClose(input: CloseInput): Promise<CloseResult> {
       disposition: "landed",
       landing: { sha: landedSha },
       ...(target.feature ? { featureId: target.feature.featureId } : {}),
+      ...(detectedPullRequest ? { pullRequest: detectedPullRequest } : {}),
     }
     emit({ type: "result", result })
     return result
@@ -1339,10 +1375,13 @@ async function createCandidate(
  * Snapshot + final diffstat → normalized message proposal (design D6). The
  * writer's answer is a proposal, not authority: the scope rule is enforced
  * here, and a writer that answered nothing usable degrades to the
- * deterministic close fallback without blocking the sequence.
+ * deterministic close fallback without blocking the sequence. When the PR
+ * probe detected an open pull request for the feature branch, the formatted
+ * proposal's subject carries the GitHub-recognized `(#N)` reference — applied
+ * here so the operator reviews exactly what lands and the journal persists it.
  */
 async function composeCloseMessage(
-  context: { target: CloseTarget; snapshot: CloseContextSnapshot; baseSha: string; diffStat: string },
+  context: { target: CloseTarget; snapshot: CloseContextSnapshot; baseSha: string; diffStat: string; pullRequest?: DetectedPullRequest },
   writer?: CloseInput["writer"],
 ): Promise<CloseMessageProposal> {
   const writerInput = {
@@ -1362,13 +1401,67 @@ async function composeCloseMessage(
       scopeCandidates: context.snapshot.scopeCandidates,
       commits: context.snapshot.commitSubjects,
     })
-    return { message: stripControlBytes(formatCommitMessage(message)), source: "fallback", ...(proposal.error ? { error: proposal.error } : {}) }
+    return {
+      message: withPullRequestReference(stripControlBytes(formatCommitMessage(message)), context.pullRequest),
+      source: "fallback",
+      ...(proposal.error ? { error: proposal.error } : {}),
+    }
   }
   const normalized = normalizeComposedMessage(proposal.message, {
     scopeCandidates: context.snapshot.scopeCandidates,
     changeID: context.target.changeID,
   })
-  return { message: stripControlBytes(formatCommitMessage(normalized)), source: "model" }
+  return { message: withPullRequestReference(stripControlBytes(formatCommitMessage(normalized)), context.pullRequest), source: "model" }
+}
+
+/**
+ * Appends the GitHub squash reference ` (#N)` to a formatted commit message's
+ * subject line (PR-aware close): the same shape GitHub's own squash merge
+ * generates, so pushing the landing to the base branch lets GitHub attribute
+ * the commit to the pull request and mark it merged. The subject part is
+ * trimmed when needed so the whole first line stays within the conventional
+ * cap, and an existing trailing `(#N)` reference is never doubled. The
+ * reviewed value stays authoritative — this runs at composition only, never
+ * after the operator's review or edit, and never on an explicit `--message`.
+ */
+export function withPullRequestReference(message: string, pullRequest?: DetectedPullRequest): string {
+  if (!pullRequest) return message
+  const reference = ` (#${pullRequest.number})`
+  const [subjectLine = "", ...rest] = message.split("\n")
+  if (/\s*\(#\d+\)$/.test(subjectLine)) return message
+  let line = subjectLine
+  const overflow = line.length + reference.length - maxCommitSubjectLength
+  if (overflow > 0) line = line.slice(0, line.length - overflow)
+  line = line.replace(/\s+$/, "")
+  return [line + reference, ...rest].join("\n")
+}
+
+/**
+ * The open-PR probe (PR-aware close, design D1): one tolerant `gh pr list`
+ * lookup for an open pull request whose head is the feature branch. Every
+ * failure mode — missing GitHub CLI, non-zero exit, unparseable output, empty
+ * result — degrades to "none detected" without blocking close or asserting
+ * anything about hosted merge state.
+ */
+export async function probeOpenPullRequest(branch: string, cwd: string): Promise<DetectedPullRequest | undefined> {
+  let result
+  try {
+    result = await execFile("gh", ["pr", "list", "--head", branch, "--state", "open", "--json", "number,title,url", "--limit", "1"], { cwd, allowFailure: true })
+  } catch {
+    return undefined
+  }
+  if (!result || result.exitCode !== 0) return undefined
+  try {
+    const rows = JSON.parse(result.stdout) as Array<{ number?: unknown; title?: unknown; url?: unknown }>
+    for (const row of rows) {
+      if (typeof row.number === "number" && Number.isFinite(row.number) && typeof row.url === "string" && row.url) {
+        return { number: row.number, ...(typeof row.title === "string" && row.title ? { title: row.title } : {}), url: row.url }
+      }
+    }
+  } catch {
+    return undefined
+  }
+  return undefined
 }
 
 /** The message inputs, captured before archive moves the live change (design D6). */

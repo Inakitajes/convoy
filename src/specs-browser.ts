@@ -82,6 +82,13 @@ export class SpecsBrowser {
   /** Set while the lifecycle Actions menu overlays the current level (task 6.4). */
   private menuOpen = false
   private menuIndex = 0
+  /**
+   * Set while the close confirm modal owns the keyboard: the exact resolution
+   * a confirm would emit plus the display facts the modal names. Nothing is
+   * emitted until the operator confirms (close confirmation, capability
+   * specs-viewer) — a stray `x` can no longer start the close sequence.
+   */
+  private pendingClose?: { resolution: SpecsResolution; feature: string; branch: string; base: string; change?: string }
   /** Scroll position for the fullscreen reader's title bar (`top` / `end` / `%` / `all`). */
   private readerPosition = ""
   /** Artifact markdown read lazily, keyed by repo-relative file; failures become placeholders. */
@@ -97,7 +104,12 @@ export class SpecsBrowser {
   private readonly detailsBox: BoxRenderable
   private readonly footerText: TextRenderable
   private readonly footerBox: BoxRenderable
-  private readonly paletteTargets: Array<{ box: BoxRenderable; background: "bg"; border?: "border" | "borderDim" }> = []
+  // The close confirm modal's overlay shell (the runs-browser retry-confirm
+  // pattern): one centered bordered box over a masking backdrop.
+  private readonly overlay: BoxRenderable
+  private readonly modal: BoxRenderable
+  private readonly modalText: TextRenderable
+  private readonly paletteTargets: Array<{ box: BoxRenderable; background: "bg" | "overlay"; border?: "border" | "borderDim" | "accent" }> = []
 
   private readonly handleThemeMode = (mode: unknown) => {
     if (mode !== "dark" && mode !== "light") return
@@ -116,6 +128,12 @@ export class SpecsBrowser {
     }
     key.preventDefault()
     key.stopPropagation()
+    // The close confirm modal owns the keyboard while it is up (same rule as
+    // the Actions menu): only y/enter confirm or n/esc cancel answer it.
+    if (this.pendingClose) {
+      this.handleConfirmKey(key)
+      return
+    }
     if (this.level === "root") this.handleRootKey(key)
     else this.handleDetailKey(key)
   }
@@ -232,6 +250,37 @@ export class SpecsBrowser {
     shell.add(footer.box)
     mount.add(shell)
 
+    // The close confirm modal (close confirmation): a centered bordered box
+    // over a masking backdrop, owning the keyboard until answered.
+    this.overlay = new BoxRenderable(renderer, {
+      id: "convoy-specs-close-overlay",
+      position: "absolute",
+      left: 0,
+      top: 0,
+      width: "100%",
+      height: "100%",
+      zIndex: 100,
+      alignItems: "center",
+      justifyContent: "center",
+      visible: false,
+    })
+    this.modal = new BoxRenderable(renderer, {
+      id: "convoy-specs-close-modal",
+      border: true,
+      borderStyle: "rounded",
+      borderColor: theme.accent,
+      backgroundColor: theme.overlay,
+      title: " close ",
+      titleAlignment: "left",
+      paddingX: 2,
+      paddingY: 1,
+    })
+    this.modalText = new TextRenderable(renderer, { content: "", fg: theme.text, width: "100%", height: "100%" })
+    this.modal.add(this.modalText)
+    this.overlay.add(this.modal)
+    mount.add(this.overlay)
+    this.paletteTargets.push({ box: this.modal, background: "overlay", border: "accent" })
+
     renderer.keyInput.on("keypress", this.handleKeyPress)
     renderer.on("theme_mode", this.handleThemeMode)
     this.render()
@@ -303,8 +352,15 @@ export class SpecsBrowser {
         const lifecycle = this.selectedLifecycleFeature()
         if (lifecycle?.checkoutPath && lifecycle.branch) {
           const changeId = lifecycle.contracts.find((contract) => contract.state === "active")?.changeId
-          if (changeId) this.finish({ type: "close-change", changeID: changeId, worktreeDir: lifecycle.checkoutPath, branch: lifecycle.branch })
-          break
+          if (changeId) {
+            this.openCloseConfirm(
+              { type: "close-change", changeID: changeId, worktreeDir: lifecycle.checkoutPath, branch: lifecycle.branch },
+              lifecycle.displayName,
+              lifecycle.branch,
+              changeId,
+            )
+            break
+          }
         }
         // A registered feature whose worktree is gone still reaches the close
         // review — through its stable identity, never a silent no-op (task
@@ -312,12 +368,17 @@ export class SpecsBrowser {
         // missing-context blocker with remediation).
         const lifecycleOnly = this.selectedLifecycleFeature()
         if (lifecycleOnly) {
-          this.finish({ type: "close-feature", featureId: lifecycleOnly.featureId })
+          this.openCloseConfirm({ type: "close-feature", featureId: lifecycleOnly.featureId }, lifecycleOnly.displayName, lifecycleOnly.branch ?? "(no local branch)")
           break
         }
         const feature = this.selectedFeature()
         if (feature?.worktreeDir && feature.branch) {
-          this.finish({ type: "close-change", changeID: feature.id, worktreeDir: feature.worktreeDir, branch: feature.branch })
+          this.openCloseConfirm(
+            { type: "close-change", changeID: feature.id, worktreeDir: feature.worktreeDir, branch: feature.branch },
+            feature.title ?? feature.id,
+            feature.branch,
+            feature.id,
+          )
         }
         break
       }
@@ -529,7 +590,7 @@ export class SpecsBrowser {
     if (!feature) return
     switch (item.dispatch) {
       case "close":
-        this.finish({ type: "close-feature", featureId: feature.featureId })
+        this.openCloseConfirm({ type: "close-feature", featureId: feature.featureId }, feature.displayName, feature.branch ?? "(no local branch)")
         return
       case "continue": {
         const changeId = feature.contracts.find((contract) => contract.state === "active")?.changeId
@@ -550,6 +611,57 @@ export class SpecsBrowser {
         return
       }
     }
+  }
+
+  // ── the close confirm modal (close confirmation) ──────────────────────────
+
+  /**
+   * Arms the close confirmation instead of emitting the resolution: the modal
+   * names the feature, branch, base, and the sequence close runs, so an
+   * accidental `x` cannot start sync → archive → squash-merge.
+   */
+  private openCloseConfirm(resolution: SpecsResolution, feature: string, branch: string, change?: string) {
+    this.pendingClose = { resolution, feature, branch, base: this.view.baseBranch ?? "the base branch", ...(change ? { change } : {}) }
+    this.render()
+  }
+
+  /** Only an explicit confirm emits the stored resolution; cancel leaves the browser untouched. */
+  private handleConfirmKey(key: KeyEvent) {
+    const pending = this.pendingClose
+    if (!pending) return
+    if (key.name === "y" || key.name === "return" || key.name === "linefeed") {
+      this.pendingClose = undefined
+      this.finish(pending.resolution)
+      return
+    }
+    if (key.name === "n" || key.name === "escape") {
+      this.pendingClose = undefined
+      this.render()
+    }
+    // Any other key is ignored: the modal stays up until it is answered.
+  }
+
+  /** The confirm modal's body: what will run, on what, and the y/n choice. */
+  private renderCloseConfirmModal(boxWidth: number) {
+    const pending = this.pendingClose
+    if (!pending) return
+    const innerWidth = Math.max(36, boxWidth - 6)
+    const lines: StyledText[] = [
+      t`${bold(fg(theme.text)("Close this feature?"))}`,
+      plain(""),
+      t`${fg(theme.faint)("Close runs sync → archive → squash-merge: it archives the")}`,
+      t`${fg(theme.faint)("change and lands one commit on the base. Nothing is pushed.")}`,
+      plain(""),
+      new StyledText([fg(theme.faint)("feature  "), fg(theme.text)(truncate(pending.feature, innerWidth - 10))]),
+      new StyledText([fg(theme.faint)("branch   "), fg(theme.dim)(pending.branch)]),
+      new StyledText([fg(theme.faint)("base     "), fg(theme.dim)(pending.base)]),
+      ...(pending.change ? [new StyledText([fg(theme.faint)("change   "), fg(theme.dim)(pending.change)])] : []),
+      plain(""),
+      t`${fg(theme.accent)("y")} ${fg(theme.text)("close")}   ${fg(theme.faint)("n / esc")} ${fg(theme.dim)("cancel")}`,
+    ]
+    this.modal.width = boxWidth
+    this.modal.height = lines.length + 4
+    this.modalText.content = joinLines(lines)
   }
 
   /** Digits 1–9 jump straight to a tab; the strip labels the numbers. */
@@ -904,6 +1016,9 @@ export class SpecsBrowser {
     this.detailsText.content = this.detailsContent((compact && !detail ? innerWidth : detail ? innerWidth : detailsWidth) - 4)
     this.detailsBox.title = this.detailsTitle()
     this.footerText.content = this.footerContent(innerWidth)
+    // The close confirm modal overlays everything while it is armed.
+    this.overlay.visible = Boolean(this.pendingClose)
+    if (this.pendingClose) this.renderCloseConfirmModal(Math.max(44, this.renderer.width - 10))
     this.renderer.requestRender()
   }
 
@@ -1151,6 +1266,14 @@ export class SpecsBrowser {
 
   /** Only actions that are not universal navigation conventions get hints. */
   private footerContent(width: number) {
+    // The close confirm modal owns the footer: only its two answers matter.
+    if (this.pendingClose) {
+      const hints: Hint[] = [
+        { keys: "y", label: "close", priority: 2 },
+        { keys: "n/esc", label: "cancel", priority: 1 },
+      ]
+      return hintsRow(hints, [], width, { style: "spaced", overflow: moreHintsMarker })
+    }
     // The open menu owns the footer: it names what answers what.
     if (this.menuOpen) {
       const hints: Hint[] = [
@@ -1196,7 +1319,7 @@ export class SpecsBrowser {
             { keys: "a", label: "pply", priority: 4, style: "glued" },
             { keys: "i", label: "terate", priority: 5, style: "glued" },
             ...(feature?.stage === "stranded" ? ([{ keys: "s", label: "pin out", priority: 6, style: "glued" }] as Hint[]) : []),
-            ...(feature?.worktreeDir && feature.branch ? ([{ keys: "c", label: "ontinue", priority: 6, style: "glued" }, { keys: "x", label: "close", priority: 7 }] as Hint[]) : []),
+            ...(feature?.worktreeDir && feature.branch ? ([{ keys: "c", label: "ontinue", priority: 6, style: "glued" }, { keys: "x", label: "close · y/n", priority: 7 }] as Hint[]) : []),
             ...(feature?.probablyMerged ? ([{ keys: "m", label: "archive", priority: 7 }] as Hint[]) : []),
           ] as Hint[])
         : []),
@@ -1205,7 +1328,7 @@ export class SpecsBrowser {
       ...(lifecycle?.checkoutPath && lifecycle.branch
         ? ([
             { keys: "c", label: "ontinue", priority: 6, style: "glued" },
-            { keys: "x", label: "close", priority: 7 },
+            { keys: "x", label: "close · y/n", priority: 7 },
           ] as Hint[])
         : []),
       { keys: "r", label: "efresh", priority: 5, style: "glued" },

@@ -339,6 +339,48 @@ describe("formatCloseEvents", () => {
     expect(text).not.toContain("composing")
     expect(text).not.toContain("awaiting message review")
   })
+
+  test("a detected PR is disclosed factually and its fallback prints after the push", () => {
+    const events: CloseEvent[] = [
+      { type: "preflight", summary: "clean tree" },
+      { type: "step-completed", step: "squash-merge", detail: "landed abcd1234 on main; pull request #7 is open for feat/add-widget (https://github.com/acme/repo/pull/7)" },
+      {
+        type: "result",
+        result: { changeID: "add-widget", branch: "feat/add-widget", worktreeDir: "/wt", baseRef: "main", disposition: "landed", landing: { sha: "abcd1234" } },
+      },
+    ]
+    const text = formatCloseEvents(events, {
+      followUps: {
+        push: { remote: "origin", refspec: "main:main", command: "git push origin main:main" },
+        prFallback: {
+          number: 7,
+          url: "https://github.com/acme/repo/pull/7",
+          command: `gh pr close 7 --comment 'landed in main as abcd1234'`,
+        },
+      },
+    })
+    // The disclosure is factual: it names the PR and its URL, never a merge claim.
+    expect(text).toContain("squash-merge: landed abcd1234 on main; pull request #7 is open for feat/add-widget (https://github.com/acme/repo/pull/7)")
+    expect(text).toContain("pull request #7 (https://github.com/acme/repo/pull/7) is open for this branch")
+    // The fallback names the deliberate close command, printed after the push.
+    expect(text).toContain("gh pr close 7 --comment 'landed in main as abcd1234'")
+    const pushAt = text.indexOf("git push origin main:main")
+    const prAt = text.indexOf("gh pr close 7")
+    expect(prAt).toBeGreaterThan(pushAt)
+    expect(text).not.toContain("has been merged")
+    expect(text).not.toContain("merged successfully")
+  })
+
+  test("no detected PR prints no PR disclosure and no fallback", () => {
+    const text = formatCloseEvents(successEvents, {
+      followUps: {
+        push: { remote: "origin", refspec: "main:main", command: "git push origin main:main" },
+        worktreeRemoval: "git worktree remove /wt",
+      },
+    })
+    expect(text).not.toContain("pull request")
+    expect(text).not.toContain("gh pr close")
+  })
 })
 
 // -- task 3.4: upstream-aware follow-ups -------------------------------------------
@@ -379,6 +421,35 @@ describe("resolveCloseFollowUps", () => {
     expect(followUps.pushRemediation).toBeUndefined()
     expect(followUps.worktreeRemoval).toBe("convoy close --feature 11111111-2222-3333-4444-555555555555 --cleanup worktree")
     expect(followUps.branchDelete).toBe("convoy close --feature 11111111-2222-3333-4444-555555555555 --cleanup branch")
+  })
+
+  test("a detected PR gains the deliberate fallback close command; no PR means no fallback", async () => {
+    const fixture = await makeFixture()
+    const tip = await git(fixture.mainDir, "rev-parse", "feat/add-widget")
+    const withPr = await resolveCloseFollowUps({
+      targetDir: fixture.mainDir,
+      baseRef: "main",
+      branch: "feat/add-widget",
+      worktreeDir: fixture.worktreeDir,
+      evidence: { landingSha: tip, featureTip: tip },
+      pullRequest: { number: 7, title: "Add widget", url: "https://github.com/acme/repo/pull/7" },
+    })
+    expect(withPr.prFallback).toEqual({
+      number: 7,
+      url: "https://github.com/acme/repo/pull/7",
+      command: `gh pr close 7 --comment 'landed in main as ${tip}'`,
+    })
+    // Without a detected PR there is no fallback row at all.
+    const withoutPr = await resolveCloseFollowUps({
+      targetDir: fixture.mainDir,
+      baseRef: "main",
+      branch: "feat/add-widget",
+      worktreeDir: fixture.worktreeDir,
+      evidence: { landingSha: tip, featureTip: tip },
+    })
+    expect(withoutPr.prFallback).toBeUndefined()
+    // The PR fallback does not disturb the evidence-gated cleanup offers.
+    expect(withPr.branchDelete).toContain("update-ref -d refs/heads/feat/add-widget")
   })
 
   test("without a resolved feature the guarded git display remains (synthetic callers only; close itself always resolves one)", async () => {
