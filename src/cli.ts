@@ -15,20 +15,21 @@ import { loadPrdHistoryPreview } from "./prd-history"
 import { loadOpenSpecBundle, openSpecPromptFor } from "./openspec"
 import { isModelGateway, modelGatewayChoices, modelGateways, type ModelGateway } from "./model-routing"
 import { browseRuns, isControlLive, isServerLive } from "./runs"
-import { browseSpecs, buildIterateSessionInput, loadSpecsView } from "./specs"
+import { browseSpecs, buildIterateSessionInput, loadSpecsView, type SpecsResolution, type SpecsResumeSelection } from "./specs"
 import { deleteKeychainSecret, keychainAvailable, storeKeychainSecret } from "./secrets"
 import type { Pipeline, RunOptions, RunPlan } from "./types"
 import { isValidRunID, resumeWorkspace } from "./workspace"
 import { readRunMetadata, type RunMetadata } from "./metadata"
 import { preflightRunPlan } from "./preflight"
-import type { LaunchBranchCheck, LaunchBranchProposal, LaunchRunPreparation, LaunchRunSelection } from "./launch-tui"
+import type { LaunchBranchCheck, LaunchBranchProposal, LaunchFeaturePreset, LaunchRunPreparation, LaunchRunSelection } from "./launch-tui"
 import type { SpinOptions } from "./spin"
 import type { CloseOptions } from "./feature-close-command"
 import { resolveFeatureForLaunch, revalidateFeatureLink } from "./feature-lifecycle/launch"
+import { resolveWorkContext, type ValidatedWorkContext } from "./feature-lifecycle/work-context"
 import { formatVersion } from "./version"
 import type { UpdateResult } from "./update"
 import type { TuiRoute } from "./tui-session"
-import type { HomeDestination } from "./home-tui"
+import type { HomeDestination, HomeResolution, HomeWorkAction } from "./home-tui"
 
 /**
  * Flags as written: every scalar stays undefined until the user sets it, so
@@ -235,7 +236,32 @@ export async function parseAndRun(argv: string[]) {
     await ensureRepoReady(options.targetDir, { baseRef: options.baseRef, allowDirty: true })
     options = await prepareWorktreeForRun(options.targetDir, options)
   }
+  // Managed writer ownership (design D5): a pipeline that can write refuses
+  // to start in a checkout whose live claim another managed writer holds.
+  await refuseConflictingWriter(options.targetDir, plan)
   await executeRun(options, plan)
+}
+
+/**
+ * Refuses to start a managed writer in a checkout that another managed
+ * writer's live claim already covers (capability work-conversations, design
+ * D5). Uncertain claims refuse with reconciliation guidance — never an
+ * unconditional takeover; unrelated checkouts are unaffected.
+ */
+async function refuseConflictingWriter(executionDir: string, plan: RunPlan): Promise<void> {
+  if (!hasWritableStep(plan.pipeline)) return
+  const { lifecycleCommonDir } = await import("./feature-lifecycle/store")
+  const { readWriterClaim, claimLiveness, writerConflictGuidance } = await import("./feature-lifecycle/writer-claims")
+  const commonDir = await lifecycleCommonDir(executionDir).catch(() => undefined)
+  if (!commonDir) return
+  const { currentBranch } = await import("./git")
+  const branch = plan.target.branch ?? (await currentBranch(executionDir).catch(() => undefined))
+  if (!branch) return
+  const claim = await readWriterClaim(commonDir, branch)
+  if (claim.status !== "found") return
+  if (claimLiveness(claim.value) === "live") {
+    throw new Error(writerConflictGuidance(claim.value).join("\n"))
+  }
 }
 
 /** Only a truly bare invocation with interactive input and output owns the home screen. */
@@ -263,7 +289,15 @@ async function runHomeSession(targetDir: string): Promise<void> {
   try {
     await runHomeNavigationLoop({
       interrupted: () => interrupted,
-      openHome: (initialSelection) => launchHomeTui(targetDir, { route, initialSelection, kittyGraphics }),
+      route,
+      targetDir,
+      openHome: (context) => launchHomeTui(targetDir, { route, kittyGraphics, ...context }),
+      openWork: async (featureId, action) => {
+        await dispatchWorkAction(targetDir, route, featureId, action)
+      },
+      createWork: async (draft) => {
+        await createWorkFromDraft(targetDir, route, draft)
+      },
       openDestination: async (selection) => {
         if (selection === "pipelines") await launchInteractiveRun(targetDir, undefined, undefined, route)
         else if (selection === "specs") await openSpecsBrowser(targetDir, route)
@@ -276,18 +310,197 @@ async function runHomeSession(targetDir: string): Promise<void> {
   }
 }
 
+/** The resolved context Home opens with: refreshed rows plus the remembered selection (task 6.4). */
+async function homeWorkContext(targetDir: string): Promise<{ workRows: import("./specs").LifecycleFeatureRow[]; resumeFeature?: import("./specs").LifecycleFeatureRow; resumeNotice?: string }> {
+  const { loadLifecycleFeatureRows } = await import("./specs")
+  const workRows = (await loadLifecycleFeatureRows(targetDir)) ?? []
+  const { lifecycleCommonDir } = await import("./feature-lifecycle/store")
+  const { readPreferences } = await import("./feature-lifecycle/preferences")
+  const commonDir = await lifecycleCommonDir(targetDir).catch(() => undefined)
+  if (!commonDir) return { workRows }
+  const preferences = await readPreferences(commonDir)
+  if (preferences.status !== "found" || !preferences.value.lastFeatureId) return { workRows }
+  const remembered = workRows.find((row) => row.featureId === preferences.value.lastFeatureId)
+  if (remembered) return { workRows, resumeFeature: remembered }
+  // The remembered work no longer resolves: the list opens with an
+  // explanation instead of silently selecting another execution target.
+  return {
+    workRows,
+    resumeNotice: `the last selected work (${preferences.value.lastFeatureId}) no longer resolves — it may have been completed or its records are unreadable`,
+  }
+}
+
+/** Remembers the work the operator opened (navigation state, task 6.4). */
+async function rememberWorkSelection(targetDir: string, featureId: string): Promise<void> {
+  const { lifecycleCommonDir } = await import("./feature-lifecycle/store")
+  const { writeLastFeatureSelection } = await import("./feature-lifecycle/preferences")
+  const commonDir = await lifecycleCommonDir(targetDir).catch(() => undefined)
+  if (commonDir) await writeLastFeatureSelection(commonDir, featureId).catch(() => {})
+}
+
+/** Runs one work detail action from Home (task 6.3): every action resolves the same work. */
+async function dispatchWorkAction(targetDir: string, route: TuiRoute, featureId: string, action: HomeWorkAction): Promise<void> {
+  await rememberWorkSelection(targetDir, featureId)
+  const { resolveWorkContext } = await import("./feature-lifecycle/work-context")
+  const resolved = await resolveWorkContext({ launchDir: targetDir, featureId })
+  if (action === "specs") {
+    await openSpecsBrowser(targetDir, route)
+    return
+  }
+  if (action === "runs") {
+    await openRunsBrowser(undefined, route)
+    return
+  }
+  if (action === "history") {
+    // The specs browser's feature history view is the read-only surface.
+    await openSpecsBrowser(targetDir, route)
+    return
+  }
+  if (resolved.status !== "validated") {
+    const { showNoticeTui } = await import("./notice-tui")
+    await showNoticeTui(route, { title: "work context unavailable", message: [resolved.reason, ...resolved.remediation].join("\n") })
+    return
+  }
+  const context = resolved.context
+  if (action === "conversation") {
+    await resumeFeatureConversation({
+      launchDir: targetDir,
+      route,
+      featureId: context.feature!.featureId,
+      checkout: context.executionCheckout,
+      branch: context.branch ?? context.feature!.context?.branch ?? "",
+      displayName: context.feature!.displayName,
+    })
+    return
+  }
+  if (action === "propose") {
+    await proposeForFeature({
+      launchDir: targetDir,
+      route,
+      featureId: context.feature!.featureId,
+      checkout: context.executionCheckout,
+      branch: context.branch ?? context.feature!.context?.branch ?? "",
+      displayName: context.feature!.displayName,
+    })
+    return
+  }
+  if (action === "pipeline") {
+    // The work-scoped pipeline launch reuses the verified checkout and the
+    // complete reviewed contract set (a focused contract is UI context).
+    const preset = featurePresetFromContext(context)
+    const focused = context.focusedContract?.changeId
+    await launchInteractiveRun(targetDir, focused, preset, route)
+    return
+  }
+  if (action === "close") {
+    const { runCloseCommand } = await import("./feature-close-command")
+    await runCloseCommand({ targetDir, featureId: context.feature!.featureId }, route)
+    return
+  }
+}
+
+/**
+ * Creates work before proposal (tasks 5.1/5.2): the reviewed draft becomes a
+ * creation intent, then the worktree, then the pre-proposal feature record.
+ * A retry reuses a validated matching result instead of creating another
+ * worktree, and cancellation before acceptance never reaches this path.
+ */
+async function createWorkFromDraft(
+  targetDir: string,
+  route: TuiRoute,
+  draft: { displayName: string; branch: string; base: string; worktree: string },
+): Promise<void> {
+  const { execFile } = await import("./git")
+  const { lifecycleCommonDir, ensureRepositoryRecord, isFound } = await import("./feature-lifecycle/store")
+  const { beginCreationIntent, completeCreationIntent } = await import("./feature-lifecycle/creation")
+  const { featureNewWork } = await import("./feature-lifecycle/commands")
+  const { showNoticeTui } = await import("./notice-tui")
+
+  const commonDir = await lifecycleCommonDir(targetDir)
+  if (!commonDir) {
+    await showNoticeTui(route, { title: "new feature", message: "not a git repository — nothing was created" })
+    return
+  }
+  const repoRecord = await ensureRepositoryRecord(commonDir)
+  if (!isFound(repoRecord)) {
+    await showNoticeTui(route, { title: "new feature", message: "the lifecycle store could not be initialized — nothing was created" })
+    return
+  }
+
+  // 1. Intent before any filesystem effect (design D3): recovery evidence.
+  const intent = await beginCreationIntent(commonDir, {
+    repositoryId: repoRecord.value.repositoryId,
+    displayName: draft.displayName,
+    branch: draft.branch,
+    base: draft.base,
+    worktree: draft.worktree,
+  })
+
+  // 2. The worktree at the reviewed destination. A retry after a partial
+  //    creation reuses a validated matching worktree instead of failing on
+  //    the existing path (design D3: never create a duplicate; never delete
+  //    potential authored content).
+  const { findWorktreeDirForBranch } = await import("./git")
+  const existing = await findWorktreeDirForBranch(draft.branch, targetDir).catch(() => undefined)
+  if (!existing) {
+    const added = await execFile("git", ["worktree", "add", "-b", draft.branch, draft.worktree, draft.base], { cwd: targetDir, allowFailure: true })
+    if (added.exitCode !== 0) {
+      await showNoticeTui(route, {
+        title: "new feature",
+        message: `creating the worktree failed:\n${(added.stderr || added.stdout).trim()}\n\nThe creation intent is retained; retry after fixing the cause — the work stays recoverable.`,
+      })
+      return
+    }
+  }
+
+  // 3. The pre-proposal feature record (empty contract set, display name
+  //    independent of change ids).
+  try {
+    const feature = await featureNewWork({
+      cwd: targetDir,
+      branch: draft.branch,
+      worktree: existing ?? draft.worktree,
+      changeIds: [],
+      base: draft.base,
+      displayName: draft.displayName,
+    })
+    await completeCreationIntent(commonDir, intent.operationId, feature.featureId)
+    await rememberWorkSelection(targetDir, feature.featureId)
+    await showNoticeTui(route, {
+      title: "work created",
+      message: `${feature.displayName} is ready at ${draft.worktree} on ${draft.branch}\n\nSelect it on the work list to open a conversation or propose the first change.`,
+    })
+  } catch (error) {
+    // Registration failed: the worktree is preserved and the pending intent
+    // is the recovery evidence — a retry reconciles instead of duplicating.
+    await showNoticeTui(route, {
+      title: "new feature",
+      message: `the checkout was created but registering the feature failed:\n${error instanceof Error ? error.message : String(error)}\n\nThe worktree at ${draft.worktree} is preserved. Retry creation for the same branch to reconcile it.`,
+    })
+  }
+}
+
 /** Pure navigation loop: destination close means back; only Home close quits. */
 export async function runHomeNavigationLoop(options: {
   interrupted: () => boolean
-  openHome: (initialSelection?: HomeDestination) => Promise<HomeDestination | undefined>
+  route: TuiRoute
+  targetDir: string
+  openHome: (context: { workRows: import("./specs").LifecycleFeatureRow[]; resumeFeature?: import("./specs").LifecycleFeatureRow; resumeNotice?: string }) => Promise<HomeResolution>
+  openWork: (featureId: string, action: HomeWorkAction) => Promise<void>
+  createWork: (draft: { displayName: string; branch: string; base: string; worktree: string }) => Promise<void>
   openDestination: (selection: HomeDestination) => Promise<void>
 }): Promise<void> {
-  let lastSelection: HomeDestination | undefined
   while (!options.interrupted()) {
-    const selection = await options.openHome(lastSelection)
-    if (!selection || options.interrupted()) return
-    lastSelection = selection
-    await options.openDestination(selection)
+    const context = await homeWorkContext(options.targetDir)
+    const resolution = await options.openHome(context)
+    if (!resolution || options.interrupted()) return
+    if (resolution.type === "destination") {
+      await options.openDestination(resolution.destination)
+    } else if (resolution.type === "work") {
+      await options.openWork(resolution.featureId, resolution.action)
+    } else if (resolution.type === "new-work" && resolution.draft) {
+      await options.createWork(resolution.draft)
+    }
   }
 }
 
@@ -511,7 +724,7 @@ export async function prepareWorktreeForRun(sourceDir: string, options: RunOptio
 async function launchInteractiveRun(
   targetDir: string,
   presetChange?: string,
-  presetFeature?: { worktreeDir: string; branch: string },
+  presetFeature?: Omit<LaunchFeaturePreset, "changeID">,
   route?: TuiRoute,
 ) {
   // Imported lazily so normal CLI invocations don't pull in OpenTUI until they
@@ -523,8 +736,9 @@ async function launchInteractiveRun(
       // A specs-viewer handoff arrives with the change already chosen: the
       // launcher pins that spec row instead of running its auto-detect heuristics.
       ...(presetChange ? { presetChange } : {}),
-      // A control-board "continue" arrives with the feature's worktree and
-      // branch already chosen: the launcher reuses them and never asks the namer.
+      // A feature handoff arrives with the verified worktree/branch and, when
+      // the board could resolve it, the stable feature identity: the launcher
+      // reuses them and never asks the namer (work-context, D1/D2).
       ...(presetFeature ? { presetFeature: { changeID: presetChange ?? "", ...presetFeature } } : {}),
       prepareRun: (runSelection) => prepareInteractiveRun(targetDir, runSelection),
       proposeBranchName: (input) => proposeInteractiveBranchName(targetDir, input),
@@ -546,6 +760,14 @@ async function launchInteractiveRun(
   const plan = selection.plan
   const runSelection = selection.selection
   await preflightRunPlan(plan)
+  // Destination revalidation before any effect (task 1.4): the reviewed
+  // feature link must still verify — same repository, association revision,
+  // branch/worktree, and recorded base. A context that moved or an
+  // association that advanced after Review refuses here instead of
+  // executing elsewhere or silently adopting the replacement.
+  if (plan.feature) {
+    await revalidateFeatureLink({ cwd: targetDir, link: plan.feature })
+  }
   if (runSelection.initializeGit) {
     const { initializeRepoWithInitialCommit } = await import("./git")
     await initializeRepoWithInitialCommit(targetDir, { baseRef: options.baseRef === "HEAD" ? undefined : options.baseRef })
@@ -571,13 +793,20 @@ async function launchInteractiveRun(
     if (!options.branch) throw new Error("worktree plan is missing its confirmed branch name")
     options = await prepareWorktreeForRun(targetDir, options)
   }
+  // Managed writer ownership (design D5): the interactive path refuses a
+  // second writer in the claimed checkout exactly like the headless one.
+  await refuseConflictingWriter(options.targetDir, plan)
   await executeRun(options, plan, route)
 }
 
 async function prepareInteractiveRun(targetDir: string, selection: LaunchRunSelection): Promise<LaunchRunPreparation> {
   const parsed = parseArgs([])
   parsed.targetDir = selection.targetDir
-  parsed.baseDetectionDir = targetDir
+  // Base detection and configuration resolve against the execution checkout
+  // (work-context, D1): for a feature handoff that is the feature worktree,
+  // so its configuration, history, and specs drive the plan; for a plain run
+  // it is the launch checkout, exactly as before.
+  parsed.baseDetectionDir = selection.targetDir
   parsed.prompt = selection.prompt
   parsed.pipeline = selection.pipeline
   parsed.humanReview = selection.humanReview
@@ -590,6 +819,12 @@ async function prepareInteractiveRun(targetDir: string, selection: LaunchRunSele
   parsed.worktree = Boolean(selection.isolateWorktree)
   if (selection.branchName) parsed.branch = selection.branchName
   if (selection.change) parsed.change = selection.change
+  // A feature-scoped handoff resolves its plan link by stable identity and
+  // uses the recorded intended base instead of re-detecting one: the frozen
+  // link then revalidates identity/revision/branch/base at execution time
+  // (advisor: identity over context heuristics; run-launcher task 4.4).
+  if (selection.featureId) parsed.featureId = selection.featureId
+  if (selection.baseRef) parsed.baseRef = selection.baseRef
 
   const options = { ...(await resolveRunOptions(parsed)), prompt: selection.prompt }
   // The branch was named and confirmed in the launcher's branch step, so the
@@ -672,67 +907,436 @@ async function openConfigEditor(targetDir: string, route?: TuiRoute) {
 /**
  * Routes the specs browser's resolutions. apply-change hands off to the
  * interactive launcher with the change pinned (launchInteractiveRun's preset),
- * iterate-change opens a standalone OpenCode session rooted at this repo (the
- * operator authors OpenSpec changes there — Convoy never writes them), and
- * exit simply ends. Each half is thin over specs.ts, whose pieces are unit-
- * tested; the interactive halves are covered by component tests.
+ * iterate-change opens a standalone OpenCode session rooted at the resolved
+ * work context (the operator authors OpenSpec changes there — Convoy never
+ * writes them), and exit simply ends. Feature-owned handoffs resolve the
+ * verified execution checkout through the shared work-context projection
+ * before any resource loads (capability work-context, design D1); an
+ * unavailable association reports its reason and remediation instead of
+ * silently launching in the launch directory. Each dispatch returns the
+ * selection to restore, so the browser reopens on it with a refreshed
+ * assessment after a cancelled launcher, a closed dashboard, or authoring
+ * (tasks 1.2/1.4) — only an explicit exit ends the browser.
  */
 export async function openSpecsBrowser(targetDir: string, route?: TuiRoute): Promise<void> {
-  const resolution = await browseSpecs(targetDir, route)
-  if (resolution.type === "apply-change") {
-    await launchInteractiveRun(targetDir, resolution.changeID, undefined, route)
+  let resume: SpecsResumeSelection | undefined
+  for (;;) {
+    const resolution = await browseSpecs(targetDir, route, resume)
+    resume = await dispatchSpecsResolution(targetDir, resolution, route)
+    if (!resume) return
+  }
+}
+
+/**
+ * Performs one browser resolution and returns the selection the reopened
+ * browser restores, or `undefined` to exit. The restored selection is
+ * identity-keyed (change id / feature id) so a refreshed view lands on the
+ * same subject regardless of list position.
+ */
+async function dispatchSpecsResolution(targetDir: string, resolution: SpecsResolution, route?: TuiRoute): Promise<SpecsResumeSelection | undefined> {
+  switch (resolution.type) {
+    case "exit":
+      return undefined
+    case "apply-change": {
+      if (resolution.featureId) {
+        const resolved = await resolveWorkContext({ launchDir: targetDir, featureId: resolution.featureId, changeId: resolution.changeID })
+        if (resolved.status !== "validated") {
+          await reportHandoffBlocker(resolved.reason, resolved.remediation, route)
+          return { changeId: resolution.changeID, featureId: resolution.featureId }
+        }
+        const context = resolved.context
+        // The pinned contract must exist in the verified checkout: a missing
+        // source reports its condition rather than letting the launcher fall
+        // back to another contract or to the launch copy (specs-viewer).
+        if (!(await handoffContractSourcePresent(context))) {
+          await reportHandoffBlocker(
+            `contract "${resolution.changeID}" has no readable source in the feature's verified checkout (${context.executionCheckout})`,
+            ["rebind or revise the feature's association: `convoy feature show`"],
+            route,
+          )
+          return { changeId: resolution.changeID, featureId: resolution.featureId }
+        }
+        // The launcher keeps running in the launch checkout (no chdir, D1);
+        // the preset carries the feature's verified checkout, which resource
+        // loading and preparation resolve against.
+        await launchInteractiveRun(targetDir, resolution.changeID, featurePresetFromContext(context), route)
+        return { changeId: resolution.changeID, featureId: resolution.featureId }
+      }
+      await launchInteractiveRun(targetDir, resolution.changeID, undefined, route)
+      return { changeId: resolution.changeID }
+    }
+    case "iterate-change": {
+      if (resolution.featureId) {
+        const resolved = await resolveWorkContext({ launchDir: targetDir, featureId: resolution.featureId, changeId: resolution.changeID })
+        if (resolved.status !== "validated") {
+          await reportHandoffBlocker(resolved.reason, resolved.remediation, route)
+          return { changeId: resolution.changeID, featureId: resolution.featureId }
+        }
+        const context = resolved.context
+        if (!(await handoffContractSourcePresent(context))) {
+          await reportHandoffBlocker(
+            `contract "${resolution.changeID}" has no readable source in the feature's verified checkout (${context.executionCheckout})`,
+            ["rebind or revise the feature's association: `convoy feature show`"],
+            route,
+          )
+          return { changeId: resolution.changeID, featureId: resolution.featureId }
+        }
+        if (resolution.presentation === "external" || !route) {
+          // Explicit external presentation (or the standalone browser, whose
+          // renderer this process no longer owns): the window flow.
+          const view = await loadSpecsView(targetDir)
+          const input = buildIterateSessionInput(context.executionCheckout, view, resolution.changeID)
+          const { openIterateOpencodeWindow } = await import("./opencode")
+          await openIterateOpencodeWindow(input)
+        } else {
+          await resumeFeatureConversation({
+            launchDir: targetDir,
+            route,
+            featureId: context.feature!.featureId,
+            checkout: context.executionCheckout,
+            branch: context.branch ?? context.feature!.context?.branch ?? "",
+            displayName: context.feature!.displayName,
+          })
+        }
+        return { changeId: resolution.changeID, featureId: resolution.featureId }
+      }
+      const view = await loadSpecsView(targetDir)
+      const input = buildIterateSessionInput(targetDir, view, resolution.changeID)
+      const { openIterateOpencodeWindow } = await import("./opencode")
+      await openIterateOpencodeWindow(input)
+      return { changeId: resolution.changeID }
+    }
+    case "propose-feature": {
+      // Foreground authoring runs inside the home session's terminal; the
+      // standalone browser delegates to the CLI flow instead of taking over
+      // a renderer it no longer owns.
+      if (!route) {
+        await reportHandoffBlocker(
+          "Propose runs foreground from the home session in this build",
+          ["launch `convoy` (interactive) and pick the work, or run `convoy feature new-work` to prepare work and propose there"],
+          route,
+        )
+        return { featureId: resolution.featureId }
+      }
+      const resolved = await resolveWorkContext({ launchDir: targetDir, featureId: resolution.featureId })
+      if (resolved.status !== "validated") {
+        await reportHandoffBlocker(resolved.reason, resolved.remediation, route)
+        return { featureId: resolution.featureId }
+      }
+      const context = resolved.context
+      await proposeForFeature({ launchDir: targetDir, route, featureId: context.feature!.featureId, checkout: context.executionCheckout, branch: context.branch ?? context.feature!.context?.branch ?? "", displayName: context.feature!.displayName })
+      return { featureId: resolution.featureId }
+    }
+    case "spin-change": {
+      // Spin out reuses `convoy spin`'s whole flow verbatim: same refusals,
+      // same worktree conventions, same /move handoff.
+      const { runSpin, printSpinHandoff } = await import("./spin")
+      const result = await runSpin({ targetDir, changeID: resolution.changeID })
+      printSpinHandoff(result)
+      // Interactive adoption (capability feature-spin, task 5.5): the
+      // stable feature spin registered is selected on the reopened board —
+      // no second record — where its managed conversation action opens in
+      // its worktree without a manual `cd`.
+      await reportHandoffBlocker(
+        `spin registered feature ${result.featureId} (${result.branch})`,
+        ["the feature is now selected — its actions offer conversation and pipeline launches without changing directories"],
+        route,
+      )
+      return { featureId: result.featureId }
+    }
+    case "continue-change": {
+      if (resolution.featureId) {
+        // Fresh destination validation before the launcher opens: the row's
+        // worktree was verified at view load; the handoff re-resolves through
+        // identity so a moved/removed context reports instead of launching
+        // against the stale path (task 1.4). The launcher itself keeps
+        // running in the launch checkout; the validated preset carries the
+        // feature's verified checkout for resource loading and preparation.
+        const resolved = await resolveWorkContext({ launchDir: targetDir, featureId: resolution.featureId, changeId: resolution.changeID })
+        if (resolved.status !== "validated") {
+          await reportHandoffBlocker(resolved.reason, resolved.remediation, route)
+          return { changeId: resolution.changeID, featureId: resolution.featureId }
+        }
+        await launchInteractiveRun(targetDir, resolution.changeID, featurePresetFromContext(resolved.context), route)
+        return { featureId: resolution.featureId }
+      }
+      await launchInteractiveRun(targetDir, resolution.changeID, { worktreeDir: resolution.worktreeDir, branch: resolution.branch }, route)
+      return { changeId: resolution.changeID }
+    }
+    case "close-change": {
+      // The board's handoff goes through the dual-mode dispatcher: a TTY gets
+      // the live checklist (progress, message confirmation, cleanup offers),
+      // a pipe gets the headless stdout summary — same event stream either way.
+      const { runCloseCommand } = await import("./feature-close-command")
+      await runCloseCommand(
+        {
+          targetDir,
+          changeID: resolution.changeID,
+          worktreeDir: resolution.worktreeDir,
+          branch: resolution.branch,
+        },
+        route,
+      )
+      return { changeId: resolution.changeID }
+    }
+    case "close-feature": {
+      // The identity-keyed handoff (task 6.4): close resolves through the
+      // feature's stable id, so a removed worktree still reaches the close
+      // review — it reports the recorded landing (with remaining follow-ups)
+      // or the concrete missing-context blocker, never a silent no-op.
+      const { runCloseCommand } = await import("./feature-close-command")
+      await runCloseCommand({ targetDir, featureId: resolution.featureId }, route)
+      return { featureId: resolution.featureId }
+    }
+    case "archive-change-main": {
+      const { runArchiveOnMain } = await import("./feature-close-command")
+      await runArchiveOnMain({ targetDir, changeID: resolution.changeID })
+      return { changeId: resolution.changeID }
+    }
+  }
+}
+
+/** The launcher preset a validated work context produces: identity, revision, contracts, recorded base. */
+function featurePresetFromContext(context: ValidatedWorkContext["context"]): {
+  worktreeDir: string
+  branch: string
+  featureId: string
+  associationRevision?: number
+  contracts?: readonly string[]
+  baseRef?: string
+} {
+  return {
+    worktreeDir: context.executionCheckout,
+    branch: context.branch ?? context.feature?.context?.branch ?? "",
+    featureId: context.feature!.featureId,
+    ...(context.associationRevision !== undefined ? { associationRevision: context.associationRevision } : {}),
+    ...(context.contracts.length > 0 ? { contracts: context.contracts } : {}),
+    ...(context.intendedBase ? { baseRef: context.intendedBase } : {}),
+  }
+}
+
+/**
+ * Whether the focused contract's planning source exists in the validated
+ * checkout (active change tree or archive path). Authoring and implementation
+ * need real files there; a missing source reports its condition instead of
+ * silently reading the launch checkout's copy.
+ */
+async function handoffContractSourcePresent(context: ValidatedWorkContext["context"]): Promise<boolean> {
+  const source = context.focusedContract?.sourceRoot
+  if (!source) return true
+  try {
+    await stat(source)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** Reports an unavailable handoff without launching anything. */
+async function reportHandoffBlocker(reason: string, remediation: readonly string[], route?: TuiRoute): Promise<void> {
+  const message = [reason, ...remediation].join("\n")
+  if (route) {
+    const { showNoticeTui } = await import("./notice-tui")
+    await showNoticeTui(route, { title: "work context unavailable", message })
     return
   }
-  if (resolution.type === "iterate-change") {
-    const view = await loadSpecsView(targetDir)
-    const input = buildIterateSessionInput(targetDir, view, resolution.changeID)
-    const { openIterateOpencodeWindow } = await import("./opencode")
-    // The run-dir grant lets the standalone session read its own planning
-    // files without prompting; it outlives Convoy and does its own authoring.
-    await openIterateOpencodeWindow(input)
-    return
+  process.stderr.write(`${message}\n`)
+}
+
+/** The shared writer-claim acquisition for an authoring conversation in a checkout. */
+async function claimAuthoringWriter(input: { launchDir: string; checkout: string; branch: string; sessionId: string; route?: TuiRoute }): Promise<boolean> {
+  const { lifecycleCommonDir } = await import("./feature-lifecycle/store")
+  const { acquireWriterClaim, writerConflictGuidance } = await import("./feature-lifecycle/writer-claims")
+  const commonDir = await lifecycleCommonDir(input.launchDir).catch(() => undefined)
+  if (!commonDir) return true
+  const acquired = await acquireWriterClaim({
+    commonDir,
+    branch: input.branch,
+    checkoutPath: input.checkout,
+    kind: "authoring",
+    owner: input.sessionId,
+    // Re-opening the conversation that already holds the claim is the same
+    // writer continuing, not a takeover (design D5 reconciliation).
+    reconcileOwner: input.sessionId,
+  })
+  if ("claim" in acquired) return true
+  const guidance = acquired.claim ? writerConflictGuidance(acquired.claim) : ["a writer claim for this checkout is in an uncertain state — reconcile it before starting another writer"]
+  await reportHandoffBlocker(guidance[0], guidance.slice(1), input.route)
+  return false
+}
+
+/** Releases the authoring claim when the session is provably quiescent (design D5). */
+async function releaseAuthoringWriterIfIdle(input: { launchDir: string; checkout: string; branch: string; sessionId: string }): Promise<void> {
+  const { lifecycleCommonDir } = await import("./feature-lifecycle/store")
+  const { releaseWriterClaim } = await import("./feature-lifecycle/writer-claims")
+  const { sessionActivity } = await import("./conversations")
+  const commonDir = await lifecycleCommonDir(input.launchDir).catch(() => undefined)
+  if (!commonDir) return
+  const activity = await sessionActivity({ checkout: input.checkout, ref: { harness: "opencode", sessionId: input.sessionId } }).catch(() => "unknown" as const)
+  // A busy or unanswerable session keeps its claim: view detachment is not
+  // evidence the agent stopped (design D5). The claim's staleness rules
+  // reconcile it later if the process is gone.
+  if (activity === "idle") await releaseWriterClaim({ commonDir, branch: input.branch, owner: input.sessionId })
+}
+
+/**
+ * Opens (or resumes) the feature's authoring conversation foreground in this
+ * terminal (tasks 4.5/3.2): the default resume target is the most recently
+ * selected linked conversation; without one a new conversation is created
+ * and linked. On client exit the specs session reopens with the feature
+ * selected and its assessment refreshed — no pipeline starts during
+ * authoring, and the writer claim reconciles against actual session
+ * activity instead of the view having closed.
+ */
+async function resumeFeatureConversation(input: {
+  launchDir: string
+  route: TuiRoute
+  featureId: string
+  checkout: string
+  branch: string
+  displayName: string
+}): Promise<void> {
+  const { readConversationRecord, addConversation, touchConversationSelection } = await import("./feature-lifecycle/conversations")
+  const { createAuthoringConversation, validateAuthoringSession, openConversationForeground } = await import("./conversations")
+  const { lifecycleCommonDir } = await import("./feature-lifecycle/store")
+  const commonDir = await lifecycleCommonDir(input.launchDir).catch(() => undefined)
+  if (!commonDir) return
+
+  // Choose the conversation to open: the remembered default, else the most
+  // recently linked one; an unavailable reference is reported and replaced by
+  // an explicit new conversation without claiming continuity.
+  const record = await readConversationRecord(commonDir, input.featureId)
+  const candidates = record.status === "found" ? [...record.value.conversations] : []
+  candidates.sort((a, b) => (b.lastSelectedAt ?? b.createdAt) - (a.lastSelectedAt ?? a.createdAt))
+  let ref: { harness: "opencode"; sessionId: string } | undefined
+  let unavailableNotice: string | undefined
+  for (const candidate of candidates) {
+    const probe = { harness: "opencode" as const, sessionId: candidate.sessionId }
+    const validated = await validateAuthoringSession({ ref: probe, checkout: input.checkout })
+    if (validated.status === "available") {
+      ref = probe
+      break
+    }
+    unavailableNotice = `the linked session ${candidate.sessionId} is unavailable (${validated.reason}) — a new conversation was created; continuity was not claimed`
   }
-  if (resolution.type === "spin-change") {
-    // Spin out reuses `convoy spin`'s whole flow verbatim: same refusals,
-    // same worktree conventions, same /move handoff.
-    const { runSpin, printSpinHandoff } = await import("./spin")
-    const result = await runSpin({ targetDir, changeID: resolution.changeID })
-    printSpinHandoff(result)
-    return
+  if (!ref) {
+    ref = await createAuthoringConversation({ checkout: input.checkout, title: input.displayName })
   }
-  if (resolution.type === "continue-change") {
-    await launchInteractiveRun(targetDir, resolution.changeID, { worktreeDir: resolution.worktreeDir, branch: resolution.branch }, route)
-    return
+  await addConversation({ commonDir, featureId: input.featureId, sessionId: ref.sessionId })
+  await touchConversationSelection({ commonDir, featureId: input.featureId, sessionId: ref.sessionId })
+
+  if (!(await claimAuthoringWriter({ launchDir: input.launchDir, checkout: input.checkout, branch: input.branch, sessionId: ref.sessionId, route: input.route }))) return
+  // Suspend the shared home-session renderer; the conversation owns the
+  // terminal until its client exits (design D4).
+  input.route.session.renderer.suspend()
+  let exitCode: number
+  try {
+    exitCode = await openConversationForeground({ checkout: input.checkout, ref, suspend: () => {}, resume: () => {} })
+  } finally {
+    input.route.session.renderer.resume()
   }
-  if (resolution.type === "close-change") {
-    // The board's handoff goes through the dual-mode dispatcher: a TTY gets
-    // the live checklist (progress, message confirmation, cleanup offers),
-    // a pipe gets the headless stdout summary — same event stream either way.
-    const { runCloseCommand } = await import("./feature-close-command")
-    await runCloseCommand(
-      {
-        targetDir,
-        changeID: resolution.changeID,
-        worktreeDir: resolution.worktreeDir,
-        branch: resolution.branch,
-      },
-      route,
+  await releaseAuthoringWriterIfIdle({ launchDir: input.launchDir, checkout: input.checkout, branch: input.branch, sessionId: ref.sessionId })
+  if (unavailableNotice || exitCode !== 0) {
+    await reportHandoffBlocker(
+      unavailableNotice ?? `the conversation client exited with code ${exitCode}`,
+      ["reopen the work to continue — its conversation and artifacts refreshed on return"],
+      input.route,
+    )
+  }
+}
+
+/**
+ * Runs the project's authoring workflow for a feature (task 5.3): validates
+ * the project command through the supported command API, creates the
+ * authoring conversation, invokes the command inside it, and hands the
+ * terminal to the foreground client. On return, newly authored changes are
+ * surfaced for explicit association review — a differing change id never
+ * renames the work's branch.
+ */
+async function proposeForFeature(input: {
+  launchDir: string
+  route: TuiRoute
+  featureId: string
+  checkout: string
+  branch: string
+  displayName: string
+}): Promise<void> {
+  const { bootOpencodeServerFrom, connectOpencode } = await import("./opencode")
+  const { createAuthoringConversation, listAuthoringCommands, invokeAuthoringCommand, openConversationForeground } = await import("./conversations")
+  const { addConversation, touchConversationSelection } = await import("./feature-lifecycle/conversations")
+  const { lifecycleCommonDir } = await import("./feature-lifecycle/store")
+
+  // Command discovery through the supported API, before any session exists:
+  // an absent workflow disables the action instead of imitating success.
+  const server = await bootOpencodeServerFrom(input.checkout)
+  let commandName: string | undefined
+  try {
+    const commands = await listAuthoringCommands({ checkout: input.checkout, server })
+    if (commands === "unknown") {
+      await reportHandoffBlocker("the project's authoring commands could not be discovered", ["run `convoy opencode install`-free: check the project's .opencode/commands/ directory"], input.route)
+      return
+    }
+    commandName = commands.find((name) => name === "opsx-propose") ?? commands.find((name) => name.endsWith("propose"))
+  } finally {
+    server.close()
+  }
+  if (!commandName) {
+    // Propose is unavailable, exactly as the work-context capability requires:
+    // the action is reported rather than faked, and ordinary conversation
+    // stays usable through the feature detail.
+    await reportHandoffBlocker(
+      `this project has no supported proposal workflow command (looked for opsx-propose under .opencode/commands/)`,
+      ["author the change manually in a conversation, then adopt it with `convoy feature adopt`"],
+      input.route,
     )
     return
   }
-  if (resolution.type === "close-feature") {
-    // The identity-keyed handoff (task 6.4): close resolves through the
-    // feature's stable id, so a removed worktree still reaches the close
-    // review — it reports the recorded landing (with remaining follow-ups)
-    // or the concrete missing-context blocker, never a silent no-op.
-    const { runCloseCommand } = await import("./feature-close-command")
-    await runCloseCommand({ targetDir, featureId: resolution.featureId }, route)
+
+  const serverForCommand = await bootOpencodeServerFrom(input.checkout)
+  let ref: { harness: "opencode"; sessionId: string } | undefined
+  try {
+    ref = await createAuthoringConversation({ checkout: input.checkout, title: input.displayName, server: serverForCommand })
+    await invokeAuthoringCommand({ ref, server: serverForCommand, command: commandName })
+  } catch (error) {
+    await reportHandoffBlocker(error instanceof Error ? error.message : String(error), ["the conversation was not started; retry Propose or open an ordinary conversation"], input.route)
     return
+  } finally {
+    if (ref) serverForCommand.close()
   }
-  if (resolution.type === "archive-change-main") {
-    const { runArchiveOnMain } = await import("./feature-close-command")
-    await runArchiveOnMain({ targetDir, changeID: resolution.changeID })
-    return
+
+  const commonDir = await lifecycleCommonDir(input.launchDir).catch(() => undefined)
+  if (commonDir) {
+    await addConversation({ commonDir, featureId: input.featureId, sessionId: ref.sessionId, label: "proposal" })
+    await touchConversationSelection({ commonDir, featureId: input.featureId, sessionId: ref.sessionId })
+  }
+  if (!(await claimAuthoringWriter({ launchDir: input.launchDir, checkout: input.checkout, branch: input.branch, sessionId: ref.sessionId, route: input.route }))) return
+  input.route.session.renderer.suspend()
+  let exitCode: number
+  try {
+    exitCode = await openConversationForeground({ checkout: input.checkout, ref, suspend: () => {}, resume: () => {} })
+  } finally {
+    input.route.session.renderer.resume()
+  }
+  await releaseAuthoringWriterIfIdle({ launchDir: input.launchDir, checkout: input.checkout, branch: input.branch, sessionId: ref.sessionId })
+
+  // Association review on return (task 5.4): newly authored changes are
+  // surfaced for the explicit revise workflow — never auto-associated, and
+  // a differing change id never renames the branch.
+  const { activeChangeIdsAt } = await import("./feature-lifecycle/observe")
+  const { resolveFeature } = await import("./feature-lifecycle/resolver")
+  const authored = await activeChangeIdsAt(input.checkout).catch(() => [] as string[])
+  const resolution = await resolveFeature({ cwd: input.launchDir, featureId: input.featureId }).catch(() => undefined)
+  const known = resolution?.status === "verified" ? resolution.feature.contracts.map((contract) => contract.changeId) : []
+  const fresh = authored.filter((id) => !known.includes(id))
+  if (fresh.length > 0) {
+    await reportHandoffBlocker(
+      `newly authored change${fresh.length === 1 ? "" : "s"}: ${fresh.join(", ")}`,
+      [`review and associate ${fresh.length === 1 ? "it" : "them"} explicitly via the actions menu (\`convoy feature revise ${input.featureId}\` adds a contract)`],
+      input.route,
+    )
+  }
+  if (exitCode !== 0) {
+    await reportHandoffBlocker(`the conversation client exited with code ${exitCode}`, ["reopen the work to continue"], input.route)
   }
 }
 

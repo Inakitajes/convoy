@@ -199,7 +199,7 @@ test("i iterates on the selected change from the root list", async () => {
 
   session.press("i")
 
-  await expect(session.instance.result).resolves.toEqual({ type: "iterate-change", changeID: "add-login" })
+  await expect(session.instance.result).resolves.toEqual({ type: "iterate-change", changeID: "add-login", presentation: "foreground" })
 })
 
 test("a feature's history view never dispatches apply or iterate, even when its display name names an active change", async () => {

@@ -56,7 +56,7 @@ export type LifecycleObservations = {
 
 /** One applicable lifecycle action with its blockers and remediation (design D5). */
 export type LifecycleAction = {
-  id: "close" | "continue" | "adopt" | "bind" | "archive-on-main" | "push" | "cleanup-worktree" | "cleanup-branch" | "history" | "spin"
+  id: "close" | "continue" | "adopt" | "bind" | "archive-on-main" | "push" | "cleanup-worktree" | "cleanup-branch" | "history" | "spin" | "propose" | "converse"
   label: string
   applicable: boolean
   enabled: boolean
@@ -165,6 +165,16 @@ export function summarize(observations: LifecycleObservations): { summary: strin
   const archived = observations.contracts.length > 0 && observations.contracts.every((contract) => contract.state === "verified-archived")
   const prerequisites = closeStartPrerequisites(observations)
 
+  // Pre-proposal state (capability work-context, task 6.2): a verified
+  // zero-contract feature with no execution is awaiting proposal — never
+  // "in implementation" and never close-ready (empty task counts imply
+  // nothing). The close blocker names the concrete prerequisite.
+  if (observations.contracts.length === 0) {
+    blockers.push("no contracts: propose a change or associate an existing one before closing")
+    blockers.push(...prerequisites.blockers)
+    return { summary: "Awaiting proposal", blockers, closeStartPrerequisitesPass: false }
+  }
+
   if (observations.integration === "stale") {
     blockers.push("landing evidence is stale (feature tip advanced or landing unreachable)")
     return { summary: "Integration evidence stale", blockers, closeStartPrerequisitesPass: false }
@@ -236,6 +246,30 @@ export function assessLifecycle(observations: LifecycleObservations): LifecycleA
     applicable: observations.feature !== undefined && observations.context.verification === "verified",
     enabled: observations.feature !== undefined && observations.context.verification === "verified",
     blockers: observations.context.verification === "verified" ? [] : [observations.context.reason ?? "context not verified"],
+    remediation: [],
+    ...(featureId ? { target: { featureId } } : {}),
+  })
+  // Authoring actions (capability work-context/work-conversations): a
+  // verified context can host a conversation; proposing is offered whenever
+  // the project workflow can run in that checkout — for pre-proposal work it
+  // is the primary action, for contract-bearing work it creates the next
+  // candidate for explicit association review.
+  const contextVerified = observations.context.verification === "verified"
+  actions.push({
+    id: "converse",
+    label: "Open conversation",
+    applicable: observations.feature !== undefined && contextVerified,
+    enabled: observations.feature !== undefined && contextVerified,
+    blockers: contextVerified ? [] : [observations.context.reason ?? "context not verified"],
+    remediation: [],
+    ...(featureId ? { target: { featureId } } : {}),
+  })
+  actions.push({
+    id: "propose",
+    label: observations.contracts.length === 0 ? "Propose a change" : "Propose next change",
+    applicable: observations.feature !== undefined && contextVerified,
+    enabled: observations.feature !== undefined && contextVerified,
+    blockers: contextVerified ? [] : [observations.context.reason ?? "context not verified"],
     remediation: [],
     ...(featureId ? { target: { featureId } } : {}),
   })

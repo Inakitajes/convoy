@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
-import { LaunchPicker, detectInsideWorktree } from "../src/launch-tui"
+import { LaunchPicker, detectInsideWorktree, loadLauncherResources } from "../src/launch-tui"
 import { buildRunPlan } from "../src/run-plan"
 import { createTestRenderer } from "@opentui/core/testing"
 import { execFile as nodeExecFile } from "node:child_process"
@@ -205,5 +205,53 @@ describe("the continue handoff's dirty preflight", () => {
     } finally {
       await closePicker(session)
     }
+  })
+})
+
+describe("launcher resource loading (task 1.3: work-scoped preparation)", () => {
+  test("a feature handoff loads config, history, and specs from the worktree, not the launch checkout", async () => {
+    const { mainDir, worktreeDir } = await makeRepoWithWorktree()
+    // Main and the worktree deliberately disagree: main forces isolation and
+    // disables history; the worktree disables isolation and enables history,
+    // and carries the only spec.
+    await Bun.write(join(mainDir, ".convoy", "config.yaml"), "defaults:\n  worktree: true\n  prdHistory: false\n")
+    await Bun.write(join(worktreeDir, ".convoy", "config.yaml"), "defaults:\n  worktree: false\n  prdHistory: true\n")
+    const changeDir = join(worktreeDir, "openspec", "changes", "add-foo")
+    await Bun.write(join(changeDir, "proposal.md"), "# Add foo\n")
+    await Bun.write(join(mainDir, "unrelated-dirt.txt"), "dirty main, clean worktree\n")
+
+    const fromFeature = await loadLauncherResources({
+      targetDir: mainDir,
+      presetFeature: { changeID: "add-foo", worktreeDir, branch: "feat/add-foo" },
+      proposeBranchName: undefined as never,
+      checkBranchName: undefined as never,
+    } as never)
+
+    // The worktree's configuration drives the launcher (differing main/worktree config).
+    expect(fromFeature.config?.defaults.worktree).toBe(false)
+    expect(fromFeature.config?.defaults.prdHistory).toBe(true)
+    expect(fromFeature.history.enabled).toBe(true)
+    // The spec that exists only in the worktree is visible; main's dirt is irrelevant.
+    expect(fromFeature.specs.map((spec) => spec.id)).toContain("add-foo")
+    // The nested-isolation probe still watches where the launcher itself runs
+    // (main here), not the handoff's destination.
+    expect(fromFeature.insideWorktree).toBeUndefined()
+  })
+
+  test("a plain launch keeps loading resources from the launch checkout", async () => {
+    const { mainDir, worktreeDir } = await makeRepoWithWorktree()
+    await Bun.write(join(mainDir, ".convoy", "config.yaml"), "defaults:\n  worktree: true\n")
+    await Bun.write(join(worktreeDir, ".convoy", "config.yaml"), "defaults:\n  worktree: false\n")
+    const changeDir = join(mainDir, "openspec", "changes", "on-main")
+    await Bun.write(join(changeDir, "proposal.md"), "# On main\n")
+
+    const standalone = await loadLauncherResources({
+      targetDir: mainDir,
+      proposeBranchName: undefined as never,
+      checkBranchName: undefined as never,
+    } as never)
+    expect(standalone.config?.defaults.worktree).toBe(true)
+    expect(standalone.specs.map((spec) => spec.id)).toContain("on-main")
+    expect(standalone.insideWorktree).toBeUndefined()
   })
 })

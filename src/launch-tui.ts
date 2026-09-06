@@ -48,6 +48,29 @@ export type LaunchRunSelection = {
   initializeGit?: boolean
   /** OpenSpec change id picked in the prompt step; becomes `--change`. */
   change?: string
+  /** A feature-scoped handoff: the plan's feature link resolves by this stable identity (work-context, D1/D2). */
+  featureId?: string
+  /** The feature's recorded intended base; set so base resolution uses the recorded base, not re-detection. */
+  baseRef?: string
+}
+
+/**
+ * A feature-scoped handoff (continue/apply) from the board or specs browser:
+ * the pinned change plus the verified implementation context. When `featureId`
+ * is present, the plan resolves its feature link by stable identity — never by
+ * branch spelling — and freezes the association revision for execution-time
+ * revalidation (run-launcher, task 4.4). The launcher loads its resources
+ * (config, pipelines, history, specs, dirty state) from `worktreeDir` so a
+ * feature checkout's configuration and contracts drive the review.
+ */
+export type LaunchFeaturePreset = {
+  changeID: string
+  worktreeDir: string
+  branch: string
+  featureId?: string
+  associationRevision?: number
+  contracts?: readonly string[]
+  baseRef?: string
 }
 
 /** A branch name suggested for the run, plus where it came from so the step can say so. */
@@ -105,11 +128,11 @@ export type LaunchRunTuiOptions = {
    */
   presetChange?: string
   /**
-   * A feature-row "continue" handoff from the control board: the change is
-   * pinned and the run reuses the feature's existing worktree and branch —
+   * A feature-row "continue" or identity-carrying "apply" handoff: the change
+   * is pinned and the run reuses the feature's existing worktree and branch —
    * no new worktree is created and the branch namer is never invoked (D7).
    */
-  presetFeature?: { changeID: string; worktreeDir: string; branch: string }
+  presetFeature?: LaunchFeaturePreset
   /** Resolves the run without effects so Review and the runner share one frozen plan. */
   prepareRun(selection: LaunchRunSelection): Promise<LaunchRunPreparation>
   /** Asks the naming model for a branch name. Injected so the launcher stays free of the worktree/opencode modules. */
@@ -382,12 +405,29 @@ export async function defaultDirtyStatus(dir: string): Promise<string> {
 /** The terminal width at or below which the launcher stacks its two panels. */
 export const compactLaunchMaxWidth = 84
 
-export async function launchRunTui(options: LaunchRunTuiOptions, route?: TuiRoute): Promise<LaunchRunTuiResult> {
-  if (!process.stdin.isTTY || !process.stdout.isTTY) {
-    throw new Error("convoy needs an interactive terminal to open the launcher")
-  }
+/** The resources a launcher session is built from, resolved once per launch (task 1.3). */
+export type LauncherResources = {
+  config: ConvoyConfig | undefined
+  choices: PipelineChoice[]
+  worktree: { isolate: boolean; reason: string }
+  history: LaunchHistoryContext
+  specs: OpenSpecChangeSummary[]
+  autoSpecIds: string[]
+  insideWorktree?: InsideWorktree
+}
 
-  const config = await loadMergedConvoyConfig(options.targetDir)
+/**
+ * Resolves the launcher's resources before the picker opens (capability
+ * run-launcher, task 1.3): work-scoped preparation loads configuration,
+ * pipeline choices, prompt history, specs, and the auto-attach contract list
+ * from the execution checkout — the feature worktree for a feature handoff,
+ * the launch checkout otherwise — so review reflects the checkout the run
+ * will execute in. The nested-isolation probe still watches the launcher's
+ * own checkout, which is a property of where Convoy runs, not of the handoff.
+ */
+export async function loadLauncherResources(options: LaunchRunTuiOptions): Promise<LauncherResources> {
+  const resourceDir = options.presetFeature?.worktreeDir ?? options.targetDir
+  const config = await loadMergedConvoyConfig(resourceDir)
   const choices = pipelineChoices(config, buildAgentRegistry(config))
 
   // Unset config means "decide per branch": isolating is right on a trunk, but
@@ -396,8 +436,8 @@ export async function launchRunTui(options: LaunchRunTuiOptions, route?: TuiRout
     config?.defaults.worktree === undefined
       ? await resolveWorktreeDefault(options.targetDir)
       : { isolate: config.defaults.worktree, reason: "set by defaults.worktree" }
-  const history = await loadLaunchHistory(options.targetDir, config?.defaults.prdHistory ?? true)
-  const specs = await listOpenSpecChanges(options.targetDir)
+  const history = await loadLaunchHistory(resourceDir, config?.defaults.prdHistory ?? true)
+  const specs = await listOpenSpecChanges(resourceDir)
   // The change the run would attach without being asked: same selection order
   // the frozen plan applies (single change, branch match), minus the
   // diff-composed rule that needs the run's base ref. That is exactly the
@@ -406,11 +446,20 @@ export async function launchRunTui(options: LaunchRunTuiOptions, route?: TuiRout
   // and the real resolution at launch both re-resolve against the full inputs.
   const autoSpecIds =
     specs.length > 0
-      ? await loadOpenSpecBundle({ targetDir: options.targetDir, branch: history.branch })
+      ? await loadOpenSpecBundle({ targetDir: resourceDir, branch: history.branch })
           .then((bundle) => (bundle ? [...bundle.changeIds] : []))
           .catch(() => [] as string[])
       : []
   const insideWorktree = await detectInsideWorktree(options.targetDir)
+  return { config, choices, worktree, history, specs, autoSpecIds, ...(insideWorktree ? { insideWorktree } : {}) }
+}
+
+export async function launchRunTui(options: LaunchRunTuiOptions, route?: TuiRoute): Promise<LaunchRunTuiResult> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    throw new Error("convoy needs an interactive terminal to open the launcher")
+  }
+
+  const { config, choices, worktree, history, specs, autoSpecIds, insideWorktree } = await loadLauncherResources(options)
 
   if (route) {
     const scene = sceneForRoute(route, "convoy-launch-scene")!
@@ -783,7 +832,7 @@ export class LaunchPicker {
     /** A change handed in pre-selected; applied before the first render. */
     presetChange?: string,
     /** A feature-row continue handoff: reuses the feature's worktree and branch (D7). */
-    private readonly presetFeature?: { changeID: string; worktreeDir: string; branch: string },
+    private readonly presetFeature?: LaunchFeaturePreset,
     /** Set when the launcher itself runs inside a worktree; drives the nested-isolation warning. */
     private readonly insideWorktree?: InsideWorktree,
     private readonly scene?: TuiScene,
@@ -1570,7 +1619,10 @@ export class LaunchPicker {
     this.render()
     try {
       const { repoBootstrapStatus } = await import("./git")
-      const status = await repoBootstrapStatus(this.targetDir)
+      // Bootstrap probes the execution tree: for a feature handoff the run
+      // executes in the feature worktree, so its readiness decides whether an
+      // initialization step is offered — never the launch directory's.
+      const status = await repoBootstrapStatus(this.executionDir())
       const selection = this.runSelection(pipelineName, status !== "ready")
       const preparation = await this.callbacks.prepareRun(selection)
       // The review rechecks the execution tree instead of trusting any status
@@ -1674,6 +1726,12 @@ export class LaunchPicker {
       gateway: this.gateway,
       isolateWorktree: this.toggleState.worktree,
       ...(frozenBranch ?? {}),
+      // A feature-scoped handoff rides its stable identity and recorded base:
+      // the plan's feature link resolves by identity (never branch spelling)
+      // and base resolution uses the recorded intended base rather than
+      // re-detecting one (work-context, D1/D2; the advisor's identity rule).
+      ...(this.presetFeature?.featureId ? { featureId: this.presetFeature.featureId } : {}),
+      ...(this.presetFeature?.baseRef ? { baseRef: this.presetFeature.baseRef } : {}),
       ...(initializeGit ? { initializeGit: true } : {}),
       ...(this.selectedChangeId ? { change: this.selectedChangeId } : {}),
     }

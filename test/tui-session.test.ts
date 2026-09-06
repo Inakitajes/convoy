@@ -50,9 +50,9 @@ test("Home and a destination swap scenes without destroying the shared renderer"
 
   try {
     const firstScene = session.openScene("convoy-home-scene")
-    const home = new HomeLauncher(testRenderer.renderer, view.targetDir, { scene: firstScene })
+    const home = new HomeLauncher(testRenderer.renderer, view.targetDir, { scene: firstScene, workRows: [] })
     testRenderer.renderer.keyInput.emit("keypress", keyEvent("s"))
-    await expect(home.result).resolves.toBe("specs")
+    await expect(home.result).resolves.toEqual({ type: "destination", destination: "specs" })
 
     expect(testRenderer.renderer.isDestroyed).toBeFalse()
     expect(testRenderer.renderer.root.getChildrenCount()).toBe(1)
@@ -68,9 +68,9 @@ test("Home and a destination swap scenes without destroying the shared renderer"
     expect(testRenderer.renderer.isDestroyed).toBeFalse()
 
     const secondScene = session.openScene("convoy-home-scene")
-    const returnedHome = new HomeLauncher(testRenderer.renderer, view.targetDir, { scene: secondScene, initialSelection: "specs" })
+    const returnedHome = new HomeLauncher(testRenderer.renderer, view.targetDir, { scene: secondScene, workRows: [] })
     await testRenderer.renderOnce()
-    expect(testRenderer.captureCharFrame()).toContain("project's living specification")
+    expect(testRenderer.captureCharFrame()).toContain("AUXILIARY")
 
     testRenderer.renderer.keyInput.emit("keypress", keyEvent("q"))
     await expect(returnedHome.result).resolves.toBeUndefined()

@@ -2,28 +2,28 @@ Baseline: PR #104 (`a20debe`, implemented `stable-feature-lifecycle`). Tasks bel
 
 ## 1. Reconcile the baseline and route feature destinations
 
-- [ ] 1.1 Verify stable-feature-lifecycle is synchronized before this change is applied, then add a plain work-context projection over its existing resolver/assessment; verify explicit association, arbitrary branch names, missing context, and full multi-contract sets without a second resolver.
-- [ ] 1.2 Route remaining change-shaped Apply, Iterate, and Continue handoffs through feature identity and source references, preserving identity-based close without global cwd mutation; verify a temporary main checkout can target a spec that exists only in another worktree.
-- [ ] 1.3 Resolve the checkout before loading launcher configuration, pipeline choices, history, specs, relative attachments, and dirty state; verify differing main/worktree configuration and unrelated dirty-main fixtures select the worktree behavior.
-- [ ] 1.4 Revalidate destination identity before accepting effects and preserve selection on cancelled launch/return; verify deleting or changing the destination after Review does not execute elsewhere and cancellation starts no run.
+- [x] 1.1 Verify stable-feature-lifecycle is synchronized before this change is applied, then add a plain work-context projection over its existing resolver/assessment; verify explicit association, arbitrary branch names, missing context, and full multi-contract sets without a second resolver.
+- [x] 1.2 Route remaining change-shaped Apply, Iterate, and Continue handoffs through feature identity and source references, preserving identity-based close without global cwd mutation; verify a temporary main checkout can target a spec that exists only in another worktree.
+- [x] 1.3 Resolve the checkout before loading launcher configuration, pipeline choices, history, specs, relative attachments, and dirty state; verify differing main/worktree configuration and unrelated dirty-main fixtures select the worktree behavior.
+- [x] 1.4 Revalidate destination identity before accepting effects and preserve selection on cancelled launch/return; verify deleting or changing the destination after Review does not execute elsewhere and cancellation starts no run.
 
 ## 2. Verify conversation integration feasibility
 
-- [ ] 2.1 Exercise public OpenCode session creation, exact-ID opening, client detach, service restart, and history resumption in a disposable checkout; record commands, installed versions, and observed outcomes in a validation note without relying on internal session storage edits.
-- [ ] 2.2 Prototype foreground OpenTUI suspend/child/restore using the installed terminal APIs; record normal exit, startup failure, non-zero exit, interrupt, and resize outcomes in a real terminal. Do not promote the conversation path if the foreground contract fails.
-- [ ] 2.3 Verify project authoring-command discovery and invocation for the existing `opsx-propose` command through supported OpenCode interfaces; record a successful invocation and an absent-command result with no global installation side effect.
+- [x] 2.1 Exercise public OpenCode session creation, exact-ID opening, client detach, service restart, and history resumption in a disposable checkout; record commands, installed versions, and observed outcomes in a validation note without relying on internal session storage edits.
+- [x] 2.2 Prototype foreground OpenTUI suspend/child/restore using the installed terminal APIs; record normal exit, startup failure, non-zero exit, interrupt, and resize outcomes in a real terminal. Do not promote the conversation path if the foreground contract fails.
+- [x] 2.3 Verify project authoring-command discovery and invocation for the existing `opsx-propose` command through supported OpenCode interfaces; record a successful invocation and an absent-command result with no global installation side effect.
 
 ## 3. Extend feature-owned authoring associations
 
-- [ ] 3.1 Add versioned conversation associations under existing feature directories using lifecycle store/locking conventions; verify old FeatureRecord compatibility, concurrent conversation updates, corrupt/unsupported records, and that navigation writes do not change associationRevision.
+- [x] 3.1 Add versioned conversation associations under existing feature directories using lifecycle store/locking conventions; verify old FeatureRecord compatibility, concurrent conversation updates, corrupt/unsupported records, and that navigation writes do not change associationRevision.
 - [ ] 3.2 Connect feature-owned conversation data to existing discovery and explicit adopt/bind/revise actions; verify arbitrary branch adoption remains explicit, browsing writes nothing, and no parallel workId or registry is created.
 - [ ] 3.3 Propagate existing missing/ambiguous/unreadable/rebind outcomes to work navigation and conversation actions; verify no fallback to main or foreign sources and that binding retains feature/session history without bypassing active-execution blockers.
 - [ ] 3.4 Remove remaining UI-only heuristic authority in favor of the shared lifecycle assessment and resolver; verify even a sole candidate requires explicit association, full contract sets survive focused reading, and unknown evidence never enables close.
 
 ## 4. Manage conversations and terminal return
 
-- [ ] 4.1 Add the minimal conversation adapter and OpenCode implementation with harness-qualified session references; verify exact-ID resume, unavailable-session reporting, multiple linked conversations, and separation from phase session history.
-- [ ] 4.2 Extract generic window/pane hosting from OpenCode invocation construction and implement the foreground terminal host; verify executable arguments/cwd, restoration in every exit path, and existing explicit external backends.
+- [x] 4.1 Add the minimal conversation adapter and OpenCode implementation with harness-qualified session references; verify exact-ID resume, unavailable-session reporting, multiple linked conversations, and separation from phase session history.
+- [x] 4.2 Extract generic window/pane hosting from OpenCode invocation construction and implement the foreground terminal host; verify executable arguments/cwd, restoration in every exit path, and existing explicit external backends.
 - [ ] 4.3 Implement conversation-service discovery and lifecycle independent of run servers using existing coordinator patterns; verify active client detachment keeps required service alive and a run dashboard closing does not invalidate authoring sessions.
 - [ ] 4.4 Coordinate shared lifecycle execution observations and managed writer ownership between authoring and run launches by validated checkout identity; verify conflicts across two Convoy instances, explicit control transitions, stale-claim reconciliation, and independent worktree concurrency.
 - [ ] 4.5 Wire Iterate and conversation selection to foreground open/resume with return to the originating work/spec; verify no pipeline starts during authoring and changed artifacts refresh on return.

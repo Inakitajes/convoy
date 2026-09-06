@@ -4,6 +4,7 @@ import { join, resolve, sep } from "node:path"
 
 import { startControlServer } from "./control-server"
 import { ControlProgress, type ControlProgressOptions } from "./control-progress"
+import { hasWritableStep } from "./pipeline"
 import { pidAlive } from "./runs"
 import { hostedTeardownFromError, isUserAbortError, run } from "./runner"
 import { isOfficialStandaloneExecutable } from "./update"
@@ -312,6 +313,36 @@ export async function runCoordinateBoot(
   if (!plan) throw new Error(`launch file ${launchPath} carries no reviewed plan`)
 
   const server = await deps.startControlServer()
+  // Managed writer ownership (capability work-conversations, design D5): the
+  // coordinator is the run's writer, so its claim lives exactly as long as
+  // the run does — acquired here (the coordinator's own PID is the liveness
+  // anchor) and released in `finally`. The launch path refuses a new writer
+  // in the same checkout before this child ever spawns; an acquisition
+  // conflict or persistence failure stops the run (fail closed).
+  let writerClaim: { branch: string } | undefined
+  if (hasWritableStep(plan.pipeline)) {
+    const { lifecycleCommonDir } = await import("./feature-lifecycle/store")
+    const { acquireWriterClaim, writerConflictGuidance } = await import("./feature-lifecycle/writer-claims")
+    const commonDir = await lifecycleCommonDir(plan.target.directory)
+    if (commonDir) {
+      const { currentBranch } = await import("./git")
+      const branch = plan.target.branch ?? (await currentBranch(plan.target.directory).catch(() => undefined))
+      if (branch) {
+        const acquired = await acquireWriterClaim({
+          commonDir,
+          branch,
+          checkoutPath: plan.target.directory,
+          kind: "pipeline",
+        })
+        if ("claim" in acquired) {
+          writerClaim = { branch }
+        } else {
+          const detail = acquired.claim ? writerConflictGuidance(acquired.claim).join(" ") : "a writer claim for this checkout is in an uncertain state — reconcile it before starting another writer"
+          throw new Error(`another managed writer owns ${plan.target.directory}: ${detail}`)
+        }
+      }
+    }
+  }
   try {
     const progress = deps.createProgress({ server, readyPath })
     // The gate/control cycle shares exactly the adapter's AutoAccept object.
@@ -350,6 +381,12 @@ export async function runCoordinateBoot(
       throw error
     }
   } finally {
+    if (writerClaim) {
+      const { lifecycleCommonDir } = await import("./feature-lifecycle/store")
+      const { releaseWriterClaim } = await import("./feature-lifecycle/writer-claims")
+      const commonDir = await lifecycleCommonDir(plan.target.directory).catch(() => undefined)
+      if (commonDir) await releaseWriterClaim({ commonDir, branch: writerClaim.branch, ownerPid: process.pid })
+    }
     server.close()
   }
 }
