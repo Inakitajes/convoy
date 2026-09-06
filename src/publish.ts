@@ -1,7 +1,10 @@
-import { readFile } from "node:fs/promises"
+import { readFile, readdir } from "node:fs/promises"
 import { join } from "node:path"
 
+import { capSubjectWithin, maxCommitSubjectLength } from "./commit-text"
 import { execFile } from "./git"
+import { branchIdFromBranch, openspecDirName, stripYamlFrontmatter, titleFromProposal } from "./openspec"
+import { conventionalTypeFromBranch, humanizeBranchSlug } from "./run-title"
 
 /**
  * The deliberate `Create pull request` publication action (capability
@@ -12,6 +15,13 @@ import { execFile } from "./git"
  * force-pushing, deleting branches, or removing worktrees. A published
  * uncompacted branch is legitimate, so nothing here inspects compaction
  * success beyond refusing to publish while a transaction needs recovery.
+ *
+ * The PR text is composed synchronously from state persisted before
+ * publication (capability run-titles, design D4/D5): a conventional
+ * `type: subject` title and a Why / What / How-tested body, each section
+ * falling back mechanically when its source is absent. Composition never
+ * blocks publication and never needs a model; equal persisted state composes
+ * equal text, so a failed `gh pr create` retry reproduces the same PR.
  *
  * Unavailable states are disclosed with remediation, never guessed around:
  * a dirty/detached/base worktree, no remotes, ambiguous remotes without an
@@ -127,7 +137,7 @@ export function createPublishSeam(input: CreatePublishSeamInput) {
         if (url) return { ok: true, outcome: { pushed: true, url } }
       }
 
-      const body = await prBody(input.runDir, plan)
+      const body = await composePrText({ cwd, runDir: input.runDir, branch: plan.branch })
       const created = await run(
         "gh",
         ["pr", "create", "--head", plan.branch, "--base", plan.base, "--title", body.title, "--body", body.text],
@@ -224,24 +234,216 @@ async function ghGuidance(run: PublishRunner): Promise<{ ok: true } | { ok: fals
   return { ok: true }
 }
 
-/** The PR title/body: the run's own summary when it is still applicable, else the branch. */
-async function prBody(runDir: string | undefined, plan: { branch: string; base: string }): Promise<{ title: string; text: string }> {
-  const title = await firstHeading(runDir, "prd.md")
-  const slug = plan.branch.replace(/^.*?\//, "").replace(/[-_]+/g, " ").trim()
-  const summary = await readOptional(runDir, "SUMMARY.md")
-  const bodyLines = summary ? summary.trim().split("\n").slice(0, 40).join("\n") : ""
-  const text = [
-    ...(title ? [`Run: ${title}`] : []),
-    ...(bodyLines ? ["", bodyLines] : []),
-  ].join("\n")
-  return { title: title ?? `feat: ${slug || plan.branch}`, text }
+/** Caps for the composed body sections (design D4): each keeps the body a summary. */
+const whyMaxChars = 600
+const whatMaxChars = 2400
+const howTestedMaxChars = 1600
+const howTestedReportMaxChars = 800
+
+/** The disclosed line a section shows when every one of its sources is absent. */
+const notDocumented = "Not documented in the sources available to this run."
+
+/** The distilled-recap report names: the built-in pipelines write `run-report` (agent alias), a step named after the agent writes `run-reporter`. */
+const recapReportNames = ["reports/run-report.md", "reports/run-reporter.md"] as const
+
+/**
+ * The PR text, composed synchronously from persisted context only (capability
+ * run-titles, design D4/D5): a conventional `type: subject` title and a Why /
+ * What / How-tested body, each source optional, so composition completes even
+ * when a document is absent and equal state composes equal text.
+ */
+async function composePrText(input: { cwd: string; runDir?: string; branch: string }): Promise<{ title: string; text: string }> {
+  const changeId = branchIdFromBranch(input.branch)
+  const proposal = changeId ? await readProposal(input.cwd, changeId) : undefined
+
+  // Title: the branch's conventional prefix supplies the type (never a
+  // fabricated one) and the change's proposal title — the same
+  // `titleFromProposal` reader the control board uses — else the humanized
+  // slug supplies the subject. The prompt's first line is never consulted.
+  const proposalTitle = proposal && changeId ? titleFromProposal(proposal.body, changeId) : ""
+  const subject = proposalTitle || humanizeBranchSlug(input.branch) || input.branch
+  const type = conventionalTypeFromBranch(input.branch)
+  // The whole line — prefix and subject together — stays inside the shared
+  // 72-column budget, shortened at a word boundary.
+  const prefix = type ? `${type}: ` : ""
+  const title = `${prefix}${capSubjectWithin(prefix, subject, maxCommitSubjectLength)}`
+
+  const sections: string[] = []
+
+  // Why: the proposal's Why section; else the prompt document's opening
+  // paragraph — the operator's stated intent is the why for non-change runs.
+  const why = (proposal ? proposalWhySection(proposal.body) : "") || firstParagraph(await readOptional(input.runDir, "prd.md"))
+  sections.push(renderSection("Why", why ? capProse(why, whyMaxChars) : notDocumented))
+
+  // What: the run's distilled recap; else the compacted run commit's message
+  // body; else the SUMMARY.md excerpt as the historical last fallback. Embedded
+  // content nests under the section heading so its own headings can never
+  // outrank the composed structure.
+  const what =
+    (await readRecapReport(input.runDir)) ??
+    (await finalizationMessageBody(input.runDir)) ??
+    summaryExcerpt(await readOptional(input.runDir, "SUMMARY.md"))
+  sections.push(renderSection("What", what ? capProse(nestUnder(what, 2), whatMaxChars) : notDocumented))
+
+  // How tested: the reports of test/validation steps; when none exists, say
+  // so explicitly rather than implying coverage.
+  const howTested = await composeHowTested(input.runDir)
+  sections.push(renderSection("How tested", howTested ?? "No test or validation report was produced by this run."))
+
+  return { title, text: sections.join("\n\n") }
 }
 
-async function firstHeading(runDir: string | undefined, file: string): Promise<string | undefined> {
-  const content = await readOptional(runDir, file)
-  if (!content) return undefined
-  const line = content.split("\n").map((raw) => raw.replace(/^#+\s*/, "").trim()).find(Boolean)
-  return line || undefined
+/** The change's proposal body read against the target checkout; `undefined` when absent or unreadable — never a blocker. */
+async function readProposal(cwd: string, changeId: string): Promise<{ body: string } | undefined> {
+  try {
+    return { body: await readFile(join(cwd, openspecDirName, "changes", changeId, "proposal.md"), "utf8") }
+  } catch {
+    return undefined
+  }
+}
+
+/** The distilled-recap report from the run workspace; `undefined` when the pipeline produced none. */
+async function readRecapReport(runDir: string | undefined): Promise<string | undefined> {
+  for (const name of recapReportNames) {
+    const body = await readOptional(runDir, name)
+    if (body) return body
+  }
+  return undefined
+}
+
+/** The proposal's `## Why` section text, up to the next heading; empty when the proposal carries none. */
+function proposalWhySection(proposalBody: string): string {
+  const lines = stripYamlFrontmatter(proposalBody).split(/\r?\n/)
+  const start = lines.findIndex((line) => /^##\s+why\b/i.test(line.trim()))
+  if (start === -1) return ""
+  const end = lines.findIndex((line, index) => index > start && /^##\s/.test(line.trim()))
+  return lines.slice(start + 1, end === -1 ? lines.length : end).join("\n").trim()
+}
+
+/** The prompt document's opening paragraph — its stated intent — with heading markers stripped. */
+function firstParagraph(prompt: string | undefined): string {
+  if (!prompt) return ""
+  const lines: string[] = []
+  for (const raw of prompt.split(/\r?\n/)) {
+    const line = raw.trim()
+    if (!line) {
+      if (lines.length > 0) break
+      continue
+    }
+    lines.push(line.replace(/^#+\s*/, ""))
+  }
+  return lines.join(" ")
+}
+
+/** The compacted run commit's message body (subject line removed) from the durable finalization record. */
+async function finalizationMessageBody(runDir: string | undefined): Promise<string | undefined> {
+  if (!runDir || runDir === "/") return undefined
+  let metadata: { finalization?: { producedMessage?: unknown } }
+  try {
+    metadata = JSON.parse(await readFile(join(runDir, "metadata.json"), "utf8"))
+  } catch {
+    return undefined
+  }
+  const message = typeof metadata.finalization?.producedMessage === "string" ? metadata.finalization.producedMessage : ""
+  const body = message.split("\n").slice(1).join("\n").trim()
+  return body || undefined
+}
+
+/** The current SUMMARY.md excerpt (first 40 lines) — the historical last fallback for What. */
+function summaryExcerpt(summary: string | undefined): string | undefined {
+  const text = summary?.trim()
+  if (!text) return undefined
+  return text.split("\n").slice(0, 40).join("\n")
+}
+
+/** The capped reports of test/validation steps (step-name substring, design D4); `undefined` when the run produced none. */
+async function composeHowTested(runDir: string | undefined): Promise<string | undefined> {
+  if (!runDir || runDir === "/") return undefined
+  let names: string[]
+  try {
+    names = (await readdir(join(runDir, "reports"))).filter((name) => name.endsWith(".md") && !name.endsWith(".raw.md"))
+  } catch {
+    return undefined
+  }
+  const steps = names.filter((name) => /test|validator/i.test(name.slice(0, -".md".length))).sort()
+  const parts: string[] = []
+  for (const name of steps) {
+    const body = await readOptional(runDir, join("reports", name))
+    if (!body) continue
+    parts.push(`### ${name.slice(0, -".md".length)}\n\n${capProse(nestUnder(body, 3), howTestedReportMaxChars)}`)
+  }
+  if (parts.length === 0) return undefined
+  return capProse(parts.join("\n\n"), howTestedMaxChars)
+}
+
+function renderSection(heading: string, body: string): string {
+  return `## ${heading}\n\n${body}`
+}
+
+/** Caps prose at `max` characters, preferring a word boundary and marking the cut. */
+function capProse(value: string, max: number): string {
+  const text = value.trim()
+  if (text.length <= max) return text
+  const cut = text.slice(0, max)
+  const boundary = cut.lastIndexOf(" ")
+  return `${(boundary > max * 0.6 ? cut.slice(0, boundary) : cut).trimEnd()}…`
+}
+
+/**
+ * Nests embedded Markdown under the heading that quotes it: every heading is
+ * shifted down uniformly so the shallowest one sits one level below `under`
+ * (content quoted under `##` starts at `###`, under `###` at `####`), keeping
+ * relative structure. Fenced code is never rewritten: per CommonMark a fence
+ * opens with at least three identical fence characters (a backtick fence's
+ * info string cannot contain a backtick) and closes only with the same
+ * character, at least the opening length, and nothing but whitespace after —
+ * so a ``` example inside a ```` fence stays code. Content without headings —
+ * or already nested deep enough — passes through verbatim.
+ */
+function nestUnder(markdown: string, under: number): string {
+  type Fence = { char: string; length: number }
+  const headingOf = (line: string): number | undefined => {
+    const heading = /^(#{1,6})(?:\s|$)/.exec(line)
+    return heading?.[1].length
+  }
+  const openerOf = (line: string): Fence | undefined => {
+    const opener = /^\s{0,3}(`{3,}|~{3,})(.*)$/.exec(line)
+    if (!opener) return undefined
+    const run = opener[1]!
+    // A backtick fence's info string cannot contain a backtick (CommonMark).
+    if (run[0] === "`" && opener[2]!.includes("`")) return undefined
+    return { char: run[0]!, length: run.length }
+  }
+  const closes = (line: string, fence: Fence): boolean =>
+    new RegExp(`^\\s{0,3}${fence.char}{${fence.length},}\\s*$`).test(line)
+
+  // Classify once: for each line, the heading level it would contribute —
+  // `undefined` for fence lines and fence content, which stay verbatim.
+  let fence: Fence | undefined
+  const headingLevels = markdown.split("\n").map((line) => {
+    if (fence) {
+      if (closes(line, fence)) fence = undefined
+      return undefined
+    }
+    const opener = openerOf(line)
+    if (opener) {
+      fence = opener
+      return undefined
+    }
+    return headingOf(line)
+  })
+
+  const shallowest = headingLevels.reduce<number>((min, level) => (level ? Math.min(min, level) : min), Number.POSITIVE_INFINITY)
+  const shift = Number.isFinite(shallowest) ? Math.max(0, under + 1 - shallowest) : 0
+  if (shift === 0) return markdown
+  return markdown
+    .split("\n")
+    .map((line, index) => {
+      const level = headingLevels[index]
+      if (!level) return line
+      return `${"#".repeat(Math.min(6, level + shift))}${line.slice(level)}`
+    })
+    .join("\n")
 }
 
 async function readOptional(runDir: string | undefined, file: string): Promise<string | undefined> {
