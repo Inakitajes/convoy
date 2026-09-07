@@ -7,84 +7,58 @@ Defines a clear, responsive Home launcher that communicates product identity, pr
 ## Requirements
 
 ### Requirement: Home presents a unified masthead
-In non-graphics mode the Home launcher SHALL display a left-aligned three-line `CONVOY` wordmark in one uniform neutral tone. To its right, the masthead SHALL show the complete version string right-aligned on the first row and the project path right-aligned on the second row. The version string SHALL include any prerelease and build metadata already present in the build's version, including local-build metadata, and SHALL NOT append a parenthetical suffix or separately display the commit or platform. Compact widths SHALL fall back to a text wordmark with the version string right-aligned and a labeled project row below, without overflowing the terminal width. In graphics mode the masthead SHALL instead be a single slim chrome row below one blank top-padding row: the labeled project path on the left and the complete version string right-aligned, both in a faint tone; the block wordmark is rendered as part of the centered destination poster instead. The launcher MUST NOT render a footer and SHALL keep one blank row between the masthead region and the body content.
+
+Home SHALL show Convoy's identity, the complete build version including prerelease/build metadata, and the normalized project path above the work list. It SHALL NOT separately append commit or platform information. Compact layouts SHALL preserve project identification and usable work navigation without overflowing terminal width. Work detail SHALL visibly identify the selected work and its checkout or branch. Decorative graphics SHALL NOT displace the primary work list or its actions. Home SHALL keep its chrome lean without a dedicated footer; actionable labels and relevant shortcuts SHALL remain visible with their work-list or auxiliary actions.
 
 #### Scenario: Wide masthead
-- **WHEN** Home opens without graphics support, with enough width for the full wordmark, version string, and project path
-- **THEN** the wordmark is left-aligned, the version string is right-aligned on the first masthead row, and the project path is right-aligned on the second masthead row
+
+- **WHEN** Home opens at a wide terminal size
+- **THEN** Convoy identity, complete version, and project path appear above the usable work list
 
 #### Scenario: Commit fragment instead of the full hash
-- **WHEN** the masthead or chrome renders a stable or local build version
-- **THEN** it shows the build's complete version string, including any embedded local-build metadata, and contains no parenthetical commit or platform details
+
+- **WHEN** Home renders a stable or local build version
+- **THEN** it includes the complete version string with embedded metadata and no separate parenthetical commit or platform
 
 #### Scenario: Compact masthead
-- **WHEN** the terminal cannot fit the block wordmark beside the version string
-- **THEN** Home shows a text `CONVOY` wordmark with the version string right-aligned and a labeled `project  <path>` row below it
+
+- **WHEN** the terminal is too narrow for the wide layout
+- **THEN** project identification and work actions remain readable within its width
 
 #### Scenario: Slim chrome in graphics mode
-- **WHEN** Home opens in a graphics-capable terminal with a valid destination image
-- **THEN** the top shows one faint chrome row with the labeled project path on the left and the version string right-aligned, and no wordmark appears in the masthead region
+
+- **WHEN** Home opens in a graphics-capable terminal
+- **THEN** compact project/version chrome identifies the repository above the work list without reserving a destination-poster region
 
 #### Scenario: No footer
-- **WHEN** Home renders in any width or graphics mode
-- **THEN** no selection counter and no key hints appear anywhere on screen, one blank row pads the top of the screen, and two blank rows pad the bottom below the content; in poster mode the centered block keeps its equal top and bottom margins instead of a fixed bottom pad
 
-### Requirement: Active destination is visibly bracketed by diamonds
-The Home launcher SHALL render the selected destination with one filled diamond before and one filled diamond after its shortcut and label. Inactive destinations SHALL reserve equivalent marker width so changing selection does not shift the destination layout.
+- **WHEN** Home renders at any terminal width or graphics capability
+- **THEN** it uses no dedicated footer or selection counter and exposes relevant shortcuts alongside their actions without displacing the work list
 
-#### Scenario: Selected destination in stacked layout
-- **WHEN** destinations are stacked and Pipelines is selected
-- **THEN** the selected row reads visually as `◆ [P]  PIPELINES ◆` while inactive rows remain aligned with it
+### Requirement: Home starts with work and its next actions
 
-#### Scenario: Selected destination in row layout
-- **WHEN** destinations share one row and selection moves between them
-- **THEN** the selected item gains both diamonds without changing the positions of the other items
+Interactive zero-argument Convoy SHALL open a repository work list offering New feature. Selecting work SHALL open a detail with distinct conversation/resume, propose/revise, pipeline, specs/runs, and close actions as applicable. Pipelines, canonical specs, global run history, and configuration SHALL remain reachable as auxiliary views. An empty repository work list SHALL still offer New work and auxiliary navigation.
 
-### Requirement: Graphics-capable Home preserves the image experience
-When a valid Home image is available and Kitty Graphics is supported, the Home launcher SHALL display the selected destination image as a centered poster: the block `CONVOY` wordmark above the image separated from it by two blank rows, centered horizontally in the terminal. The wordmark, the image, the destination controls, and the description SHALL form one block that is vertically centered between the chrome row and the bottom of the terminal, so the controls always follow the image after two blank rows and the blank margin above the wordmark equals the blank margin below the description (each at least one row, within one row for odd leftovers). In this mode the destination controls SHALL render as a centered column of the four destinations. The image SHALL be scaled with aspect-preserving contain fit — the whole image is visible and never cropped — and SHALL NOT exceed 60 columns wide or 50 rows tall. When the available space is smaller than the capped card, the image SHALL shrink to fit while keeping its aspect ratio. The poster MUST NOT overlap the chrome row or the destination controls and SHALL keep at least one blank row below the chrome and at least two blank rows above the controls.
+#### Scenario: First work in a repository
 
-#### Scenario: Kitty Graphics available
-- **WHEN** Home opens in a terminal that supports Kitty Graphics and the selected destination has a valid image
-- **THEN** the uncropped image is displayed centered with the block wordmark two rows above it and the destinations listed as a centered column two blank rows under the image, with the blank margin above the wordmark matching the margin below the description
+- **WHEN** interactive Convoy opens with no existing work or specs
+- **THEN** Home offers New feature without requiring an OpenSpec artifact to exist first
 
-#### Scenario: Large terminal respects the cap
-- **WHEN** the space between the chrome and the controls is larger than the caps
-- **THEN** the image card is at most 60 columns wide and 50 rows tall and the remaining space stays plain background around the centered poster
+#### Scenario: Conversation is distinct from pipeline execution
 
-#### Scenario: Small terminal shrinks the card
-- **WHEN** the space between the chrome and the controls is smaller than the capped card
-- **THEN** the card scales down with its aspect ratio intact and still does not overlap the chrome or the controls
+- **WHEN** work has both a linked conversation and runnable pipelines
+- **THEN** detail offers separate resume-conversation and execute-pipeline actions with unambiguous labels
 
-#### Scenario: Selection swaps the poster image in place
-- **WHEN** the selection moves to another destination with a valid image
-- **THEN** the wordmark stays put and only the image changes, without moving the poster
+### Requirement: Navigation preserves the selected work
 
-### Requirement: Non-graphics Home prioritizes navigation
-When Kitty Graphics is unavailable or no valid image can be displayed, the Home launcher SHALL display neither an image nor an ASCII sculpture. It SHALL vertically center the destination selector together with its selected destination description in the available body.
+Returning from a conversation, launcher, dashboard, spec reader, or cancelled action SHALL restore the originating work selection and refresh its derived state. Reopening Convoy SHALL restore the last valid work selection for that repository without automatically launching an agent. A missing selection SHALL fall back to the work list with an explanation; it SHALL NOT silently select another execution target. Only explicitly leaving Convoy SHALL end the surrounding Home workflow.
 
-#### Scenario: Kitty Graphics unavailable
-- **WHEN** Home opens in a terminal without Kitty Graphics support
-- **THEN** no image or ASCII artwork is shown and the destination-and-description block is vertically centered
+#### Scenario: Reopen from another worktree
 
-#### Scenario: Selected image unavailable
-- **WHEN** Kitty Graphics is supported but the selected destination has no valid displayable image
-- **THEN** Home uses the same vertically centered navigation-only fallback without showing ASCII artwork
+- **WHEN** an operator restarts Convoy from another checkout of the same repository
+- **THEN** the same last valid work is selected without changing its execution destination or starting a session
 
-### Requirement: Destination description wraps to at most two contextual lines
-The Home launcher SHALL show the selected destination description beneath the selector, separated from it by one blank row, centered inside a fixed maximum width of 48 columns regardless of terminal width, wrapped to at most two rows. When wrapping, it SHALL split near the middle at a word boundary so both rows stay balanced; when the description cannot fit two rows at the available width it SHALL clip the second row with an ellipsis without overflowing the terminal.
+#### Scenario: Last selected checkout disappeared
 
-#### Scenario: Description fits on one line
-- **WHEN** the selected description fits within the maximum width
-- **THEN** it shows as a single centered row beneath the selector
-
-#### Scenario: Description wraps within the maximum width
-- **WHEN** the selected description exceeds the maximum width but fits in two rows
-- **THEN** it wraps onto two centered rows split at a word boundary near the middle, with no ellipsis
-
-#### Scenario: Description on a narrow terminal
-- **WHEN** the terminal is narrower than the description's maximum width
-- **THEN** the description wraps within the reduced width, and its second row ends with an ellipsis when even two rows cannot fit it
-
-#### Scenario: Description overflows two rows
-- **WHEN** the selected description does not fit in two rows at the available width
-- **THEN** the second row ends with an ellipsis without overflowing
+- **WHEN** the remembered work no longer has a valid checkout
+- **THEN** Home shows the unavailable association or the work list with an explanation and starts no action on a replacement checkout
