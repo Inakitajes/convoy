@@ -43,7 +43,11 @@ export function validateConversationServiceRecord(value: unknown): ConversationS
   if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined
   const record = value as Record<string, unknown>
   if (record.schemaVersion !== lifecycleSchemaVersion) return undefined
-  if (typeof record.url !== "string" || !record.url.startsWith("http://")) return undefined
+  // The authoring server always binds to loopback (bootOpencodeServerFrom uses
+  // 127.0.0.1), so a valid discovery URL must be a loopback http URL. A record
+  // pointing elsewhere is not evidence of this repository's server and would
+  // make the liveness probe / client connect to an arbitrary host — refuse it.
+  if (typeof record.url !== "string" || !isLoopbackHttpUrl(record.url)) return undefined
   if (typeof record.pid !== "number" || !Number.isInteger(record.pid) || record.pid <= 0) return undefined
   if (typeof record.bootCheckout !== "string" || record.bootCheckout === "") return undefined
   if (typeof record.startedAt !== "number") return undefined
@@ -54,6 +58,26 @@ export function validateConversationServiceRecord(value: unknown): ConversationS
     bootCheckout: record.bootCheckout,
     startedAt: record.startedAt,
   }
+}
+
+/**
+ * Whether `url` is an http URL on a loopback interface (the only place the
+ * authoring server binds). Parsed with `new URL` and compared by exact
+ * hostname, so a lookalike host — `http://127.0.0.1.evil.com`,
+ * `http://localhost.attacker.com`, or userinfo like `http://127.0.0.1@evil.com`
+ * — is rejected rather than passing a bare prefix match.
+ */
+function isLoopbackHttpUrl(url: string): boolean {
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    return false
+  }
+  if (parsed.protocol !== "http:") return false
+  // URL.hostname preserves IPv6 brackets ([::1]); strip them for the comparison.
+  const host = parsed.hostname.replace(/^\[|\]$/g, "")
+  return host === "127.0.0.1" || host === "localhost" || host === "::1"
 }
 
 function discoveryPath(commonDir: string): string {

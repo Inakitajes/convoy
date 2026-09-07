@@ -10,6 +10,7 @@ import {
   probeConversationService,
   readConversationServiceDiscovery,
   stopConversationService,
+  validateConversationServiceRecord,
   type ConversationServiceRecord,
 } from "../src/conversation-service"
 import { bootOpencodeServerFrom, connectOpencode } from "../src/opencode"
@@ -124,6 +125,46 @@ describe("conversation-service discovery and reuse (task 4.3)", () => {
     expect(read.status).toBe("found")
     if (read.status !== "found") return
     expect(read.value.url).toBe(seeded.url)
+  })
+
+  test("a discovery record pointing off-loopback is not valid evidence", async () => {
+    for (const url of [
+      "http://example.com:8080",
+      // Lookalike hosts that a bare prefix match would let through.
+      "http://127.0.0.1.evil.com",
+      "http://localhost.attacker.com",
+      "http://127.0.0.1:8080@evil.com",
+    ]) {
+      const tampered: ConversationServiceRecord = {
+        schemaVersion: lifecycleSchemaVersion,
+        url,
+        pid: 123_458,
+        bootCheckout: repoDir,
+        startedAt: Date.now(),
+      }
+      expect(validateConversationServiceRecord(tampered)).toBeUndefined()
+    }
+    // And an external URL never causes a probe/connect of that host: the
+    // record is treated as not-found instead of being reused or booted over.
+    let boots = 0
+    const offLoopback: ConversationServiceRecord = {
+      schemaVersion: lifecycleSchemaVersion,
+      url: "http://example.com:8080",
+      pid: 123_458,
+      bootCheckout: repoDir,
+      startedAt: Date.now(),
+    }
+    await Bun.write(join(commonDir, "convoy", "authoring-server.json"), JSON.stringify(offLoopback))
+    const outcome = await ensureConversationService({
+      commonDir,
+      checkout: repoDir,
+      boot: async () => {
+        boots += 1
+        return { url: "http://127.0.0.1:51005", close() {}, pid: 123_459 }
+      },
+    })
+    expect(outcome.status).toBe("uncertain")
+    expect(boots).toBe(0)
   })
 
   test("a corrupt discovery record is reported, never overwritten by a boot", async () => {
