@@ -384,8 +384,86 @@ describe("small terminals (list and detail stay navigable)", () => {
 
 describe("typical action coverage (used by tests above)", () => {
   test("HomeWorkAction ids are exhaustive", () => {
-    const ids: HomeWorkAction[] = ["conversation", "propose", "pipeline", "specs", "runs", "close", "history"]
-    expect(ids).toHaveLength(7)
+    const ids: HomeWorkAction[] = ["conversation", "conversation-external", "propose", "pipeline", "specs", "runs", "close", "history"]
+    expect(ids).toHaveLength(8)
+  })
+})
+
+describe("authoring conversation selector (capability work-conversations)", () => {
+  const multi = featureRow({
+    featureId: "cccccccc-2222-3333-4444-555555555555",
+    displayName: "Chatty work",
+    branch: "feat/chatty",
+    checkoutPath: "/wt/chatty",
+    conversations: [
+      { sessionId: "ses_first0000000", harness: "opencode", label: "proposal", lastSelectedAt: 200 },
+      { sessionId: "ses_second000000", harness: "opencode", lastSelectedAt: 100 },
+    ],
+    lastSelectedConversationId: "ses_first0000000",
+  })
+
+  test("several linked conversations open the selector listing each, separate from phase sessions", async () => {
+    const session = await openHome({ workRows: [multi] })
+    try {
+      session.press("return") // open the work's detail
+      await session.renderOnce()
+      session.press("v") // conversation action with two linked conversations
+      await session.renderOnce()
+      const frame = frameOf(session)
+      // Both linked conversations are listed, most recently selected first,
+      // with the default resume target marked; phase sessions never appear.
+      expect(frame).toContain("proposal")
+      expect(frame).toContain("ses_second0000")
+      expect(frame).toContain("(last selected)")
+      expect(frame).not.toContain("phase")
+    } finally {
+      await closeHome(session)
+    }
+  })
+
+  test("the selector resolves the chosen conversation; escape returns to the detail", async () => {
+    const session = await openHome({ workRows: [multi] })
+    try {
+      session.press("return")
+      await session.renderOnce()
+      session.press("v")
+      await session.renderOnce()
+      session.press("j") // move to the second conversation
+      await session.renderOnce()
+      session.press("return")
+      const resolution = (await session.instance.result) as HomeResolution
+      expect(resolution).toEqual({
+        type: "work",
+        featureId: "cccccccc-2222-3333-4444-555555555555",
+        action: "conversation",
+        sessionId: "ses_second000000",
+      })
+    } catch {
+      await closeHome(session)
+      throw new Error("test failed")
+    }
+  })
+
+  test("a single linked conversation keeps the direct default without a selector", async () => {
+    const single = featureRow({
+      featureId: "dddddddd-2222-3333-4444-555555555555",
+      displayName: "Solo work",
+      branch: "feat/solo",
+      checkoutPath: "/wt/solo",
+      conversations: [{ sessionId: "ses_only00000000", harness: "opencode" }],
+      lastSelectedConversationId: "ses_only00000000",
+    })
+    const session = await openHome({ workRows: [single] })
+    try {
+      session.press("return")
+      await session.renderOnce()
+      session.press("v")
+      const resolution = (await session.instance.result) as HomeResolution
+      expect(resolution).toEqual({ type: "work", featureId: "dddddddd-2222-3333-4444-555555555555", action: "conversation" })
+    } catch {
+      await closeHome(session)
+      throw new Error("test failed")
+    }
   })
 })
 

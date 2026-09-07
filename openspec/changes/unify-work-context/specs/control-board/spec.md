@@ -99,7 +99,7 @@ Standalone launches inside a worktree SHALL retain the current default of no new
 - **WHEN** a pipeline is launched from a work detail
 - **THEN** it reuses that checkout and creating a derivative requires the separate derived-work action
 
-## ADDED Requirements
+## MODIFIED Requirements
 
 ### Requirement: Board assessment can be refreshed without changing selection identity
 

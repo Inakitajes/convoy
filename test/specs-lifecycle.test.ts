@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { execFile as nodeExecFile } from "node:child_process"
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { promisify } from "node:util"
@@ -149,6 +149,37 @@ describe("specs view lifecycle rows (tasks 6.1/6.3)", () => {
     const featureRow = view.features?.find((row) => row.featureId === feature.featureId)
     expect(featureRow?.summary).toBe("Awaiting proposal")
     expect(view.worktreesWithoutSpec?.some((worktree) => worktree.dir === wt)).toBe(false)
+  })
+
+  test("an unassociated worktree with no runs is listed in the worktrees-without-spec section (delta: including those with no runs)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "convoy-specs-lifecycle-noruns-"))
+    dirs.push(root)
+    const main = join(root, "main")
+    const wt = join(root, "wt")
+    await mkdir(main, { recursive: true })
+    await git(main, "init", "-b", "main")
+    await writeFile(join(main, "README.md"), "# repo\n")
+    await git(main, "add", ".")
+    await git(main, "-c", "user.email=t@x", "-c", "user.name=T", "commit", "-m", "init")
+    // One registered feature (so Features is non-empty) and one plain
+    // unassociated worktree with no openspec and no runs.
+    await git(main, "worktree", "add", "-b", "feat/add-widget", join(root, "feat-wt"))
+    const changeDir = join(root, "feat-wt", "openspec", "changes", "add-widget")
+    await mkdir(changeDir, { recursive: true })
+    await writeFile(join(changeDir, "proposal.md"), "# Add widget\n")
+    await git(main, "worktree", "add", "-b", "feat/nothing", wt)
+    await featureAdopt({ cwd: main, branch: "feat/add-widget", changeIds: ["add-widget"], base: "main" })
+
+    const view = await loadSpecsView(main)
+    // git canonicalizes worktree paths (macOS /var → /private/var), so the
+    // comparison goes through realpath.
+    const [wtReal, featWtReal] = await Promise.all([realpath(wt), realpath(join(root, "feat-wt"))])
+    const listed = view.worktreesWithoutSpec?.find((worktree) => worktree.dir === wtReal)
+    expect(listed).toBeDefined()
+    expect(listed?.runCount).toBe(0)
+    // The registered feature's own worktree is never downgraded into the
+    // section alongside it.
+    expect(view.worktreesWithoutSpec?.some((worktree) => worktree.dir === featWtReal)).toBe(false)
   })
 
   test("the verified associated source supplies artifacts, even on an arbitrary branch with a launch-checkout husk (task 6.2)", async () => {

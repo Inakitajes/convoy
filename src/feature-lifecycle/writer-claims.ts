@@ -193,6 +193,27 @@ export async function releaseWriterClaim(input: { commonDir: string; branch: str
   return released
 }
 
+/**
+ * Hands the checkout's claim to a new owner without ever dropping it: the
+ * propose flow claims before its session exists (so a concurrent writer is
+ * refused before any writer work starts) and re-owns the claim with the
+ * session id once created, keeping the idle release and conflict guidance
+ * naming the actual writer. Only the claiming process may re-own — a claim
+ * held by another PID (or missing) is left untouched.
+ */
+export async function reownWriterClaim(input: { commonDir: string; branch: string; owner: string; ownerPid?: number }): Promise<boolean> {
+  let reowned = false
+  await withFeatureLock(join(input.commonDir, "convoy", "writer-claims"), async () => {
+    const read = await readWriterClaim(input.commonDir, input.branch)
+    if (read.status !== "found") return
+    if (read.value.pid !== (input.ownerPid ?? process.pid)) return
+    const updated: WriterClaim = { ...read.value, owner: input.owner, heartbeatAt: Date.now() }
+    await writeJsonFile(claimPath(input.commonDir, input.branch), updated)
+    reowned = true
+  })
+  return reowned
+}
+
 /** Guidance for a refused writer start, consumed by launch paths and menus. */
 export function writerConflictGuidance(claim: WriterClaim): string[] {
   const what = claim.kind === "pipeline" ? `run ${claim.owner ?? "(unknown)"} is executing` : `authoring conversation ${claim.owner ?? "(unknown)"} is active`

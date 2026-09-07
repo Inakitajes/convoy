@@ -41,6 +41,8 @@ function readsFixture(input: {
   cherryClean?: boolean
   baseBranch?: string
   present?: boolean
+  /** Checkout paths registered as a feature's current context. */
+  registeredContextDirs?: string[]
 }): BoardReads {
   const {
     worktrees = [
@@ -59,6 +61,7 @@ function readsFixture(input: {
     cherryClean = true,
     baseBranch = "main",
     present = true,
+    registeredContextDirs = [],
   } = input
   const idsFor = (dir: string) => worktreeChangesByDir[dir] ?? worktreeChanges
   return {
@@ -74,6 +77,7 @@ function readsFixture(input: {
     patchEquivalent: async () => cherryClean,
     baseBranch: async () => baseBranch,
     canonicalSpecs: async () => ["openspec/specs/specs-viewer/spec.md"],
+    registeredContextDirs: async () => registeredContextDirs,
   }
 }
 
@@ -207,12 +211,23 @@ describe("assembleControlBoard", () => {
     expect(board.worktreesWithoutSpec).toEqual([{ dir: "/wt/iso-run", branch: "feat/quick-fix", runCount: 1 }])
   })
 
-  test("a worktree with no change dir and no runs is not listed", async () => {
+  test("an unassociated worktree with no change dir and no runs is still listed (delta: including those with no runs)", async () => {
     const worktrees: BoardWorktree[] = [
       { dir: mainDir, branch: "main", main: true },
       { dir: "/wt/empty", branch: "feat/nothing", main: false },
     ]
     const board = await assembleControlBoard(readsFixture({ worktrees, worktreeChanges: [] }))
+    expect(board.worktreesWithoutSpec).toEqual([{ dir: "/wt/empty", branch: "feat/nothing", runCount: 0 }])
+  })
+
+  test("a registered feature's worktree is never downgraded to a specless worktree", async () => {
+    const worktrees: BoardWorktree[] = [
+      { dir: mainDir, branch: "main", main: true },
+      { dir: "/wt/pre-proposal", branch: "feat/pre-proposal", main: false },
+    ]
+    const board = await assembleControlBoard(
+      readsFixture({ worktrees, worktreeChanges: [], registeredContextDirs: ["/wt/pre-proposal"] }),
+    )
     expect(board.worktreesWithoutSpec).toHaveLength(0)
   })
 

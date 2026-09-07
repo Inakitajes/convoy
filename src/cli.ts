@@ -292,8 +292,8 @@ async function runHomeSession(targetDir: string): Promise<void> {
       route,
       targetDir,
       openHome: (context) => launchHomeTui(targetDir, { route, kittyGraphics, ...context }),
-      openWork: async (featureId, action) => {
-        await dispatchWorkAction(targetDir, route, featureId, action)
+      openWork: async (featureId, action, sessionId) => {
+        await dispatchWorkAction(targetDir, route, featureId, action, sessionId)
       },
       createWork: async (draft) => {
         await createWorkFromDraft(targetDir, route, draft)
@@ -339,7 +339,7 @@ async function rememberWorkSelection(targetDir: string, featureId: string): Prom
 }
 
 /** Runs one work detail action from Home (task 6.3): every action resolves the same work. */
-async function dispatchWorkAction(targetDir: string, route: TuiRoute, featureId: string, action: HomeWorkAction): Promise<void> {
+async function dispatchWorkAction(targetDir: string, route: TuiRoute, featureId: string, action: HomeWorkAction, sessionId?: string): Promise<void> {
   await rememberWorkSelection(targetDir, featureId)
   const { resolveWorkContext } = await import("./feature-lifecycle/work-context")
   const resolved = await resolveWorkContext({ launchDir: targetDir, featureId })
@@ -370,6 +370,7 @@ async function dispatchWorkAction(targetDir: string, route: TuiRoute, featureId:
       checkout: context.executionCheckout,
       branch: context.branch ?? context.feature!.context?.branch ?? "",
       displayName: context.feature!.displayName,
+      ...(sessionId ? { sessionId } : {}),
     })
     return
   }
@@ -496,7 +497,7 @@ export async function runHomeNavigationLoop(options: {
   route: TuiRoute
   targetDir: string
   openHome: (context: { workRows: import("./specs").LifecycleFeatureRow[]; resumeFeature?: import("./specs").LifecycleFeatureRow; resumeNotice?: string }) => Promise<HomeResolution>
-  openWork: (featureId: string, action: HomeWorkAction) => Promise<void>
+  openWork: (featureId: string, action: HomeWorkAction, sessionId?: string) => Promise<void>
   createWork: (draft: { displayName: string; branch: string; base: string; worktree: string }) => Promise<void>
   openDestination: (selection: HomeDestination) => Promise<void>
 }): Promise<void> {
@@ -507,7 +508,7 @@ export async function runHomeNavigationLoop(options: {
     if (resolution.type === "destination") {
       await options.openDestination(resolution.destination)
     } else if (resolution.type === "work") {
-      await options.openWork(resolution.featureId, resolution.action)
+      await options.openWork(resolution.featureId, resolution.action, resolution.sessionId)
     } else if (resolution.type === "new-work" && resolution.draft) {
       await options.createWork(resolution.draft)
     }
@@ -1310,6 +1311,8 @@ async function resumeFeatureConversation(input: {
   checkout: string
   branch: string
   displayName: string
+  /** An explicit selector choice: resume this exact reference, not the default. */
+  sessionId?: string
 }): Promise<void> {
   const { readConversationRecord, addConversation, touchConversationSelection } = await import("./feature-lifecycle/conversations")
   const { createAuthoringConversation, validateAuthoringSession, openConversationForeground } = await import("./conversations")
@@ -1325,12 +1328,18 @@ async function resumeFeatureConversation(input: {
   if (server.status === "blocked") return
   const serviceHandle = server.status === "service" ? { url: server.url } : undefined
 
-  // Choose the conversation to open: the remembered default, else the most
-  // recently linked one; an unavailable reference is reported and replaced by
-  // an explicit new conversation without claiming continuity.
+  // Choose the conversation to open: an explicit selector choice resumes that
+  // exact reference; otherwise the remembered default, else the most recently
+  // linked one. An unavailable reference is reported and replaced by an
+  // explicit new conversation without claiming continuity.
   const record = await readConversationRecord(commonDir, input.featureId)
   const candidates = record.status === "found" ? [...record.value.conversations] : []
-  candidates.sort((a, b) => (b.lastSelectedAt ?? b.createdAt) - (a.lastSelectedAt ?? a.createdAt))
+  if (input.sessionId) {
+    candidates.length = 0
+    candidates.push({ sessionId: input.sessionId, harness: "opencode", createdAt: 0 })
+  } else {
+    candidates.sort((a, b) => (b.lastSelectedAt ?? b.createdAt) - (a.lastSelectedAt ?? a.createdAt))
+  }
   let ref: { harness: "opencode"; sessionId: string } | undefined
   let unavailableNotice: string | undefined
   for (const candidate of candidates) {
@@ -1374,9 +1383,10 @@ async function resumeFeatureConversation(input: {
  * authoring conversation, invokes the command inside it, and hands the
  * terminal to the foreground client. On return, newly authored changes are
  * surfaced for explicit association review — a differing change id never
- * renames the work's branch.
+ * renames the work's branch. Exported for the propose-flow tests (the same
+ * pattern as runHomeNavigationLoop).
  */
-async function proposeForFeature(input: {
+export async function proposeForFeature(input: {
   launchDir: string
   route: TuiRoute
   featureId: string
@@ -1429,12 +1439,48 @@ async function proposeForFeature(input: {
     return
   }
 
+  // The writer claim precedes any writer work (capability work-conversations:
+  // a conflicting managed writer is refused before a second writer starts).
+  // Creating the conversation and invoking the authoring command both start
+  // writer work, so the claim is acquired — or the conflict refused — first.
+  // Until the session exists the claim is owned by this process; it is
+  // re-owned by the session id after creation so the idle release and
+  // conflict guidance keep naming the actual writer.
+  const commonDir = await lifecycleCommonDir(input.launchDir).catch(() => undefined)
+  let claimed = false
+  if (commonDir) {
+    const { acquireWriterClaim, writerConflictGuidance } = await import("./feature-lifecycle/writer-claims")
+    const acquired = await acquireWriterClaim({
+      commonDir,
+      branch: input.branch,
+      checkoutPath: input.checkout,
+      kind: "authoring",
+    })
+    if (acquired.status === "acquired") {
+      claimed = true
+    } else {
+      const guidance =
+        acquired.status === "conflict"
+          ? writerConflictGuidance(acquired.existing)
+          : ["a writer claim for this checkout is in an uncertain state — reconcile it before starting another writer"]
+      await reportHandoffBlocker(guidance[0], guidance.slice(1), input.route)
+      boundedClose?.()
+      return
+    }
+  }
+
   let ref: { harness: "opencode"; sessionId: string } | undefined
   try {
     if (!serviceHandle) throw new Error("no authoring server is available")
     ref = await createAuthoringConversation({ checkout: input.checkout, title: input.displayName, server: serviceHandle })
     await invokeAuthoringCommand({ ref, server: serviceHandle, command: commandName })
   } catch (error) {
+    // No confirmed writer remains: release the provisional claim instead of
+    // wedging the checkout for the next attempt.
+    if (commonDir && claimed) {
+      const { releaseWriterClaim } = await import("./feature-lifecycle/writer-claims")
+      await releaseWriterClaim({ commonDir, branch: input.branch, ownerPid: process.pid })
+    }
     await reportHandoffBlocker(error instanceof Error ? error.message : String(error), ["the conversation was not started; retry Propose or open an ordinary conversation"], input.route)
     return
   } finally {
@@ -1443,12 +1489,17 @@ async function proposeForFeature(input: {
   }
 
   if (!ref) return
-  const commonDir = await lifecycleCommonDir(input.launchDir).catch(() => undefined)
+  // Re-own the claim with the session id — the claim is never dropped here,
+  // so no window opens where a second writer could slip in; a reown failure
+  // leaves it process-owned for the claim's staleness rules to reconcile.
+  if (commonDir && claimed) {
+    const { reownWriterClaim } = await import("./feature-lifecycle/writer-claims")
+    await reownWriterClaim({ commonDir, branch: input.branch, owner: ref.sessionId }).catch(() => {})
+  }
   if (commonDir) {
     await addConversation({ commonDir, featureId: input.featureId, sessionId: ref.sessionId, label: "proposal" })
     await touchConversationSelection({ commonDir, featureId: input.featureId, sessionId: ref.sessionId })
   }
-  if (!(await claimAuthoringWriter({ launchDir: input.launchDir, checkout: input.checkout, branch: input.branch, sessionId: ref.sessionId, route: input.route }))) return
   input.route.session.renderer.suspend()
   let exitCode: number
   try {

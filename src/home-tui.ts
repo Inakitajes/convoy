@@ -43,7 +43,7 @@ export type HomeWorkAction = "conversation" | "conversation-external" | "propose
 /** What a closed Home asks the surrounding session to do. */
 export type HomeResolution =
   | { type: "destination"; destination: HomeDestination }
-  | { type: "work"; featureId: string; action: HomeWorkAction }
+  | { type: "work"; featureId: string; action: HomeWorkAction; /** The explicitly selected authoring conversation (the selector's choice). */ sessionId?: string }
   | { type: "new-work"; draft?: { displayName: string; branch: string; base: string; worktree: string } }
   | undefined
 
@@ -131,8 +131,8 @@ export class HomeLauncher {
   private resolveResult!: (resolution: HomeResolution) => void
   private finished = false
   private readonly scene?: TuiScene
-  /** "list": the work list; "detail": one work's actions; "form": new-work fields. */
-  private level: "list" | "detail" | "form" = "list"
+  /** "list": the work list; "detail": one work's actions; "conversations": the authoring selector; "form": new-work fields. */
+  private level: "list" | "detail" | "conversations" | "form" = "list"
   private rows: ListRow[] = []
   private selectedRow = 1
   /** First visible list row; re-clamped on every render so navigation and resize both keep the selection on screen. */
@@ -147,6 +147,14 @@ export class HomeLauncher {
    * actions — title, status, contracts, blockers — stays readable.
    */
   private detailFollow = true
+  /**
+   * The authoring-conversation selector (capability work-conversations): when
+   * the work has several linked conversations, the conversation action opens
+   * this list — every linked conversation, most recently selected first,
+   * separate from run phase sessions — instead of silently resuming the most
+   * recent one. The default (single conversation or none) is unchanged.
+   */
+  private conversationSelected = 0
   /** New-work form state: one input field at a time, committed in sequence. */
   private form: { field: 0 | 1 | 2; displayName: string; branch: string; base: string; error?: string } | undefined
   /** Why the remembered work could not be restored (task 6.4). */
@@ -185,6 +193,7 @@ export class HomeLauncher {
     key.stopPropagation()
     if (this.level === "list") this.handleListKey(key)
     else if (this.level === "detail") this.handleDetailKey(key)
+    else if (this.level === "conversations") this.handleConversationsKey(key)
     else this.handleFormKey(key)
   }
 
@@ -442,7 +451,59 @@ export class HomeLauncher {
       this.finish({ type: "destination", destination: "runs" })
       return
     }
+    if (action.id === "conversation" && (this.detailFeature.conversations?.length ?? 0) > 1) {
+      // Several linked conversations: the selector makes every one reachable
+      // (capability work-conversations) instead of always resuming the most
+      // recently selected reference. One or none keeps the direct default.
+      this.conversationSelected = 0
+      this.level = "conversations"
+      this.render()
+      return
+    }
     this.finish({ type: "work", featureId: this.detailFeature.featureId, action: action.id })
+  }
+
+  /** The work's linked authoring conversations, most recently selected first. */
+  private linkedConversations(): Array<{ sessionId: string; label?: string; last: boolean }> {
+    const feature = this.detailFeature
+    if (!feature?.conversations) return []
+    return [...feature.conversations]
+      .sort((a, b) => (b.lastSelectedAt ?? 0) - (a.lastSelectedAt ?? 0))
+      .map((conversation) => ({
+        sessionId: conversation.sessionId,
+        ...(conversation.label ? { label: conversation.label } : {}),
+        last: conversation.sessionId === feature.lastSelectedConversationId,
+      }))
+  }
+
+  private handleConversationsKey(key: KeyEvent) {
+    const conversations = this.linkedConversations()
+    switch (key.name) {
+      case "up":
+      case "k":
+        this.conversationSelected = Math.max(0, this.conversationSelected - 1)
+        break
+      case "down":
+      case "j":
+        this.conversationSelected = Math.min(conversations.length - 1, this.conversationSelected + 1)
+        break
+      case "return":
+      case "linefeed":
+      case "o": {
+        const chosen = conversations[this.conversationSelected]
+        if (chosen && this.detailFeature) {
+          this.finish({ type: "work", featureId: this.detailFeature.featureId, action: "conversation", sessionId: chosen.sessionId })
+        }
+        return
+      }
+      case "escape":
+      case "q":
+      case "backspace":
+      case "b":
+        this.level = "detail"
+        break
+    }
+    this.render()
   }
 
   // ── new-work form (task 5.1) ────────────────────────────────────────────
@@ -566,7 +627,14 @@ export class HomeLauncher {
     if (this.renderer.isDestroyed || this.scene?.isClosed) return
     const width = Math.max(1, this.renderer.width)
     this.mastheadText.content = this.mastheadContent(width - CHROME_PADDING_COLS * 2)
-    this.bodyText.content = this.level === "list" ? this.listContent(width - CHROME_PADDING_COLS * 2) : this.level === "detail" ? this.detailContent(width - CHROME_PADDING_COLS * 2) : this.formContent(width - CHROME_PADDING_COLS * 2)
+    this.bodyText.content =
+      this.level === "list"
+        ? this.listContent(width - CHROME_PADDING_COLS * 2)
+        : this.level === "detail"
+          ? this.detailContent(width - CHROME_PADDING_COLS * 2)
+          : this.level === "conversations"
+            ? this.conversationsContent(width - CHROME_PADDING_COLS * 2)
+            : this.formContent(width - CHROME_PADDING_COLS * 2)
     this.renderer.requestRender()
   }
 
@@ -732,6 +800,45 @@ export class HomeLauncher {
     if (lines.length > visible) hints.splice(1, 0, { keys: "pgup/pgdn", label: "page", priority: 2 })
     slice.push(hintsRow(hints, [], width, { style: "spaced", overflow: moreHintsMarker }))
     return joinLines(slice)
+  }
+
+  /**
+   * The authoring-conversation selector (capability work-conversations): one
+   * row per linked conversation — label or short session id, the default
+   * resume target marked — never run phase sessions, which live in run
+   * records rather than the feature's conversation associations.
+   */
+  private conversationsContent(width: number): StyledText {
+    const feature = this.detailFeature
+    if (!feature) return this.listContent(width)
+    const conversations = this.linkedConversations()
+    const lines: StyledText[] = []
+    lines.push(new StyledText([bold(fg(theme.text)(truncate(feature.displayName, width)))]))
+    lines.push(new StyledText([fg(theme.dim)("linked authoring conversations — enter resumes the selected one")]))
+    lines.push(new StyledText([raw("")]))
+    conversations.forEach((conversation, index) => {
+      const selected = index === this.conversationSelected
+      const marker = selected ? fg(theme.accent)("▸ ") : raw("  ")
+      const name = conversation.label ?? `${conversation.sessionId.slice(0, 14)}…`
+      const label = selected ? bold(fg(theme.text)(name)) : fg(theme.text)(name)
+      const chunks: TextChunk[] = [marker, label]
+      if (conversation.last) chunks.push(fg(theme.faint)("  (last selected)"))
+      lines.push(new StyledText(chunks))
+    })
+    lines.push(new StyledText([raw("")]))
+    lines.push(
+      hintsRow(
+        [
+          { keys: "↑/↓", label: "select", priority: 2 },
+          { keys: "enter", label: "resume", priority: 1 },
+          { keys: "esc", label: "back", priority: 0 },
+        ],
+        [],
+        width,
+        { style: "spaced", overflow: moreHintsMarker },
+      ),
+    )
+    return joinLines(lines)
   }
 
   private formContent(width: number): StyledText {
