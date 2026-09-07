@@ -8,11 +8,11 @@ The `convoy specs` command lets an operator browse OpenSpec state — registered
 
 ### Requirement: Specs command discovers OpenSpec state from the filesystem
 
-`convoy specs` SHALL discover OpenSpec artifacts from the filesystem: active changes are real directories in `openspec/changes/` excluding `archive`, dotfiles, and stray non-directory files; canonical specs are Markdown files under `openspec/specs/**`. It SHALL also read repository-scoped feature associations, referenced archives, run/close evidence, and current Git context for lifecycle discovery. Read-only OpenSpec task queries SHALL be permitted by the shared assessment contract. Discovery, refresh, and browsing MUST NOT write any file or silently adopt/migrate features. Absence of active changes or of the launch checkout's `openspec/` SHALL NOT suppress registered features or run-bearing worktrees.
+`convoy specs` SHALL discover OpenSpec artifacts from the filesystem: active changes are real directories in `openspec/changes/` excluding `archive`, dotfiles, and stray non-directory files; canonical specs are Markdown files under `openspec/specs/**`. It SHALL also read repository-scoped feature associations, referenced archives, run/close evidence, and current Git context for lifecycle discovery. Read-only OpenSpec task queries SHALL be permitted by the shared assessment contract. Discovery, refresh, and browsing MUST NOT write any file or silently adopt/migrate features. Absence of active changes or of the launch checkout's `openspec/` SHALL NOT suppress registered features or discoverable unassociated worktrees, including those without runs.
 
 #### Scenario: Repo without openspec directory
 
-- **WHEN** a repository has no `openspec/` directory and no discoverable registered features or run-bearing worktrees
+- **WHEN** a repository has no `openspec/` directory and no discoverable registered features or discoverable unassociated worktrees
 - **THEN** Convoy reports that no specs were found and exits successfully without launching a UI
 
 #### Scenario: Repo with openspec directory but no active changes
@@ -56,7 +56,7 @@ The specs view SHALL load a registered feature's title and artifact inventory fr
 
 ### Requirement: Root view shows only non-empty sections
 
-The root SHALL present non-empty sections in this order: **Features**, **Worktrees without spec**, and **Canonical Specs**. Features SHALL include registered pending lifecycle work and unassociated active-change candidates. A discoverable history view SHALL expose completed registered features without requiring them to clutter pending work. Section headers SHALL remain distinct and reachable while scrolling; empty sections and headers SHALL be omitted. Missing proposals SHALL not hide entries; features SHALL use their recorded display identity and unassociated changes their change id. Selection SHALL use stable feature identity where available, not a mutable branch or directory name.
+The root SHALL present non-empty sections in this order: **Features**, **Worktrees without spec**, and **Canonical Specs**. Features SHALL include registered pending lifecycle work, pre-proposal features with no contracts, and unassociated active-change candidates. A discoverable history view SHALL expose completed registered features without requiring them to clutter pending work. Section headers SHALL remain distinct and reachable while scrolling; empty sections and headers SHALL be omitted. Missing proposals SHALL not hide entries; features SHALL use their recorded display identity and unassociated changes their change id. Selection SHALL use stable feature identity where available, not a mutable branch or directory name.
 
 #### Scenario: Sections appear in order
 
@@ -145,9 +145,11 @@ While browsing an active contract, **Apply this spec** SHALL open the standard l
 - **WHEN** an active contract disappears between browsing and launch review
 - **THEN** the launcher reports the missing selected source instead of choosing a different active change
 
+Launcher resource loading SHALL use the verified execution checkout from the start, including configuration, history, specs, and relative attachments. Returning from a cancelled launcher or dashboard SHALL restore the originating feature/contract selection and refresh its assessment.
+
 ### Requirement: Iterate on this plan opens an OpenCode session on the change
 
-**Iterate on this plan** SHALL open a standalone OpenCode session rooted at the verified checkout containing the selected active planning artifacts, with proposal, design, tasks, and delta specs referenced as context. For a registered feature the source SHALL come from its association; for an unassociated candidate the source SHALL be explicitly selected. The session SHALL be pre-authorized to read the entire selected repository checkout without per-file read confirmations; only reads are pre-granted and writes retain normal defaults. The session SHALL outlive the browser and use OpenSpec authoring commands for edits, not Convoy artifact writes. Missing, ambiguous, or archived-only planning sources SHALL yield guidance rather than silently opening an unrelated checkout for editing.
+Iterate SHALL open or explicitly resume an authoring conversation linked to the existing feature identity in the verified checkout containing the selected active contract source. It SHALL preserve the feature's complete contract set even when the reader focuses one contract. The selected proposal, design, tasks, and delta files SHALL be initial context; checkout reads SHALL be pre-granted and writes SHALL retain normal permissions and shared writer coordination. Foreground presentation with return to the originating feature/contract SHALL be the default; external presentation SHALL remain explicit. Missing or ambiguous contexts SHALL offer association/binding remediation. Archived artifacts SHALL remain readable, but editing them SHALL require the existing explicit new active-work decision rather than reactivating a completed feature. OpenSpec authoring remains owned by the operator and the project workflow.
 
 #### Scenario: Iterate opens a repo-rooted session
 
@@ -157,12 +159,17 @@ While browsing an active contract, **Apply this spec** SHALL open the standard l
 #### Scenario: Iterate requires no launcher
 
 - **WHEN** the operator iterates and closes the session without running a pipeline
-- **THEN** no run starts and only the standalone session was opened
+- **THEN** no run starts and the conversation returns to the originating feature without starting a run
 
 #### Scenario: Iterate session is pre-authorized to read the repository
 
 - **WHEN** Iterate opens on a verified planning checkout
 - **THEN** reads across that checkout are pre-granted while writes follow normal session permissions
+
+#### Scenario: Revisit a plan conversation
+
+- **WHEN** the feature has a linked authoring conversation and the operator chooses resume
+- **THEN** Convoy opens that exact session and returns to the same selected feature and contract on client exit
 
 ### Requirement: Non-TTY invocations print a plain listing
 

@@ -50,12 +50,22 @@ Spin SHALL move the uncommitted `openspec/changes/<id>/` files from the base che
 
 ### Requirement: Spin hands the session over via /move
 
-On success spin SHALL print the worktree path, the branch, the state of the moved change, and an instruction to run OpenCode's `/move` and pick that worktree — the operator's current session relocates there with its history. Spin SHALL NOT fork, copy, summarize, or otherwise touch any OpenCode session itself; the session belongs to OpenCode.
+On successful standalone `convoy spin`, Convoy SHALL print the worktree path, branch, moved-change state, and instruction to run OpenCode's `/move` to continue an existing external conversation. Spin SHALL NOT fork, copy, summarize, or relocate that external session itself. When spin is invoked as adoption within Convoy, Convoy SHALL select the stable feature already registered by spin, preserve its complete association and recovery evidence, and offer its managed conversation action without requiring a shell directory switch. This action SHALL NOT claim to have preserved an external conversation unless the operator explicitly relocated or linked that session through a supported mechanism.
 
 #### Scenario: Output tells the operator exactly what to do next
 
-- **WHEN** spin completes
-- **THEN** the output names the worktree directory, the branch, what moved, and says to continue the same conversation by running `/move` and selecting that worktree
+- **WHEN** standalone spin completes
+- **THEN** its output names the directory, branch, and moved files and explains the `/move` handoff for continuing the external conversation
+
+#### Scenario: Adoption from the work browser
+
+- **WHEN** the operator adopts a stranded proposal through Convoy and spin succeeds
+- **THEN** the feature identity returned by spin is selected without creating a second record and can open a managed conversation in its worktree without a manual `cd`
+
+#### Scenario: External history has not moved
+
+- **WHEN** adoption creates work but an earlier conversation still belongs to the source checkout
+- **THEN** Convoy distinguishes opening a new managed conversation from relocating the external conversation and does not claim its history moved
 
 ### Requirement: The global /convoy-spin OpenCode command is opt-in
 

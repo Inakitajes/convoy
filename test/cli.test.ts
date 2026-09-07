@@ -28,22 +28,26 @@ describe("home launcher gate", () => {
 
 describe("home navigation loop", () => {
   test("a destination close returns to Home with that destination still selected", async () => {
-    const initials: Array<string | undefined> = []
+    const contexts: Array<string | undefined> = []
     const destinations: string[] = []
     let opens = 0
 
     await runHomeNavigationLoop({
       interrupted: () => false,
-      openHome: async (initial) => {
-        initials.push(initial)
-        return opens++ === 0 ? "specs" : undefined
+      route: {} as never,
+      targetDir: ".",
+      openHome: async (context) => {
+        contexts.push(context.resumeNotice === undefined ? "ok" : "notice")
+        return opens++ === 0 ? { type: "destination", destination: "specs" } : undefined
       },
+      openWork: async () => {},
+      createWork: async () => {},
       openDestination: async (selection) => {
         destinations.push(selection)
       },
     })
 
-    expect(initials).toEqual([undefined, "specs"])
+    expect(contexts).toEqual(["ok", "ok"])
     expect(destinations).toEqual(["specs"])
   })
 
@@ -53,10 +57,14 @@ describe("home navigation loop", () => {
 
     await runHomeNavigationLoop({
       interrupted: () => interrupted,
+      route: {} as never,
+      targetDir: ".",
       openHome: async () => {
         homeOpens += 1
-        return "runs"
+        return { type: "destination", destination: "runs" }
       },
+      openWork: async () => {},
+      createWork: async () => {},
       openDestination: async () => {
         interrupted = true
       },

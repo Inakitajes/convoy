@@ -635,13 +635,17 @@ async function recoverFromLegacy(commonDir: string, input: RecoverInput): Promis
 
 // ── new-work (task 3.6) ──────────────────────────────────────────────────
 
-export type NewWorkInput = { cwd: string; branch: string; worktree: string; changeIds: string[]; base: string }
+export type NewWorkInput = { cwd: string; branch: string; worktree: string; changeIds?: string[]; base: string; displayName?: string }
 
 /**
- * Explicit consent to start a new feature on a retained completed context
- * (task 3.6): creates a fresh identity with the given contracts and does not
- * reopen the completed feature's receipt or inherit its runs. The old
- * feature's record is untouched.
+ * Explicit consent to start a new feature on a retained completed context, or
+ * to create pre-proposal work with no contracts at all (capability
+ * work-context, task 5.2): creates a fresh identity and does not reopen the
+ * completed feature's receipt or inherit its runs. `changeIds` may be empty —
+ * an idle verified zero-contract feature is awaiting proposal, and its
+ * contracts arrive later through the explicit association-revision workflow.
+ * `displayName` is independent of change/branch names; without one, a
+ * contract-less creation is named from the branch slug.
  */
 export async function featureNewWork(input: NewWorkInput): Promise<FeatureRecord> {
   const commonDir = await lifecycleCommonDir(input.cwd)
@@ -667,7 +671,8 @@ export async function featureNewWork(input: NewWorkInput): Promise<FeatureRecord
   }
 
   const contracts: FeatureContract[] = []
-  for (const changeId of input.changeIds) {
+  const changeIds = input.changeIds ?? []
+  for (const changeId of changeIds) {
     if (!isOpenSpecChangeId(changeId)) throw operationError(`"${changeId}" is not a valid change id`, "missing")
     const idsHere = await listChangeIds(join(input.worktree, openspecDirName, "changes"))
     if (!idsHere.includes(changeId)) throw operationError(`change "${changeId}" is not active in ${input.worktree}`, "missing")
@@ -676,18 +681,19 @@ export async function featureNewWork(input: NewWorkInput): Promise<FeatureRecord
 
   const featureId = crypto.randomUUID()
   const now = Date.now()
+  const displayName = input.displayName ?? (contracts.length > 0 ? contracts.map((contract) => contract.changeId).join(" + ") : `new work (${input.branch})`)
   const record: FeatureRecord = {
     schemaVersion: 1,
     featureId,
     repositoryId: repoRecord.value.repositoryId,
-    displayName: input.changeIds.join(" + "),
+    displayName,
     associationRevision: 1,
     contracts,
     intendedBaseRef: input.base,
     context: { branch: input.branch, ...(await realpathSafe(input.worktree) ? { checkoutPath: await realpathSafe(input.worktree) } : {}) },
     runIds: [],
     closeAttemptIds: [],
-    history: [{ at: now, kind: "new-work", summary: `new work on ${input.branch}: ${contracts.map((contract) => contract.changeId).join(", ")}`, revision: 1 }],
+    history: [{ at: now, kind: "new-work", summary: contracts.length > 0 ? `new work on ${input.branch}: ${contracts.map((contract) => contract.changeId).join(", ")}` : `new work created before proposal on ${input.branch}`, revision: 1 }],
     createdAt: now,
     updatedAt: now,
   }

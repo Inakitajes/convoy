@@ -30,6 +30,20 @@ import type { Hint } from "./tui-theme"
 const compactSpecsMaxWidth = 84
 
 /**
+ * The selection a returning browser restores (capability work-context /
+ * specs-viewer: returning from a cancelled launcher, a dashboard, or an
+ * authoring conversation SHALL restore the originating selection). Identity-
+ * keyed — change id, feature id, or spec path — never a list position, so a
+ * refreshed view still lands on the same subject.
+ */
+export type SpecsBrowserResume = {
+  level: "root" | "detail"
+  changeId?: string
+  featureId?: string
+  specPath?: string
+}
+
+/**
  * One row of the navigation list. Non-empty board sections are peers,
  * separated by headers so each is independently reachable while scrolling.
  */
@@ -49,7 +63,7 @@ type ListRow =
 type MenuItem = {
   action: { id: string; label: string; enabled: boolean; blockers: readonly string[]; remediation?: readonly string[] }
   /** Present only when the browser can run the action itself. */
-  dispatch?: "close" | "continue" | "history" | "refresh" | "archive-main"
+  dispatch?: "close" | "continue" | "history" | "refresh" | "archive-main" | "propose"
 }
 
 export class SpecsBrowser {
@@ -145,6 +159,8 @@ export class SpecsBrowser {
     // copyReport, so tests swap the transport instead of shelling out.
     private readonly copyReport: typeof copyReportToClipboard = copyReportToClipboard,
     private readonly scene?: TuiScene,
+    /** The selection to restore on re-entry (returning from an action). */
+    private readonly resume?: SpecsBrowserResume,
   ) {
     this.result = new Promise((resolve) => {
       this.resolveResult = resolve
@@ -281,9 +297,34 @@ export class SpecsBrowser {
     mount.add(this.overlay)
     this.paletteTargets.push({ box: this.modal, background: "overlay", border: "accent" })
 
+    this.applyResume()
     renderer.keyInput.on("keypress", this.handleKeyPress)
     renderer.on("theme_mode", this.handleThemeMode)
     this.render()
+  }
+
+  /**
+   * Restores a returning selection by identity (task 1.4): the row matching
+   * the remembered change/feature/spec is selected again, and a detail-level
+   * resume re-enters that subject. A subject the refreshed view no longer
+   * contains falls back to the root row it had — never to a different
+   * execution target.
+   */
+  private applyResume() {
+    if (!this.resume) return
+    const rows = this.rows
+    const matchIndex = rows.findIndex((row) => {
+      if (this.resume!.changeId && row.kind === "change") return row.change.id === this.resume!.changeId
+      if (this.resume!.featureId && row.kind === "feature") return row.feature.featureId === this.resume!.featureId
+      if (this.resume!.specPath && row.kind === "spec") return row.path === this.resume!.specPath
+      return false
+    })
+    if (matchIndex >= 0) this.selectedRow = matchIndex
+    if (this.resume.level !== "detail") return
+    const row = rows[this.selectedRow]
+    if (!row || row.kind === "header" || row.kind === "worktree") return
+    if (row.kind === "feature") this.enterFeatureHistory(row.feature)
+    else this.enterSelected()
   }
 
   // ── keys ────────────────────────────────────────────────────────────────
@@ -322,12 +363,22 @@ export class SpecsBrowser {
         break
       case "a": {
         const change = this.selectedChange()
-        if (change) this.finish({ type: "apply-change", changeID: change.id })
+        if (change) this.finish({ type: "apply-change", changeID: change.id, ...(this.featureIdFor(change.id) ? { featureId: this.featureIdFor(change.id) } : {}) })
         break
       }
       case "i": {
         const change = this.selectedChange()
-        if (change) this.finish({ type: "iterate-change", changeID: change.id })
+        if (change) {
+          this.finish({
+            type: "iterate-change",
+            changeID: change.id,
+            ...(this.featureIdFor(change.id) ? { featureId: this.featureIdFor(change.id) } : {}),
+            // Foreground (open the client in this terminal and return) is the
+            // default; an external window is the explicit shift+I choice
+            // (capability work-conversations, tasks 4.5/4.6).
+            presentation: key.shift ? "external" : "foreground",
+          })
+        }
         break
       }
       case "s": {
@@ -339,7 +390,7 @@ export class SpecsBrowser {
         const lifecycle = this.selectedLifecycleFeature()
         if (lifecycle?.checkoutPath && lifecycle.branch) {
           const changeId = lifecycle.contracts.find((contract) => contract.state === "active")?.changeId
-          if (changeId) this.finish({ type: "continue-change", changeID: changeId, worktreeDir: lifecycle.checkoutPath, branch: lifecycle.branch })
+          if (changeId) this.finish({ type: "continue-change", changeID: changeId, featureId: lifecycle.featureId, worktreeDir: lifecycle.checkoutPath, branch: lifecycle.branch })
           break
         }
         const feature = this.selectedFeature()
@@ -463,12 +514,19 @@ export class SpecsBrowser {
         break
       case "a": {
         const subject = this.subject
-        if (subject?.kind === "change" && !this.historyFeature) this.finish({ type: "apply-change", changeID: subject.change.id })
+        if (subject?.kind === "change" && !this.historyFeature) this.finish({ type: "apply-change", changeID: subject.change.id, ...(this.featureIdFor(subject.change.id) ? { featureId: this.featureIdFor(subject.change.id) } : {}) })
         return
       }
       case "i": {
         const subject = this.subject
-        if (subject?.kind === "change" && !this.historyFeature) this.finish({ type: "iterate-change", changeID: subject.change.id })
+        if (subject?.kind === "change" && !this.historyFeature) {
+          this.finish({
+            type: "iterate-change",
+            changeID: subject.change.id,
+            ...(this.featureIdFor(subject.change.id) ? { featureId: this.featureIdFor(subject.change.id) } : {}),
+            presentation: key.shift ? "external" : "foreground",
+          })
+        }
         return
       }
       case "escape":
@@ -524,6 +582,8 @@ export class SpecsBrowser {
               : { action }
           case "history":
             return { action, dispatch: "history" as const }
+          case "propose":
+            return { action, dispatch: "propose" as const }
           case "archive-on-main": {
             const changeId = feature.contracts.find((contract) => contract.state === "active")?.changeId
             return changeId ? { action, dispatch: "archive-main" as const } : { action }
@@ -595,7 +655,7 @@ export class SpecsBrowser {
       case "continue": {
         const changeId = feature.contracts.find((contract) => contract.state === "active")?.changeId
         if (changeId && feature.checkoutPath && feature.branch) {
-          this.finish({ type: "continue-change", changeID: changeId, worktreeDir: feature.checkoutPath, branch: feature.branch })
+          this.finish({ type: "continue-change", changeID: changeId, featureId: feature.featureId, worktreeDir: feature.checkoutPath, branch: feature.branch })
         }
         return
       }
@@ -604,6 +664,9 @@ export class SpecsBrowser {
         return
       case "refresh":
         void this.refresh()
+        return
+      case "propose":
+        this.finish({ type: "propose-feature", featureId: feature.featureId })
         return
       case "archive-main": {
         const changeId = feature.contracts.find((contract) => contract.state === "active")?.changeId
@@ -780,6 +843,16 @@ export class SpecsBrowser {
 
   private featureFor(change: SpecsChangeEntry): FeatureRow | undefined {
     return this.view.rows?.find((row) => row.id === change.id)
+  }
+
+  /**
+   * The stable feature id whose reviewed contract set names this change
+   * (capability work-context, design D2): handoffs carry it so routing
+   * resolves the feature's verified checkout instead of the launch directory.
+   * Undefined when no registered feature owns the change.
+   */
+  private featureIdFor(changeId: string): string | undefined {
+    return this.view.features?.find((feature) => feature.contracts.some((contract) => contract.changeId === changeId))?.featureId
   }
 
   /** Enters a change (its reading pane) or a spec (its rendered content). */
@@ -1376,10 +1449,10 @@ export class SpecsBrowser {
 }
 
 /** Interactive specs browser: the control board — browse, read, apply, iterate, spin, continue, close. */
-export async function browseSpecsTui(view: SpecsView, route?: TuiRoute): Promise<SpecsResolution> {
+export async function browseSpecsTui(view: SpecsView, route?: TuiRoute, resume?: SpecsBrowserResume): Promise<SpecsResolution> {
   if (route) {
     const scene = sceneForRoute(route, "convoy-specs-scene")!
-    return new SpecsBrowser(route.session.renderer, view, copyReportToClipboard, scene).result
+    return new SpecsBrowser(route.session.renderer, view, copyReportToClipboard, scene, resume).result
   }
   // No backgroundColor yet: the palette is only chosen after the terminal
   // answers the background query, so a light terminal never flashes dark.
@@ -1390,7 +1463,7 @@ export async function browseSpecsTui(view: SpecsView, route?: TuiRoute): Promise
   })
   const mode = await renderer.waitForThemeMode(1_000).catch(() => null)
   setTheme(paletteForTerminal(mode, terminalBackgroundHex(renderer)))
-  return new SpecsBrowser(renderer, view).result
+  return new SpecsBrowser(renderer, view, copyReportToClipboard, undefined, resume).result
 }
 
 /** Stage color follows the runs list: attention in yellow, live/ready in green, uncertain in orange. */
@@ -1415,9 +1488,9 @@ function stageColor(stage: FeatureRow["stage"], live: boolean): string {
  * yellow (same attention color as a stranded row), live work in green, and
  * everything else informational cyan. The summary strings come from the
  * shared assessment (feature-lifecycle/assessment.ts), so the two move
- * together.
+ * together. Shared with Home's work list, which renders the same rows.
  */
-function lifecycleColor(feature: LifecycleFeatureRow): string {
+export function lifecycleColor(feature: LifecycleFeatureRow): string {
   if (feature.integration === "verified") return theme.green
   if (feature.integration === "probable" || feature.integration === "stale") return theme.orange
   if (feature.summary === "Ready to close" || feature.summary === "Implementation complete · archive verified") return theme.green

@@ -1,12 +1,12 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { execFile as nodeExecFile } from "node:child_process"
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { promisify } from "node:util"
 
 import { loadLifecycleFeatureRows, loadSpecsView, printSpecsList } from "../src/specs"
-import { featureAdopt } from "../src/feature-lifecycle/commands"
+import { featureAdopt, featureNewWork } from "../src/feature-lifecycle/commands"
 
 /**
  * Tasks 6.1/6.3 (data + headless level): the specs view exposes registered
@@ -110,6 +110,76 @@ describe("specs view lifecycle rows (tasks 6.1/6.3)", () => {
     await loadSpecsView(main)
     const after = await readdir(join(commonDir, "convoy"), { recursive: true })
     expect(after.sort()).toEqual(before.sort())
+  })
+
+  test("a pre-proposal feature with no contracts stays in Features, not an unassociated worktree", async () => {
+    const root = await mkdtemp(join(tmpdir(), "convoy-specs-lifecycle-prep-"))
+    dirs.push(root)
+    const main = join(root, "main")
+    const wt = join(root, "wt")
+    await mkdir(main, { recursive: true })
+    await git(main, "init", "-b", "main")
+    await writeFile(join(main, "README.md"), "# repo\n")
+    await git(main, "add", ".")
+    await git(main, "-c", "user.email=t@x", "-c", "user.name=T", "commit", "-m", "init")
+    await git(main, "worktree", "add", "-b", "feat/pre-proposal", wt)
+
+    // Created before any spec exists: an empty contract set and an
+    // independent display name (work-context: "Work exists before a
+    // specification").
+    const feature = await featureNewWork({
+      cwd: main,
+      branch: "feat/pre-proposal",
+      worktree: wt,
+      changeIds: [],
+      base: "main",
+      displayName: "Widget redesign",
+    })
+
+    const rows = await loadLifecycleFeatureRows(main)
+    expect(rows).toHaveLength(1)
+    expect(rows![0]!.featureId).toBe(feature.featureId)
+    expect(rows![0]!.displayName).toBe("Widget redesign")
+    expect(rows![0]!.summary).toBe("Awaiting proposal")
+    expect(rows![0]!.contracts).toEqual([])
+
+    // The specs view keeps it under Features; it is never downgraded to the
+    // unassociated-worktree section (it is registered, not specless).
+    const view = await loadSpecsView(main)
+    const featureRow = view.features?.find((row) => row.featureId === feature.featureId)
+    expect(featureRow?.summary).toBe("Awaiting proposal")
+    expect(view.worktreesWithoutSpec?.some((worktree) => worktree.dir === wt)).toBe(false)
+  })
+
+  test("an unassociated worktree with no runs is listed in the worktrees-without-spec section (delta: including those with no runs)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "convoy-specs-lifecycle-noruns-"))
+    dirs.push(root)
+    const main = join(root, "main")
+    const wt = join(root, "wt")
+    await mkdir(main, { recursive: true })
+    await git(main, "init", "-b", "main")
+    await writeFile(join(main, "README.md"), "# repo\n")
+    await git(main, "add", ".")
+    await git(main, "-c", "user.email=t@x", "-c", "user.name=T", "commit", "-m", "init")
+    // One registered feature (so Features is non-empty) and one plain
+    // unassociated worktree with no openspec and no runs.
+    await git(main, "worktree", "add", "-b", "feat/add-widget", join(root, "feat-wt"))
+    const changeDir = join(root, "feat-wt", "openspec", "changes", "add-widget")
+    await mkdir(changeDir, { recursive: true })
+    await writeFile(join(changeDir, "proposal.md"), "# Add widget\n")
+    await git(main, "worktree", "add", "-b", "feat/nothing", wt)
+    await featureAdopt({ cwd: main, branch: "feat/add-widget", changeIds: ["add-widget"], base: "main" })
+
+    const view = await loadSpecsView(main)
+    // git canonicalizes worktree paths (macOS /var → /private/var), so the
+    // comparison goes through realpath.
+    const [wtReal, featWtReal] = await Promise.all([realpath(wt), realpath(join(root, "feat-wt"))])
+    const listed = view.worktreesWithoutSpec?.find((worktree) => worktree.dir === wtReal)
+    expect(listed).toBeDefined()
+    expect(listed?.runCount).toBe(0)
+    // The registered feature's own worktree is never downgraded into the
+    // section alongside it.
+    expect(view.worktreesWithoutSpec?.some((worktree) => worktree.dir === featWtReal)).toBe(false)
   })
 
   test("the verified associated source supplies artifacts, even on an arbitrary branch with a launch-checkout husk (task 6.2)", async () => {

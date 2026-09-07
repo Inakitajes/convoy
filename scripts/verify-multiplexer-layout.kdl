@@ -1,0 +1,11 @@
+// Task 7.2 multiplexer leg layout: one pane running the probe. Start the
+// session from the repository root so the relative script path resolves:
+//
+//   script -q /dev/null zellij --session convoy-verify-mux \
+//     --new-session-with-layout scripts/verify-multiplexer-layout.kdl
+//
+layout {
+    pane command="bun" {
+        args "run" "scripts/verify-multiplexer-pane.ts"
+    }
+}

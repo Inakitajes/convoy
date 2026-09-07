@@ -100,20 +100,38 @@ export type LifecycleFeatureRow = {
   history?: Array<{ at: number; kind: string; summary: string }>
   /** Durable run ids linked to the feature (task 6.3). */
   runIds?: string[]
+  /**
+   * Linked authoring conversations (capability work-conversations, task
+   * 3.2): harness-qualified durable references owned by the feature.
+   * Omitted when the conversation record is missing or unreadable — a
+   * failed read is never flattened into "no conversations".
+   */
+  conversations?: Array<{ sessionId: string; harness: string; label?: string; lastSelectedAt?: number }>
+  /** The default resume target: the most recently selected conversation. */
+  lastSelectedConversationId?: string
 }
 
 /**
  * What the specs browser can ask Convoy to do next. Action-shaped so later
  * actions fit without reshaping call sites (same pattern as RunsResolution).
+ * The handoffs that can resolve through a registered feature carry its stable
+ * `featureId` (capability work-context, design D1/D2): the routing layer
+ * resolves the feature's verified checkout instead of the launch directory.
+ * `featureId` is absent for unassociated changes, which keep today's flows.
+ * Iterate presentation: foreground (open the harness client in this terminal
+ * and return) is the default for feature-owned changes; external windows are
+ * the explicit alternative (capability work-conversations, task 4.5/4.6).
  */
 export type SpecsResolution =
   | { type: "exit" }
-  | { type: "apply-change"; changeID: string }
-  | { type: "iterate-change"; changeID: string }
+  | { type: "apply-change"; changeID: string; featureId?: string }
+  | { type: "iterate-change"; changeID: string; featureId?: string; presentation?: "foreground" | "external" }
+  /** Propose the next change for a feature via the project authoring workflow. */
+  | { type: "propose-feature"; featureId: string }
   /** Spin out a stranded change into its own worktree (`convoy spin`'s flow). */
   | { type: "spin-change"; changeID: string }
   /** Continue a feature: the launcher preselects its existing worktree and branch. */
-  | { type: "continue-change"; changeID: string; worktreeDir: string; branch: string }
+  | { type: "continue-change"; changeID: string; featureId?: string; worktreeDir: string; branch: string }
   /** Run the full closing sequence (sync → archive → squash → merge) for a feature. */
   | { type: "close-change"; changeID: string; worktreeDir: string; branch: string }
   /** Run the close review by stable feature identity — dispatched even when the worktree is gone (task 6.4). */
@@ -245,9 +263,16 @@ export async function loadLifecycleFeatureRows(targetDir: string): Promise<Lifec
     const { assessLifecycle } = await import("./feature-lifecycle/assessment")
     const discovery = await discoverLifecycle({ cwd: targetDir })
     const rows: LifecycleFeatureRow[] = []
+    const commonDir = (await import("./feature-lifecycle/store").then(({ lifecycleCommonDir }) => lifecycleCommonDir(targetDir).catch(() => undefined))) ?? ""
+    // Conversation records load once per feature (task 3.2); a read failure
+    // is per-feature, never a row-dropping failure.
+    const { readConversationRecord } = await import("./feature-lifecycle/conversations")
+    const conversationsByFeature = new Map(
+      await Promise.all(
+        discovery.features.map(async ({ record }) => [record.featureId, await readConversationRecord(commonDir, record.featureId)] as const),
+      ),
+    )
     for (const discovered of discovery.features) {
-      const { lifecycleCommonDir } = await import("./feature-lifecycle/store")
-      const commonDir = (await lifecycleCommonDir(targetDir)) ?? ""
       const observations = await buildObservationsForFeature({ cwd: targetDir, commonDir, feature: discovered.record })
       const assessment = assessLifecycle(observations)
       // Verified associated sources (task 6.2): each readable contract's
@@ -297,6 +322,26 @@ export async function loadLifecycleFeatureRows(targetDir: string): Promise<Lifec
           ? { history: discovered.record.history.map((event) => ({ at: event.at, kind: event.kind, summary: event.summary })) }
           : {}),
         ...(discovered.record.runIds.length > 0 ? { runIds: [...discovered.record.runIds] } : {}),
+        ...(() => {
+          // Conversation refs join through the feature-owned record (task
+          // 3.2); a corrupt/unsupported record stays unread — the row simply
+          // omits the field rather than inventing an empty truth.
+          const record = conversationsByFeature.get(discovered.record.featureId)
+          if (record?.status !== "found") return {}
+          return {
+            ...(record.value.conversations.length > 0
+              ? {
+                  conversations: record.value.conversations.map((entry) => ({
+                    sessionId: entry.sessionId,
+                    harness: entry.harness,
+                    ...(entry.label ? { label: entry.label } : {}),
+                    ...(entry.lastSelectedAt ? { lastSelectedAt: entry.lastSelectedAt } : {}),
+                  })),
+                }
+              : {}),
+            ...(record.value.lastSelectedId ? { lastSelectedConversationId: record.value.lastSelectedId } : {}),
+          }
+        })(),
       })
     }
     return rows
@@ -381,6 +426,20 @@ export async function loadSpecsChangeAt(
 }
 
 /**
+ * The registered feature whose reviewed contract set names this change id
+ * (capability work-context, design D2): the identity apply/iterate handoffs
+ * carry so routing resolves the feature's verified checkout instead of the
+ * launch directory. Undefined for unassociated changes, which keep today's
+ * launch-directory flows.
+ */
+export function featureOwningChange(
+  view: Pick<SpecsView, "features">,
+  changeId: string,
+): LifecycleFeatureRow | undefined {
+  return view.features?.find((feature) => feature.contracts.some((contract) => contract.changeId === changeId))
+}
+
+/**
  * Plain-text listing for pipes and CI: registered lifecycle features with
  * their summaries and blockers, active changes with their artifact inventory,
  * run-bearing unassociated worktrees, then canonical specs. No colors, no
@@ -441,12 +500,27 @@ function inventory(change: SpecsChangeEntry): string[] {
 }
 
 /**
+ * The selection a returning specs browser restores (capability work-context /
+ * specs-viewer: returning from a cancelled launcher, a dashboard, or an
+ * authoring conversation restores the originating selection and refreshes the
+ * assessment). Identity-keyed; never a list position.
+ */
+export type SpecsResumeSelection = {
+  changeId?: string
+  featureId?: string
+  specPath?: string
+  detail?: boolean
+}
+
+/**
  * Interactive entry point for `convoy specs`. Missing or completely empty
  * OpenSpec state prints one line and exits successfully; pipes get the plain
  * listing instead of the TUI (the same rule as `convoy runs`). The browser
  * itself is lazy-imported so non-interactive invocations never pull in opentui.
+ * `resume` restores a returning selection after an action; the caller reloads
+ * the view each round so restored state is freshly assessed.
  */
-export async function browseSpecs(targetDir: string, route?: TuiRoute): Promise<SpecsResolution> {
+export async function browseSpecs(targetDir: string, route?: TuiRoute, resume?: SpecsResumeSelection): Promise<SpecsResolution> {
   let view: SpecsView
   if (route && stdin.isTTY && stdout.isTTY) {
     // The home session's handoff: the loading transition covers a genuinely
@@ -482,7 +556,18 @@ export async function browseSpecs(targetDir: string, route?: TuiRoute): Promise<
     return { type: "exit" }
   }
   const { browseSpecsTui } = await import("./specs-browser")
-  return browseSpecsTui(view, route)
+  return browseSpecsTui(
+    view,
+    route,
+    resume
+      ? {
+          level: resume.detail ? "detail" : "root",
+          ...(resume.changeId ? { changeId: resume.changeId } : {}),
+          ...(resume.featureId ? { featureId: resume.featureId } : {}),
+          ...(resume.specPath ? { specPath: resume.specPath } : {}),
+        }
+      : undefined,
+  )
 }
 
 /**

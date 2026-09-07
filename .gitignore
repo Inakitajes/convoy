@@ -5,3 +5,4 @@ coverage/
 .*.bun-build
 .DS_Store
 docs/plans/
+feasibility-foreground.log

@@ -43,9 +43,16 @@ The board SHALL show registered pending features and unassociated active-change 
 - **WHEN** a feature has a verified receipt whose landing remains reachable and its feature tip is unchanged
 - **THEN** the board reports integrated locally and offers only applicable follow-ups without labelling the evidence as patch-equivalence probability
 
+The same shared assessment SHALL supply Home and feature detail summaries and action eligibility. A pre-proposal feature with zero contracts and no execution SHALL be identified as awaiting proposal, not ready to close. Fullscreen reading and navigation SHALL not silently revise contracts or mutate lifecycle state.
+
+#### Scenario: Tasks alone do not authorize close in Home
+
+- **WHEN** all tasks are complete but execution is active or required evidence is unknown
+- **THEN** Home and the specs board show the same blockers and neither enables close from task count alone
+
 ### Requirement: Worktrees without spec get their own section
 
-The board SHALL include a peer section for run-bearing worktrees without an associated OpenSpec feature, each linking to its runs. Presence of unrelated change-directory copies SHALL NOT suppress this section. Registered features with archived contracts SHALL stay in the feature lifecycle surface rather than being downgraded to specless worktrees. Empty peer sections SHALL be omitted entirely. A non-empty worktree section SHALL make the board interactive even without changes or canonical specs.
+The board SHALL include a peer section for discovered worktrees without an associated feature, including those with no runs, each exposing adoption and available runs. Registered pre-proposal features with an empty contract set SHALL remain in Features, alongside other registered lifecycle work. Presence of unrelated change-directory copies SHALL NOT suppress this section. Registered features with archived contracts SHALL stay in the feature lifecycle surface rather than being downgraded to specless worktrees. Empty peer sections SHALL be omitted entirely. A non-empty worktree section SHALL make the board interactive even without changes or canonical specs.
 
 #### Scenario: Plain isolated run appears
 
@@ -62,6 +69,11 @@ The board SHALL include a peer section for run-bearing worktrees without an asso
 - **WHEN** a no-spec run's worktree contains active changes copied from the base
 - **THEN** those copies do not assign the run to a feature or remove the worktree's run-navigation entry
 
+#### Scenario: New feature has no contracts yet
+
+- **WHEN** a feature has been created before proposal with a verified checkout and no contracts or runs
+- **THEN** it remains in Features with conversation/proposal actions, rather than disappearing or being treated as an unassociated worktree
+
 ### Requirement: Continue reuses the feature's worktree and branch
 
 Launching continue from a feature SHALL carry stable feature identity, its explicit contract set, intended base, and verified implementation context into the launcher. Continue SHALL reuse that worktree and actual branch without creating another worktree or invoking the branch namer; new-worktree isolation SHALL be disabled for this handoff. The reviewed plan SHALL freeze the association revision and current context for execution-time validation. Invalid or missing associations SHALL present resolution guidance rather than silently creating replacement work. Archived contracts SHALL remain available for closing/history but SHALL require an explicit new active-work decision before another implementation run.
@@ -76,14 +88,21 @@ Launching continue from a feature SHALL carry stable feature identity, its expli
 - **WHEN** continue is requested after an external branch rename
 - **THEN** Convoy resolves a previously verified rebind or offers rebinding before launch, rather than choosing another change by branch spelling
 
+Conversation resumption SHALL have a separate label and action from pipeline continuation, while both retain the same feature identity.
+
 ### Requirement: The launcher warns on nested isolation
 
-When the launcher detects it is running inside a worktree, isolation SHALL remain off by default (today's behavior), and enabling it manually SHALL display a warning that the operator is already on a branch inside a worktree and should fork only deliberately. The warning SHALL be informational, not blocking.
+Standalone launches inside a worktree SHALL retain the current default of no new isolation and SHALL show an informational warning when new isolation is deliberately enabled, identifying the source branch. Work-scoped launches SHALL reuse existing work; deriving a separate work item SHALL explicitly review its source and destination.
 
 #### Scenario: Warning on deliberate fork
 
-- **WHEN** the operator enables isolate-in-a-worktree while the launcher runs inside a worktree
-- **THEN** the options step shows that the new worktree will be forked from the current worktree's branch, in addition to the existing default-off behavior
+- **WHEN** isolation is enabled for a standalone launch inside a worktree
+- **THEN** the launcher warns that the new worktree derives from the current branch without blocking the deliberate choice
+
+#### Scenario: Existing work is selected
+
+- **WHEN** a pipeline is launched from a work detail
+- **THEN** it reuses that checkout and creating a derivative requires the separate derived-work action
 
 ### Requirement: Change rows resolve to the owning worktree
 

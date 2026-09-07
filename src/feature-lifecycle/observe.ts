@@ -71,7 +71,34 @@ export async function buildObservationsForFeature(input: { cwd: string; commonDi
       const hasMarkdown = await changeHasMarkdown(checkout ?? input.cwd, contract.changeId)
       const counts = await observeTaskCounts(checkout ?? input.cwd)
       const tasks = counts.kind === "known" ? counts.value.get(contract.changeId) ?? "unknown" : "unknown"
-      contracts.push({ changeId: contract.changeId, state: hasMarkdown ? "active" : "missing", ...(hasMarkdown ? {} : { reason: "no markdown artifacts (husk)" }), tasks })
+      if (hasMarkdown) {
+        // Verified archive evidence outranks a stale branch copy (capability
+        // work-context): when the base state carries verified archive
+        // markdown for this change id and the branch sits behind its recorded
+        // base (never synced that state), the branch's unarchived copy is a
+        // leftover, not current state — report archived with the discrepancy
+        // disclosed instead of presenting the stale copy as active work.
+        const archiveRoot = join(mainDir, openspecDirName, "changes", "archive", contract.changeId)
+        const archiveHasMarkdown = (await exists(archiveRoot)) && (await collectDirRelativeMarkdown(archiveRoot, ".")).length > 0
+        // "Behind its recorded base": the branch does not contain the base's
+        // current tip, so the archive state that landed there has not been
+        // synced into this branch's copy.
+        const branchBehindBase =
+          feature.intendedBaseRef && feature.context?.branch
+            ? !(await isAncestor(feature.intendedBaseRef, feature.context.branch, mainDir).catch(() => false))
+            : false
+        if (archiveHasMarkdown && branchBehindBase) {
+          contracts.push({
+            changeId: contract.changeId,
+            state: "verified-archived",
+            reason: `stale branch copy: verified archive evidence for ${contract.changeId} exists in the base state (${feature.intendedBaseRef}) while this branch has not synced it`,
+          })
+          continue
+        }
+        contracts.push({ changeId: contract.changeId, state: "active", tasks })
+        continue
+      }
+      contracts.push({ changeId: contract.changeId, state: "missing", ...(hasMarkdown ? {} : { reason: "no markdown artifacts (husk)" }), tasks })
       continue
     }
     // Archived contract: positively verified only when the archive tree

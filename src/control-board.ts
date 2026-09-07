@@ -106,6 +106,14 @@ export type BoardReads = {
   patchEquivalent(ref: string, branch: string): Promise<boolean>
   baseBranch(): Promise<string | undefined>
   canonicalSpecs(dir: string): Promise<string[]>
+  /**
+   * Checkout paths registered as a feature's current context (read-only
+   * lifecycle-store read). A registered feature's worktree stays in the
+   * feature lifecycle surface — never downgraded to a specless worktree,
+   * runs or no runs (delta control-board: "including those with no runs"
+   * applies to *unassociated* worktrees only).
+   */
+  registeredContextDirs(): Promise<string[]>
 }
 
 /**
@@ -142,7 +150,12 @@ export function hasUncommittedProposal(status: string, changeId: string): boolea
  * carry runs but no OpenSpec change.
  */
 export async function assembleControlBoard(reads: BoardReads): Promise<ControlBoard> {
-  const [worktrees, baseBranch, runs] = await Promise.all([reads.worktrees(), reads.baseBranch(), reads.runs()])
+  const [worktrees, baseBranch, runs, registered] = await Promise.all([
+    reads.worktrees(),
+    reads.baseBranch(),
+    reads.runs(),
+    reads.registeredContextDirs(),
+  ])
   const main = worktrees.find((worktree) => worktree.main) ?? worktrees[0]
   if (!main) return { present: false, rows: [], worktreesWithoutSpec: [], specs: [] }
 
@@ -162,10 +175,13 @@ export async function assembleControlBoard(reads: BoardReads): Promise<ControlBo
   for (const worktree of features) {
     const changePresent = (await reads.openspecPresent(worktree.dir)) && (await reads.changeIds(worktree.dir)).length > 0
     if (!changePresent) {
+      // Registered features stay in the feature lifecycle surface; only
+      // unassociated worktrees land in the peer section — including those
+      // with no runs (delta control-board), so the run count no longer gates
+      // the listing.
+      if (registered.some((dir) => sameCheckoutPath(dir, worktree.dir))) continue
       const worktreeRuns = worktreeRunsFor(worktree, runs)
-      if (worktreeRuns.length > 0) {
-        specless.push({ dir: worktree.dir, ...(worktree.branch ? { branch: worktree.branch } : {}), runCount: worktreeRuns.length })
-      }
+      specless.push({ dir: worktree.dir, ...(worktree.branch ? { branch: worktree.branch } : {}), runCount: worktreeRuns.length })
       continue
     }
     for (const id of await reads.changeIds(worktree.dir)) {
@@ -197,6 +213,11 @@ export async function assembleControlBoard(reads: BoardReads): Promise<ControlBo
 function worktreeRunsFor(worktree: BoardWorktree, runs: BoardRun[]): BoardRun[] {
   if (!worktree.branch) return []
   return runs.filter((run) => run.branch === worktree.branch)
+}
+
+/** Path equality the way the lifecycle observations compare registered paths (trailing-slash insensitive). */
+function sameCheckoutPath(a: string, b: string): boolean {
+  return a.replace(/\/+$/, "") === b.replace(/\/+$/, "")
 }
 
 /**
@@ -426,6 +447,29 @@ export function createBoardReads(targetDir: string): BoardReads {
 
     async canonicalSpecs(dir) {
       return collectDirRelativeMarkdown(join(dir, openspecDirName, "specs"), join(openspecDirName, "specs"))
+    },
+
+    async registeredContextDirs() {
+      // Read-only lifecycle-store read (the board never writes the registry):
+      // every valid feature record's current context checkout path. A store
+      // failure degrades to no registered contexts — the same failure also
+      // removes the feature rows from the view, so the degradation is
+      // consistent rather than a silent ownership claim.
+      try {
+        const { lifecycleCommonDir, isFound } = await import("./feature-lifecycle/store")
+        const { listFeatureIds, readFeatureRecord } = await import("./feature-lifecycle/records")
+        const commonDir = await lifecycleCommonDir(targetDir)
+        if (!commonDir) return []
+        const ids = await listFeatureIds(commonDir)
+        const dirs: string[] = []
+        for (const featureId of ids) {
+          const read = await readFeatureRecord(commonDir, featureId)
+          if (isFound(read) && read.value.context?.checkoutPath) dirs.push(read.value.context.checkoutPath)
+        }
+        return dirs
+      } catch {
+        return []
+      }
     },
   }
 }

@@ -36,6 +36,14 @@ jobs:
         # to the version the maintainers run locally.
         run: bun add -g @fission-ai/openspec@1.10.0
 
+      - name: Install OpenCode CLI
+        # The authoring-conversation tests boot a real OpenCode server through
+        # @opencode-ai/sdk, which spawns the `opencode` CLI from PATH. Same
+        # rule as openspec: CI carries the developer's tool or the real-server
+        # boundary tests fail with spawn ENOENT. Pinned to the version the
+        # maintainers run locally.
+        run: bun add -g opencode-ai@1.18.29
+
       - name: Verify cross-platform native dependencies
         # OpenTUI resolves each target dynamically, so a missing package can
         # produce a binary that reports a version but cannot open the TUI.
