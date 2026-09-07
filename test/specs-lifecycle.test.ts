@@ -6,7 +6,7 @@ import { join } from "node:path"
 import { promisify } from "node:util"
 
 import { loadLifecycleFeatureRows, loadSpecsView, printSpecsList } from "../src/specs"
-import { featureAdopt } from "../src/feature-lifecycle/commands"
+import { featureAdopt, featureNewWork } from "../src/feature-lifecycle/commands"
 
 /**
  * Tasks 6.1/6.3 (data + headless level): the specs view exposes registered
@@ -110,6 +110,45 @@ describe("specs view lifecycle rows (tasks 6.1/6.3)", () => {
     await loadSpecsView(main)
     const after = await readdir(join(commonDir, "convoy"), { recursive: true })
     expect(after.sort()).toEqual(before.sort())
+  })
+
+  test("a pre-proposal feature with no contracts stays in Features, not an unassociated worktree", async () => {
+    const root = await mkdtemp(join(tmpdir(), "convoy-specs-lifecycle-prep-"))
+    dirs.push(root)
+    const main = join(root, "main")
+    const wt = join(root, "wt")
+    await mkdir(main, { recursive: true })
+    await git(main, "init", "-b", "main")
+    await writeFile(join(main, "README.md"), "# repo\n")
+    await git(main, "add", ".")
+    await git(main, "-c", "user.email=t@x", "-c", "user.name=T", "commit", "-m", "init")
+    await git(main, "worktree", "add", "-b", "feat/pre-proposal", wt)
+
+    // Created before any spec exists: an empty contract set and an
+    // independent display name (work-context: "Work exists before a
+    // specification").
+    const feature = await featureNewWork({
+      cwd: main,
+      branch: "feat/pre-proposal",
+      worktree: wt,
+      changeIds: [],
+      base: "main",
+      displayName: "Widget redesign",
+    })
+
+    const rows = await loadLifecycleFeatureRows(main)
+    expect(rows).toHaveLength(1)
+    expect(rows![0]!.featureId).toBe(feature.featureId)
+    expect(rows![0]!.displayName).toBe("Widget redesign")
+    expect(rows![0]!.summary).toBe("Awaiting proposal")
+    expect(rows![0]!.contracts).toEqual([])
+
+    // The specs view keeps it under Features; it is never downgraded to the
+    // unassociated-worktree section (it is registered, not specless).
+    const view = await loadSpecsView(main)
+    const featureRow = view.features?.find((row) => row.featureId === feature.featureId)
+    expect(featureRow?.summary).toBe("Awaiting proposal")
+    expect(view.worktreesWithoutSpec?.some((worktree) => worktree.dir === wt)).toBe(false)
   })
 
   test("the verified associated source supplies artifacts, even on an arbitrary branch with a launch-checkout husk (task 6.2)", async () => {
