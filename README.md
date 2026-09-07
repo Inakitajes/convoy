@@ -644,6 +644,8 @@ The permission gate has three states. In the dashboard, `Shift+Tab` cycles throu
 
 The judge model is `--smart-model <provider/model[#variant]>`, falling back to `defaults.autoAcceptJudgeModel` in config, then the run's model. The hard denylist is never relaxed: OpenCode rejects it before the gate, including for read-only steps that have `verify: true`. `--yolo` and smart auto-accept only cover the "ask" bucket.
 
+**In the launcher**, the same choice is a single cycling control. The options step's **permission selector** replaces the old pair of mutually exclusive toggles: activating it cycles Interactive → Auto-accept → Smart auto-accept → Interactive, and it starts on **Auto-accept** — a launcher-launched run defaults to `--yolo` unless you move the selector to Smart auto-accept or back to Interactive (which sends neither flag and prompts for every ask-level request). The row always names the current state and description, the review shows the resolved permission state before anything starts, and the dashboard's `Shift+Tab` cycle plus the CLI flags behave exactly as described below.
+
 ## Commit safety
 
 Before each commit Convoy scans the staged files for common secret names (`.env*`, `*.pem`, `*.key`, `id_rsa*`, `credentials*`, `*.p12`, `*.keystore`, ...). If any match, the commit is aborted, the index reset, and Convoy asks you to add them to `.gitignore` (or delete them) before re-running. Combined with `--include-dirty` this is the only line of defense against accidentally publishing a secret your working tree had lying around — review the resulting commits with `git show` before pushing.

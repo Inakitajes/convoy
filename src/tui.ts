@@ -23,6 +23,7 @@ import { log } from "./log"
 import { markdownInlineChunks, markdownLines, parseMarkdown, renderMarkdownDoc, type MarkdownDoc } from "./markdown-render"
 import { openIterateOpencodeWindow, openOpencodeSessionWindow, openStoredSessionWindow, type SessionWindowBackend } from "./opencode"
 import { formatTerminalTitle } from "./run-status"
+import { compactRunRowName } from "./runner"
 import { stepRunnerFor, type StepRunnerId } from "./step-runners"
 import { autoAcceptModeLabel, comparePaletteActions, dashboardActions, shortcutGroupOrder, shortcutGroupTitle } from "./tui-actions"
 import { PhaseUsage, addTokens, emptyTokens } from "./usage"
@@ -1626,15 +1627,32 @@ export class TuiProgress implements ProgressUI {
    * starting under qualified phase ids). Merge is strictly by phase name:
    * existing rows — with their status, durations, costs, transcripts, reports
    * — are left untouched, missing rows are appended in the given order as
-   * pending, and nothing is cleared. Idempotent: re-syncing the same list is a
-   * no-op. Unlike `resetPipeline` this never rebuilds or destroys anything;
-   * destructive view swaps remain resetPipeline's exclusive job.
+   * pending, and nothing is cleared. The terminal `Compact run` lifecycle row
+   * always closes the merged list: the initial reset registered it before any
+   * goal row existed, so when a sync appends rows that would sit below it, the
+   * row object moves to the terminal position — never rebuilt, so its state
+   * survives. Idempotent: re-syncing the same list is a no-op. Unlike
+   * `resetPipeline` this never rebuilds or destroys anything; destructive view
+   * swaps remain resetPipeline's exclusive job.
    */
   syncPhases(rows: readonly ProgressPhase[]): void {
     const known = new Set(this.phases.map((phase) => phase.name))
     const additions = rows.filter((row) => !known.has(row.name))
     if (additions.length === 0) return
     this.phases.push(...pendingPhases(additions))
+    // Terminal-row invariant (capability run-finalization): the lifecycle row
+    // closes the phase list. On the tick that appends the first goal rows it
+    // is the only row that shifts, so the only selection that needs
+    // repointing is one resting on the row itself — selections before it are
+    // unaffected, and the appended rows are still-pending additions that
+    // cannot be selected within this tick.
+    const compactIndex = this.phases.findIndex((phase) => phase.name === compactRunRowName)
+    if (compactIndex >= 0 && compactIndex !== this.phases.length - 1) {
+      const compact = this.phases[compactIndex]!
+      this.phases.splice(compactIndex, 1)
+      this.phases.push(compact)
+      if (this.selected === compactIndex) this.selected = this.phases.length - 1
+    }
     this.scheduleRender()
   }
 

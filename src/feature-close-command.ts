@@ -3,7 +3,7 @@ import { stat } from "node:fs/promises"
 import { resolve } from "node:path"
 import type { Readable } from "node:stream"
 
-import { archiveChangeOnMain, runClose, runCloseCleanup, verifiedCloseReceipt, type CloseEvent, type CloseInput, type CloseMessageProposal, type CloseResult, type CloseStep } from "./feature-close"
+import { archiveChangeOnMain, runClose, runCloseCleanup, verifiedCloseReceipt, type CloseEvent, type CloseInput, type CloseMessageProposal, type CloseResult, type CloseStep, type DetectedPullRequest } from "./feature-close"
 import { stripControlBytes } from "./commit-text"
 import {
   applyCloseEvent,
@@ -131,6 +131,7 @@ export async function runCloseHeadless(input: CloseInput): Promise<void> {
       worktreeDir: result.worktreeDir,
       ...(result.featureId ?? input.featureId ? { featureId: result.featureId ?? input.featureId } : {}),
       ...(evidence ? { evidence: { landingSha: evidence.landingSha, featureTip: evidence.postArchiveTip } } : {}),
+      ...(result.pullRequest ? { pullRequest: result.pullRequest } : {}),
     })
     stdout.write(formatCloseEvents(events, { followUps }))
     return
@@ -198,6 +199,14 @@ export type CloseFollowUps = {
   branchDelete?: string
   /** Why branch deletion is unavailable; never an unguarded delete command. */
   branchDeleteRemediation?: string
+  /**
+   * Present only when close detected an open pull request for the feature
+   * branch (PR-aware close): the deliberate fallback close command for the
+   * case where GitHub has not marked the PR merged after the landing is
+   * pushed, plus the PR's URL for inspection. Printed guidance only — close
+   * never mutates GitHub state itself.
+   */
+  prFallback?: { number: number; url?: string; command: string }
 }
 
 /**
@@ -226,6 +235,8 @@ export async function resolveCloseFollowUps(args: {
   featureId?: string
   /** Present only when a verified receipt authorizes branch deletion. */
   evidence?: CloseLandingEvidence
+  /** The open pull request close detected for the feature branch (PR-aware close). */
+  pullRequest?: DetectedPullRequest
 }): Promise<CloseFollowUps> {
   const mainDir = (await mainWorktreeDir(args.targetDir).catch(() => undefined)) ?? args.targetDir
   // Every printed command is prefixed `git -C <mainDir>` and quotes only the
@@ -303,12 +314,26 @@ export async function resolveCloseFollowUps(args: {
       "no verified landing receipt names this branch — deletion needs the receipt close recorded (landing commit reachable from the base and an unchanged feature tip)"
   }
 
+  // The PR fallback (PR-aware close): a detected open pull request gets the
+  // deliberate close command naming the base and the landing SHA, so the PR is
+  // never left dangling when GitHub has not marked it merged after the push.
+  // Guidance only: like push, it is the operator's decision to run.
+  let prFallback: CloseFollowUps["prFallback"]
+  if (args.pullRequest && args.evidence) {
+    prFallback = {
+      number: args.pullRequest.number,
+      ...(args.pullRequest.url ? { url: args.pullRequest.url } : {}),
+      command: `gh pr close ${args.pullRequest.number} --comment ${shq(`landed in ${args.baseRef} as ${args.evidence.landingSha}`)}`,
+    }
+  }
+
   return {
     ...(push ? { push } : {}),
     ...(pushRemediation ? { pushRemediation } : {}),
     ...(worktreeRemoval ? { worktreeRemoval } : {}),
     ...(branchDelete ? { branchDelete } : {}),
     ...(branchDeleteRemediation ? { branchDeleteRemediation } : {}),
+    ...(prFallback ? { prFallback } : {}),
   }
 }
 
@@ -329,6 +354,16 @@ export function formatCloseFollowUps(followUps: CloseFollowUps): string[] {
   const lines = ["", "optional follow-ups (never automatic):"]
   if (followUps.push) lines.push(`  ${followUps.push.command}`)
   else if (followUps.pushRemediation) lines.push(`  push unavailable — ${followUps.pushRemediation}`)
+  if (followUps.prFallback) {
+    // Factual disclosure, never a merge assertion: GitHub may mark the PR
+    // merged through the landing subject's (#N) reference once the push lands;
+    // the printed command is the deliberate fallback when it has not.
+    const pr = followUps.prFallback.number
+    lines.push(
+      `  pull request #${pr}${followUps.prFallback.url ? ` (${followUps.prFallback.url})` : ""} is open for this branch — after the push, if GitHub has not marked it merged, close it deliberately:`,
+    )
+    lines.push(`  ${followUps.prFallback.command}`)
+  }
   if (followUps.worktreeRemoval) lines.push(`  ${followUps.worktreeRemoval}`)
   if (followUps.branchDelete) lines.push(`  ${followUps.branchDelete}`)
   else if (followUps.branchDeleteRemediation) lines.push(`  branch deletion unavailable — ${followUps.branchDeleteRemediation}`)
@@ -365,6 +400,7 @@ export async function runCloseInteractive(input: CloseInput, io: CloseIO = {}, r
       worktreeDir: result.worktreeDir,
       ...(featureId ? { featureId } : {}),
       ...(evidence ? { evidence: { landingSha: evidence.landingSha, featureTip: evidence.postArchiveTip } } : {}),
+      ...(result.pullRequest ? { pullRequest: result.pullRequest } : {}),
     })
     await offerCloseFollowUpsTui(tui, {
       ...followUps,
@@ -507,6 +543,16 @@ export async function buildCloseFollowUpsView(args: {
   const actions: CloseFollowUpItem[] = []
   let notice: string | undefined
 
+  // The PR fallback rides the follow-ups notice (PR-aware close): informational
+  // guidance, never a selectable action — unlike worktree/branch cleanup it has
+  // no local git evidence to revalidate, and the push must happen first anyway.
+  if (followUps.prFallback) {
+    notice = [
+      `pull request #${followUps.prFallback.number}${followUps.prFallback.url ? ` (${followUps.prFallback.url})` : ""} is open for ${followUps.branch} — after the push, if GitHub has not marked it merged, close it deliberately:`,
+      followUps.prFallback.command,
+    ].join("\n")
+  }
+
   // Push is independent of the worktree (design D5) and remains an action in
   // both launch locations. A missing upstream is a remediation, not a
   // fabricated action.
@@ -520,7 +566,7 @@ export async function buildCloseFollowUpsView(args: {
       ...(state.push?.error ? { error: state.push.error } : {}),
     })
   } else if (followUps.pushRemediation) {
-    notice = followUps.pushRemediation
+    notice = notice ? `${notice}\n${followUps.pushRemediation}` : followUps.pushRemediation
   }
 
   if (cwdInside) {

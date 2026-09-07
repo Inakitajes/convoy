@@ -1,11 +1,13 @@
 import { describe, expect, test, afterAll } from "bun:test"
 import { createTestRenderer } from "@opentui/core/testing"
 
-import { LaunchPicker, branchActionForKey, branchProposalNote, compactLaunchMaxWidth, cursorPosition, defaultDirtyStatus, dirtReading, emptyPromptField, goalLines, hookLines, launcherStepModelLabel, markPromptEdited, nextPromptSuggestion, pipelineChoices, pipelineRow, prefillPromptField, promptAfterPipelineSwitch, promptEnterAction, reviewActionForKey, sanitizePaste, stepTree, trimPromptField, typedText, wrapPromptLines } from "../src/launch-tui"
-import type { GoalPreview, LaunchRunTuiOptions } from "../src/launch-tui"
+import { LaunchPicker, branchActionForKey, branchProposalNote, compactLaunchMaxWidth, cursorPosition, defaultDirtyStatus, dirtReading, emptyPromptField, goalLines, hookLines, launcherStepModelLabel, markPromptEdited, nextPermissionMode, nextPromptSuggestion, pipelineChoices, pipelineRow, prefillPromptField, promptAfterPipelineSwitch, promptEnterAction, reviewActionForKey, sanitizePaste, stepTree, trimPromptField, typedText, wrapPromptLines } from "../src/launch-tui"
+import type { GoalPreview, LaunchRunSelection, LaunchRunTuiOptions } from "../src/launch-tui"
 import { ensureRepoReady, statusPorcelain } from "../src/git"
 import type { OpenSpecChangeSummary } from "../src/openspec"
 
+import { parseArgs, resolveRunOptions } from "../src/cli"
+import { runReviewLines } from "../src/review-tui"
 import { buildRunPlan } from "../src/run-plan"
 import { builtInAgents, builtInPipelines, hasWritableStep, resolvePipeline } from "../src/pipeline"
 import { parseConvoyConfig } from "../src/config"
@@ -98,22 +100,24 @@ type LaunchPickerView = {
   optionIndex: number
   gateway: string
   modal: { kind: string; index: number } | undefined
+  permissionMode: string
   toggleState: { worktree: boolean; includeDirty: boolean; [key: string]: unknown }
   promptChoosing: boolean
   specIndex: number
   selectedChangeId?: string
   prepared?: {
-    selection: { includeDirty: boolean }
+    selection: { includeDirty: boolean; yolo: boolean; smart: boolean }
     dirt: { files: number; matters: boolean; blocked: boolean; preview: string }
   }
   modalWidth(): number
+  footerContent(width: number): { chunks: Array<{ text: string }> }
   promptDetail(width: number): { chunks: Array<{ text: string }> }
   optionsDetail(width: number): { chunks: Array<{ text: string }> }
   pipelineDetail(width: number): { chunks: Array<{ text: string }> }
   reviewDetail(width: number): { chunks: Array<{ text: string }> }
   prepareReview(pipelineName: string): Promise<void>
   refreshDirt(): Promise<void>
-  runSelection(pipelineName: string, initializeGit?: boolean): { prompt: string; change?: string }
+  runSelection(pipelineName: string, initializeGit?: boolean): LaunchRunSelection
 }
 
 function launchView(picker: LaunchPicker): LaunchPickerView {
@@ -232,9 +236,9 @@ describe("launch TUI compact layout", () => {
       expect(displayWidth(promptHint)).toBeLessThanOrEqual(40)
 
       view.mode = "options"
-      // The toggle list is taller than the compact panel, so the flags
+      // The options list is taller than the compact panel, so the flags
       // summary only scrolls into view once the selection reaches the end.
-      view.optionIndex = 7
+      view.optionIndex = 6
       const flags = view.optionsDetail(40).chunks.map((chunk) => chunk.text).join("").split("\n").find((line) => line.includes("will run with"))!
       expect(displayWidth(flags)).toBeLessThanOrEqual(40)
     } finally {
@@ -242,7 +246,7 @@ describe("launch TUI compact layout", () => {
     }
   })
 
-  test("keeps the selected toggle inside the options window when the list overflows", async () => {
+  test("keeps the selected control inside the options window when the list overflows", async () => {
     const launcher = await createLauncher(80, 24)
     try {
       const view = launchView(launcher.picker)
@@ -250,10 +254,10 @@ describe("launch TUI compact layout", () => {
 
       view.optionIndex = 1
       const top = view.optionsDetail(60).chunks.map((chunk) => chunk.text).join("")
-      expect(top).toContain("▸ ━━● on  Smart auto-accept")
+      expect(top).toContain("▸ permissions  Auto-accept")
       expect(top).not.toContain("will run with")
 
-      view.optionIndex = 7
+      view.optionIndex = 6
       const bottom = view.optionsDetail(60).chunks.map((chunk) => chunk.text).join("")
       expect(bottom).toContain("▸ ●━━ off Isolate in a worktree")
       expect(bottom).toContain("will run with")
@@ -1023,7 +1027,7 @@ describe("launch TUI gateway selector", () => {
       expect(lines[instruction + 1]).toBe("")
       expect(lines[gatewayRow + 1]).toContain("Route every model through one provider")
       expect(lines[gatewayRow + 2]).toBe("")
-      expect(lines[gatewayRow + 3]).toContain("Smart auto-accept")
+      expect(lines[gatewayRow + 3]).toContain("permissions  Auto-accept")
     } finally {
       await closeLauncher(launcher)
     }
@@ -1040,7 +1044,10 @@ describe("launch TUI gateway selector", () => {
       expect(gatewayRow).toBeGreaterThanOrEqual(0)
       expect(lines[gatewayRow]).not.toContain("▸ gateway")
       expect(lines[gatewayRow]).toContain("--gateway")
-      expect(lines.find((line) => line.includes("Smart auto-accept"))).toContain("▸ ━━● on")
+      // The row after the gateway is the permission selector; moving down one
+      // row selects it without turning it into a switch row.
+      expect(lines.find((line) => line.includes("permissions"))).toContain("▸ permissions")
+      expect(lines.find((line) => line.includes("permissions"))).not.toContain("━━●")
     } finally {
       await closeLauncher(launcher)
     }
@@ -1170,6 +1177,313 @@ describe("launch TUI gateway selector", () => {
       await launcher.mockMouse.click(lines[gatewayRow]!.indexOf("gateway"), gatewayRow)
       await launcher.renderOnce()
       expect(view.modal?.kind).toBe("gateway")
+    } finally {
+      await closeLauncher(launcher)
+    }
+  })
+})
+
+describe("launch TUI permission selector", () => {
+  function optionsLines(view: LaunchPickerView, width = 80) {
+    return view.optionsDetail(width).chunks.map((chunk) => chunk.text).join("").split("\n")
+  }
+
+  function permissionsRow(lines: string[]) {
+    const row = lines.find((line) => line.includes("permissions  "))
+    expect(row, "permission selector row visible").toBeDefined()
+    return row!
+  }
+
+  test("nextPermissionMode walks the fixed cycle and wraps", () => {
+    expect(nextPermissionMode("interactive")).toBe("yolo")
+    expect(nextPermissionMode("yolo")).toBe("smart")
+    expect(nextPermissionMode("smart")).toBe("interactive")
+    // Three activations always return to the starting state.
+    expect(nextPermissionMode(nextPermissionMode(nextPermissionMode("yolo")))).toBe("yolo")
+  })
+
+  test("a fresh launcher starts on Auto-accept and shows its flag", async () => {
+    const launcher = await createLauncher(100)
+    try {
+      const view = launchView(launcher.picker)
+      view.mode = "options"
+      view.optionIndex = 1
+      await launcher.renderOnce()
+      expect(view.permissionMode).toBe("yolo")
+      const row = permissionsRow(optionsLines(view))
+      expect(row).toContain("Auto-accept")
+      expect(row).toContain("--yolo")
+      expect(view.runSelection("review")).toMatchObject({ yolo: true, smart: false })
+    } finally {
+      await closeLauncher(launcher)
+    }
+  })
+
+  test("activation cycles all three states and wraps back, by keyboard and mouse", async () => {
+    const launcher = await createLauncher(100)
+    try {
+      const view = launchView(launcher.picker)
+      view.mode = "options"
+      view.optionIndex = 1
+      await launcher.renderOnce()
+
+      launcher.mockInput.pressKey(" ")
+      await launcher.renderOnce()
+      expect(view.permissionMode).toBe("smart")
+      expect(permissionsRow(optionsLines(view))).toContain("Smart auto-accept")
+
+      launcher.mockInput.pressKey(" ")
+      await launcher.renderOnce()
+      expect(view.permissionMode).toBe("interactive")
+      const interactiveRow = permissionsRow(optionsLines(view))
+      expect(interactiveRow).toContain("Interactive")
+      expect(interactiveRow).toContain("no auto-accept flag")
+      expect(interactiveRow).not.toContain("--yolo")
+      expect(interactiveRow).not.toContain("--smart")
+
+      launcher.mockInput.pressKey(" ")
+      await launcher.renderOnce()
+      expect(view.permissionMode).toBe("yolo")
+
+      // Mouse activation advances the same cycle.
+      await launcher.renderOnce()
+      const lines = launcher.captureCharFrame().split("\n")
+      const row = lines.findIndex((line) => line.includes("permissions  "))
+      expect(row, "permission selector row visible in frame").toBeGreaterThanOrEqual(0)
+      await launcher.mockMouse.click(lines[row]!.indexOf("permissions"), row)
+      await launcher.renderOnce()
+      expect(view.permissionMode).toBe("smart")
+    } finally {
+      await closeLauncher(launcher)
+    }
+  })
+
+  test("each mode maps to the run's permission flags, never both", async () => {
+    const launcher = await createLauncher(100)
+    try {
+      const view = launchView(launcher.picker)
+      view.mode = "options"
+      const flagsLine = () =>
+        optionsLines(view).find((line) => line.includes("will run with")) ?? ""
+
+      view.permissionMode = "yolo"
+      expect(view.runSelection("review")).toMatchObject({ yolo: true, smart: false })
+      expect(flagsLine()).toContain("--yolo")
+      expect(flagsLine()).not.toContain("--smart")
+
+      view.permissionMode = "smart"
+      expect(view.runSelection("review")).toMatchObject({ yolo: false, smart: true })
+      expect(flagsLine()).toContain("--smart")
+      expect(flagsLine()).not.toContain("--yolo")
+
+      view.permissionMode = "interactive"
+      expect(view.runSelection("review")).toMatchObject({ yolo: false, smart: false })
+      expect(flagsLine()).not.toContain("--yolo")
+      expect(flagsLine()).not.toContain("--smart")
+    } finally {
+      await closeLauncher(launcher)
+    }
+  })
+
+  test("the two old permission toggles no longer exist", async () => {
+    const launcher = await createLauncher(100)
+    try {
+      const view = launchView(launcher.picker)
+      view.mode = "options"
+      const text = optionsLines(view).join("\n")
+      // The old yolo toggle's label is gone, and the permission control is a
+      // value row rather than an on/off switch.
+      expect(text).not.toContain("Auto-accept permissions")
+      expect(permissionsRow(optionsLines(view))).not.toContain("━━●")
+      expect("smart" in view.toggleState).toBe(false)
+      expect("yolo" in view.toggleState).toBe(false)
+    } finally {
+      await closeLauncher(launcher)
+    }
+  })
+
+  test("other toggles keep their rows, labels, and couplings", async () => {
+    const launcher = await createLauncher(100)
+    try {
+      const view = launchView(launcher.picker)
+      view.mode = "options"
+      view.optionIndex = 2
+      const text = optionsLines(view).join("\n")
+      expect(text).toContain("Human gates")
+      expect(text).toContain("Include dirty tree")
+      expect(text).toContain("Keep run directory")
+      expect(text).toContain("Progress dashboard")
+      expect(text).toContain("Isolate in a worktree")
+      // The include-dirty/worktree coupling survives the row shift.
+      view.toggleState.worktree = true
+      expect(view.toggleState.includeDirty).toBe(false)
+      expect(view.runSelection("review").yolo).toBe(true)
+    } finally {
+      await closeLauncher(launcher)
+    }
+  })
+
+  test("activating a boolean toggle row flips it and leaves the permission mode alone", async () => {
+    const launcher = await createLauncher(100)
+    try {
+      const view = launchView(launcher.picker)
+      view.mode = "options"
+      // Human gates is the first toggle row (index 2): activating it must flip
+      // that boolean, not cycle the permission selector, proving the toggle
+      // rows still resolve through the shifted `toggles[index - 2]` dispatch.
+      view.optionIndex = 2
+      await launcher.renderOnce()
+      const before = view.toggleState.humanReview
+      launcher.mockInput.pressKey(" ")
+      await launcher.renderOnce()
+      expect(view.toggleState.humanReview).toBe(!before)
+      expect(view.permissionMode).toBe("yolo")
+    } finally {
+      await closeLauncher(launcher)
+    }
+  })
+
+  test("activating the worktree toggle through the row path enforces the include-dirty coupling", async () => {
+    const launcher = await createLauncher(100)
+    try {
+      const view = launchView(launcher.picker)
+      view.mode = "options"
+      // Worktree is the last toggle row (index 6): the row activation must
+      // resolve to the worktree toggle and enforce the coupling through the
+      // real dispatch path, not through direct state assignment.
+      view.optionIndex = 6
+      await launcher.renderOnce()
+      launcher.mockInput.pressKey(" ")
+      await launcher.renderOnce()
+      expect(view.toggleState.worktree).toBe(true)
+      expect(view.toggleState.includeDirty).toBe(false)
+      expect(view.permissionMode).toBe("yolo")
+    } finally {
+      await closeLauncher(launcher)
+    }
+  })
+
+  test("the footer names the selected row's activation: cycle on permissions, toggle elsewhere", async () => {
+    const launcher = await createLauncher(100)
+    try {
+      const view = launchView(launcher.picker)
+      view.mode = "options"
+      const footer = () => view.footerContent(100).chunks.map((chunk) => chunk.text).join("")
+
+      view.optionIndex = 1
+      expect(footer()).toContain("cycle")
+      view.optionIndex = 2
+      expect(footer()).toContain("toggle")
+      expect(footer()).not.toContain("cycle")
+    } finally {
+      await closeLauncher(launcher)
+    }
+  })
+})
+
+describe("launch TUI default launch resolution", () => {
+  // The default launcher state (no operator interaction) must resolve through
+  // the production option/plan path to a `--yolo` run: the selector's default
+  // is Auto-accept, and the review must show it before the run starts.
+  test("an untouched selection resolves plan permissions 'yolo' and shows --yolo", async () => {
+    const launcher = await createLauncher(100)
+    try {
+      const view = launchView(launcher.picker)
+      expect(view.permissionMode).toBe("yolo")
+      const selection = view.runSelection("review")
+      expect(selection).toMatchObject({ yolo: true, smart: false })
+
+      // Mirror prepareInteractiveRun's mapping of the launcher selection onto
+      // parsed args, then resolve through the production path.
+      const parsed = parseArgs([])
+      parsed.targetDir = selection.targetDir
+      parsed.baseDetectionDir = process.cwd()
+      parsed.prompt = selection.prompt
+      parsed.pipeline = selection.pipeline
+      parsed.humanReview = selection.humanReview
+      parsed.tui = selection.tui
+      parsed.includeDirty = selection.includeDirty
+      parsed.keepRunDir = selection.keepRunDir
+      parsed.yolo = selection.yolo
+      parsed.smart = selection.smart
+      parsed.gateway = selection.gateway
+      parsed.worktree = Boolean(selection.isolateWorktree)
+      const options = await resolveRunOptions(parsed)
+      expect(options).toMatchObject({ yolo: true, smart: false })
+      const plan = buildRunPlan({ ...options, prompt: selection.prompt })
+      expect(plan.permissions).toBe("yolo")
+
+      // The review renders the resolved permission state with its flag form,
+      // and the options step's flag line names --yolo without --smart.
+      const reviewLines = runReviewLines(plan, 120).map((line) => line.chunks.map((chunk) => chunk.text).join(""))
+      expect(reviewLines.some((line) => line.includes("yolo permissions (--yolo)"))).toBe(true)
+      expect(reviewLines.some((line) => line.includes("--smart"))).toBe(false)
+      view.mode = "options"
+      const flags = view.optionsDetail(120).chunks.map((chunk) => chunk.text).join("")
+      expect(flags).toContain("will run with")
+      expect(flags).toContain("--yolo")
+      expect(flags).not.toContain("--smart")
+    } finally {
+      await closeLauncher(launcher)
+    }
+  })
+
+  test("the review shows the selector's Smart auto-accept as --smart, never --yolo", async () => {
+    const launcher = await createLauncher(100)
+    try {
+      const view = launchView(launcher.picker)
+      view.permissionMode = "smart"
+      const selection = view.runSelection("review")
+      expect(selection).toMatchObject({ yolo: false, smart: true })
+      const parsed = parseArgs([])
+      parsed.targetDir = selection.targetDir
+      parsed.baseDetectionDir = process.cwd()
+      parsed.pipeline = selection.pipeline
+      parsed.humanReview = selection.humanReview
+      parsed.tui = selection.tui
+      parsed.includeDirty = selection.includeDirty
+      parsed.keepRunDir = selection.keepRunDir
+      parsed.yolo = selection.yolo
+      parsed.smart = selection.smart
+      parsed.gateway = selection.gateway
+      parsed.worktree = Boolean(selection.isolateWorktree)
+      const options = await resolveRunOptions(parsed)
+      const plan = buildRunPlan({ ...options, prompt: selection.prompt })
+      expect(plan.permissions).toBe("smart")
+      const reviewLines = runReviewLines(plan, 120).map((line) => line.chunks.map((chunk) => chunk.text).join(""))
+      expect(reviewLines.some((line) => line.includes("smart permissions (--smart)"))).toBe(true)
+      expect(reviewLines.some((line) => line.includes("--yolo"))).toBe(false)
+    } finally {
+      await closeLauncher(launcher)
+    }
+  })
+
+  test("an explicitly Interactive selection resolves neither auto-accept flag", async () => {
+    const launcher = await createLauncher(100)
+    try {
+      const view = launchView(launcher.picker)
+      view.permissionMode = "interactive"
+      const selection = view.runSelection("review")
+      expect(selection).toMatchObject({ yolo: false, smart: false })
+      const parsed = parseArgs([])
+      parsed.targetDir = selection.targetDir
+      parsed.baseDetectionDir = process.cwd()
+      parsed.pipeline = selection.pipeline
+      parsed.humanReview = selection.humanReview
+      parsed.tui = selection.tui
+      parsed.includeDirty = selection.includeDirty
+      parsed.keepRunDir = selection.keepRunDir
+      parsed.yolo = selection.yolo
+      parsed.smart = selection.smart
+      parsed.gateway = selection.gateway
+      parsed.worktree = Boolean(selection.isolateWorktree)
+      const options = await resolveRunOptions(parsed)
+      const plan = buildRunPlan({ ...options, prompt: selection.prompt })
+      expect(plan.permissions).toBe("interactive")
+      // Interactive names no auto-accept flag in the review at all.
+      const reviewLines = runReviewLines(plan, 120).map((line) => line.chunks.map((chunk) => chunk.text).join(""))
+      expect(reviewLines.some((line) => line.includes("interactive permissions"))).toBe(true)
+      expect(reviewLines.some((line) => line.includes("--yolo") || line.includes("--smart"))).toBe(false)
     } finally {
       await closeLauncher(launcher)
     }

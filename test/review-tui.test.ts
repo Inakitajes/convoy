@@ -115,7 +115,7 @@ describe("run review TUI", () => {
     expect(lines.some((line) => line.includes("worktree /home/dev/.convoy/worktrees/feat-runtime-guard-limits"))).toBe(true)
     expect(lines.some((line) => line.includes("hooks    pre   · pnpm lint"))).toBe(true)
     expect(lines.some((line) => line.includes("post  · ./notify.sh · always"))).toBe(true)
-    expect(lines.some((line) => line.includes("runtime  smart permissions · 2 attachments · judge openrouter/openai/gpt-5.6-terra#xhigh"))).toBe(true)
+    expect(lines.some((line) => line.includes("runtime  smart permissions (--smart) · 2 attachments · judge openrouter/openai/gpt-5.6-terra#xhigh"))).toBe(true)
   })
 
   test("renders the terminal goal block as immutable policy, not a toggle", () => {

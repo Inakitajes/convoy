@@ -421,6 +421,35 @@ describe("close TUI follow-ups", () => {
     }
   })
 
+  test("the PR fallback notice renders as guidance and is never a selectable action", async () => {
+    const session = await openClose()
+    try {
+      const view: CloseFollowUpsView = {
+        actions: [
+          { id: "push", label: "Push main", detail: "Push to origin.", command: "git push origin main:main", status: "available" },
+        ],
+        notice: [
+          "pull request #7 (https://github.com/acme/repo/pull/7) is open for feat/add-widget — after the push, if GitHub has not marked it merged, close it deliberately:",
+          "gh pr close 7 --comment 'landed in main as abcd1234'",
+        ].join("\n"),
+      }
+      const selection = session.instance.selectFollowUp(view)
+      await session.renderOnce()
+      const frame = session.captureCharFrame()
+      expect(frame).toContain("pull request #7")
+      expect(frame).toContain("https://github.com/acme/repo/pull/7")
+      expect(frame).toContain("if GitHub has not marked it merged")
+      expect(frame).toContain("gh pr close 7")
+      // The notice is informational: only the push action is selectable.
+      expect(frame).toContain("Push main  available")
+      expect(frame).not.toContain("pr close  available")
+      session.press("q")
+      await expect(selection).resolves.toEqual({ type: "done" })
+    } finally {
+      session.instance.destroy()
+    }
+  })
+
   test("completing the worktree removal unlocks branch deletion in the same view", async () => {
     const session = await openClose()
     try {

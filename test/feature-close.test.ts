@@ -3,7 +3,7 @@ import { chmod, mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import { archiveChangeOnMain, closePreflight, resolveCloseTarget, runClose, type CloseEvent, type CloseInput } from "../src/feature-close"
+import { archiveChangeOnMain, closePreflight, probeOpenPullRequest, resolveCloseTarget, runClose, type CloseEvent, type CloseInput } from "../src/feature-close"
 import { templateCommitMessage, type CommitMessageProposal } from "../src/commit-message"
 import { addAllAndCommit } from "../src/git"
 import { renderStepCommitMessage } from "../src/step-commit"
@@ -749,6 +749,155 @@ describe("runClose", () => {
     // The landing's parent is exactly the captured base tip.
     const baseTip = await git(fixture.mainDir, undefined, "rev-parse", "main^")
     expect(result.landing).toBeDefined()
+  })
+})
+
+describe("PR-aware close", () => {
+  /** A writer double with a predictable normalized subject for reference assertions. */
+  const widgetWriter: CloseInput["writer"] = async () => ({
+    message: { type: "feat", subject: "improve the close flow", body: ["one change"] },
+    source: "model",
+  })
+
+  test("a detected open PR rides the composed subject, the result, and the disclosure", async () => {
+    const fixture = await makeFixture()
+    const seenProposals: Array<{ message: string }> = []
+    const events: CloseEvent[] = []
+    const result = await runTestClose(fixture, {
+      writer: widgetWriter,
+      resolveMessage: async (proposal) => {
+        seenProposals.push(proposal)
+        return proposal.message
+      },
+      probePullRequest: async (branch) => {
+        expect(branch).toBe("feat/add-widget")
+        return { number: 7, title: "Add widget", url: "https://github.com/acme/repo/pull/7" }
+      },
+      onEvent: (event) => events.push(event),
+    })
+    expect(result.landing).toBeDefined()
+    // The composed proposal the operator reviews carries the reference...
+    expect(seenProposals).toHaveLength(1)
+    expect(seenProposals[0]!.message).toBe("feat(cli): improve the close flow (#7)\n\n- change add-widget\n- one change")
+    // ...and the landing commit uses that exact subject.
+    const subject = await git(fixture.mainDir, undefined, "log", "--format=%s", "-n", "1", "main")
+    expect(subject).toBe("feat(cli): improve the close flow (#7)")
+    // The result event carries the PR for the follow-up surface...
+    const resultEvent = events.find((event) => event.type === "result")
+    expect(resultEvent).toBeDefined()
+    expect(resultEvent && resultEvent.type === "result" ? resultEvent.result.pullRequest : undefined).toEqual({
+      number: 7,
+      title: "Add widget",
+      url: "https://github.com/acme/repo/pull/7",
+    })
+    // ...and the squash-merge row discloses it without asserting merge.
+    const disclosure = events.find((event) => event.type === "step-completed" && event.step === "squash-merge")
+    expect(disclosure).toBeDefined()
+    expect(disclosure && disclosure.type === "step-completed" ? disclosure.detail : "").toContain("pull request #7 is open for feat/add-widget (https://github.com/acme/repo/pull/7)")
+    expect(disclosure && disclosure.type === "step-completed" ? disclosure.detail : "").not.toContain("merged")
+  })
+
+  test("no detected PR degrades silently: no reference, no result field", async () => {
+    const fixture = await makeFixture()
+    const events: CloseEvent[] = []
+    const result = await runTestClose(fixture, {
+      writer: widgetWriter,
+      resolveMessage: async (proposal) => proposal.message,
+      probePullRequest: async () => undefined,
+      onEvent: (event) => events.push(event),
+    })
+    expect(result.landing).toBeDefined()
+    const subject = await git(fixture.mainDir, undefined, "log", "--format=%s", "-n", "1", "main")
+    expect(subject).toBe("feat(cli): improve the close flow")
+    const resultEvent = events.find((event) => event.type === "result")
+    expect(resultEvent && resultEvent.type === "result" ? resultEvent.result.pullRequest : undefined).toBeUndefined()
+    const disclosure = events.find((event) => event.type === "step-completed" && event.step === "squash-merge")
+    expect(disclosure && disclosure.type === "step-completed" ? disclosure.detail : "").toBe(`landed ${result.landing!.sha.slice(0, 8)} on main`)
+  })
+
+  test("the deterministic fallback proposal carries the reference too", async () => {
+    const fixture = await makeFixture()
+    const seenProposals: Array<{ message: string; source: string }> = []
+    await runTestClose(fixture, {
+      resolveMessage: async (proposal) => {
+        seenProposals.push(proposal)
+        return proposal.message
+      },
+      probePullRequest: async () => ({ number: 12, url: "https://github.com/acme/repo/pull/12" }),
+    })
+    expect(seenProposals).toHaveLength(1)
+    expect(seenProposals[0]!.source).toBe("fallback")
+    expect(seenProposals[0]!.message.split("\n")[0]).toMatch(/\(#12\)$/)
+  })
+
+  test("an operator edit removing the reference is respected, never re-appended", async () => {
+    const fixture = await makeFixture()
+    await runTestClose(fixture, {
+      writer: widgetWriter,
+      resolveMessage: async (proposal) => proposal.message.replace(" (#7)", ""),
+      probePullRequest: async () => ({ number: 7, url: "https://github.com/acme/repo/pull/7" }),
+    })
+    const subject = await git(fixture.mainDir, undefined, "log", "--format=%s", "-n", "1", "main")
+    expect(subject).toBe("feat(cli): improve the close flow")
+  })
+
+  test("an explicit --message stays verbatim even with a detected PR", async () => {
+    const fixture = await makeFixture()
+    await runTestClose(fixture, {
+      message: "feat(cli): exact override",
+      resolveMessage: async () => {
+        throw new Error("the resolver must never be reached with an explicit --message")
+      },
+      probePullRequest: async () => ({ number: 7, url: "https://github.com/acme/repo/pull/7" }),
+    })
+    const subject = await git(fixture.mainDir, undefined, "log", "--format=%s", "-n", "1", "main")
+    expect(subject).toBe("feat(cli): exact override")
+  })
+
+  test("an already-landed resume never probes for a pull request", async () => {
+    const fixture = await makeFixture()
+    await runTestClose(fixture, { writer: widgetWriter, resolveMessage: async (proposal) => proposal.message })
+    let probed = 0
+    const result = await runTestClose(fixture, {
+      probePullRequest: async () => {
+        probed += 1
+        return undefined
+      },
+    })
+    expect(result.disposition).toBe("already-landed")
+    expect(probed).toBe(0)
+  })
+
+  test("probeOpenPullRequest parses gh's JSON and tolerates every failure", async () => {
+    const writeGhDouble = async (body: string, exitCode: number) => {
+      const binDir = join(tmpdir(), `convoy-close-gh-${Math.random().toString(36).slice(2)}`)
+      dirs.push(binDir)
+      await mkdir(binDir, { recursive: true })
+      const path = join(binDir, "gh")
+      await writeFile(path, `#!/bin/sh\nprintf '%s' '${body}'\nexit ${exitCode}\n`)
+      await chmod(path, 0o755)
+      return binDir
+    }
+    const savedPath = process.env.PATH
+    try {
+      process.env.PATH = `${await writeGhDouble('[{"number":7,"title":"Add widget","url":"https://github.com/acme/repo/pull/7"}]', 0)}:${savedPath}`
+      const fixture = await makeFixture()
+      expect(await probeOpenPullRequest("feat/add-widget", fixture.mainDir)).toEqual({
+        number: 7,
+        title: "Add widget",
+        url: "https://github.com/acme/repo/pull/7",
+      })
+
+      // A failing gh (missing auth, network, whatever) is "none detected".
+      process.env.PATH = `${await writeGhDouble("error: not authenticated", 1)}:${savedPath}`
+      expect(await probeOpenPullRequest("feat/add-widget", fixture.mainDir)).toBeUndefined()
+
+      // Unparseable output degrades the same way.
+      process.env.PATH = `${await writeGhDouble("not json at all", 0)}:${savedPath}`
+      expect(await probeOpenPullRequest("feat/add-widget", fixture.mainDir)).toBeUndefined()
+    } finally {
+      process.env.PATH = savedPath
+    }
   })
 })
 

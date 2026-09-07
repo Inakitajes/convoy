@@ -92,7 +92,11 @@ export function runReviewLines(plan: RunPlan, width: number, options: RunReviewR
     rows.push(plain(""))
   }
 
-  const runtime = `${plan.permissions} permissions · ${plan.attachments.length} attachment${plan.attachments.length === 1 ? "" : "s"}`
+  // The permission vocabulary names the mode, and the flag form is what the
+  // operator would have typed: show both so the review names the exact
+  // auto-accept flag the launcher's permission selector resolved to.
+  const permissionFlag = plan.permissions === "yolo" ? " (--yolo)" : plan.permissions === "smart" ? " (--smart)" : ""
+  const runtime = `${plan.permissions} permissions${permissionFlag} · ${plan.attachments.length} attachment${plan.attachments.length === 1 ? "" : "s"}`
   const judge = plan.smartJudge ? sanitizeReviewInline(plan.smartJudge.model.target) : ""
   if (judge && labelWidth + runtime.length + 9 + judge.length <= width) {
     rows.push(labelRow("runtime", [fg(theme.text)(runtime), fg(theme.faint)(" · judge "), fg(theme.dim)(judge)]))

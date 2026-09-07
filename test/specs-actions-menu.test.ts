@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, expect, test } from "bun:test"
+import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -79,7 +79,7 @@ function featureRow(overrides: Partial<LifecycleFeatureRow> = {}): LifecycleFeat
 }
 
 function viewWith(feature: LifecycleFeatureRow, width = 120): SpecsView {
-  return { targetDir: root, present: true, changes: [changeEntry()], specs: [], features: [feature] }
+  return { targetDir: root, present: true, changes: [changeEntry()], specs: [], features: [feature], baseBranch: "main" }
 }
 
 async function openBrowser(view: SpecsView, width = 120, height = 40) {
@@ -105,7 +105,7 @@ async function selectFeatureRow(session: Awaited<ReturnType<typeof openBrowser>>
   // Rows start past headers; with one feature the cursor already sits on it.
 }
 
-test("! opens the Actions menu on a feature row and Enter dispatches close review by feature id", async () => {
+test("! opens the Actions menu on a feature row and Enter opens the close confirmation", async () => {
   const session = await openBrowser(viewWith(featureRow()))
   await selectFeatureRow(session)
 
@@ -115,16 +115,30 @@ test("! opens the Actions menu on a feature row and Enter dispatches close revie
   expect(frame).toContain("Actions — add-widget")
   expect(frame).toContain("Close review")
 
+  // Enter arms the close confirmation instead of emitting the resolution.
   session.press("return")
+  await session.renderOnce()
+  const modal = session.captureCharFrame()
+  expect(modal).toContain("Close this feature?")
+  expect(modal).toContain("add-widget")
+  expect(modal).toContain("feat/add-widget")
+  expect(modal).toContain("main")
+  expect(modal).toContain("sync → archive → squash-merge")
+
+  // Only the explicit confirm emits the exact same resolution as before.
+  session.press("y")
   await expect(session.instance.result).resolves.toEqual({ type: "close-feature", featureId: "11111111-2222-3333-4444-555555555555" })
 })
 
-test("x on a worktree-less feature row dispatches close review by identity instead of dying silently", async () => {
+test("x on a worktree-less feature row opens the close confirmation and confirms by identity", async () => {
   // No checkoutPath: the old close-change handoff required it and no-oped.
   const session = await openBrowser(viewWith(featureRow({ checkoutPath: undefined })))
   await selectFeatureRow(session)
 
   session.press("x")
+  await session.renderOnce()
+  expect(session.captureCharFrame()).toContain("Close this feature?")
+  session.press("y")
   await expect(session.instance.result).resolves.toEqual({ type: "close-feature", featureId: "11111111-2222-3333-4444-555555555555" })
 })
 
@@ -140,6 +154,9 @@ test("the ordinary detail view's menu offers the same close action as the root",
   expect(session.captureCharFrame()).toContain("Close review")
 
   session.press("return")
+  await session.renderOnce()
+  expect(session.captureCharFrame()).toContain("Close this feature?")
+  session.press("y")
   await expect(session.instance.result).resolves.toEqual({ type: "close-feature", featureId: "11111111-2222-3333-4444-555555555555" })
 })
 
@@ -193,10 +210,13 @@ test("the pinned ! actions hint survives footer truncation in a narrow terminal"
   expect(frame).toContain("actions")
   expect(frame).toContain("!")
 
-  // And the menu itself still opens and dispatches.
+  // And the menu itself still opens and confirms through the modal.
   session.press("!")
   await session.renderOnce()
   session.press("return")
+  await session.renderOnce()
+  expect(session.captureCharFrame()).toContain("Close this feature?")
+  session.press("y")
   await expect(session.instance.result).resolves.toEqual({ type: "close-feature", featureId: "11111111-2222-3333-4444-555555555555" })
 })
 
@@ -220,4 +240,95 @@ test("the fullscreen reader keeps its copy keys and never opens the menu", async
   await session.renderOnce()
   session.press("q")
   await expect(session.instance.result).resolves.toEqual({ type: "exit" })
+})
+
+describe("the close confirmation modal", () => {
+  /** Resolves true only if the browser's result promise settles within a beat. */
+  async function alreadyResolved(session: Awaited<ReturnType<typeof openBrowser>>): Promise<boolean> {
+    let settled = false
+    session.instance.result.then(
+      () => {
+        settled = true
+      },
+      () => {
+        settled = true
+      },
+    )
+    await Bun.sleep(20)
+    return settled
+  }
+
+  test("x arms the confirmation: nothing is emitted and the modal names the facts", async () => {
+    const session = await openBrowser(viewWith(featureRow()))
+    await selectFeatureRow(session)
+
+    session.press("x")
+    await session.renderOnce()
+    const modal = session.captureCharFrame()
+    expect(modal).toContain("Close this feature?")
+    expect(modal).toContain("sync → archive → squash-merge")
+    expect(modal).toContain("add-widget")
+    expect(modal).toContain("feat/add-widget")
+    expect(modal).toContain("main")
+    // While the modal is up the footer only offers the two answers.
+    expect(modal).toContain("y close")
+    expect(modal).toContain("n/esc cancel")
+    expect(await alreadyResolved(session)).toBe(false)
+
+    session.press("y")
+    await expect(session.instance.result).resolves.toEqual({ type: "close-feature", featureId: "11111111-2222-3333-4444-555555555555" })
+  })
+
+  test("cancel keeps the browser on the same row with nothing emitted", async () => {
+    const session = await openBrowser(viewWith(featureRow()))
+    await selectFeatureRow(session)
+
+    session.press("x")
+    await session.renderOnce()
+    session.press("n")
+    await session.renderOnce()
+    const frame = session.captureCharFrame()
+    expect(frame).not.toContain("Close this feature?")
+    // The browser is alive and still on the feature row.
+    expect(frame).toContain("add-widget")
+    expect(await alreadyResolved(session)).toBe(false)
+
+    // A second, deliberate attempt still confirms to the same resolution.
+    session.press("x")
+    await session.renderOnce()
+    session.press("y")
+    await expect(session.instance.result).resolves.toEqual({ type: "close-feature", featureId: "11111111-2222-3333-4444-555555555555" })
+  })
+
+  test("escape cancels and any other key is ignored while the modal is open", async () => {
+    const session = await openBrowser(viewWith(featureRow()))
+    await selectFeatureRow(session)
+
+    session.press("x")
+    await session.renderOnce()
+    // Navigation keys and even a second x cannot dismiss or re-arm anything.
+    session.press("j")
+    session.press("x")
+    await session.renderOnce()
+    expect(session.captureCharFrame()).toContain("Close this feature?")
+    expect(await alreadyResolved(session)).toBe(false)
+
+    session.press("escape")
+    await session.renderOnce()
+    expect(session.captureCharFrame()).not.toContain("Close this feature?")
+    expect(await alreadyResolved(session)).toBe(false)
+
+    session.press("c", { ctrl: true })
+    await expect(session.instance.result).resolves.toEqual({ type: "exit" })
+  })
+
+  test("the footer advertises the confirm step beside the x shortcut", async () => {
+    const session = await openBrowser(
+      viewWith(featureRow({ checkoutPath: "/wt/add-widget" })),
+    )
+    await selectFeatureRow(session)
+
+    const frame = session.captureCharFrame()
+    expect(frame).toContain("x close · y/n")
+  })
 })

@@ -216,7 +216,21 @@ export type PipelineChoice = {
   attachesPrdHistory?: boolean
 }
 
-type ToggleKey = "smart" | "yolo" | "humanReview" | "includeDirty" | "keepRunDir" | "tui" | "worktree"
+type ToggleKey = "humanReview" | "includeDirty" | "keepRunDir" | "tui" | "worktree"
+
+/**
+ * The permission modes the options step's selector cycles through, in its fixed
+ * order. The names align with the run plan's `permissions` vocabulary, so the
+ * mapping to `LaunchOptions.yolo/smart` (and everything downstream) stays in
+ * one place.
+ */
+export const permissionModes = ["interactive", "yolo", "smart"] as const
+export type PermissionMode = (typeof permissionModes)[number]
+
+/** Advances one step along the selector's fixed cycle, wrapping back to Interactive. */
+export function nextPermissionMode(mode: PermissionMode): PermissionMode {
+  return permissionModes[(permissionModes.indexOf(mode) + 1) % permissionModes.length]!
+}
 
 type ToggleSpec = {
   key: ToggleKey
@@ -319,19 +333,33 @@ const gatewayOptionIndex = 0
 /** What the gateway row's description says: why you would touch it at all. */
 const gatewayRowDescription = "Route every model through one provider without changing pipeline YAML."
 
-const toggles: readonly ToggleSpec[] = [
-  {
-    key: "smart",
-    label: "Smart auto-accept",
-    flag: "--smart",
-    description: "An AI judge auto-allows safe ask-level permission requests and escalates risky ones.",
+/** The permission selector is the second selectable row: right after the gateway, before the toggles. */
+const permissionOptionIndex = 1
+
+/**
+ * What each permission mode's row displays: the state's name, the flag it
+ * resolves to (empty for Interactive), and the description line beneath the
+ * row. Auto-accept and Smart keep the wording of the toggles they replace.
+ */
+const permissionModeSpecs: Record<PermissionMode, { name: string; flag: string; description: string }> = {
+  interactive: {
+    name: "Interactive",
+    flag: "",
+    description: "Prompt for every ask-level permission request.",
   },
-  {
-    key: "yolo",
-    label: "Auto-accept permissions",
+  yolo: {
+    name: "Auto-accept",
     flag: "--yolo",
     description: "Allow every ask-level permission request automatically. The hard denylist still applies.",
   },
+  smart: {
+    name: "Smart auto-accept",
+    flag: "--smart",
+    description: "An AI judge auto-allows safe ask-level permission requests and escalates risky ones.",
+  },
+}
+
+const toggles: readonly ToggleSpec[] = [
   {
     key: "humanReview",
     label: "Human gates",
@@ -671,9 +699,15 @@ export class LaunchPicker {
   private branchError = ""
   private branchChecking = false
 
+  /**
+   * The permission selector's state, replacing the old smart/yolo toggle pair.
+   * Defaults to Auto-accept (--yolo): ask-level requests are allowed
+   * automatically, the hard denylist still applies, and the review names the
+   * flag before the run starts.
+   */
+  private permissionMode: PermissionMode = "yolo"
+
   private readonly toggleState: Record<ToggleKey, boolean> = {
-    smart: true,
-    yolo: false,
     humanReview: Boolean(process.stdin.isTTY && process.stdout.isTTY),
     includeDirty: false,
     keepRunDir: true,
@@ -1721,8 +1755,10 @@ export class LaunchPicker {
       tui: this.toggleState.tui,
       includeDirty: this.toggleState.includeDirty,
       keepRunDir: this.toggleState.keepRunDir,
-      yolo: this.toggleState.yolo,
-      smart: this.toggleState.smart,
+      // The single permission mode maps onto the same pair of flags the old
+      // toggles produced: never both, and neither for Interactive.
+      yolo: this.permissionMode === "yolo",
+      smart: this.permissionMode === "smart",
       gateway: this.gateway,
       isolateWorktree: this.toggleState.worktree,
       ...(frozenBranch ?? {}),
@@ -1744,12 +1780,17 @@ export class LaunchPicker {
       this.openGatewayPicker()
       return
     }
-    const key = toggles[this.optionIndex - 1]?.key
+    // The permission row is a tri-state selector: activation advances the
+    // fixed cycle Interactive → Auto-accept → Smart auto-accept → Interactive.
+    if (this.optionIndex === permissionOptionIndex) {
+      this.permissionMode = nextPermissionMode(this.permissionMode)
+      this.render()
+      return
+    }
+    const key = toggles[this.optionIndex - 2]?.key
     if (!key) return
     const next = !this.toggleState[key]
     this.toggleState[key] = next
-    if (key === "smart" && next) this.toggleState.yolo = false
-    if (key === "yolo" && next) this.toggleState.smart = false
     // A fresh worktree is always clean, so includeDirty is meaningless there.
     if (key === "worktree" && next) this.toggleState.includeDirty = false
     if (key === "includeDirty" && next) this.toggleState.worktree = false
@@ -1801,9 +1842,9 @@ export class LaunchPicker {
     this.render()
   }
 
-  /** Number of selectable rows in the options step: the gateway selector and the built-in toggles. */
+  /** Number of selectable rows in the options step: the gateway selector, the permission selector, and the built-in toggles. */
   private optionCount(): number {
-    return 1 + toggles.length
+    return 2 + toggles.length
   }
 
   private currentChoice() {
@@ -2293,8 +2334,24 @@ this.detailBox.title = reviewing ? " review " : " run setup "
     lines.push(plain(""))
     this.optionRows.push(undefined)
 
+    // The permission selector follows the gateway row's precedent: a value row
+    // (mode name as the value, the flag it resolves to on the right) with a
+    // per-state description beneath — one deliberate control where the two
+    // mutually exclusive auto-accept toggles used to sit.
+    const permissionSpec = permissionModeSpecs[this.permissionMode]
+    const permissionSelected = this.optionIndex === permissionOptionIndex
+    const permissionMarker = permissionSelected ? fg(theme.accent)("▸ ") : raw("  ")
+    const permissionValue = permissionSelected ? bold(fg(theme.text)(permissionSpec.name)) : fg(theme.text)(permissionSpec.name)
+    const permissionFlag = permissionSpec.flag ? fg(theme.green)(permissionSpec.flag) : fg(theme.dim)("no auto-accept flag")
+    lines.push(padBetween([permissionMarker, fg(theme.faint)("permissions  "), permissionValue], [permissionFlag], width))
+    this.optionRows.push(permissionOptionIndex)
+    lines.push(new StyledText([raw("        "), fg(theme.dim)(truncate(permissionSpec.description, Math.max(8, width - 8)))]))
+    this.optionRows.push(permissionOptionIndex)
+    lines.push(plain(""))
+    this.optionRows.push(undefined)
+
     for (const [index, spec] of toggles.entries()) {
-      const selected = index + 1 === this.optionIndex
+      const selected = index + 2 === this.optionIndex
       const enabled = this.toggleState[spec.key]
       const marker = selected ? fg(theme.accent)("▸ ") : raw("  ")
       const toggle = toggleSwitch(enabled)
@@ -2306,7 +2363,7 @@ this.detailBox.title = reviewing ? " review " : " run setup "
       const count = dirt?.blocked ? fg(theme.dim)(` (${dirt.files} uncommitted)`) : undefined
       const flag = fg(enabled ? theme.green : theme.dim)(spec.flag)
       lines.push(padBetween([marker, ...toggle, raw(" "), label, ...(count ? [count] : [])], [flag], width))
-      this.optionRows.push(index + 1)
+      this.optionRows.push(index + 2)
       // The worktree default depends on which branch you're on, so say why it
       // landed where it did — otherwise the checkbox looks like it moves on its own.
       const description =
@@ -2314,7 +2371,7 @@ this.detailBox.title = reviewing ? " review " : " run setup "
           ? `Default ${this.worktreeDefault.isolate ? "on" : "off"}: ${this.worktreeDefault.reason}. ${spec.description}`
           : spec.description
       lines.push(new StyledText([raw("        "), fg(theme.dim)(truncate(description, Math.max(8, width - 8)))]))
-      this.optionRows.push(index + 1)
+      this.optionRows.push(index + 2)
       // Nested isolation is never blocked, only named: enabling a new worktree
       // while already inside one forks from this worktree's branch, and the
       // operator should do that deliberately (D7).
@@ -2323,7 +2380,7 @@ this.detailBox.title = reviewing ? " review " : " run setup "
         const where = this.insideWorktree.branch ? `branch ${this.insideWorktree.branch} of worktree ${dir}` : `worktree ${dir}`
         const warning = `you are on ${where} — the new worktree forks from this branch; isolate only if you truly mean it`
         lines.push(new StyledText([raw("        "), fg(theme.yellow)(truncate(warning, Math.max(8, width - 8)))]))
-        this.optionRows.push(index + 1)
+        this.optionRows.push(index + 2)
       }
     }
 
@@ -2501,8 +2558,8 @@ this.detailBox.title = reviewing ? " review " : " run setup "
   private enabledFlags() {
     const flags = [`--pipeline ${this.currentChoice().name}`]
     flags.push(`--gateway ${this.gateway}`)
-    if (this.toggleState.smart) flags.push("--smart")
-    if (this.toggleState.yolo) flags.push("--yolo")
+    const permissionFlag = permissionModeSpecs[this.permissionMode].flag
+    if (permissionFlag) flags.push(permissionFlag)
     flags.push(this.toggleState.humanReview ? "--human-step" : "--no-human-step")
     if (this.toggleState.includeDirty) flags.push("--include-dirty")
     if (!this.toggleState.keepRunDir) flags.push("--no-keep-run-dir")
@@ -2581,7 +2638,9 @@ this.detailBox.title = reviewing ? " review " : " run setup "
     return row(
       [
         { keys: "↑/↓", label: "select", priority: 3, tone: "dim" },
-        { keys: "space", label: "toggle", priority: 2 },
+        // The permission row is a tri-state selector, so space cycles it rather
+        // than toggling — the footer names the behavior of the selected row.
+        { keys: "space", label: this.optionIndex === permissionOptionIndex ? "cycle" : "toggle", priority: 2 },
         { keys: "g", label: "gateway", priority: 5 },
         { keys: "enter", label: "review", priority: 4 },
         { keys: "p", label: "prompt", priority: 6 },

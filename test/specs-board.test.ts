@@ -166,12 +166,16 @@ describe("row actions route to the right handoff", () => {
     await expect(session.instance.result).resolves.toEqual({ type: "continue-change", changeID: "add-foo", worktreeDir, branch: "feat/add-foo" })
   })
 
-  test("x closes a feature that has a worktree and branch", async () => {
+  test("x confirms before it closes a feature that has a worktree and branch", async () => {
     const session = await openBoard(
       viewWith([featureRow({ id: "add-foo", location: "worktree", worktreeDir, branch: "feat/add-foo", stage: "ready", tasks: { done: 4, total: 4 } })]),
     )
     await selectFirstChange(session)
     session.press("x")
+    await session.renderOnce()
+    // The confirmation arms first; nothing resolves until y.
+    expect(session.captureCharFrame()).toContain("Close this feature?")
+    session.press("y")
     await expect(session.instance.result).resolves.toEqual({ type: "close-change", changeID: "add-foo", worktreeDir, branch: "feat/add-foo" })
   })
 
@@ -295,9 +299,12 @@ describe("registered lifecycle features on the board", () => {
     expect(frame).toContain("1 live run(s) attached")
   })
 
-  test("x on a feature row dispatches the close handoff through its verified context (task 6.4)", async () => {
+  test("x on a feature row confirms before the close handoff through its verified context (task 6.4)", async () => {
     const session = await openBoard(viewWithFeatures([lifecycleRow()]))
     session.press("x")
+    await session.renderOnce()
+    expect(session.captureCharFrame()).toContain("Close this feature?")
+    session.press("y")
     await expect(session.instance.result).resolves.toEqual({
       type: "close-change",
       changeID: "add-widget",

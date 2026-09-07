@@ -373,10 +373,15 @@ export type ProgressUI = {
    * Aligns the dashboard's phase list with the expected rows, additively: rows
    * already present are left untouched (their state continues to be driven by
    * phase events), missing rows are appended in the given order as pending,
-   * and nothing is cleared. Idempotent and one-way (client state never feeds
-   * back), so a poller can call it every tick: an attached dashboard grows its
-   * panel when a goal scheduler starts the next invocation, without the
-   * destructive rebuild `resetPipeline` performs.
+   * and nothing is cleared. Rows arrive in canonical display order with the
+   * terminal `Compact run` lifecycle row last — after the pipeline prefix and
+   * every goal invocation row — and the dashboard upholds that invariant on
+   * its own list regardless: an already-known lifecycle row moves to the
+   * terminal position when later rows would sit below it. Idempotent and
+   * one-way (client state never feeds back), so a poller can call it every
+   * tick: an attached dashboard grows its panel when a goal scheduler starts
+   * the next invocation, without the destructive rebuild `resetPipeline`
+   * performs.
    */
   syncPhases?(rows: readonly ProgressPhase[]): void
   /**

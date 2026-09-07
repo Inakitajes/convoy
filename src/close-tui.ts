@@ -695,7 +695,12 @@ export class CloseTui {
     })
     if (this.followUpsNotice) {
       lines.push(plain(""))
-      lines.push(...wrapStyled(new StyledText([fg(theme.yellow)(this.followUpsNotice)]), width))
+      // The notice can carry several paragraphs (the PR fallback guidance plus
+      // a push remediation), so each line wraps separately instead of blending
+      // into one wrapped string.
+      for (const paragraph of this.followUpsNotice.split("\n")) {
+        lines.push(...wrapStyled(new StyledText([fg(theme.yellow)(paragraph)]), width))
+      }
     }
     if (this.followUpsDeferred) {
       lines.push(plain(""))

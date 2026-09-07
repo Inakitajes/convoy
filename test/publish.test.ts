@@ -1,5 +1,7 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { rm } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 
 import { createPublishSeam, type PublishRunner, type RunResult } from "../src/publish"
 import type { FeatureRecord } from "../src/feature-lifecycle/records"
@@ -141,6 +143,228 @@ describe("publish apply pushes normally and locates before creating", () => {
     expect(result.ok).toBe(false)
     if (!result.ok) expect(result.message).toContain("the branch was pushed to origin/feat/widget")
     expect(calls.some((call) => call.command === "git" && call.args[0] === "push")).toBe(true)
+  })
+})
+
+/** Extracts the composed --title/--body a `gh pr create` call received. */
+function composedArgs(calls: Array<{ command: string; args: string[] }>): { title: string; body: string } {
+  const create = calls.find((call) => call.command === "gh" && call.args[0] === "pr" && call.args[1] === "create")
+  expect(create).toBeDefined()
+  const title = create!.args[create!.args.indexOf("--title") + 1]
+  const body = create!.args[create!.args.indexOf("--body") + 1]
+  expect(typeof title).toBe("string")
+  expect(typeof body).toBe("string")
+  return { title: title as string, body: body as string }
+}
+
+/** Like the happy-path fake, but any normal push succeeds so tests can apply arbitrary branches. */
+function seedingRunner(calls: Array<{ command: string; args: string[] }>): PublishRunner {
+  const base = fakeRunner({}, calls)
+  return async (command, args, options) => {
+    if (command === "git" && args[0] === "push") return ok("")
+    return base(command, args, options)
+  }
+}
+
+describe("PR text is composed deterministically from persisted context (capability run-titles)", () => {
+  const dirs: string[] = []
+
+  afterAll(async () => {
+    await Promise.all(dirs.map((dir) => rm(dir, { recursive: true, force: true })))
+  })
+
+  /** A target checkout with the attached change's proposal and a run workspace with reports. */
+  async function seedFixtures(options: { proposal?: string | null; recap?: boolean; finalizationMessage?: string } = {}): Promise<{ cwd: string; runDir: string }> {
+    const cwd = join(await mkdtemp(join(tmpdir(), "convoy-publish-cwd-")), "repo")
+    const runDir = await mkdtemp(join(tmpdir(), "convoy-publish-rundir-"))
+    dirs.push(cwd, runDir)
+    if (options.proposal !== null) {
+      await mkdir(join(cwd, "openspec", "changes", "add-attach-flow"), { recursive: true })
+      await writeFile(
+        join(cwd, "openspec", "changes", "add-attach-flow", "proposal.md"),
+        options.proposal ??
+          "# Attachment flow for run reports\n\n## Why\n\nRun reports need a first page a human actually reads.\n\n## What Changes\n\n- Attach it.\n",
+      )
+    }
+    await writeFile(join(runDir, "prd.md"), "Implement the attach flow for run reports\n\nMore detail below.\n")
+    await writeFile(join(runDir, "SUMMARY.md"), "# convoy run - summary\n\n## implementer\n\nMechanical dump of every phase report.\n")
+    if (options.recap !== false) {
+      await mkdir(join(runDir, "reports"), { recursive: true })
+      await writeFile(join(runDir, "reports", "run-report.md"), "# One-page recap\n\nEverything the phases reported, distilled.\n")
+      await writeFile(join(runDir, "reports", "tests.md"), "42 specs pass across the publish flow.\n")
+    }
+    if (options.finalizationMessage !== undefined) {
+      await writeFile(
+        join(runDir, "metadata.json"),
+        JSON.stringify({ schemaVersion: 5, finalization: { state: "completed", producedMessage: options.finalizationMessage } }),
+      )
+    }
+    return { cwd, runDir }
+  }
+
+  test("a change-backed branch composes `type: proposal title`", async () => {
+    const { cwd, runDir } = await seedFixtures()
+    const calls: Array<{ command: string; args: string[] }> = []
+    const real = createPublishSeam({ cwd, runDir, run: seedingRunner(calls) })
+    await real.apply({ branch: "feat/add-attach-flow", remote: "origin", base: "main" })
+    const { title, body } = composedArgs(calls)
+    expect(title).toBe("feat: Attachment flow for run reports")
+    // The three-section shape replaces the raw dump and the Run: line.
+    expect(body).toContain("## Why")
+    expect(body).toContain("## What")
+    expect(body).toContain("## How tested")
+    expect(body).not.toContain("Run: ")
+    expect(body).toContain("Run reports need a first page a human actually reads.")
+    // What prefers the distilled recap; How tested names the test step's report.
+    expect(body.indexOf("One-page recap")).toBeGreaterThan(body.indexOf("## What"))
+    expect(body).toContain("42 specs pass across the publish flow.")
+  })
+
+  test("a spin `change/` branch resolves to its change and titles with the `change` type", async () => {
+    // Spin mints `change/<change-id>` branches; the prefix supplies the commit
+    // type and the same change-title lookup supplies the subject, so a
+    // spin-launched run publishes `change: <proposal title>`, not `feat:`.
+    const { cwd, runDir } = await seedFixtures()
+    const calls: Array<{ command: string; args: string[] }> = []
+    const seam = createPublishSeam({ cwd, runDir, run: seedingRunner(calls) })
+    await seam.apply({ branch: "change/add-attach-flow", remote: "origin", base: "main" })
+    expect(composedArgs(calls).title).toBe("change: Attachment flow for run reports")
+  })
+
+  test("a prefixed non-change branch titles from the humanized slug; an unprefixed branch fabricates no type", async () => {
+    const { cwd, runDir } = await seedFixtures({ proposal: "# Something unrelated\n" })
+    const calls: Array<{ command: string; args: string[] }> = []
+    const prefixed = createPublishSeam({ cwd, runDir, run: seedingRunner(calls) })
+    await prefixed.apply({ branch: "fix/quiet-notifications", remote: "origin", base: "main" })
+    expect(composedArgs(calls).title).toBe("fix: quiet notifications")
+
+    const unprefixedCalls: Array<{ command: string; args: string[] }> = []
+    const unprefixed = createPublishSeam({ cwd, runDir, run: seedingRunner(unprefixedCalls) })
+    await unprefixed.apply({ branch: "team/alice/release-42", remote: "origin", base: "main" })
+    expect(composedArgs(unprefixedCalls).title).toBe("team alice release 42")
+  })
+
+  test("the whole title stays inside the 72-column subject budget with word-boundary shortening", async () => {
+    const longTitle = "Attachment flow for run reports with a deliberately very long subject line that must be shortened at a word boundary"
+    const { cwd, runDir } = await seedFixtures({ proposal: `# ${longTitle}\n` })
+    const calls: Array<{ command: string; args: string[] }> = []
+    const seam = createPublishSeam({ cwd, runDir, run: seedingRunner(calls) })
+    await seam.apply({ branch: "feat/add-attach-flow", remote: "origin", base: "main" })
+    const { title } = composedArgs(calls)
+    expect(title.length).toBeLessThanOrEqual(72)
+    expect(title.startsWith("feat: ")).toBe(true)
+    // Shortened at a word boundary: a prefix of the proposal title, never a mid-word cut.
+    expect(`${longTitle} `.startsWith(`${title.slice("feat: ".length)} `)).toBe(true)
+  })
+
+  test("each missing source degrades mechanically: prompt why, message-body what, disclosed how-tested", async () => {
+    // No proposal at all, no recap, no test reports: the prompt paragraph feeds
+    // Why, the message body feeds What, and How tested discloses the gap
+    // instead of implying coverage.
+    const { cwd, runDir } = await seedFixtures({
+      proposal: null,
+      recap: false,
+      finalizationMessage: "feat: compact the run\n\n- body line one\n- body line two\n",
+    })
+    const calls: Array<{ command: string; args: string[] }> = []
+    const seam = createPublishSeam({ cwd, runDir, run: seedingRunner(calls) })
+    await seam.apply({ branch: "feat/add-attach-flow", remote: "origin", base: "main" })
+    const { title, body } = composedArgs(calls)
+    expect(title).toBe("feat: add attach flow")
+    expect(body).toContain("Implement the attach flow for run reports")
+    expect(body).toContain("- body line one")
+    expect(body).toContain("No test or validation report was produced by this run.")
+  })
+
+  test("the SUMMARY.md excerpt remains the last fallback for What", async () => {
+    const { cwd, runDir } = await seedFixtures({ proposal: "# Something unrelated\n", recap: false })
+    const calls: Array<{ command: string; args: string[] }> = []
+    const seam = createPublishSeam({ cwd, runDir, run: seedingRunner(calls) })
+    await seam.apply({ branch: "feat/add-attach-flow", remote: "origin", base: "main" })
+    const { body } = composedArgs(calls)
+    expect(body).toContain("Mechanical dump of every phase report.")
+  })
+
+  test("embedded content nests under the section heading that quotes it; fenced code is untouched", async () => {
+    // The default fixture's SUMMARY.md opens with `# convoy run - summary` and
+    // carries `## implementer`; quoted verbatim under `## What` those would
+    // outrank the composed section heading itself. The test report's own
+    // headings would likewise escape `### tests`.
+    const { cwd, runDir } = await seedFixtures({ proposal: "# Something unrelated\n", recap: false })
+    await mkdir(join(runDir, "reports"), { recursive: true })
+    await writeFile(join(runDir, "reports", "tests.md"), "## Results\n\n42 specs pass.\n\n```bash\n# a comment, not a heading\n```\n")
+    const calls: Array<{ command: string; args: string[] }> = []
+    const seam = createPublishSeam({ cwd, runDir, run: seedingRunner(calls) })
+    await seam.apply({ branch: "feat/add-attach-flow", remote: "origin", base: "main" })
+    const { body } = composedArgs(calls)
+    // The summary's headings shift under `## What` (H1 → H3, H2 → H4)…
+    expect(body).toContain("### convoy run - summary")
+    expect(body).toContain("#### implementer")
+    // …and the report's under `### tests` (H2 → H4), fences preserved.
+    expect(body).toContain("### tests")
+    expect(body).toContain("#### Results")
+    expect(body).toContain("# a comment, not a heading")
+    // Outside fenced code, no heading outranks the composed `##` sections.
+    expect(body.replace(/```[\s\S]*?```/g, "").match(/^# /m)).toBeNull()
+  })
+
+  test("a fenced example inside a longer fence stays code; headings after the outer close still normalize", async () => {
+    // A ``` example inside a ```` fence must not flip the fence state: every
+    // line inside the outer fence survives byte-exact, and heading-shaped
+    // content there is never rewritten. Only after the outer fence closes do
+    // real headings shift under the `### tests` step heading.
+    const { cwd, runDir } = await seedFixtures({ proposal: "# Something unrelated\n", recap: false })
+    await mkdir(join(runDir, "reports"), { recursive: true })
+    await writeFile(
+      join(runDir, "reports", "tests.md"),
+      "````markdown\n```bash\n# not a heading: inner fence\n```\n# not a heading: inside the outer fence\n````\n## Results\n\n42 specs pass.\n",
+    )
+    const calls: Array<{ command: string; args: string[] }> = []
+    const seam = createPublishSeam({ cwd, runDir, run: seedingRunner(calls) })
+    await seam.apply({ branch: "feat/add-attach-flow", remote: "origin", base: "main" })
+    const lines = composedArgs(calls).body.split("\n")
+    // Exact lines, not substrings: a shifted `##` line would still contain the
+    // single-# form, so containment on the array pins byte-exact preservation.
+    expect(lines).toContain("````markdown")
+    expect(lines).toContain("```bash")
+    expect(lines).toContain("# not a heading: inner fence")
+    expect(lines).toContain("```")
+    expect(lines).toContain("# not a heading: inside the outer fence")
+    expect(lines).toContain("````")
+    expect(lines).not.toContain("## not a heading: inner fence")
+    // After the outer fence closes, real headings still nest.
+    expect(lines).toContain("#### Results")
+    expect(lines).not.toContain("## Results")
+  })
+
+  test("prepare→apply twice over identical state composes the identical title and body, and absent sources still publish", async () => {
+    const { cwd, runDir } = await seedFixtures()
+    const firstCalls: Array<{ command: string; args: string[] }> = []
+    const first = createPublishSeam({ cwd, runDir, run: seedingRunner(firstCalls) })
+    const firstResult = await first.apply({ branch: "feat/add-attach-flow", remote: "origin", base: "main" })
+    expect(firstResult.ok).toBe(true)
+
+    const secondCalls: Array<{ command: string; args: string[] }> = []
+    const second = createPublishSeam({ cwd, runDir, run: seedingRunner(secondCalls) })
+    const secondResult = await second.apply({ branch: "feat/add-attach-flow", remote: "origin", base: "main" })
+    expect(secondResult.ok).toBe(true)
+
+    const firstText = composedArgs(firstCalls)
+    const secondText = composedArgs(secondCalls)
+    expect(secondText.title).toBe(firstText.title)
+    expect(secondText.body).toBe(firstText.body)
+  })
+
+  test("a run without any source documents still publishes with disclosed fallback sections", async () => {
+    const calls: Array<{ command: string; args: string[] }> = []
+    const seam = createPublishSeam({ cwd: "/repo", run: seedingRunner(calls) })
+    const result = await seam.apply({ branch: "feat/widget", remote: "origin", base: "main" })
+    expect(result.ok).toBe(true)
+    const { title, body } = composedArgs(calls)
+    expect(title).toBe("feat: widget")
+    expect(body).toContain("## Why")
+    expect(body).toContain("## What")
+    expect(body).toContain("No test or validation report was produced by this run.")
   })
 })
 

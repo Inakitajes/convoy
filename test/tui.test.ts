@@ -10,6 +10,7 @@ import { shortVersion } from "../src/version"
 import { reconstructedPhases } from "../src/attach"
 import { qualifyInvocation } from "../src/goal-scheduler"
 import { builtInAgents, builtInPipelines, resolvePipeline } from "../src/pipeline"
+import { compactRunRowName } from "../src/runner"
 
 import type { ClipboardResult } from "../src/clipboard"
 import type { LimitsSnapshot } from "../src/limits"
@@ -1507,6 +1508,21 @@ describe("goal invocation tree", () => {
 })
 
 describe("syncPhases", () => {
+  // Frame assertions on the pipeline panel: all ordering checks compare line
+  // indexes, never character indexes (left/right panels share terminal rows).
+  const lineIndexOf = (frame: string, text: string) => {
+    const index = frame.split("\n").findIndex((line) => line.includes(text))
+    expect(index).toBeGreaterThanOrEqual(0)
+    return index
+  }
+  // The selected pipeline row is the one carrying the ▸ marker, so a selected
+  // row is identified by name + marker (the detail panel shows the name too).
+  const selectedRowIndex = (frame: string, name: string) => {
+    const index = frame.split("\n").findIndex((line) => line.includes(name) && line.includes("▸"))
+    expect(index).toBeGreaterThanOrEqual(0)
+    return index
+  }
+
   test("appends missing rows in the given order without touching existing ones", async () => {
     const { dashboard, renderOnce, captureCharFrame } = await createDashboard(140, 40, [{ name: "plan", description: "" }])
     try {
@@ -1566,6 +1582,72 @@ describe("syncPhases", () => {
       expect(frame).toContain("1/2")
       expect(frame).toContain("$0.42")
       expect(frame).toContain("prefix transcript kept")
+    } finally {
+      dashboard.stop()
+    }
+  })
+
+  test("the Compact run row stays terminal as goal rows arrive, keeping its state and selection", async () => {
+    const compactRow = { name: compactRunRowName, description: "compacts this run's commits into one operator-authored conventional commit" }
+    const { dashboard, mockInput, renderOnce, captureCharFrame } = await createDashboard(140, 40, [{ name: "plan", description: "" }, compactRow])
+    try {
+      // Terminal state before any goal row exists — compaction already ran and
+      // produced a commit — and the operator's selection pinned on the
+      // lifecycle row (manual focus, so no auto-follow repaints selection).
+      dashboard.phaseStarted(compactRunRowName)
+      dashboard.phaseCompleted(compactRunRowName, "compacted into abc1234")
+      mockInput.pressKey("j")
+      await renderOnce()
+      expect(captureCharFrame().split("\n").filter((line) => line.includes(compactRunRowName))).toHaveLength(2)
+
+      // The live payload order (prefix, the lifecycle row, then goal rows)
+      // grows the list additively; the merge must keep the lifecycle row last.
+      const rows = [
+        { name: "plan", description: "" },
+        compactRow,
+        { name: "goal-improve-1-fixer", description: "improve" },
+        { name: "goal-measure-1-scorer", description: "measure" },
+      ]
+      dashboard.syncPhases(rows)
+      await renderOnce()
+      let frame = captureCharFrame()
+      expect(lineIndexOf(frame, "goal-improve-1-fixer")).toBeLessThan(selectedRowIndex(frame, compactRunRowName))
+      expect(lineIndexOf(frame, "goal-measure-1-scorer")).toBeLessThan(selectedRowIndex(frame, compactRunRowName))
+      // The row moved, it was not rebuilt: its completed state survives the
+      // move (pipeline row and detail header both still show ✓) and the
+      // operator's selection stays on the row at its new terminal index.
+      const compactLines = frame.split("\n").filter((line) => line.includes(compactRunRowName))
+      expect(compactLines).toHaveLength(2)
+      expect(compactLines.every((line) => line.includes("✓"))).toBe(true)
+
+      // Re-syncing the same payload is a no-op: nothing re-appends and the
+      // lifecycle row stays terminal.
+      dashboard.syncPhases(rows)
+      await renderOnce()
+      frame = captureCharFrame()
+      expect(frame.split("\n").filter((line) => line.includes("goal-improve-1-fixer"))).toHaveLength(1)
+      expect(frame.split("\n").filter((line) => line.includes("goal-measure-1-scorer"))).toHaveLength(1)
+      expect(lineIndexOf(frame, "goal-improve-1-fixer")).toBeLessThan(selectedRowIndex(frame, compactRunRowName))
+    } finally {
+      dashboard.stop()
+    }
+  })
+
+  test("a pending Compact run row renders below goal invocation rows while following a live goal run", async () => {
+    const compactRow = { name: compactRunRowName, description: "compacts this run's commits into one operator-authored conventional commit" }
+    const { dashboard, renderOnce, captureCharFrame } = await createDashboard(140, 40, [{ name: "plan", description: "" }, compactRow])
+    try {
+      // Nothing has happened yet: the lifecycle row is pending, exactly what a
+      // dashboard following a live goal run shows while invocation rows grow.
+      dashboard.syncPhases([
+        { name: "plan", description: "" },
+        compactRow,
+        { name: "goal-measure-0-scorer", description: "measure" },
+      ])
+      await renderOnce()
+      const frame = captureCharFrame()
+      expect(frame.split("\n").filter((line) => line.includes(compactRunRowName))).toHaveLength(1)
+      expect(lineIndexOf(frame, "goal-measure-0-scorer")).toBeLessThan(lineIndexOf(frame, compactRunRowName))
     } finally {
       dashboard.stop()
     }

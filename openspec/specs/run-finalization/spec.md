@@ -107,22 +107,22 @@ Convoy SHALL persist `pending`, `running`, `completed`, `skipped`, `blocked`, or
 
 ### Requirement: Create pull request is the only run-publication action
 
-Run completion SHALL expose `Create pull request` in the command palette independently of compaction success, with no manual finish or standalone push action. Existing inspection and navigation actions SHALL remain. For feature-linked runs, publication SHALL use the shared assessment of the selected feature's currently verified associated branch, not the branch now occupying the historical run path. For no-spec runs, publication SHALL retain explicit verified run-context selection without requiring a fabricated feature contract. Selecting the action SHALL explicitly authorize a normal push to the disclosed repository/remote followed by PR creation; it MUST NOT publish automatically, force-push, delete branches, or remove worktrees. The action SHALL revalidate current identity, branch state, and unresolved recovery blockers immediately before publication rather than treating an old run's HEAD or a prior assessment as authority. A resulting run commit SHALL seed the PR title/body when applicable; otherwise the run summary and current branch context SHALL seed them. Missing GitHub CLI/authentication or unsafe/unresolved state SHALL disable publishing with actionable guidance. Headless output SHALL provide guidance only unless a separate explicit publication request exists. Publication SHALL NOT mark local integration, archive, or hosted PR merge complete.
+Run completion SHALL expose `Create pull request` in the command palette independently of compaction success, with no manual finish or standalone push action. Existing inspection and navigation actions SHALL remain. Selecting this action SHALL explicitly authorize a normal push of the current verified feature branch to a disclosed repository/remote followed by PR creation; it MUST NOT publish automatically at run completion, force-push, delete branches, or remove worktrees. The action SHALL revalidate current branch state rather than using an old run's HEAD as authority. The PR title and body SHALL be composed from persisted run and change context under a deterministic precedence — the branch's conventional prefix supplies the commit type and the attached change's proposal title, else a humanized branch slug, supplies the subject — never from the prompt's first line. The PR body SHALL present Why, What, and How-tested sections drawn from the change proposal, the run's distilled recap (or the compacted run commit's message when no recap exists), and test/validation reports, each falling back mechanically when its source is absent. Missing GitHub CLI/authentication or an unsafe/unresolved repository state SHALL disable publishing with actionable guidance. Headless output SHALL provide guidance only unless a separate explicit publication request exists.
 
 #### Scenario: Deliberate PR creation
 
-- **WHEN** the operator selects Create pull request on a safe verified feature branch
-- **THEN** Convoy performs a normal push and creates the PR, displaying its URL without a separate push choice
+- **WHEN** the operator selects Create pull request on a safe feature branch
+- **THEN** Convoy performs a normal push and creates the PR, displaying its URL without any separate push choice
 
 #### Scenario: Push is rejected or PR already exists
 
 - **WHEN** the normal push is rejected, or a matching open PR already exists
-- **THEN** Convoy respectively stops before PR creation with no force-push fallback, or opens/reports the existing PR rather than creating a duplicate
+- **THEN** Convoy respectively stops before creating a PR with no force-push fallback, or opens/reports the existing PR rather than creating a duplicate
 
 #### Scenario: GitHub CLI is unavailable
 
 - **WHEN** a completed run is viewed without a usable GitHub CLI
-- **THEN** Create pull request is unavailable with setup/manual guidance while inspection remains usable
+- **THEN** Create pull request is unavailable with setup/manual guidance, while inspection remains usable
 
 #### Scenario: Historical path has been reused
 
@@ -151,3 +151,41 @@ Convoy SHALL remove the public finish command, its flags/help, the dashboard sho
 
 - **WHEN** an operator invokes `convoy finish` with or without old options
 - **THEN** Convoy exits non-zero without changing state and explains that run compaction is automatic and close squash-lands a feature
+
+### Requirement: PR text is composed deterministically from persisted context
+
+PR title and body composition SHALL depend only on state persisted before publication — run metadata, the change proposal, and the run's own reports — so composing twice from the same run state yields the same text. A publication whose PR creation previously failed SHALL retry with the same title and body. Composition MUST NOT require a model call and MUST NOT block publication when a source document is absent: each missing source degrades to its mechanical fallback and the PR is still created.
+
+#### Scenario: Retry after a failed PR creation
+
+- **WHEN** a push succeeds but PR creation fails, and the operator retries publication
+- **THEN** the retry composes the same title and body and reuses the push, locating the existing PR rather than creating a duplicate
+
+#### Scenario: Sources are absent
+
+- **WHEN** a run publishes without an attached change proposal or validation reports
+- **THEN** the PR is still created, with the affected sections falling back to branch- and metadata-derived content and the How-tested section disclosing what was not covered
+
+#### Scenario: Conventional title within the subject budget
+
+- **WHEN** a run on branch `feat/add-attach-flow` publishes and the branch resolves to a change titled "Attachment flow for run reports"
+- **THEN** the PR title is `feat: <composed subject>` naming that change, bounded to the shared subject budget with word-boundary shortening
+
+### Requirement: The terminal lifecycle row closes every dashboard phase list
+
+Every dashboard phase list — a live run's initial list, a following dashboard grown additively while a goal cycle adds invocation rows, and a reconstructed or historical view — SHALL order the `Compact run` lifecycle row last, after the pipeline prefix rows, hook rows, and every goal invocation group. A live merge that appends previously unknown rows MUST NOT leave the lifecycle row above any row appended after it. Upholding the invariant MUST NOT require rebuilding the dashboard, dropping row state, or re-running phases, and the lifecycle row's position MUST NOT imply any execution-order relationship with the goal cycle: it is the run epilogue regardless of where the rows render.
+
+#### Scenario: Live dashboard grows during a goal cycle
+
+- **WHEN** a dashboard is following a live goal run and the scheduler's next invocation's rows arrive through the additive sync
+- **THEN** the merged phase list still ends with the `Compact run` row, the goal invocation rows render above it, and the pending lifecycle row never sits above a goal invocation row
+
+#### Scenario: Mid-cycle attach shows the row terminal
+
+- **WHEN** a dashboard attaches to a goal run that is mid-cycle and reconstructs its phase list from durable state
+- **THEN** the reconstructed list closes with the `Compact run` row after every recorded and in-flight goal invocation row
+
+#### Scenario: Compaction starts on a grown dashboard
+
+- **WHEN** finalization starts on a run whose dashboard grew goal invocation rows while following it
+- **THEN** the `Compact run` row transitions to running and then to its outcome in place at the terminal position of the phase list

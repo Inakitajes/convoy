@@ -517,6 +517,11 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
 
   try {
     releaseLease = await acquireRunLease(workspace)
+    // The run's branch, resolved once: the confirmed worktree branch for an
+    // isolated run, otherwise whatever the execution tree has checked out. The
+    // persisted run title (capability run-titles) and the terminal-title
+    // identity both derive from it and must agree.
+    const runBranch = options.branch ?? (await currentBranch(options.targetDir))
     metadata = await openRunMetadata(workspace, options.targetDir, options.pipeline, {
       gateway: options.plan?.modelRouting.gateway ?? options.gateway ?? "configured",
       gatewayOverride: options.gatewayExplicit ?? false,
@@ -526,6 +531,7 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
       useExecutionPipeline: Boolean(options.resumeRunID && options.plan),
       // The reviewed feature link persists before any execution (task 4.2).
       ...(options.plan?.feature ? { feature: options.plan.feature } : {}),
+      ...(runBranch ? { branch: runBranch } : {}),
     })
     const pipeline = metadata.pipeline
     pipelineNameForHooks = pipeline.name
@@ -553,17 +559,13 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
     control = new RunControl(metadata)
     caffeinate = new Caffeinate()
 
-    // Identity for the terminal title and notifications. The branch is only on
-    // options for worktree runs, so fall back to whatever is checked out.
+    // Identity for the terminal title and notifications, reusing the branch
+    // resolved for metadata above.
     const phases = progressPhases(pipeline, hookSet)
     const identity = {
       project: projectName(options.targetDir),
       pipeline: pipeline.name,
-      ...(options.branch ? { branch: options.branch } : {}),
-    }
-    if (!identity.branch) {
-      const branch = await currentBranch(options.targetDir)
-      if (branch) identity.branch = branch
+      ...(runBranch ? { branch: runBranch } : {}),
     }
     // Resolve the defaults up front. An unset CLI switch preserves config;
     // explicit --notify and --no-notify apply after that merge.
