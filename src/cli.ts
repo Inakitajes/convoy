@@ -1412,7 +1412,7 @@ async function proposeForFeature(input: {
   if (serviceHandle) {
     const commands = await listAuthoringCommands({ checkout: input.checkout, server: serviceHandle })
     if (commands === "unknown") {
-      await reportHandoffBlocker("the project's authoring commands could not be discovered", ["run `convoy opencode install`-free: check the project's .opencode/commands/ directory"], input.route)
+      await reportHandoffBlocker("the project's authoring commands could not be discovered", ["check the project's .opencode/commands/ directory — Convoy does not install commands into it"], input.route)
       return
     }
     commandName = commands.find((name) => name === "opsx-propose") ?? commands.find((name) => name.endsWith("propose"))

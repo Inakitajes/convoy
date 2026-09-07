@@ -1365,9 +1365,9 @@ function stageColor(stage: FeatureRow["stage"], live: boolean): string {
  * yellow (same attention color as a stranded row), live work in green, and
  * everything else informational cyan. The summary strings come from the
  * shared assessment (feature-lifecycle/assessment.ts), so the two move
- * together.
+ * together. Shared with Home's work list, which renders the same rows.
  */
-function lifecycleColor(feature: LifecycleFeatureRow): string {
+export function lifecycleColor(feature: LifecycleFeatureRow): string {
   if (feature.integration === "verified") return theme.green
   if (feature.integration === "probable" || feature.integration === "stale") return theme.orange
   if (feature.summary === "Ready to close" || feature.summary === "Implementation complete · archive verified") return theme.green

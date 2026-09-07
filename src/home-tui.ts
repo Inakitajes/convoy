@@ -3,9 +3,12 @@ import { join } from "node:path"
 import { BoxRenderable, StyledText, TextRenderable, bold, createCliRenderer, fg } from "@opentui/core"
 
 import { detectBaseRef } from "./git"
+import { lifecycleColor } from "./specs-browser"
 import {
   displayWidth,
+  hintsRow,
   joinLines,
+  moreHintsMarker,
   padBetween,
   paletteForTerminal,
   raw,
@@ -19,6 +22,7 @@ import { versionDetails } from "./version"
 import { homeRendererConfig, sceneForRoute, type TuiRoute, type TuiScene } from "./tui-session"
 
 import type { CliRenderer, KeyEvent, TextChunk } from "@opentui/core"
+import type { Hint } from "./tui-theme"
 import type { LifecycleFeatureRow } from "./specs"
 
 /**
@@ -131,8 +135,18 @@ export class HomeLauncher {
   private level: "list" | "detail" | "form" = "list"
   private rows: ListRow[] = []
   private selectedRow = 1
+  /** First visible list row; re-clamped on every render so navigation and resize both keep the selection on screen. */
+  private scroll = 0
   private detailFeature?: LifecycleFeatureRow
   private detailSelected = 0
+  /** First visible detail line; same re-clamping contract as `scroll`. */
+  private detailScroll = 0
+  /**
+   * Whether the detail pane follows the selected action. Action navigation
+   * sets it; explicit paging (pgup/pgdn) clears it so the metadata above the
+   * actions — title, status, contracts, blockers — stays readable.
+   */
+  private detailFollow = true
   /** New-work form state: one input field at a time, committed in sequence. */
   private form: { field: 0 | 1 | 2; displayName: string; branch: string; base: string; error?: string } | undefined
   /** Why the remembered work could not be restored (task 6.4). */
@@ -148,6 +162,15 @@ export class HomeLauncher {
     if (mode !== "dark" && mode !== "light") return
     setTheme(paletteForTerminal(mode, terminalBackgroundHex(this.renderer)))
     this.applyPalette()
+    this.render()
+  }
+
+  /**
+   * A resize redraws the existing tree at the new size; without re-rendering,
+   * the windowed list and detail would keep the old pane's content until the
+   * next keypress. Re-clamping here keeps the selection visible immediately.
+   */
+  private readonly handleResize = () => {
     this.render()
   }
 
@@ -230,6 +253,7 @@ export class HomeLauncher {
 
     renderer.keyInput.on("keypress", this.handleKeyPress)
     renderer.on("theme_mode", this.handleThemeMode)
+    renderer.on("resize", this.handleResize)
     this.render()
   }
 
@@ -292,6 +316,8 @@ export class HomeLauncher {
     if (row.kind === "work") {
       this.detailFeature = row.feature
       this.detailSelected = 0
+      this.detailScroll = 0
+      this.detailFollow = true
       this.level = "detail"
       return
     }
@@ -355,22 +381,39 @@ export class HomeLauncher {
     const actions = this.detailActions()
     const direct = actions.find((action) => action.key === key.name)
     if (direct) {
+      this.detailFollow = true
       this.resolveDetail(direct)
       return
     }
     switch (key.name) {
       case "up":
       case "k":
+        this.detailFollow = true
         this.detailSelected = Math.max(0, this.detailSelected - 1)
         break
       case "down":
       case "j":
+        this.detailFollow = true
         this.detailSelected = Math.min(actions.length - 1, this.detailSelected + 1)
         break
+      case "pageup":
+      case "pagedown": {
+        // Explicit scrolling: read the metadata above the actions without
+        // moving the selection; the next action navigation re-follows it.
+        this.detailFollow = false
+        const page = this.detailVisible()
+        const max = Math.max(0, this.detailLineCount() - page)
+        this.detailScroll = key.name === "pageup" ? Math.max(0, this.detailScroll - page) : Math.min(max, this.detailScroll + page)
+        break
+      }
       case "return":
       case "linefeed": {
         const action = actions[this.detailSelected]
-        if (action) this.resolveDetail(action)
+        if (action) {
+          this.detailFollow = true
+          this.resolveDetail(action)
+          return
+        }
         break
       }
       case "escape":
@@ -503,13 +546,12 @@ export class HomeLauncher {
 
   // ── rendering ───────────────────────────────────────────────────────────
 
-  private move() {}
-
   private finish(resolution: HomeResolution) {
     if (this.finished) return
     this.finished = true
     this.renderer.keyInput.off("keypress", this.handleKeyPress)
     this.renderer.off("theme_mode", this.handleThemeMode)
+    this.renderer.off("resize", this.handleResize)
     if (!this.scene && !this.renderer.isDestroyed) this.renderer.destroy()
     this.resolveResult(resolution)
   }
@@ -526,6 +568,11 @@ export class HomeLauncher {
     this.mastheadText.content = this.mastheadContent(width - CHROME_PADDING_COLS * 2)
     this.bodyText.content = this.level === "list" ? this.listContent(width - CHROME_PADDING_COLS * 2) : this.level === "detail" ? this.detailContent(width - CHROME_PADDING_COLS * 2) : this.formContent(width - CHROME_PADDING_COLS * 2)
     this.renderer.requestRender()
+  }
+
+  /** Rows the body can hold: everything under the fixed 4-row masthead. */
+  private bodyHeight(): number {
+    return Math.max(1, this.renderer.height - 4)
   }
 
   /** Masthead: identity, complete version, project path above the work list. */
@@ -551,57 +598,140 @@ export class HomeLauncher {
   private listContent(width: number): StyledText {
     const lines: StyledText[] = []
     if (this.resumeNotice) lines.push(new StyledText([fg(theme.yellow)(truncate(this.resumeNotice, Math.max(1, width)))]))
-    const windowed = this.rows.map((row, index) => ({ row, index }))
-    const selectedLabel = (row: ListRow, selected: boolean): TextChunk[] => {
-      const marker = selected ? fg(theme.accent)("▸ ") : raw("  ")
-      if (row.kind === "header") return [fg(theme.faint)(row.label.toUpperCase())]
-      if (row.kind === "work") {
-        const label = `${row.feature.displayName}`
-        const suffix = row.feature.branch ? `  ${row.feature.branch}` : ""
-        const summary = ` — ${row.feature.summary}`
-        return [marker, ...(selected ? [bold(fg(theme.accent)(label))] : [fg(theme.text)(label)]), fg(theme.faint)(truncate(suffix + summary, Math.max(0, width - displayWidth(label) - 2)))]
-      }
-      if (row.kind === "new") return [marker, ...(selected ? [bold(fg(theme.accent)("+ New feature"))] : [fg(theme.text)("+ New feature")])]
-      return [marker, ...(selected ? [bold(fg(theme.text)(`${row.label}`))] : [fg(theme.text)(row.label)]), fg(theme.faint)(`  [${row.shortcut.toUpperCase()}]`)]
-    }
-    for (const { row, index } of windowed) {
-      lines.push(new StyledText(row.kind === "header" ? [raw(""), ...selectedLabel(row, false)] : selectedLabel(row, index === this.selectedRow)))
+    // One blank separator and one hints row are always reserved, so the work
+    // list itself windows into what remains — the same scroll contract as the
+    // specs board, keeping the selected row visible while navigating.
+    const visible = Math.max(1, this.bodyHeight() - lines.length - 2)
+    if (this.selectedRow < this.scroll) this.scroll = this.selectedRow
+    if (this.selectedRow >= this.scroll + visible) this.scroll = this.selectedRow - visible + 1
+    this.scroll = Math.max(0, Math.min(this.scroll, Math.max(0, this.rows.length - visible)))
+    for (const { row, index } of this.rows.map((row, index) => ({ row, index })).slice(this.scroll, this.scroll + visible)) {
+      lines.push(this.rowLine(row, index === this.selectedRow, width))
     }
     lines.push(new StyledText([raw("")]))
-    lines.push(new StyledText([fg(theme.faint)(truncate("↑/↓ select · enter open · n new work · p/s/r/c auxiliary · q quit", Math.max(1, width)))]))
+    // The same footer machinery every destination screen uses: hints degrade
+    // by priority instead of being chopped at the border.
+    lines.push(
+      hintsRow(
+        [
+          { keys: "↑/↓", label: "select", priority: 4 },
+          { keys: "p/s/r/c", label: "auxiliary", priority: 3 },
+          { keys: "n", label: "new work", priority: 2 },
+          { keys: "enter", label: "open", priority: 1 },
+          { keys: "q", label: "quit", priority: 0 },
+        ],
+        [],
+        width,
+        { style: "spaced", overflow: moreHintsMarker },
+      ),
+    )
     return joinLines(lines)
+  }
+
+  /**
+   * One list row, speaking the board's row vocabulary: accent-bold uppercase
+   * section headers, a lifecycle-colored dot on work rows, and the selected
+   * title in bold text with the accent `▸` marker carrying the selection —
+   * the anatomy of the specs board's feature rows for the very same rows.
+   */
+  private rowLine(row: ListRow, selected: boolean, width: number): StyledText {
+    if (row.kind === "header") {
+      return new StyledText([bold(fg(theme.accent)(` ${truncate(row.label.toUpperCase(), width)}`))])
+    }
+    if (row.kind === "work") {
+      const feature = row.feature
+      const left: TextChunk[] = [selected ? fg(theme.accent)("▸ ") : raw("  "), fg(lifecycleColor(feature))("●"), raw(" ")]
+      const title = truncate(feature.displayName, Math.max(12, width - 18))
+      left.push(selected ? bold(fg(theme.text)(title)) : fg(theme.text)(title))
+      const state: TextChunk[] = [fg(lifecycleColor(feature))(feature.summary)]
+      const rest: string[] = []
+      if (feature.branch) rest.push(feature.branch)
+      if (feature.tasks && feature.tasks !== "unknown" && feature.tasks.total > 0) rest.push(`${feature.tasks.done}/${feature.tasks.total}`)
+      if (feature.liveRuns > 0) rest.push(`${feature.liveRuns} live`)
+      if (rest.length > 0) state.push(fg(theme.dim)(` · ${rest.join(" · ")}`))
+      return padBetween(left, state, width)
+    }
+    if (row.kind === "new") {
+      const left: TextChunk[] = [selected ? fg(theme.accent)("▸ ") : raw("  "), fg(theme.green)("+"), raw(" ")]
+      left.push(selected ? bold(fg(theme.text)("New feature")) : fg(theme.text)("New feature"))
+      return new StyledText(left)
+    }
+    const left: TextChunk[] = [selected ? fg(theme.accent)("▸ ") : raw("  "), fg(theme.teal)("◇"), raw(" ")]
+    left.push(selected ? bold(fg(theme.text)(row.label)) : fg(theme.text)(row.label))
+    left.push(fg(theme.faint)(`  [${row.shortcut.toUpperCase()}]`))
+    return new StyledText(left)
+  }
+
+  /** Rows the detail pane can hold below its blank separator and hints row. */
+  private detailVisible(): number {
+    return Math.max(3, this.bodyHeight() - 2)
+  }
+
+  /** The detail pane's full line list plus the index of its first action row. */
+  private detailLines(width: number): { lines: StyledText[]; actionStart: number } {
+    const feature = this.detailFeature
+    if (!feature) return { lines: [], actionStart: 0 }
+    const lines: StyledText[] = []
+    // The board's detail anatomy: bold title, dim identity line, then faint
+    // `label: ` rows with the status speaking the lifecycle color.
+    lines.push(new StyledText([bold(fg(theme.text)(truncate(feature.displayName, width)))]))
+    lines.push(new StyledText([fg(theme.dim)(`feature ${feature.featureId}`)]))
+    lines.push(new StyledText([raw("")]))
+    const add = (label: string, value: string, color = theme.text) => {
+      lines.push(new StyledText([fg(theme.faint)(`${label}: `), fg(color)(truncate(value, Math.max(8, width - label.length - 2)))]))
+    }
+    add("status", feature.summary, lifecycleColor(feature))
+    if (feature.branch) add("branch", feature.branch)
+    if (feature.checkoutPath) add("worktree", shortPath(feature.checkoutPath, Math.max(12, width - 10)))
+    for (const contract of feature.contracts) add("contract", `${contract.changeId} (${contract.state})`)
+    if (feature.contracts.length === 0) add("contracts", "none yet — awaiting proposal", theme.dim)
+    if (feature.conversations && feature.conversations.length > 0) add("conversations", `${feature.conversations.length}`)
+    for (const blocker of feature.blockers.slice(0, 4)) lines.push(new StyledText([fg(theme.yellow)(`! ${truncate(blocker, Math.max(8, width - 2))}`)]))
+    lines.push(new StyledText([raw("")]))
+    lines.push(new StyledText([bold(fg(theme.accent)("actions"))]))
+    const actionStart = lines.length
+    this.detailActions().forEach((action, index) => {
+      const selected = index === this.detailSelected
+      const marker = selected ? fg(theme.accent)("▸ ") : raw("  ")
+      // A blocked action dims like the board's disabled entries; its reason
+      // stays inspectable in the attention color instead of disappearing.
+      const label = action.enabled ? (selected ? bold(fg(theme.text)(action.label)) : fg(theme.text)(action.label)) : fg(theme.dim)(action.label)
+      const hint = action.enabled ? fg(theme.faint)(`  [${action.key}]`) : fg(theme.yellow)(`  blocked: ${truncate(action.blocker ?? "", Math.max(0, width - displayWidth(action.label) - 14))}`)
+      lines.push(new StyledText([marker, label, hint]))
+    })
+    return { lines, actionStart }
+  }
+
+  private detailLineCount(): number {
+    if (!this.detailFeature) return 0
+    return this.detailLines(Math.max(1, this.renderer.width) - CHROME_PADDING_COLS * 2).lines.length
   }
 
   private detailContent(width: number): StyledText {
     const feature = this.detailFeature
     if (!feature) return this.listContent(width)
-    const lines: StyledText[] = []
-    lines.push(new StyledText([bold(fg(theme.text)(feature.displayName)), fg(theme.faint)(`  ${feature.featureId}`)]))
-    lines.push(new StyledText([fg(theme.faint)("status: "), fg(theme.text)(feature.summary)]))
-    if (feature.branch) lines.push(new StyledText([fg(theme.faint)("branch: "), fg(theme.text)(feature.branch)]))
-    if (feature.checkoutPath) lines.push(new StyledText([fg(theme.faint)("checkout: "), fg(theme.text)(shortPath(feature.checkoutPath, Math.max(1, width - 14)))]))
-    if (feature.contracts.length > 0) {
-      lines.push(new StyledText([fg(theme.faint)(`contracts (${feature.contracts.length}):`)]))
-      for (const contract of feature.contracts) lines.push(new StyledText([fg(theme.text)(`  ${contract.changeId}`), fg(theme.faint)(`  ${contract.state}`)]))
-    } else {
-      lines.push(new StyledText([fg(theme.faint)("contracts: none yet — awaiting proposal")]))
+    const { lines, actionStart } = this.detailLines(width)
+    const visible = this.detailVisible()
+    // Action navigation follows the selection; explicit paging (pgup/pgdn)
+    // reads the metadata above the actions instead. Both re-clamp to bounds,
+    // so a resize never strands the pane past its content.
+    if (this.detailFollow) {
+      const selectedLine = actionStart + this.detailSelected
+      if (selectedLine < this.detailScroll) this.detailScroll = selectedLine
+      if (selectedLine >= this.detailScroll + visible) this.detailScroll = selectedLine - visible + 1
     }
-    if (feature.conversations && feature.conversations.length > 0) {
-      lines.push(new StyledText([fg(theme.faint)(`conversations: ${feature.conversations.length}`)]))
-    }
-    for (const blocker of feature.blockers.slice(0, 4)) lines.push(new StyledText([fg(theme.yellow)(`! ${blocker}`)]))
-    lines.push(new StyledText([raw("")]))
-    lines.push(new StyledText([fg(theme.faint)("actions")]))
-    this.detailActions().forEach((action, index) => {
-      const selected = index === this.detailSelected
-      const marker = selected ? fg(theme.accent)("▸ ") : raw("  ")
-      const label = selected ? bold(fg(theme.accent)(action.label)) : fg(theme.text)(action.label)
-      const hint = action.enabled ? fg(theme.faint)(`  [${action.key}]`) : fg(theme.yellow)(`  blocked: ${truncate(action.blocker ?? "", Math.max(0, width - displayWidth(action.label) - 14))}`)
-      lines.push(new StyledText([marker, label, hint]))
-    })
-    lines.push(new StyledText([raw("")]))
-    lines.push(new StyledText([fg(theme.faint)("↑/↓ select · enter run · esc back")]))
-    return joinLines(lines)
+    this.detailScroll = Math.max(0, Math.min(this.detailScroll, Math.max(0, lines.length - visible)))
+    const slice = lines.slice(this.detailScroll, this.detailScroll + visible)
+    slice.push(new StyledText([raw("")]))
+    const hints: Hint[] = [
+      { keys: "↑/↓", label: "select", priority: 3 },
+      { keys: "enter", label: "run", priority: 1 },
+      { keys: "esc", label: "back", priority: 0 },
+    ]
+    // The paging hint is only advertised when there is something to page.
+    if (lines.length > visible) hints.splice(1, 0, { keys: "pgup/pgdn", label: "page", priority: 2 })
+    slice.push(hintsRow(hints, [], width, { style: "spaced", overflow: moreHintsMarker }))
+    return joinLines(slice)
   }
 
   private formContent(width: number): StyledText {
@@ -620,7 +750,17 @@ export class HomeLauncher {
     field("base     ", form.base, form.field === 2, "detected default")
     lines.push(new StyledText([raw("")]))
     if (form.error) lines.push(new StyledText([fg(theme.red)(form.error)]))
-    lines.push(new StyledText([fg(theme.faint)("enter confirm · esc cancel — nothing is created until the destination is accepted")]))
+    lines.push(
+      hintsRow(
+        [
+          { keys: "enter", label: "confirm", priority: 1 },
+          { keys: "esc", label: "cancel", priority: 0 },
+        ],
+        [[fg(theme.faint)("nothing is created until the destination is accepted")]],
+        width,
+        { style: "spaced", overflow: moreHintsMarker },
+      ),
+    )
     return joinLines(lines)
   }
 }

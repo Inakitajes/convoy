@@ -290,6 +290,98 @@ describe("new feature form (task 5.1)", () => {
   })
 })
 
+describe("small terminals (list and detail stay navigable)", () => {
+  test("navigating past the fold keeps the selected work row and the hints row visible", async () => {
+    const many: LifecycleFeatureRow[] = Array.from({ length: 10 }, (_, index) =>
+      featureRow({ featureId: `f${index}-2222-3333-4444-555555555555`, displayName: `Work item ${index}`, branch: `feat/item-${index}`, checkoutPath: `/wt/item-${index}` }),
+    )
+    const session = await openHome({ workRows: many, height: 14 })
+    try {
+      for (let step = 0; step < 9; step++) {
+        session.press("j")
+      }
+      await session.renderOnce()
+      const frame = frameOf(session)
+      // The selected row is the tenth work item; it must be on screen, not
+      // clipped below the fold, and the hints row must survive with it.
+      const selected = frame.split("\n").filter((line) => line.includes("▸"))
+      expect(selected.some((line) => line.includes("Work item 9"))).toBe(true)
+      expect(frame).toContain("q quit")
+    } finally {
+      await closeHome(session)
+    }
+  })
+
+  test("a short terminal keeps the selected detail action and its hints visible", async () => {
+    const session = await openHome({ height: 12 })
+    try {
+      session.press("return") // open the first work's detail
+      await session.renderOnce()
+      const frame = frameOf(session)
+      const selected = frame.split("\n").filter((line) => line.includes("▸"))
+      expect(selected.some((line) => line.includes("Open conversation"))).toBe(true)
+      expect(frame).toContain("esc back")
+    } finally {
+      await closeHome(session)
+    }
+  })
+
+  test("detail metadata above the actions stays reachable through paging", async () => {
+    const manyContracts = featureRow({
+      featureId: "cccccccc-2222-3333-4444-555555555555",
+      displayName: "Many contracts",
+      branch: "feat/many",
+      checkoutPath: "/wt/many",
+      contracts: Array.from({ length: 12 }, (_, index) => ({ changeId: `change-${index + 1}`, state: "active" })),
+    })
+    const session = await openHome({ workRows: [manyContracts], height: 14 })
+    try {
+      session.press("return") // open the detail; it follows the first action
+      await session.renderOnce()
+      const followed = frameOf(session)
+      expect(followed).toContain("Open conversation")
+      expect(followed).not.toContain("Many contracts")
+      // Page up: the metadata block — title through contracts — becomes readable.
+      session.press("pageup")
+      session.press("pageup")
+      await session.renderOnce()
+      const paged = frameOf(session)
+      expect(paged).toContain("Many contracts")
+      expect(paged).toContain("contract: change-1 (active)")
+      expect(paged).toContain("pgup/pgdn page")
+      // Action navigation re-follows the selection.
+      session.press("j")
+      await session.renderOnce()
+      const selected = frameOf(session).split("\n").filter((line) => line.includes("▸"))
+      expect(selected.some((line) => line.includes("Open in window"))).toBe(true)
+    } finally {
+      await closeHome(session)
+    }
+  })
+
+  test("a resize re-clamps the detail pane without stranding it", async () => {
+    const session = await openHome({ height: 30 })
+    try {
+      session.press("return")
+      await session.renderOnce()
+      expect(frameOf(session)).toContain("Add widget")
+      // Shrink: the pane re-renders at the new size and re-clamps around the
+      // selected action instead of keeping the tall pane's stale content.
+      session.resize(110, 12)
+      await session.renderOnce()
+      const shrunk = frameOf(session)
+      expect(shrunk).toContain("Open conversation")
+      expect(shrunk).not.toContain("Add widget")
+      // Grow back: the pane re-clamps and the metadata is readable again.
+      session.resize(110, 30)
+      await session.renderOnce()
+      expect(frameOf(session)).toContain("Add widget")
+    } finally {
+      await closeHome(session)
+    }
+  })
+})
+
 describe("typical action coverage (used by tests above)", () => {
   test("HomeWorkAction ids are exhaustive", () => {
     const ids: HomeWorkAction[] = ["conversation", "propose", "pipeline", "specs", "runs", "close", "history"]
