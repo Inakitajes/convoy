@@ -68,8 +68,8 @@ function viewDir(): string {
   return "/work/acme"
 }
 
-async function openHome(options: { workRows?: LifecycleFeatureRow[]; resumeFeature?: LifecycleFeatureRow; resumeNotice?: string; height?: number; targetDir?: string } = {}) {
-  const testRenderer = await createTestRenderer({ width: 110, height: options.height ?? 30 })
+async function openHome(options: { workRows?: LifecycleFeatureRow[]; resumeFeature?: LifecycleFeatureRow; resumeNotice?: string; width?: number; height?: number; targetDir?: string } = {}) {
+  const testRenderer = await createTestRenderer({ width: options.width ?? 110, height: options.height ?? 30 })
   const instance = new HomeLauncher(testRenderer.renderer, options.targetDir ?? viewDir(), {
     scene: undefined,
     workRows: options.workRows ?? work,
@@ -117,12 +117,14 @@ describe("work-first home (tasks 6.2/6.3)", () => {
       // npm_package_version), so assert the same value the masthead renders.
       expect(frame).toContain(versionDetails())
       expect(frame).toContain("/work/acme")
-      // The work list leads: features, New feature, then auxiliary.
-      expect(frame).toContain("WORK")
+      // Panels: the work list leads, New feature is explicit, destinations
+      // remain reachable, and the preview speaks the selected work.
+      expect(frame).toContain(" work ")
+      expect(frame).toContain(" next ")
       expect(frame).toContain("Add widget")
       expect(frame).toContain("+ New feature")
-      expect(frame).toContain("AUXILIARY")
       expect(frame).toContain("Pipelines")
+      expect(frame).toContain("enter  Open conversation")
     } finally {
       await closeHome(session)
     }
@@ -194,6 +196,23 @@ describe("work-first home (tasks 6.2/6.3)", () => {
       const frame = frameOf(session)
       expect(frame).toContain("Idle pre-proposal")
       expect(frame).toContain("Awaiting proposal")
+    } finally {
+      await closeHome(session)
+    }
+  })
+
+  test("highlighting a destination fills the preview with its kicker and description", async () => {
+    const session = await openHome()
+    try {
+      // Skip both work rows and New feature to land on Pipelines (the rule is not selectable).
+      session.press("j")
+      session.press("j")
+      session.press("j")
+      await session.renderOnce()
+      const frame = frameOf(session)
+      expect(frame).toContain("From intent to ship")
+      expect(frame).toContain("Compose agents into a reviewed, repeatable path")
+      expect(frame).toContain(" pipelines ")
     } finally {
       await closeHome(session)
     }
@@ -294,6 +313,20 @@ describe("new feature form (task 5.1)", () => {
 })
 
 describe("small terminals (list and detail stay navigable)", () => {
+  test("a narrow terminal stacks the preview under the work list", async () => {
+    const session = await openHome({ width: 60, height: 24 })
+    try {
+      const frame = frameOf(session)
+      expect(frame).toContain(" work ")
+      expect(frame).toContain(" next ")
+      expect(frame).toContain("Add widget")
+      expect(frame).toContain("enter  Open conversation")
+      expect(frame).toContain("q quit")
+    } finally {
+      await closeHome(session)
+    }
+  })
+
   test("navigating past the fold keeps the selected work row and the hints row visible", async () => {
     const many: LifecycleFeatureRow[] = Array.from({ length: 10 }, (_, index) =>
       featureRow({ featureId: `f${index}-2222-3333-4444-555555555555`, displayName: `Work item ${index}`, branch: `feat/item-${index}`, checkoutPath: `/wt/item-${index}` }),

@@ -70,7 +70,7 @@ test("Home and a destination swap scenes without destroying the shared renderer"
     const secondScene = session.openScene("convoy-home-scene")
     const returnedHome = new HomeLauncher(testRenderer.renderer, view.targetDir, { scene: secondScene, workRows: [] })
     await testRenderer.renderOnce()
-    expect(testRenderer.captureCharFrame()).toContain("AUXILIARY")
+      expect(testRenderer.captureCharFrame()).toContain("Pipelines")
 
     testRenderer.renderer.keyInput.emit("keypress", keyEvent("q"))
     await expect(returnedHome.result).resolves.toBeUndefined()
