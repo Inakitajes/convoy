@@ -3,7 +3,7 @@ import { dirname } from "node:path"
 import { aggregateAdvisorEvents, readAdvisorEvents } from "./advisor-events"
 import { goalProgressPhases } from "./goal-phases"
 import { readRunMetadata, type PhaseMetadata, type RunMetadata } from "./metadata"
-import { progressPhases, watchSession, backfillSessionTranscript, type SessionWatcher } from "./runner"
+import { compactRunRowName, progressPhases, watchSession, backfillSessionTranscript, type SessionWatcher } from "./runner"
 
 import type { OpencodeClient } from "@opencode-ai/sdk/v2"
 import type { GoalLoopView, ProgressPhaseSnapshot, ProgressUI } from "./progress"
@@ -88,7 +88,13 @@ export class LiveAttach {
     const pipeline = metadata.pipeline
     if (!pipeline) return
     const recorded = new Set(Object.keys(metadata.phases))
-    this.tui.syncPhases?.([...progressPhases(pipeline), ...goalProgressPhases(pipeline, recorded, { live: true, goal: metadata.goal })])
+    const rows = [...progressPhases(pipeline), ...goalProgressPhases(pipeline, recorded, { live: true, goal: metadata.goal })]
+    // Canonical display order (SC-2): the terminal `Compact run` lifecycle row
+    // closes the payload — after the prefix and every goal invocation row —
+    // mirroring `reconstructedPhases`, so the contract the dashboard merges
+    // against describes one canonical order.
+    const compact = rows.filter((row) => row.name === compactRunRowName)
+    this.tui.syncPhases?.([...rows.filter((row) => row.name !== compactRunRowName), ...compact])
   }
 
   /** Derives the header's goal segments from the durable record each poll. */

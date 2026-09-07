@@ -144,9 +144,10 @@ describe("LiveAttach follows a goal cycle", () => {
     try {
       await attach.start()
 
-      // Measurement zero's rows are synced (prefix first), its running phase
-      // started, and every recorded session is attached to its row.
-      expect(state.synced[0]).toEqual([...prefixNames, compactRunRowName, ...measure0])
+      // Measurement zero's rows are synced in canonical display order (prefix,
+      // then the invocation, with the terminal lifecycle row last), its
+      // running phase started, and every recorded session is attached to its row.
+      expect(state.synced[0]).toEqual([...prefixNames, ...measure0, compactRunRowName])
       expect(state.started).toEqual([measure0[0]])
       expect(state.sessions).toEqual(measure0.map((name, index) => `${name}:ses_${index}`))
       expect(state.goalViews).toEqual([])
@@ -167,8 +168,9 @@ describe("LiveAttach follows a goal cycle", () => {
       for (let attempt = 0; attempt < 200 && !state.synced.at(-1)!.includes(improve1[0]); attempt++) await Bun.sleep(5)
 
       // The improvement's rows appeared through the ordinary poll — no
-      // detach/re-attach — and their events land on them.
-      expect(state.synced.at(-1)).toEqual([...prefixNames, compactRunRowName, ...measure0, ...improve1])
+      // detach/re-attach — their events land on them, and the lifecycle row
+      // still closes the payload.
+      expect(state.synced.at(-1)).toEqual([...prefixNames, ...measure0, ...improve1, compactRunRowName])
       expect(state.started).toContain(improve1[0])
       expect(state.sessions).toContain(`${improve1[0]}:ses_fix`)
       // Measurement zero's completion is restored onto its existing rows, and
@@ -513,7 +515,7 @@ describe("observer dashboard follows a goal cycle", () => {
       // after measurement zero, and the observer's panel and header advance.
       await writeRunMeta(runADir, runA, { ...Object.fromEntries(measure0.map((name) => [name, { status: "completed" }])), [improve1[0]]: { status: "running", sessionID: "ses_fix" } }, { target: plan.target, maxIterations: plan.maxIterations, plateau: plan.plateau, iteration: 1, stage: "improve", scores: [{ score: 81, verdict: "ready" as const, dimensions: { security: 81, tests: 81, scope: 81, prd: 81, maintainability: 81, operational: 81 }, mustFix: [] }] })
       expect(await until(() => (state.synced.at(-1) ?? []).includes(improve1[0]))).toBe(true)
-      expect(state.synced.at(-1)).toEqual([...prefixNames, compactRunRowName, ...measure0, ...improve1])
+      expect(state.synced.at(-1)).toEqual([...prefixNames, ...measure0, ...improve1, compactRunRowName])
       expect(state.goalViews.at(-1)).toEqual({ target: plan.target, iteration: 2, maxRuns: 1 + plan.maxIterations, plateau: plan.plateau, scores: [81] })
 
       // The hosted loop's next iteration publishes a reset for a NEW runID:
@@ -529,7 +531,7 @@ describe("observer dashboard follows a goal cycle", () => {
       progress.resetPipeline([...prefixNames.map((name) => ({ name, description: "" }))], { runID: runB, targetDir: "/repo", runDir: runBDir, pipeline })
       expect(await until(() => state.resets.at(-1) === runB && state.synced.length > syncsBeforeReset && state.synced.at(-1)!.includes(improve1[0]) && !(state.synced.at(-1) ?? []).some((name) => measure0.includes(name)))).toBe(true)
       // The rebound view's rows are the new iteration's, not the old run's.
-      expect(state.synced.at(-1)).toEqual([...prefixNames, compactRunRowName, ...improve1])
+      expect(state.synced.at(-1)).toEqual([...prefixNames, ...improve1, compactRunRowName])
       // The sticky reset is re-delivered on every poll; the same-runID dedupe
       // rebinds exactly once.
       await Bun.sleep(60)
