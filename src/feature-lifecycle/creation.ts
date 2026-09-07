@@ -1,7 +1,7 @@
+import { readdir } from "node:fs/promises"
 import { join } from "node:path"
 
-import { isSafePathSegment, isUuid, lifecycleSchemaVersion, readJsonFile, writeJsonFile, type StoreRead } from "./store"
-import { readdir } from "node:fs/promises"
+import { isUuid, lifecycleSchemaVersion, readJsonFile, writeJsonFile, type StoreRead } from "./store"
 
 /**
  * Creation-intent records (capability work-context, design D3): recovery

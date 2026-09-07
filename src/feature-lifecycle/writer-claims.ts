@@ -1,6 +1,6 @@
 import { join } from "node:path"
 
-import { isUuid, lifecycleSchemaVersion, readJsonFile, withFeatureLock, writeJsonFile, type StoreRead } from "./store"
+import { lifecycleSchemaVersion, readJsonFile, removePath, withFeatureLock, writeJsonFile, type StoreRead } from "./store"
 
 /**
  * Managed writer ownership (capability work-conversations, design D5): a
@@ -187,7 +187,6 @@ export async function releaseWriterClaim(input: { commonDir: string; branch: str
     if (read.status !== "found") return
     const mine = (input.owner !== undefined && read.value.owner === input.owner) || (input.ownerPid !== undefined && read.value.pid === input.ownerPid)
     if (!mine) return
-    const { removePath } = await import("./store")
     await removePath(claimPath(input.commonDir, input.branch))
     released = true
   })
