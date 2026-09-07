@@ -9,7 +9,8 @@ import { readFeatureRecord } from "../src/feature-lifecycle/records"
 import { ensureRepositoryRecord } from "../src/feature-lifecycle/store"
 import { featureNewWork } from "../src/feature-lifecycle/commands"
 import { beginCreationIntent, completeCreationIntent, listPendingCreationIntents, readCreationIntent } from "../src/feature-lifecycle/creation"
-import { acquireWriterClaim, claimLiveness, readWriterClaim, releaseWriterClaim, writerConflictGuidance } from "../src/feature-lifecycle/writer-claims"
+import { acquireWriterClaim, claimLiveness, readWriterClaim, releaseWriterClaim, writerClaimPath, writerConflictGuidance } from "../src/feature-lifecycle/writer-claims"
+import { writeJsonFile } from "../src/feature-lifecycle/store"
 import { assessLifecycle } from "../src/feature-lifecycle/assessment"
 import type { LifecycleObservations } from "../src/feature-lifecycle/assessment"
 import type { FeatureRecord } from "../src/feature-lifecycle/records"
@@ -71,7 +72,23 @@ describe("pre-proposal creation (task 5.2)", () => {
   })
 
   test("the shared assessment identifies the idle zero-contract feature as awaiting proposal", () => {
+    const feature: FeatureRecord = {
+      schemaVersion: 1,
+      featureId: "cccccccc-0000-4000-8000-00000000abcd",
+      repositoryId,
+      displayName: "Widget redesign",
+      associationRevision: 1,
+      contracts: [],
+      intendedBaseRef: "main",
+      context: { branch: "feat/pre-proposal", checkoutPath: worktreeDir },
+      runIds: [],
+      closeAttemptIds: [],
+      history: [],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    }
     const observations: LifecycleObservations = {
+      feature,
       context: { verification: "verified", branch: "feat/pre-proposal", checkoutPath: worktreeDir },
       contracts: [],
       execution: { kind: "known", liveRunIds: [], totalRuns: 0 },
@@ -122,13 +139,12 @@ describe("creation intents (tasks 5.1/5.2)", () => {
 describe("managed writer claims (task 4.4)", () => {
   test("a live claim refuses a second writer with transition guidance", async () => {
     const acquired = await acquireWriterClaim({ commonDir, branch: "feat/claimed", checkoutPath: worktreeDir, kind: "pipeline", owner: "run-1" })
-    expect("claim" in acquired).toBe(true)
+    expect(acquired.status).toBe("acquired")
     const second = await acquireWriterClaim({ commonDir, branch: "feat/claimed", checkoutPath: worktreeDir, kind: "authoring" })
-    expect("claim" in second).toBe(false)
-    if ("claim" in second) return
     expect(second.status).toBe("conflict")
-    expect(second.claim?.owner).toBe("run-1")
-    const guidance = writerConflictGuidance(second.claim!)
+    if (second.status !== "conflict") return
+    expect(second.existing.owner).toBe("run-1")
+    const guidance = writerConflictGuidance(second.existing)
     expect(guidance.join(" ")).toContain("run-1")
     expect(guidance.join(" ")).toContain("convoy runs")
     await releaseWriterClaim({ commonDir, branch: "feat/claimed", owner: "run-1" })
@@ -136,18 +152,34 @@ describe("managed writer claims (task 4.4)", () => {
 
   test("a stale claim (dead pid, expired heartbeat) is reconciled, not taken over blindly", async () => {
     const acquired = await acquireWriterClaim({ commonDir, branch: "feat/stale", checkoutPath: worktreeDir, kind: "pipeline", owner: "run-old", pid: 999_999_999 })
-    expect("claim" in acquired).toBe(true)
-    // Backdate the heartbeat past the freshness window so liveness is stale,
-    // not uncertain (an alive-pid claim whose pid we cannot probe here).
+    expect(acquired.status).toBe("acquired")
+    // Simulate the owner having stopped heartbeating long ago: backdate the
+    // on-disk heartbeat past the freshness window so the claim is provably
+    // stale (dead pid, expired heartbeat) at the next acquisition.
     const claim = await readWriterClaim(commonDir, "feat/stale")
     if (claim.status !== "found") throw new Error("claim lost")
-    expect(claimLiveness({ ...claim.value, heartbeatAt: Date.now() - 20 * 60 * 1000 })).toBe("stale")
+    const backdated = { ...claim.value, heartbeatAt: Date.now() - 20 * 60 * 1000 }
+    expect(claimLiveness(backdated)).toBe("stale")
+    await writeJsonFile(writerClaimPath(commonDir, "feat/stale"), backdated)
     const reAcquired = await acquireWriterClaim({ commonDir, branch: "feat/stale", checkoutPath: worktreeDir, kind: "authoring", owner: "session-2" })
-    expect("claim" in reAcquired).toBe(true)
-    if (!("claim" in reAcquired)) return
+    expect(reAcquired.status).toBe("acquired")
+    if (reAcquired.status !== "acquired") return
     expect(reAcquired.claim.owner).toBe("session-2")
     expect(reAcquired.claim.kind).toBe("authoring")
     await releaseWriterClaim({ commonDir, branch: "feat/stale", owner: "session-2" })
+  })
+
+  test("a dead pid with a fresh heartbeat is uncertain and is never taken over silently", async () => {
+    const acquired = await acquireWriterClaim({ commonDir, branch: "feat/uncertain", checkoutPath: worktreeDir, kind: "pipeline", owner: "run-x", pid: 999_999_998 })
+    expect(acquired.status).toBe("acquired")
+    const refused = await acquireWriterClaim({ commonDir, branch: "feat/uncertain", checkoutPath: worktreeDir, kind: "authoring", owner: "session-y" })
+    expect(refused.status).toBe("uncertain")
+    // The refused acquisition replaced nothing.
+    const unchanged = await readWriterClaim(commonDir, "feat/uncertain")
+    expect(unchanged.status).toBe("found")
+    if (unchanged.status !== "found") return
+    expect(unchanged.value.owner).toBe("run-x")
+    await releaseWriterClaim({ commonDir, branch: "feat/uncertain", owner: "run-x" })
   })
 
   test("a foreign owner cannot release someone else's claim", async () => {

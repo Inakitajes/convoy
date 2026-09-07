@@ -139,7 +139,7 @@ async function freePort() {
  * server's own startup output, and `close()` terminates the child; a boot
  * that fails or stalls within the timeout rejects instead of hanging.
  */
-export async function bootOpencodeServerFrom(checkout: string, timeoutMs = 30_000): Promise<{ url: string; close(): void }> {
+export async function bootOpencodeServerFrom(checkout: string, timeoutMs = 30_000): Promise<{ url: string; close(): void; pid: number }> {
   const { spawn } = await import("node:child_process")
   const port = await freePort()
   const child = spawn("opencode", ["serve", "--hostname=127.0.0.1", `--port=${port}`], {
@@ -174,6 +174,8 @@ export async function bootOpencodeServerFrom(checkout: string, timeoutMs = 30_00
     close() {
       child.kill("SIGTERM")
     },
+    // The spawned server process — the conversation service's liveness anchor.
+    pid: child.pid ?? 0,
   }
 }
 

@@ -34,7 +34,7 @@ import type { LifecycleFeatureRow } from "./specs"
 export type HomeDestination = "pipelines" | "specs" | "runs" | "config"
 
 /** The action an opened work detail resolves to. */
-export type HomeWorkAction = "conversation" | "propose" | "pipeline" | "specs" | "runs" | "close" | "history"
+export type HomeWorkAction = "conversation" | "conversation-external" | "propose" | "pipeline" | "specs" | "runs" | "close" | "history"
 
 /** What a closed Home asks the surrounding session to do. */
 export type HomeResolution =
@@ -314,6 +314,13 @@ export class HomeLauncher {
         id: "conversation",
         key: "v",
         label: feature.lastSelectedConversationId ? "Resume conversation" : "Open conversation",
+        enabled: verified,
+        blocker: verified ? undefined : "the work's checkout is not verified — rebind before authoring",
+      },
+      {
+        id: "conversation-external",
+        key: "w",
+        label: "Open in window",
         enabled: verified,
         blocker: verified ? undefined : "the work's checkout is not verified — rebind before authoring",
       },

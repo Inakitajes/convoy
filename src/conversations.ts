@@ -1,5 +1,5 @@
 import { bootOpencodeServerFrom, connectOpencode } from "./opencode"
-import { runForegroundChild } from "./terminal-host"
+import { openSessionCommand, runForegroundChild, shellQuote, type SessionWindowBackend } from "./terminal-host"
 
 /**
  * The minimal conversation adapter (capability `work-conversations`, design
@@ -19,8 +19,14 @@ export type AuthoringSessionRef = {
   sessionId: string
 }
 
-/** A live server connection used transiently while validating or creating. */
-type ServerHandle = { url: string; close(): void }
+/**
+ * A live server connection used transiently while validating or creating.
+ * `close` is optional on purpose: a conversation-service handle (task 4.3)
+ * carries the URL but *no* shutdown right — the service outlives the call and
+ * is stopped only through the service's explicit, guarded stop. Adapters
+ * never close an injected handle.
+ */
+type ServerHandle = { url: string; close?(): void }
 
 /**
  * Boots a bounded server rooted at the checkout, creates a session, and
@@ -47,7 +53,7 @@ export async function createAuthoringConversation(input: {
     return { harness: "opencode", sessionId: created.data.id }
   } finally {
     // Only close servers this call booted; an injected one belongs to its owner.
-    if (!input.server) server.close()
+    if (!input.server) server.close?.()
   }
 }
 
@@ -74,7 +80,7 @@ export async function validateAuthoringSession(input: {
     }
     return { status: "available", ...(got.data.title ? { title: got.data.title } : {}) }
   } finally {
-    if (!input.server) server.close()
+    if (!input.server) server.close?.()
   }
 }
 
@@ -111,6 +117,43 @@ export function openConversationForeground(input: {
 }
 
 /**
+ * External presentation (capability work-conversations): opens the linked
+ * conversation in a supported external window or pane — same validated work
+ * and session reference as the foreground path. The three facts are reported
+ * independently (task 4.6): a pane result proves only that a pane was
+ * created; the separate session check proves only that the *persisted*
+ * session resolves, not that the pane's client started (pane backends expose
+ * no child handle, so client startup is unobservable and never claimed).
+ */
+export async function openConversationExternal(input: {
+  checkout: string
+  ref: AuthoringSessionRef
+  /** Injected window launcher (tests); defaults to the detected backend. */
+  openWindow?: () => Promise<SessionWindowBackend>
+  /** Injected server for the availability check (tests). */
+  server?: Parameters<typeof validateAuthoringSession>[0]["server"]
+}): Promise<{ status: "opened"; backend: string; sessionVerified: true } | { status: "opened-unverified"; backend: string; reason: string } | { status: "failed"; reason: string }> {
+  let backend: SessionWindowBackend
+  try {
+    const open = input.openWindow ?? (() => openSessionCommand(authoringClientArgv({ checkout: input.checkout, ref: input.ref }).map(shellQuote).join(" "), input.checkout, "convoy conversation"))
+    backend = await open()
+  } catch (error) {
+    return { status: "failed", reason: error instanceof Error ? error.message : String(error) }
+  }
+  // Pane created: that says nothing about the harness. Verify the exact
+  // session before reporting the conversation as running; a verification
+  // error is an honest "unverified", never a crash through the pane result.
+  let verified: Awaited<ReturnType<typeof validateAuthoringSession>>
+  try {
+    verified = await validateAuthoringSession({ ref: input.ref, checkout: input.checkout, ...(input.server ? { server: input.server } : {}) })
+  } catch (error) {
+    return { status: "opened-unverified", backend, reason: error instanceof Error ? error.message : String(error) }
+  }
+  if (verified.status === "available") return { status: "opened", backend, sessionVerified: true }
+  return { status: "opened-unverified", backend, reason: verified.reason }
+}
+
+/**
  * Whether the session's agent is actively executing right now (design D5:
  * view detachment is not evidence the agent stopped). `idle` proves the
  * session is quiescent; `busy` proves a writer is live; `unknown` means the
@@ -134,7 +177,7 @@ export async function sessionActivity(input: {
   } catch {
     return "unknown"
   } finally {
-    if (!input.server) server.close()
+    if (!input.server) server.close?.()
   }
 }
 
@@ -157,7 +200,7 @@ export async function listAuthoringCommands(input: {
   } catch {
     return "unknown"
   } finally {
-    if (!input.server) server.close()
+    if (!input.server) server.close?.()
   }
 }
 

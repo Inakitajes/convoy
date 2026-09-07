@@ -334,10 +334,10 @@ export async function runCoordinateBoot(
           checkoutPath: plan.target.directory,
           kind: "pipeline",
         })
-        if ("claim" in acquired) {
+        if (acquired.status === "acquired") {
           writerClaim = { branch }
         } else {
-          const detail = acquired.claim ? writerConflictGuidance(acquired.claim).join(" ") : "a writer claim for this checkout is in an uncertain state — reconcile it before starting another writer"
+          const detail = acquired.status === "conflict" ? writerConflictGuidance(acquired.existing).join(" ") : "a writer claim for this checkout is in an uncertain state — reconcile it before starting another writer"
           throw new Error(`another managed writer owns ${plan.target.directory}: ${detail}`)
         }
       }

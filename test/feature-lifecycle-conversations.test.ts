@@ -12,7 +12,7 @@ import {
   readConversationRecord,
   touchConversationSelection,
 } from "../src/feature-lifecycle/conversations"
-import { authoringClientArgv, createAuthoringConversation, validateAuthoringSession } from "../src/conversations"
+import { authoringClientArgv, createAuthoringConversation, openConversationExternal, validateAuthoringSession } from "../src/conversations"
 import { bootOpencodeServerFrom } from "../src/opencode"
 import { runForegroundChild } from "../src/terminal-host"
 import type { FeatureRecord } from "../src/feature-lifecycle/records"
@@ -229,6 +229,58 @@ describe("conversation adapter + terminal host (tasks 4.1/4.2)", () => {
     } finally {
       server2.close()
     }
+  })
+
+  test("external presentation reports pane creation and harness startup independently (task 4.6)", async () => {
+    const repoDir = await mkdtemp(join(tmpdir(), "convoy-conversation-ext-"))
+    dirs.push(repoDir)
+    await Bun.write(join(repoDir, "README.md"), "# repo\n")
+    await git(repoDir, ["init", "-q", "-b", "main"])
+    await git(repoDir, ["add", "."])
+    await git(repoDir, ["-c", "user.email=t@x", "-c", "user.name=T", "commit", "-q", "-m", "init"])
+
+    // Pane creation fails: a real outcome, reported before any session claim.
+    const failed = await openConversationExternal({
+      checkout: repoDir,
+      ref: { harness: "opencode", sessionId: "ses_missing" },
+      openWindow: async () => {
+        throw new Error("no backend available")
+      },
+    })
+    expect(failed.status).toBe("failed")
+    if (failed.status !== "failed") return
+    expect(failed.reason).toContain("no backend available")
+
+    // A real server with a real session: pane creation + verified session.
+    const server = await bootOpencodeServerFrom(repoDir)
+    try {
+      const ref = await createAuthoringConversation({ checkout: repoDir, title: "external", server })
+      const opened = await openConversationExternal({
+        checkout: repoDir,
+        ref,
+        openWindow: async () => "herdr",
+        server,
+      })
+      expect(opened.status).toBe("opened")
+      if (opened.status !== "opened") return
+      expect(opened.backend).toBe("herdr")
+      expect(opened.sessionVerified).toBe(true)
+    } finally {
+      server.close()
+    }
+
+    // A pane in front of a dead harness: the pane result alone must never
+    // read as a running conversation.
+    const unverified = await openConversationExternal({
+      checkout: repoDir,
+      ref: { harness: "opencode", sessionId: "ses_not_here" },
+      openWindow: async () => "ghostty",
+      server: { url: "http://127.0.0.1:1", close() {} },
+    })
+    expect(unverified.status).toBe("opened-unverified")
+    if (unverified.status !== "opened-unverified") return
+    expect(unverified.backend).toBe("ghostty")
+    expect(unverified.reason).toBeTruthy()
   })
 })
 

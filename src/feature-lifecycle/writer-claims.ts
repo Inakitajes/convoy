@@ -47,6 +47,11 @@ function claimPath(commonDir: string, branch: string): string {
   return join(commonDir, "convoy", "writer-claims", `${branch.replace(/\//g, "__")}.json`)
 }
 
+/** The path of one checkout's claim record (shared by the store and recovery tooling). */
+export function writerClaimPath(commonDir: string, branch: string): string {
+  return claimPath(commonDir, branch)
+}
+
 export function validateWriterClaim(value: unknown): WriterClaim | undefined {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined
   const record = value as Record<string, unknown>
@@ -98,6 +103,17 @@ export function claimLiveness(claim: WriterClaim, now = Date.now()): "live" | "s
 }
 
 /**
+ * The outcome of an acquisition attempt. The three outcomes are
+ * distinguished by `status` — never by key presence — so a refused writer
+ * (with the blocking claim attached for guidance) can never be mistaken for
+ * a successful acquisition.
+ */
+export type WriterClaimAcquisition =
+  | { status: "acquired"; claim: WriterClaim }
+  | { status: "conflict"; existing: WriterClaim }
+  | { status: "uncertain"; existing?: WriterClaim }
+
+/**
  * Acquires the writer claim for a checkout, refusing a live conflicting
  * claim with the transition guidance instead of starting a second writer.
  * A stale claim (dead PID past the freshness window) is reconciled —
@@ -115,11 +131,10 @@ export async function acquireWriterClaim(input: {
   pid?: number
   /** Take over an existing claim only when its owner matches this value. */
   reconcileOwner?: string
-}): Promise<{ claim: WriterClaim } | { status: "conflict" | "uncertain"; claim?: WriterClaim }> {
-  let outcome: { claim: WriterClaim } | { status: "conflict" | "uncertain"; claim?: WriterClaim } = { status: "conflict" }
+}): Promise<WriterClaimAcquisition> {
+  let outcome: WriterClaimAcquisition = { status: "uncertain" }
   await withFeatureLock(join(input.commonDir, "convoy", "writer-claims"), async () => {
     const read = await readWriterClaim(input.commonDir, input.branch)
-    if (process.env.CONVOY_DEBUG_CLAIMS) console.error("DBG read", read.status, JSON.stringify(read).slice(0, 150))
     if (read.status === "found") {
       const existing = read.value
       const sameOwnerContinues =
@@ -127,11 +142,11 @@ export async function acquireWriterClaim(input: {
       if (!sameOwnerContinues) {
         const liveness = claimLiveness(existing)
         if (liveness === "live") {
-          outcome = { status: "conflict", claim: existing }
+          outcome = { status: "conflict", existing }
           return
         }
         if (liveness === "uncertain") {
-          outcome = { status: "uncertain", claim: existing }
+          outcome = { status: "uncertain", existing }
           return
         }
       }
@@ -155,7 +170,7 @@ export async function acquireWriterClaim(input: {
       heartbeatAt: now,
     }
     await writeJsonFile(claimPath(input.commonDir, input.branch), claim)
-    outcome = { claim }
+    outcome = { status: "acquired", claim }
   })
   return outcome
 }

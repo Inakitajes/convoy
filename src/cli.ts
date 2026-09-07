@@ -373,6 +373,16 @@ async function dispatchWorkAction(targetDir: string, route: TuiRoute, featureId:
     })
     return
   }
+  if (action === "conversation-external") {
+    await openFeatureConversationExternal({
+      launchDir: targetDir,
+      route,
+      featureId: context.feature!.featureId,
+      checkout: context.executionCheckout,
+      branch: context.branch ?? context.feature!.context?.branch ?? "",
+    })
+    return
+  }
   if (action === "propose") {
     await proposeForFeature({
       launchDir: targetDir,
@@ -1143,6 +1153,98 @@ async function reportHandoffBlocker(reason: string, remediation: readonly string
   process.stderr.write(`${message}\n`)
 }
 
+/**
+ * Explicit external presentation of the work's authoring conversation
+ * (task 4.6): the writer claim is taken before any pane is created, pane
+ * creation and harness startup are reported independently, and a successful
+ * pane whose harness session cannot be verified is never reported as a
+ * running conversation. The claim is deliberately not released on return —
+ * the external client may still be writing — and is reconciled later
+ * against actual session activity (same-owner resume or idle release).
+ */
+async function openFeatureConversationExternal(input: { launchDir: string; checkout: string; branch: string; featureId: string; route?: TuiRoute }): Promise<void> {
+  const { readConversationRecord, addConversation, touchConversationSelection } = await import("./feature-lifecycle/conversations")
+  const { createAuthoringConversation, openConversationExternal } = await import("./conversations")
+  const { lifecycleCommonDir } = await import("./feature-lifecycle/store")
+  const commonDir = await lifecycleCommonDir(input.launchDir).catch(() => undefined)
+
+  // The resume target: the remembered default, else the most recently linked
+  // conversation; without any linked conversation a new one is created.
+  let sessionId: string | undefined
+  if (commonDir) {
+    const record = await readConversationRecord(commonDir, input.featureId)
+    const candidates = record.status === "found" ? [...record.value.conversations] : []
+    candidates.sort((a, b) => (b.lastSelectedAt ?? b.createdAt) - (a.lastSelectedAt ?? a.createdAt))
+    sessionId = candidates[0]?.sessionId
+  }
+  if (!sessionId) {
+    const created = await createAuthoringConversation({ checkout: input.checkout, title: input.featureId })
+    sessionId = created.sessionId
+  }
+  if (commonDir) {
+    await addConversation({ commonDir, featureId: input.featureId, sessionId })
+    await touchConversationSelection({ commonDir, featureId: input.featureId, sessionId })
+  }
+
+  if (!(await claimAuthoringWriter({ launchDir: input.launchDir, checkout: input.checkout, branch: input.branch, sessionId, route: input.route }))) return
+  // The service (task 4.3) verifies the linked session independently of the
+  // pane: an unverified service blocks the handoff, a failed boot falls back
+  // to the adapter's bounded boot.
+  const serverResolution = await resolveAuthoringServer({ launchDir: input.launchDir, checkout: input.checkout, route: input.route })
+  if (serverResolution.status === "blocked") return
+  const outcome = await openConversationExternal({
+    checkout: input.checkout,
+    ref: { harness: "opencode", sessionId },
+    ...(serverResolution.status === "service" ? { server: { url: serverResolution.url } } : {}),
+  })
+  if (outcome.status === "failed") {
+    // No pane was created, so no writer was started: release the claim this
+    // path took instead of wedging the checkout.
+    if (commonDir) {
+      const { releaseWriterClaim } = await import("./feature-lifecycle/writer-claims")
+      await releaseWriterClaim({ commonDir, branch: input.branch, owner: sessionId })
+    }
+    await reportHandoffBlocker(`no window was opened: ${outcome.reason}`, ["open the conversation foreground from the work detail, or install Herdr/Zellij for panes"], input.route)
+    return
+  }
+  // Pane created — the harness session is reported separately (task 4.6), and
+  // the pane's client itself is outside Convoy's view (pane backends expose no
+  // child handle), so client startup is disclosed as unknown: nothing here
+  // claims a running conversation from pane success plus a resolvable session.
+  const lines =
+    outcome.status === "opened"
+      ? [`pane opened in ${outcome.backend} — the linked session was verified available, but Convoy cannot observe the pane's client`]
+      : [`pane created in ${outcome.backend}, but the linked session could not be verified yet: ${outcome.reason}`]
+  await reportHandoffBlocker(lines[0], outcome.status === "opened" ? ["confirm the conversation started in that window; resume it from the work detail later"] : ["reopen the conversation once the harness client has started; Convoy did not claim it running"], input.route)
+}
+
+/**
+ * Resolves the authoring server for a CLI handoff (task 4.3): the repository's
+ * conversation service — discovered, liveness-verified, and independent of run
+ * servers and views — supplies one reused OpenCode server for every authoring
+ * call in the flow. Outcomes:
+ * - `service` — a live service URL to pass through as the handle (never
+ *   closed by the caller; the service outlives the flow).
+ * - `fallback` — the lifecycle store is absent or the service boot failed;
+ *   the flow uses the previous bounded per-call boots.
+ * - `blocked` — an existing service is in an unverified state (alive PID,
+ *   unanswerable URL) or its discovery record is unreadable: fail closed and
+ *   report, never boot a second server over unverified state.
+ */
+async function resolveAuthoringServer(input: { launchDir: string; checkout: string; route?: TuiRoute }): Promise<{ status: "service"; url: string } | { status: "fallback" } | { status: "blocked"; reason: string }> {
+  const { lifecycleCommonDir } = await import("./feature-lifecycle/store")
+  const commonDir = await lifecycleCommonDir(input.launchDir).catch(() => undefined)
+  if (!commonDir) return { status: "fallback" }
+  const { ensureConversationService } = await import("./conversation-service")
+  const service = await ensureConversationService({ commonDir, checkout: input.checkout }).catch((error: unknown) => ({ status: "unavailable" as const, reason: error instanceof Error ? error.message : String(error) }))
+  if (service.status === "live") return { status: "service", url: service.url }
+  if (service.status === "uncertain") {
+    await reportHandoffBlocker(service.reason, ["the service is kept running and nothing was booted over it — resolve its state, then retry"], input.route)
+    return { status: "blocked", reason: service.reason }
+  }
+  return { status: "fallback" }
+}
+
 /** The shared writer-claim acquisition for an authoring conversation in a checkout. */
 async function claimAuthoringWriter(input: { launchDir: string; checkout: string; branch: string; sessionId: string; route?: TuiRoute }): Promise<boolean> {
   const { lifecycleCommonDir } = await import("./feature-lifecycle/store")
@@ -1159,8 +1261,8 @@ async function claimAuthoringWriter(input: { launchDir: string; checkout: string
     // writer continuing, not a takeover (design D5 reconciliation).
     reconcileOwner: input.sessionId,
   })
-  if ("claim" in acquired) return true
-  const guidance = acquired.claim ? writerConflictGuidance(acquired.claim) : ["a writer claim for this checkout is in an uncertain state — reconcile it before starting another writer"]
+  if (acquired.status === "acquired") return true
+  const guidance = acquired.status === "conflict" ? writerConflictGuidance(acquired.existing) : ["a writer claim for this checkout is in an uncertain state — reconcile it before starting another writer"]
   await reportHandoffBlocker(guidance[0], guidance.slice(1), input.route)
   return false
 }
@@ -1172,7 +1274,20 @@ async function releaseAuthoringWriterIfIdle(input: { launchDir: string; checkout
   const { sessionActivity } = await import("./conversations")
   const commonDir = await lifecycleCommonDir(input.launchDir).catch(() => undefined)
   if (!commonDir) return
-  const activity = await sessionActivity({ checkout: input.checkout, ref: { harness: "opencode", sessionId: input.sessionId } }).catch(() => "unknown" as const)
+  // The activity query goes through the authoring service when one is live
+  // (task 4.3) so the answer reflects the same server the work ran on; any
+  // discovery failure falls back to the adapter's bounded boot, and either
+  // failure reads as "unknown" — which keeps the claim. No blockers are
+  // reported here: the release path is bookkeeping, not a user handoff.
+  let serviceHandle: { url: string } | undefined
+  try {
+    const { ensureConversationService } = await import("./conversation-service")
+    const service = await ensureConversationService({ commonDir, checkout: input.checkout })
+    if (service.status === "live") serviceHandle = { url: service.url }
+  } catch {
+    serviceHandle = undefined
+  }
+  const activity = await sessionActivity({ checkout: input.checkout, ref: { harness: "opencode", sessionId: input.sessionId }, ...(serviceHandle ? { server: serviceHandle } : {}) }).catch(() => "unknown" as const)
   // A busy or unanswerable session keeps its claim: view detachment is not
   // evidence the agent stopped (design D5). The claim's staleness rules
   // reconcile it later if the process is gone.
@@ -1202,6 +1317,14 @@ async function resumeFeatureConversation(input: {
   const commonDir = await lifecycleCommonDir(input.launchDir).catch(() => undefined)
   if (!commonDir) return
 
+  // The authoring service (task 4.3): one live, liveness-verified OpenCode
+  // server for every probe and creation below — independent of run servers
+  // and of any view. An unverified service blocks the handoff; a failed boot
+  // falls back to the previous bounded per-call boots.
+  const server = await resolveAuthoringServer({ launchDir: input.launchDir, checkout: input.checkout, route: input.route })
+  if (server.status === "blocked") return
+  const serviceHandle = server.status === "service" ? { url: server.url } : undefined
+
   // Choose the conversation to open: the remembered default, else the most
   // recently linked one; an unavailable reference is reported and replaced by
   // an explicit new conversation without claiming continuity.
@@ -1212,7 +1335,7 @@ async function resumeFeatureConversation(input: {
   let unavailableNotice: string | undefined
   for (const candidate of candidates) {
     const probe = { harness: "opencode" as const, sessionId: candidate.sessionId }
-    const validated = await validateAuthoringSession({ ref: probe, checkout: input.checkout })
+    const validated = await validateAuthoringSession({ ref: probe, checkout: input.checkout, ...(serviceHandle ? { server: serviceHandle } : {}) })
     if (validated.status === "available") {
       ref = probe
       break
@@ -1220,7 +1343,7 @@ async function resumeFeatureConversation(input: {
     unavailableNotice = `the linked session ${candidate.sessionId} is unavailable (${validated.reason}) — a new conversation was created; continuity was not claimed`
   }
   if (!ref) {
-    ref = await createAuthoringConversation({ checkout: input.checkout, title: input.displayName })
+    ref = await createAuthoringConversation({ checkout: input.checkout, title: input.displayName, ...(serviceHandle ? { server: serviceHandle } : {}) })
   }
   await addConversation({ commonDir, featureId: input.featureId, sessionId: ref.sessionId })
   await touchConversationSelection({ commonDir, featureId: input.featureId, sessionId: ref.sessionId })
@@ -1261,24 +1384,38 @@ async function proposeForFeature(input: {
   branch: string
   displayName: string
 }): Promise<void> {
-  const { bootOpencodeServerFrom, connectOpencode } = await import("./opencode")
+  const { bootOpencodeServerFrom } = await import("./opencode")
   const { createAuthoringConversation, listAuthoringCommands, invokeAuthoringCommand, openConversationForeground } = await import("./conversations")
   const { addConversation, touchConversationSelection } = await import("./feature-lifecycle/conversations")
   const { lifecycleCommonDir } = await import("./feature-lifecycle/store")
 
+  // The authoring service (task 4.3) supplies one live server for command
+  // discovery, creation, and command invocation; an unverified service blocks
+  // the handoff, and a failed boot falls back to a bounded per-flow boot.
+  const serverResolution = await resolveAuthoringServer({ launchDir: input.launchDir, checkout: input.checkout, route: input.route })
+  if (serverResolution.status === "blocked") return
+  let serviceHandle: { url: string; close?(): void } | undefined
+  let boundedClose: (() => void) | undefined
+  if (serverResolution.status === "service") {
+    serviceHandle = { url: serverResolution.url }
+  } else {
+    const booted = await bootOpencodeServerFrom(input.checkout).catch(() => undefined)
+    if (booted) {
+      serviceHandle = booted
+      boundedClose = () => booted.close()
+    }
+  }
+
   // Command discovery through the supported API, before any session exists:
   // an absent workflow disables the action instead of imitating success.
-  const server = await bootOpencodeServerFrom(input.checkout)
   let commandName: string | undefined
-  try {
-    const commands = await listAuthoringCommands({ checkout: input.checkout, server })
+  if (serviceHandle) {
+    const commands = await listAuthoringCommands({ checkout: input.checkout, server: serviceHandle })
     if (commands === "unknown") {
       await reportHandoffBlocker("the project's authoring commands could not be discovered", ["run `convoy opencode install`-free: check the project's .opencode/commands/ directory"], input.route)
       return
     }
     commandName = commands.find((name) => name === "opsx-propose") ?? commands.find((name) => name.endsWith("propose"))
-  } finally {
-    server.close()
   }
   if (!commandName) {
     // Propose is unavailable, exactly as the work-context capability requires:
@@ -1292,18 +1429,20 @@ async function proposeForFeature(input: {
     return
   }
 
-  const serverForCommand = await bootOpencodeServerFrom(input.checkout)
   let ref: { harness: "opencode"; sessionId: string } | undefined
   try {
-    ref = await createAuthoringConversation({ checkout: input.checkout, title: input.displayName, server: serverForCommand })
-    await invokeAuthoringCommand({ ref, server: serverForCommand, command: commandName })
+    if (!serviceHandle) throw new Error("no authoring server is available")
+    ref = await createAuthoringConversation({ checkout: input.checkout, title: input.displayName, server: serviceHandle })
+    await invokeAuthoringCommand({ ref, server: serviceHandle, command: commandName })
   } catch (error) {
     await reportHandoffBlocker(error instanceof Error ? error.message : String(error), ["the conversation was not started; retry Propose or open an ordinary conversation"], input.route)
     return
   } finally {
-    if (ref) serverForCommand.close()
+    // A bounded fallback boot dies with this flow; the service never does.
+    boundedClose?.()
   }
 
+  if (!ref) return
   const commonDir = await lifecycleCommonDir(input.launchDir).catch(() => undefined)
   if (commonDir) {
     await addConversation({ commonDir, featureId: input.featureId, sessionId: ref.sessionId, label: "proposal" })
