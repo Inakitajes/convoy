@@ -9,6 +9,7 @@ import { afterAll } from "bun:test"
 
 import { HomeLauncher } from "../src/home-tui"
 import type { HomeResolution, HomeWorkAction } from "../src/home-tui"
+import { versionDetails } from "../src/version"
 import type { LifecycleFeatureRow, SpecsView } from "../src/specs"
 
 const exec = promisify(nodeExecFile)
@@ -111,8 +112,10 @@ describe("work-first home (tasks 6.2/6.3)", () => {
     try {
       const frame = frameOf(session)
       expect(frame).toContain("████")
-      // The wide masthead right-aligns the version and the project path.
-      expect(frame).toContain("0.0.0")
+      // The wide masthead right-aligns the version and the project path. The
+      // version's fallback chain is environment-dependent (bun run scripts see
+      // npm_package_version), so assert the same value the masthead renders.
+      expect(frame).toContain(versionDetails())
       expect(frame).toContain("/work/acme")
       // The work list leads: features, New feature, then auxiliary.
       expect(frame).toContain("WORK")
