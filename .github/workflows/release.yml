@@ -132,7 +132,7 @@ jobs:
           shasum -a 256 convoy-darwin-arm64 convoy-darwin-x64 convoy-linux-arm64 convoy-linux-x64 install.sh > SHA256SUMS
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           generate_release_notes: true
           fail_on_unmatched_files: true
