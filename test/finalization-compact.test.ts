@@ -14,6 +14,7 @@ import type { CommitLedgerEntry, RunBoundary } from "../src/finalization/types"
 
 const dirs: string[] = []
 const runID = "20260905-120000-compact"
+const legacyRunID = "20260905-130000-l1xy"
 const convoyEnv = { GIT_AUTHOR_NAME: "convoy", GIT_AUTHOR_EMAIL: "convoy@local", GIT_COMMITTER_NAME: "convoy", GIT_COMMITTER_EMAIL: "convoy@local" }
 let savedHome: string | undefined
 
@@ -417,6 +418,68 @@ describe("automatic compaction", () => {
     const record = await runFinalization({ runID, targetDir: dir, boundary: boundaryFor(dir, startHead), ledger: [], branch: "main", composeMessage: compose })
     expect(record.state).toBe("skipped")
     expect(await currentHead(dir)).toBe(before)
+  })
+
+  test("the index retains a run's exact persisted title — longer than any display cap, immune to prd rewrites (capability run-titles)", async () => {
+    // A valid run id, so run discovery lists the index-only record after cleanup.
+    const titledRunID = "20260905-125000-x1ab"
+    const { readRunIndexEntry, listRuns } = await import("../src/runs")
+    const dir = await repo()
+    const startHead = (await currentHead(dir))!
+    await runCommit(dir, "a.txt", "a\n", "design", titledRunID)
+
+    const runDir = await mkdtemp(join(tmpdir(), "convoy-compact-rundir-"))
+    dirs.push(runDir)
+    const exactTitle = "a persisted run title deliberately longer than one hundred and twenty characters so no persistence-side cap can quietly clip the durable evidence"
+    await writeFile(join(runDir, "metadata.json"), JSON.stringify({ schemaVersion: 5, runID: titledRunID, title: exactTitle, control: { state: "running" }, phases: {} }))
+    // The prompt document is rewritten (goal-loop reset) and then the workspace
+    // is cleaned: the index title comes from the stored field, never the prd.
+    await writeFile(join(runDir, "prd.md"), "# A completely different prompt now\n")
+
+    const record = await runFinalization({ runID: titledRunID, targetDir: dir, boundary: boundaryFor(dir, startHead), ledger: await ledgerFor(dir, startHead, titledRunID), branch: "main", runDir, composeMessage: compose })
+    expect(record.state).toBe("completed")
+
+    const entry = await readRunIndexEntry(titledRunID)
+    expect(entry).toBeDefined()
+    expect(entry!.title).toBe(exactTitle)
+
+    // After the workspace is deleted, discovery still names the run; the runs
+    // list applies its own display truncation to the exact stored value.
+    await rm(runDir, { recursive: true, force: true })
+    const runs = await listRuns()
+    const listed = runs.find((run) => run.runID === titledRunID)
+    expect(listed).toBeDefined()
+    expect(listed!.title.length).toBeLessThanOrEqual(63)
+    expect(listed!.title.endsWith("...")).toBe(true)
+  })
+
+  test("a legacy run named by its index is not renamed by a later prd rewrite (capability run-titles)", async () => {
+    const { readRunIndexEntry } = await import("../src/runs")
+    const { convoyHome } = await import("../src/workspace")
+    const dir = await repo()
+    const startHead = (await currentHead(dir))!
+    await runCommit(dir, "a.txt", "a\n", "design", legacyRunID)
+
+    const runDir = await mkdtemp(join(tmpdir(), "convoy-compact-rundir-"))
+    dirs.push(runDir)
+    // A legacy run: metadata carries no persisted title, the cleanup-surviving
+    // index already names the run, and the prompt document was since rewritten.
+    await writeFile(join(runDir, "metadata.json"), JSON.stringify({ schemaVersion: 5, runID: legacyRunID, control: { state: "running" }, phases: {} }))
+    await writeFile(join(runDir, "prd.md"), "# A rewritten prompt line\n")
+    const indexDir = join(convoyHome(), "run-records")
+    await mkdir(indexDir, { recursive: true })
+    await writeFile(
+      join(indexDir, `${legacyRunID}.json`),
+      JSON.stringify({ schemaVersion: 1, runID: legacyRunID, title: "The original naming", state: "completed", manifestPath: "/x", recordedAt: 1, updatedAt: 2 }),
+    )
+
+    const record = await runFinalization({ runID: legacyRunID, targetDir: dir, boundary: boundaryFor(dir, startHead), ledger: await ledgerFor(dir, startHead, legacyRunID), branch: "main", runDir, composeMessage: compose })
+    expect(record.state).toBe("completed")
+
+    // The earlier durable index title wins over the rewritten prd fallback.
+    const entry = await readRunIndexEntry(legacyRunID)
+    expect(entry).toBeDefined()
+    expect(entry!.title).toBe("The original naming")
   })
 
   test("a legacy run without a durable boundary skips", async () => {

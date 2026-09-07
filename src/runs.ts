@@ -280,7 +280,8 @@ function runEntryFromIndexRecord(record: RunIndexRecord, root: string): RunEntry
   return {
     runID: record.runID,
     dir: join(root, record.runID),
-    title: record.title ?? record.summary ?? "(run workspace cleaned; evidence retained)",
+    // The persisted title is exact in the record; the list truncates for display.
+    title: truncate(record.title ?? record.summary ?? "(run workspace cleaned; evidence retained)", 60),
     targetDir: record.worktreeDir,
     status: failed ? "compaction failed" : "completed",
     statusKind: failed ? "failed" : "completed",
@@ -397,10 +398,14 @@ async function loadRunEntry(root: string, runID: string): Promise<RunEntry> {
   const advisorCost = split.advisor.cost
   const goal = metadata?.goal
   const finalization = finalizationInfo(metadata, indexRecord)
+  // Capability run-titles: the persisted title wins over the prompt-derived
+  // fallback, and the runs list keeps its 60-column display truncation either
+  // way. The stored value itself stays untruncated in the record.
+  const storedTitle = metadata?.title?.trim()
   return {
     runID,
     dir,
-    title: await runTitle(dir),
+    title: truncate(storedTitle || (await runTitle(dir)), 60),
     targetDir: metadata?.targetDir,
     status: summary.label,
     statusKind: summary.kind,
@@ -519,6 +524,7 @@ export function tcpReachable(url: string, timeoutMs: number): Promise<boolean> {
   })
 }
 
+/** The legacy prompt-document first-line fallback for records without a persisted title (capability run-titles). */
 async function runTitle(dir: string) {
   const prd = await readIfExists(join(dir, "prd.md"))
   if (prd === undefined) return "(no prd)"

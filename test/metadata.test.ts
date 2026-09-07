@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -755,6 +755,102 @@ describe("openRunMetadata", () => {
       expect(store.phaseStatus("nonexistent")).toBeUndefined()
     } finally {
       await store.flush()
+      await cleanup()
+    }
+  })
+
+  test("persists a title resolved once at open, preferring the change proposal over the branch slug and prompt", async () => {
+    // A target checkout carrying the change the branch resolves to.
+    const target = await mkdtemp(join(tmpdir(), "convoy-meta-title-target-"))
+    const changeDir = join(target, "openspec", "changes", "add-attach-flow")
+    await mkdir(changeDir, { recursive: true })
+    await writeFile(join(changeDir, "proposal.md"), "# Attachment flow for run reports\n")
+
+    const { dir, ws, cleanup } = await withDir("title")
+    await writeFile(join(dir, "prd.md"), "# Implement the attach\n")
+    const store = await openRunMetadata(ws, target, validPipeline([validAgentStep("design")]), { branch: "feat/add-attach-flow" })
+    try {
+      await store.flush()
+      const raw = await readRunMetadata(`${dir}/metadata.json`)
+      // The proposal title wins over the branch slug and the prompt line.
+      expect(raw!.title).toBe("Attachment flow for run reports")
+    } finally {
+      await cleanup()
+      await rm(target, { recursive: true, force: true })
+    }
+  })
+
+  test("falls back to the humanized branch slug, then the prompt first line", async () => {
+    const { ws, dir, cleanup } = await withDir("title-slug")
+    await writeFile(join(dir, "prd.md"), "# Implement the attach\n")
+    const store = await openRunMetadata(ws, "/target", validPipeline([validAgentStep("design")]), { branch: "feat/quiet-notifications" })
+    try {
+      await store.flush()
+      const raw = await readRunMetadata(`${dir}/metadata.json`)
+      expect(raw!.title).toBe("quiet notifications")
+    } finally {
+      await cleanup()
+    }
+  })
+
+  test("a run without a branch or usable slug keeps the prompt fallback", async () => {
+    const { ws, dir, cleanup } = await withDir("title-prompt")
+    await writeFile(join(dir, "prd.md"), "# Refactor the retry loop\n\ndetails\n")
+    const store = await openRunMetadata(ws, "/target", validPipeline([validAgentStep("design")]))
+    try {
+      await store.flush()
+      const raw = await readRunMetadata(`${dir}/metadata.json`)
+      expect(raw!.title).toBe("Refactor the retry loop")
+    } finally {
+      await cleanup()
+    }
+  })
+
+  test("re-opening an existing record never recomputes or replaces its title", async () => {
+    const { ws, dir, cleanup } = await withDir("title-stable")
+    const first = await openRunMetadata(ws, "/target", validPipeline([validAgentStep("design")]), { branch: "feat/quiet-notifications" })
+    await first.flush()
+    // A goal-loop reset rewrites the prompt document; the stored title must not follow it.
+    await writeFile(join(dir, "prd.md"), "# A completely different prompt now\n")
+    const reopened = await openRunMetadata(ws, "/target", validPipeline([validAgentStep("design")]), { branch: "feat/other-thing" })
+    await reopened.flush()
+    try {
+      const raw = await readRunMetadata(`${dir}/metadata.json`)
+      expect(raw!.title).toBe("quiet notifications")
+    } finally {
+      await cleanup()
+    }
+  })
+
+  test("a legacy record without a title gains one at open without disturbing its other fields", async () => {
+    const { dir, ws, cleanup } = await withDir("title-legacy")
+    await writeFile(join(dir, "metadata.json"), JSON.stringify({ ...baseV3 }))
+    const store = await openRunMetadata(ws, "/target", validPipeline([validAgentStep("design")]), { branch: "feat/quiet-notifications" })
+    try {
+      await store.flush()
+      const raw = await readRunMetadata(`${dir}/metadata.json`)
+      expect(raw!.schemaVersion).toBe(3)
+      expect(raw!.title).toBe("quiet notifications")
+    } finally {
+      await cleanup()
+    }
+  })
+
+  test("a resumed record's durable boundary branch outranks the caller's current branch", async () => {
+    const { dir, ws, cleanup } = await withDir("title-boundary")
+    await writeFile(
+      join(dir, "metadata.json"),
+      JSON.stringify({
+        ...baseV3,
+        boundary: { schemaVersion: 1, worktreeDir: "/repo", branch: "feat/boundary-change", startHead: "a".repeat(40), commonDir: "", includeDirty: false, recordedAt: 1 },
+      }),
+    )
+    const store = await openRunMetadata(ws, "/target", validPipeline([validAgentStep("design")]), { branch: "feat/other-branch" })
+    try {
+      await store.flush()
+      const raw = await readRunMetadata(`${dir}/metadata.json`)
+      expect(raw!.title).toBe("boundary change")
+    } finally {
       await cleanup()
     }
   })

@@ -19,6 +19,7 @@ import type { ModelGateway } from "./model-routing"
 import { PhaseUsage } from "./usage"
 import { aggregateAdvisorEvents, type AdvisorEvent, type AdvisorPhaseAggregate } from "./advisor-events"
 import { readCommitLedger, readFinalizationRecord, readRunBoundary, type CommitLedgerEntry, type FinalizationRecord, type RunBoundary } from "./finalization/types"
+import { resolveRunTitleFor } from "./run-title"
 import type { Workspace } from "./workspace"
 
 export type PhaseMetadataStatus = "pending" | "running" | "completed" | "skipped" | "failed"
@@ -97,6 +98,14 @@ export type RunMetadata = {
    * history join by stable identity and never reinterpret a stored path.
    */
   feature?: FeaturePlanLink
+  /**
+   * The run's human title (capability run-titles), resolved once at metadata
+   * open — change proposal title → humanized branch slug → prompt first line —
+   * and never recomputed afterwards: a goal-loop prompt rewrite or a workspace
+   * cleanup must not rename a run. Legacy records without the field keep the
+   * prompt-first-line fallback in their discovery readers.
+   */
+  title?: string
   /** The ordered ledger of Convoy-created commits, recorded as each commit lands (schema v5). */
   commitLedger?: CommitLedgerEntry[]
   /** The automatic compaction outcome, independent of the pipeline result (schema v5). */
@@ -150,6 +159,13 @@ export type OpenRunMetadataOptions = {
   useExecutionPipeline?: boolean
   /** The reviewed feature link, persisted at open — before any execution (task 4.2/5.1). */
   feature?: FeaturePlanLink
+  /**
+   * The run's branch as the caller knows it (the confirmed worktree branch, or
+   * whatever the execution tree has checked out). Title resolution prefers a
+   * resumed record's durable boundary branch, then this value, then the
+   * reviewed feature link's branch.
+   */
+  branch?: string
 }
 
 const saveDebounceMs = 2_000
@@ -167,6 +183,18 @@ export async function openRunMetadata(
   // for failed/aborted runs (capability feature-lifecycle: the link is
   // written before execution, not only after success).
   if (options.feature && !data.feature) data.feature = options.feature
+  // Capability run-titles (design D2/D3): resolve the human title once at
+  // open — change proposal title → humanized branch slug → prompt first line —
+  // and persist it with the record. An existing record keeps its stored title:
+  // a goal-loop prompt rewrite must not rename a live run, so re-opens never
+  // replace one. A legacy record without a title gains one here (a fill, not
+  // an overwrite), preferring the durable run-start boundary branch over the
+  // caller's current view so the persisted title reflects run start.
+  if (!data.title) {
+    const prompt = await readPromptDocument(workspace.dir)
+    const branch = data.boundary?.branch ?? options.branch ?? options.feature?.branch
+    data.title = (await resolveRunTitleFor({ targetDir, branch, prompt })) || undefined
+  }
   // Opening metadata means a new coordinator owns the run. It resumes from the
   // next pending batch; pausing/running crashes still use normal phase recovery.
   if (data.control.state !== "running") data.control = { state: "running" }
@@ -515,4 +543,13 @@ export async function readRunMetadata(path: string): Promise<RunMetadata | undef
 function newMetadata(runID: string, targetDir: string): RunMetadata {
   const now = Date.now()
   return { schemaVersion: 5, runID, targetDir, createdAt: now, updatedAt: now, control: { state: "running" }, phases: {} }
+}
+
+/** The prompt document in the run workspace; a missing or unreadable one simply resolves no prompt title. */
+async function readPromptDocument(runDir: string): Promise<string | undefined> {
+  try {
+    return await readFile(join(runDir, "prd.md"), "utf8")
+  } catch {
+    return undefined
+  }
 }

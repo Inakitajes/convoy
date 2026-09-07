@@ -3,6 +3,7 @@ import { dirname, join } from "node:path"
 
 import { formatCommitMessage, proposeCommitMessage } from "../commit-message"
 import { currentHead, diffStat, execFile, resetSoft, resolveCommit } from "../git"
+import { readPersistedRunTitle } from "../run-title"
 import { convoyHome } from "../workspace"
 import type { FeaturePlanLink } from "../types"
 import { boundedCommitAsOperator } from "./executor"
@@ -386,9 +387,17 @@ async function updateRunIndex(
       ...(producedSha ? { producedSha } : {}),
       disposition,
       state: "completed" as const,
-      // A title survives workspace cleanup so run discovery can still name the
-      // run it rediscovers through this index.
-      title: (entry?.title as string | undefined) ?? (await runTitleFrom(input.runDir)),
+      // The run's persisted title survives workspace cleanup so run discovery
+      // can still name the run it rediscovers through this index. Priority:
+      // the metadata's stored title, then an earlier index title (a legacy
+      // record named once must not be renamed again by a prd rewrite), then
+      // the prd.md fallback. The record keeps the exact untruncated value —
+      // display truncation is the runs list's concern, not the durable
+      // evidence's.
+      title:
+        (await readPersistedRunTitle(input.runDir)) ??
+        (entry?.title as string | undefined) ??
+        (await promptTitleFrom(input.runDir)),
       recordedAt: (entry?.recordedAt as number | undefined) ?? now,
       updatedAt: now,
     }
@@ -399,13 +408,17 @@ async function updateRunIndex(
   }
 }
 
-/** The run's prd.md first line, as run history titles it; undefined when unavailable. */
-async function runTitleFrom(runDir: string | undefined): Promise<string | undefined> {
+/**
+ * The legacy prd.md first-line fallback for a run's title; used only when
+ * neither the metadata nor the existing index record carries one. `undefined`
+ * when unavailable.
+ */
+async function promptTitleFrom(runDir: string | undefined): Promise<string | undefined> {
   if (!runDir || runDir === "/") return undefined
   const prd = await readOptional(join(runDir, "prd.md"))
   if (!prd) return undefined
   const line = prd.split("\n").map((raw) => raw.replace(/^#+\s*/, "").trim()).find(Boolean)
-  return line ? line.slice(0, 120) : undefined
+  return line || undefined
 }
 
 type ReconcileResult =

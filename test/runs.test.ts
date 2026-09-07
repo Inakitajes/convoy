@@ -1,5 +1,5 @@
 import { createServer, type Server } from "node:net"
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -563,5 +563,73 @@ describe("runTitle (pure function exercised through listRuns)", () => {
     expect(run).toBeDefined()
     expect(run!.title.length).toBeLessThanOrEqual(63)
     expect(run!.title.endsWith("...")).toBe(true)
+  })
+})
+
+describe("persisted run titles (capability run-titles)", () => {
+  test("a stored title wins over the prompt document, even after a goal-loop rewrite", async () => {
+    const runID = "20260615-100000-titl"
+    const dir = join(root, runID)
+    await mkdir(dir, { recursive: true })
+    // The prompt document disagrees with the persisted title (a goal-loop
+    // reset rewrote it): the stored title still names the run.
+    await writeFile(join(dir, "prd.md"), "# A completely different prompt now\n")
+    await writeFile(join(dir, "metadata.json"), JSON.stringify({
+      schemaVersion: 5, runID, targetDir: "/tmp", createdAt: 1, updatedAt: 2,
+      control: { state: "running" }, title: "Tabbed reading in the specs viewer", phases: { a: { status: "completed" } },
+    }))
+
+    const runs = await listRuns(root)
+    const run = runs.find((r) => r.runID === runID)
+    expect(run).toBeDefined()
+    expect(run!.title).toBe("Tabbed reading in the specs viewer")
+  })
+
+  test("the list display truncates a long stored title while the record stays exact", async () => {
+    const runID = "20260615-110000-wido"
+    const storedTitle = "a stored title that is far longer than sixty characters and must not be truncated in the durable record itself"
+    const dir = join(root, runID)
+    await mkdir(dir, { recursive: true })
+    await writeFile(join(dir, "metadata.json"), JSON.stringify({
+      schemaVersion: 5, runID, targetDir: "/tmp", createdAt: 1, updatedAt: 2,
+      control: { state: "running" }, title: storedTitle, phases: { a: { status: "completed" } },
+    }))
+
+    const runs = await listRuns(root)
+    const run = runs.find((r) => r.runID === runID)
+    expect(run).toBeDefined()
+    expect(run!.title.length).toBeLessThanOrEqual(63)
+    expect(run!.title.endsWith("...")).toBe(true)
+    // The record itself keeps the exact value.
+    const metadata = JSON.parse(await readFile(join(dir, "metadata.json"), "utf8"))
+    expect(metadata.title).toBe(storedTitle)
+  })
+
+  test("a cleaned-up run rediscovers through the index with its exact persisted title", async () => {
+    // Isolate the run-record index so parallel finalization tests cannot leak into this listing.
+    const savedHome = process.env.CONVOY_HOME
+    const home = await mkdtemp(join(tmpdir(), "convoy-runs-title-home-"))
+    process.env.CONVOY_HOME = home
+    try {
+      const indexRunID = "20260615-120000-cldn"
+      const exactTitle = "a long index title that stays exact and untruncated in the durable run-record evidence on disk"
+      await mkdir(join(home, ".convoy", "run-records"), { recursive: true })
+      await writeFile(join(home, ".convoy", "run-records", `${indexRunID}.json`), JSON.stringify({
+        schemaVersion: 1, runID: indexRunID, title: exactTitle, state: "completed",
+        manifestPath: "/repo/.git/convoy/finalization/manifest.json", recordedAt: 1, updatedAt: 2,
+      }))
+      const { readRunIndexEntry } = await import("../src/runs")
+      const record = await readRunIndexEntry(indexRunID)
+      expect(record!.title).toBe(exactTitle)
+
+      const runs = await listRuns()
+      const run = runs.find((r) => r.runID === indexRunID)
+      expect(run).toBeDefined()
+      expect(run!.title.length).toBeLessThanOrEqual(63)
+    } finally {
+      if (savedHome === undefined) delete process.env.CONVOY_HOME
+      else process.env.CONVOY_HOME = savedHome
+      await rm(home, { recursive: true, force: true })
+    }
   })
 })
