@@ -8,6 +8,7 @@ import { parseMarkdown, renderMarkdownDoc, type MarkdownDoc } from "./markdown-r
 import { stripYamlFrontmatter } from "./openspec"
 import { groupChangeArtifacts, loadSpecsView, specGroupSource, worktreeDisplayName, type SpecGroup, type SpecsChangeEntry, type SpecsResolution, type SpecsView } from "./specs"
 import {
+  chunksLength,
   displayWidth,
   hintsRow,
   joinLines,
@@ -17,7 +18,6 @@ import {
   plain,
   raw,
   setTheme,
-  shortPath,
   terminalBackgroundHex,
   theme,
   truncate,
@@ -26,9 +26,6 @@ import { sceneForRoute, type TuiRoute, type TuiScene } from "./tui-session"
 
 import type { BoxOptions, CliRenderer, KeyEvent, TextChunk } from "@opentui/core"
 import type { Hint } from "./tui-theme"
-
-/** Below this width the list and details stack vertically (same breakpoint as runs). */
-const compactSpecsMaxWidth = 84
 
 /**
  * The selection a returning browser restores (capability work-context /
@@ -45,17 +42,19 @@ export type SpecsBrowserResume = {
 }
 
 /**
- * One row of the navigation list. The board is worktree-rooted (delta
- * specs-viewer): every Git-registered checkout is a section divider — never a
- * selectable row — and its local active changes hang beneath it as the only
- * entries that section owns. The launch checkout's canonical specs close the
- * list under their own divider. Selection only ever lands on a change or a
- * spec: the sections group, the children act.
+ * One row of the navigation list. The board has two top-level sections, each
+ * named by a header divider: `changes` — every Git-registered checkout as a
+ * divider with its local active changes hanging beneath it as the only
+ * entries that worktree owns — and `specs` — the launch checkout's canonical
+ * specs. Worktree sections are separated by a full blank line; neither the
+ * headers nor the worktree rules are selectable. Selection only ever lands on
+ * a change or a spec: the sections group, the children act.
  */
 type ListRow =
   | { kind: "spacer" }
   | { kind: "worktree"; worktree: BoardWorktree }
   | { kind: "header"; label: string }
+  | { kind: "sectionEnd" }
   | { kind: "change"; change: SpecsChangeEntry }
   | { kind: "spec"; path: string }
 
@@ -112,8 +111,6 @@ export class SpecsBrowser {
   private readonly bodies = new Map<string, string>()
   private readonly docs = new Map<string, MarkdownDoc>()
 
-  private readonly headerText: TextRenderable
-  private readonly headerBox: BoxRenderable
   private readonly bodyBox: BoxRenderable
   private readonly listText: TextRenderable
   private readonly listBox: BoxRenderable
@@ -186,16 +183,9 @@ export class SpecsBrowser {
       gap: 0,
     })
 
-    // Minimal chrome (one bare header row, like home): a context label plus the
-    // normalized target directory, no border box and no version title.
-    const header = new BoxRenderable(renderer, {
-      id: "convoy-specs-header",
-      height: 1,
-      backgroundColor: theme.bg,
-    })
-    const headerText = new TextRenderable(renderer, { content: "", fg: theme.text, width: "100%", wrapMode: "none" })
-    header.add(headerText)
-
+    // No header row: the board opens straight on its sections — the screen's
+    // name is the session's own context, and the section containers identify
+    // everything else.
     const body = new BoxRenderable(renderer, {
       id: "convoy-specs-body",
       width: "100%",
@@ -214,10 +204,14 @@ export class SpecsBrowser {
       this.render()
     }
 
+    // The list's own rows carry the section containers, so the panel adds no
+    // padding of its own — the containers reach within the shell's 1-column
+    // margin on both edges.
     const list = this.panel({
       id: "convoy-specs-list",
       height: "100%",
       flexGrow: 1,
+      paddingX: 0,
       backgroundColor: theme.bg,
       onMouseScroll: wheel,
     })
@@ -235,6 +229,7 @@ export class SpecsBrowser {
     const footer = this.panel({
       id: "convoy-specs-footer",
       height: 1,
+      paddingX: 0,
       backgroundColor: theme.bg,
     })
 
@@ -246,8 +241,6 @@ export class SpecsBrowser {
     details.box.border = false
     footer.box.border = false
 
-    this.headerText = headerText
-    this.headerBox = header
     this.bodyBox = body
     this.listText = list.text
     this.listBox = list.box
@@ -258,7 +251,6 @@ export class SpecsBrowser {
 
     this.paletteTargets.push(
       { box: shell, background: "bg" },
-      { box: header, background: "bg" },
       { box: list.box, background: "bg" },
       { box: details.box, background: "bg" },
       { box: footer.box, background: "bg" },
@@ -266,7 +258,6 @@ export class SpecsBrowser {
 
     body.add(list.box)
     body.add(details.box)
-    shell.add(header)
     shell.add(body)
     shell.add(footer.box)
     mount.add(shell)
@@ -870,56 +861,60 @@ export class SpecsBrowser {
 
   private get rows(): ListRow[] {
     const rows: ListRow[] = []
-    // Worktrees lead the board (delta specs-viewer): each checkout renders as
-    // a section divider and its local active changes hang beneath it — never
-    // a global deduplicated list. The same change id landing in two checkouts
-    // is two entries (one per section); an exact duplicate copy is noise and
-    // is collapsed.
-    const seen = new Set<string>()
-    for (const worktree of this.view.board.worktrees) {
-      rows.push({ kind: "worktree", worktree })
-      let children = 0
-      for (const change of this.view.changes) {
-        if (change.checkout !== worktree.path) continue
-        const identity = `${change.id}\n${change.checkout}`
-        if (seen.has(identity)) continue
-        seen.add(identity)
-        rows.push({ kind: "change", change })
-        children++
-      }
-      if (children === 0) rows.push({ kind: "spacer" })
+    // Two named sections, each drawn as its own rounded container so the
+    // section headers never read like the worktree rules inside them.
+    // `changes` opens the board: each checkout renders as a divider and its
+    // local active changes hang beneath it — never a global deduplicated
+    // list. The same change id landing in two checkouts is two entries (one
+    // per section); an exact duplicate copy is noise and is collapsed. A full
+    // blank line separates every worktree from the next so they read as
+    // distinct blocks.
+    if (this.view.board.worktrees.length > 0) {
+      rows.push({ kind: "header", label: "changes" })
+      const seen = new Set<string>()
+      this.view.board.worktrees.forEach((worktree, worktreeIndex) => {
+        if (worktreeIndex > 0) rows.push({ kind: "spacer" })
+        rows.push({ kind: "worktree", worktree })
+        for (const change of this.view.changes) {
+          if (change.checkout !== worktree.path) continue
+          const identity = `${change.id}\n${change.checkout}`
+          if (seen.has(identity)) continue
+          seen.add(identity)
+          rows.push({ kind: "change", change })
+        }
+      })
+      rows.push({ kind: "sectionEnd" })
     }
+    // `specs` closes the board with the launch checkout's canonical specs,
+    // opening immediately after the changes container — no gap row.
     if (this.view.specs.length > 0) {
-      rows.push({ kind: "spacer" }, { kind: "header", label: "specs" })
+      rows.push({ kind: "header", label: "specs" })
       for (const path of this.view.specs) rows.push({ kind: "spec", path })
+      rows.push({ kind: "sectionEnd" })
+    }
+    // The final container claims the body's remaining height: blank rows
+    // inside it (it is the last section, so they read as its own emptiness)
+    // push its closing border down to the footer line.
+    const deficit = this.listHeight() - rows.length
+    if (deficit > 0 && rows[rows.length - 1]?.kind === "sectionEnd") {
+      rows.splice(rows.length - 1, 0, ...Array.from({ length: deficit }, () => ({ kind: "spacer" as const })))
     }
     return rows
   }
 
-  /** Canonical specs need no root preview: their row already identifies them. */
-  private canonicalSelectedAtRoot() {
-    return this.level === "root" && this.rows[this.selectedRow]?.kind === "spec"
-  }
-
+  /** The Actions menu's borrowed root pane width — the reading pane reuses it at detail. */
   private detailsWidth() {
     return Math.max(34, Math.min(48, this.renderer.width - 64))
   }
 
   private bodyHeight() {
-    // Header (1) + footer (1).
-    return Math.max(8, this.renderer.height - 2)
-  }
-
-  private compactListHeight(bodyHeight: number) {
-    return Math.max(5, Math.min(9, Math.floor(bodyHeight * 0.35)))
+    // Footer (1) — the board has no header row.
+    return Math.max(8, this.renderer.height - 1)
   }
 
   private listHeight() {
-    // Borderless panels: the list's inner rows are its box height. Compact
-    // screens stack instead.
-    if (this.canonicalSelectedAtRoot()) return Math.max(3, this.bodyHeight())
-    if (this.renderer.width <= compactSpecsMaxWidth) return Math.max(3, this.compactListHeight(this.bodyHeight()))
-    return Math.max(3, this.renderer.height - 2)
+    // Borderless panel: the list's inner rows are its box height.
+    return Math.max(3, this.bodyHeight())
   }
 
   private detailsHeight() {
@@ -940,24 +935,20 @@ export class SpecsBrowser {
 
   private render() {
     if (this.finished || this.renderer.isDestroyed || this.scene?.isClosed) return
-    const innerWidth = Math.max(40, this.renderer.width - 6)
-    const compact = this.renderer.width <= compactSpecsMaxWidth
+    // The shell's 1-column padding on each edge is the board's only margin —
+    // the section containers span it fully.
+    const innerWidth = Math.max(40, this.renderer.width - 2)
     const detail = this.level === "detail"
-    const fullRootList = this.canonicalSelectedAtRoot()
-    // The fullscreen reader replaces the header, footer, and tab chrome with
+    // The fullscreen reader replaces the footer and tab chrome with
     // its title bar (the details panel's border title) plus the full-width pane.
     const reader = detail && this.fullscreen
-    this.headerBox.visible = !reader
     this.footerBox.visible = !reader
-    const detailsWidth = this.detailsWidth()
-    const listWidth = Math.max(36, this.renderer.width - detailsWidth - 7)
-    const bodyHeight = this.bodyHeight()
+    // The Actions menu overlays either level. At the root — where the details
+    // panel no longer exists — it borrows the pane beside a narrowed list.
+    const rootMenu = !detail && this.menuOpen
+    const paneWidth = this.detailsWidth()
+    const listWidth = Math.max(36, this.renderer.width - paneWidth - 7)
 
-    this.bodyBox.flexDirection = !detail && compact && !fullRootList ? "column" : "row"
-    // Stacked panels sit flush (the shell's own chrome has no gaps either);
-    // keeping the row layout's 1-column gap here would overflow the body by
-    // the separator row and push the details' bottom border under the footer.
-    this.bodyBox.gap = !detail && compact && !fullRootList ? 0 : 1
     if (detail) {
       // The reading pane is full width: the navigation list is hidden and the
       // details panel takes the whole body.
@@ -965,43 +956,24 @@ export class SpecsBrowser {
       this.detailsBox.visible = true
       this.detailsBox.width = "100%"
       this.detailsBox.height = "100%"
-    } else if (fullRootList) {
-      this.listBox.visible = true
-      this.detailsBox.visible = false
-      this.listBox.width = "100%"
-      this.listBox.height = "100%"
-    } else if (compact) {
-      this.listBox.visible = true
-      this.detailsBox.visible = true
-      const listHeight = this.compactListHeight(bodyHeight)
-      this.listBox.width = "100%"
-      this.listBox.height = listHeight
-      this.detailsBox.width = "100%"
-      this.detailsBox.height = Math.max(3, bodyHeight - listHeight)
     } else {
+      // Root is list-only: the navigation list fills the body. The details
+      // panel reappears only while the Actions menu borrows it.
       this.listBox.visible = true
-      this.detailsBox.visible = true
-      this.listBox.width = "auto"
+      this.listBox.width = rootMenu ? listWidth : "100%"
       this.listBox.height = "100%"
-      this.detailsBox.width = detailsWidth
+      this.detailsBox.visible = rootMenu
+      this.detailsBox.width = paneWidth
       this.detailsBox.height = "100%"
     }
 
-    this.headerText.content = this.headerContent(innerWidth)
-    this.listText.content = detail ? "" : this.listContent(compact || fullRootList ? innerWidth : listWidth)
-    this.detailsText.content = this.detailsContent((compact && !detail ? innerWidth : detail ? innerWidth : detailsWidth) - 4)
+    this.listText.content = detail ? "" : this.listContent(rootMenu ? listWidth : innerWidth)
+    this.detailsText.content = detail || rootMenu ? this.detailsContent(detail ? innerWidth : paneWidth - 4) : ""
     this.footerText.content = this.footerContent(innerWidth)
     // The close confirm modal overlays everything while it is armed.
     this.overlay.visible = Boolean(this.pendingClose)
     if (this.pendingClose) this.renderCloseConfirmModal(Math.max(44, this.renderer.width - 10))
     this.renderer.requestRender()
-  }
-
-  /** The header's only content line: the screen's name and its scope, no path — the session's directory is implied. */
-  private headerContent(width: number) {
-    const changes = this.view.changes.length
-    const right = `${this.view.board.worktrees.length} worktree${this.view.board.worktrees.length === 1 ? "" : "s"} · ${changes} change${changes === 1 ? "" : "s"}`
-    return padBetween([bold(fg(theme.accent)("specs"))], [fg(theme.dim)(right)], width)
   }
 
   private listContent(width: number) {
@@ -1010,14 +982,54 @@ export class SpecsBrowser {
     if (this.selectedRow < this.scroll) this.scroll = this.selectedRow
     if (this.selectedRow >= this.scroll + visible) this.scroll = this.selectedRow - visible + 1
 
+    // Container membership is positional: every row between a section header
+    // and its closing rule rides inside the rounded container. Computed from
+    // the full row list (not the visible slice) so a scrolled-off header still
+    // wraps its rows.
+    let inside = false
+    const insideFlags = rows.map((row) => {
+      if (row.kind === "header") inside = true
+      else if (row.kind === "sectionEnd") inside = false
+      return inside
+    })
+
     const slice = rows.slice(this.scroll, this.scroll + visible)
     return joinLines(
       slice.map((row, offset) => {
         const absolute = this.scroll + offset
         const selected = absolute === this.selectedRow
+        if (row.kind === "header") return this.sectionHeaderLine(row.label, width)
+        if (row.kind === "sectionEnd") return this.sectionEndLine(width)
+        if (insideFlags[absolute]) return this.containerRow(this.rowLine(row, selected, width - 4), width - 4)
         return this.rowLine(row, selected, width)
       }),
     )
+  }
+
+  /**
+   * A section's top border: the label rides inside a rounded rule, accent-bold
+   * so a section header never reads like the plain worktree rules beneath it.
+   */
+  private sectionHeaderLine(label: string, width: number): StyledText {
+    const name = truncate(label, Math.max(4, width - 10))
+    const fill = Math.max(1, width - name.length - 5)
+    return new StyledText([fg(theme.dim)("╭─ "), bold(fg(theme.accent)(name)), fg(theme.dim)(` ${"─".repeat(fill)}╮`)])
+  }
+
+  /** A section's closing border. */
+  private sectionEndLine(width: number): StyledText {
+    return new StyledText([fg(theme.dim)(`╰${"─".repeat(Math.max(1, width - 2))}╯`)])
+  }
+
+  /**
+   * Wraps one row inside the section container: dim side borders, the content
+   * padded to the inner width so the right border stays aligned, and the
+   * selection fill (applied by the row itself) stopping short of the borders.
+   */
+  private containerRow(line: StyledText, innerWidth: number): StyledText {
+    const used = chunksLength(line.chunks)
+    const filler = used < innerWidth ? [raw(" ".repeat(innerWidth - used))] : []
+    return new StyledText([fg(theme.dim)("│ "), ...line.chunks, ...filler, fg(theme.dim)(" │")])
   }
 
   /**
@@ -1059,17 +1071,22 @@ export class SpecsBrowser {
       const title = truncate(heading, Math.max(12, width - 18))
       const counts = artifactCounts(change)
       const countText = counts === "—" ? "" : `  ${truncate(counts, Math.max(0, width - displayWidth(heading) - 8))}`
+      // One column in from the container border, like every other child row.
       if (selected) {
-        return this.highlighted([raw("  "), marker, raw(" "), bold(fg(theme.chipText)(title)), fg(theme.chipText)(countText)], width)
+        return this.highlighted([raw(" "), marker, raw(" "), bold(fg(theme.chipText)(title)), fg(theme.chipText)(countText)], width)
       }
-      return padBetween([raw("  "), marker, raw(" "), fg(theme.text)(title)], [fg(theme.dim)(countText)], width)
+      return padBetween([raw(" "), marker, raw(" "), fg(theme.text)(title)], [fg(theme.dim)(countText)], width)
     }
-    const marker = selected ? bg(theme.teal)(fg(theme.chipText)("◆")) : fg(theme.teal)("◆")
-    const name = truncate(specDisplayPath(row.path), Math.max(12, width - 8))
+    if (row.kind === "sectionEnd") return this.sectionEndLine(width)
+    // Canonical specs are stateless — already-integrated truth, not work in
+    // any state — so they carry no state-coded diamond: a quiet gray bullet
+    // riding one column in from the container border.
+    const marker = selected ? fg(theme.chipText)("•") : fg(theme.dim)("•")
+    const name = truncate(specDisplayPath(row.path), Math.max(12, width - 6))
     if (selected) {
-      return this.highlighted([raw("  "), marker, raw(" "), bold(fg(theme.chipText)(name))], width)
+      return this.highlighted([raw(" "), marker, raw(" "), bold(fg(theme.chipText)(name))], width)
     }
-    return new StyledText([raw("  "), marker, raw(" "), fg(theme.text)(name)])
+    return new StyledText([raw(" "), marker, raw(" "), fg(theme.dim)(name)])
   }
 
   /** A section divider: one dim rule with the label riding inside it. */
@@ -1096,42 +1113,14 @@ export class SpecsBrowser {
    * The reading pane. Its first content rows are the title row and — when the
    * subject spans more than one group — the tab strip; below them the active
    * tab's markdown scrolls. Single-group subjects render no strip at all.
+   * The pane only exists at the detail level (or while the Actions menu
+   * borrows it): the root list identifies its rows without a preview.
    */
   private detailsContent(width: number): StyledText {
     // The Actions menu overlays either level; the fullscreen reader never
     // shows it (its copy/close/tab keys are unchanged).
     if (this.menuOpen && !(this.level === "detail" && this.fullscreen)) return this.menuContent(width)
-    if (this.level !== "detail") {
-      this.readerPosition = ""
-      const row = this.rows[this.selectedRow]
-      if (!row || !isSelectableRow(row)) return plain("")
-      const lines: StyledText[] = []
-      // The at-a-glance pane speaks the fold's rhythm: a divider names the
-      // subject, faint labels carry the facts, and the artifact tree descends
-      // with the same faded connectors the home fold uses.
-      if (row.kind === "change") {
-        const change = row.change
-        lines.push(this.dividerLine(change.id, width))
-        if (change.title !== change.id) lines.push(new StyledText([fg(theme.text)(truncate(change.title, width))]))
-        lines.push(new StyledText([fg(theme.faint)("checkout ".padEnd(10, " ")), fg(theme.dim)(truncate(shortPath(change.checkout, Math.max(12, width - 10)), Math.max(8, width - 11)))]))
-        lines.push(new StyledText([raw("")]))
-        if (change.artifacts.length === 0) {
-          lines.push(new StyledText([fg(theme.dim)("no markdown artifacts found for this change")]))
-        } else {
-          for (const group of groupChangeArtifacts(change)) {
-            lines.push(new StyledText([fg(theme.text)(group.label)]))
-            for (const entry of group.entries) {
-              lines.push(new StyledText([raw("  "), fg(theme.dim)(truncate(artifactDisplayPath(entry.file, change.id), Math.max(8, width - 2)))]))
-            }
-          }
-        }
-        return joinLines(lines)
-      }
-      const name = specDisplayPath(row.path)
-      lines.push(this.dividerLine(name, width))
-      lines.push(new StyledText([fg(theme.dim)(shortPath(row.path, width))]))
-      return joinLines(lines)
-    }
+    if (this.level !== "detail") return plain("")
 
     const group = this.groups[this.selectedGroup]
     if (!group) {
@@ -1378,17 +1367,6 @@ function artifactCounts(change: SpecsChangeEntry): string {
   const count = change.artifacts.length
   if (count === 0) return "—"
   return `${count} artifact${count === 1 ? "" : "s"}`
-}
-
-/** Change-relative path so the filename survives a narrow details pane. */
-function artifactDisplayPath(file: string, changeId: string): string {
-  const normalized = file.replaceAll("\\", "/")
-  const nested = `/openspec/changes/${changeId}/`
-  const nestedAt = normalized.indexOf(nested)
-  if (nestedAt >= 0) return normalized.slice(nestedAt + nested.length)
-  const prefix = `openspec/changes/${changeId}/`
-  if (normalized.startsWith(prefix)) return normalized.slice(prefix.length)
-  return specDisplayPath(normalized)
 }
 
 // Terminal wheel events arrive as mouse "scroll" with a direction and a tick

@@ -62,7 +62,7 @@ test("Home and a destination swap scenes without destroying the shared renderer"
     await testRenderer.renderOnce()
     expect(firstScene.isClosed).toBeTrue()
     expect(testRenderer.renderer.root.getChildrenCount()).toBe(1)
-    expect(testRenderer.captureCharFrame()).toContain("specs")
+    expect(testRenderer.captureCharFrame()).toContain("╭─ changes")
 
     testRenderer.renderer.keyInput.emit("keypress", keyEvent("q"))
     await expect(specsResult).resolves.toEqual({ type: "exit" })

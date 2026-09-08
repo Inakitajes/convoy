@@ -247,14 +247,15 @@ describe("tabbed detail level", () => {
 })
 
 describe("minimal chrome", () => {
-  test("the header's only content line is the screen's name and its scope, no path", async () => {
+  test("the board renders no header row — the sections identify themselves", async () => {
     const session = await openReader({ view: sampleView() })
     session.press("v") // close the fullscreen reader: the chrome returns
     await session.renderOnce()
     const frame = session.captureCharFrame()
-    expect(frame).toContain("specs")
-    expect(frame).toContain("1 worktree · 1 change")
+    // No header line of counts or screen name: the footer is the only chrome.
+    expect(frame).not.toContain("worktree ·")
     expect(frame).not.toContain("project")
+    expect(frame).toContain("actions")
     await closeSession(session)
   })
 

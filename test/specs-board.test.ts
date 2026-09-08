@@ -117,7 +117,7 @@ describe("the worktree-rooted board (delta specs-viewer)", () => {
   test("a worktree-only board remains useful and omits the empty canonical section", async () => {
     const frame = await frameOf(viewWith([worktree({ path: "/wt/iso", branch: "feat/quick-fix" })]))
     expect(frame).toContain("── iso · feat/quick-fix · no changes")
-    expect(frame).not.toContain("── specs")
+    expect(frame).not.toContain("╭─ specs")
   })
 
   test("canonical specs render as their own section after the worktrees", async () => {
@@ -126,7 +126,7 @@ describe("the worktree-rooted board (delta specs-viewer)", () => {
     )
     const lines = frame.split("\n")
     const worktrees = lines.findIndex((line) => line.includes("── repo · main ·"))
-    const specs = lines.findIndex((line) => line.trimStart().startsWith("── specs"))
+    const specs = lines.findIndex((line) => line.trimStart().startsWith("╭─ specs"))
     expect(worktrees).toBeGreaterThanOrEqual(0)
     expect(specs).toBeGreaterThan(worktrees)
     expect(frame).toContain("core.md")
@@ -205,15 +205,15 @@ describe("the fullscreen reader stays at the detail level", () => {
     const session = await openBoard(viewWith([worktree({ path: mainDir, branch: "main", main: true })]))
     session.press("v")
     await session.renderOnce()
-    // The header is still visible: the reader never opened.
-    expect(session.captureCharFrame()).toContain("specs")
+    // The board is still at the root: the reader never opened.
+    expect(session.captureCharFrame()).toContain("╭─ changes")
     session.press("c", { ctrl: true })
     await expect(session.instance.result).resolves.toEqual({ type: "exit" })
   })
 })
 
-describe("compact stacking", () => {
-  test("stacked panels sit flush and every bottom border stays visible", async () => {
+describe("the compact root stays a single full-body list", () => {
+  test("sections draw as rounded containers and every footer hint stays visible", async () => {
     const testRenderer = await createTestRenderer({ width: 84, height: 55 })
     const instance = new SpecsBrowser(
       testRenderer.renderer,
@@ -223,11 +223,12 @@ describe("compact stacking", () => {
     try {
       await testRenderer.renderOnce()
       const frame = testRenderer.captureCharFrame()
-      // The bare header row rides above the panels.
-      expect(frame).toContain("specs")
+      // The section containers identify the board — there is no header row.
+      expect(frame).toContain("╭─ changes")
       const lines = frame.split("\n")
-      // No bordered panels anywhere: sections are dividers, chrome is bare.
-      expect(lines.some((line) => line.trimStart().startsWith("╭"))).toBe(false)
+      // Sections draw as rounded text containers — chrome on the rows
+      // themselves, never a bordered panel box around the body.
+      expect(lines.some((line) => line.trimStart().startsWith("╭─ changes"))).toBe(true)
       // The hints row is the last drawn line — nothing scrolls off the
       // bottom edge.
       const lastDrawn = lines.map((line) => line.trimEnd()).filter((line) => line.length > 0).pop() ?? ""
@@ -254,9 +255,12 @@ describe("a selected canonical spec uses the full root body", () => {
         testRenderer.renderer.keyInput.emit("keypress", keyEvent("g", { shift: true }))
         await testRenderer.renderOnce()
         const frame = testRenderer.captureCharFrame()
-        // The redundant details panel is hidden; the list fills the body.
-        expect(frame).not.toContain("╭")
+        // The details panel is hidden; the list fills the body — its spec
+        // section container wraps the selected row.
         expect(frame).toContain("core.md")
+        const lines = frame.split("\n")
+        const specRow = lines.findIndex((line) => line.includes("core.md"))
+        expect(lines[specRow]!.trimStart().startsWith("│")).toBe(true)
       } finally {
         testRenderer.renderer.keyInput.emit("keypress", keyEvent("c", { ctrl: true }))
         await instance.result.catch(() => {})
