@@ -740,6 +740,28 @@ export class HomeLauncher {
     // Auto mode is the default: describe the work, get a conventional
     // proposal. Tab reaches the manual name/branch/base sequence.
     this.form = { mode: "auto", description: "", field: 0, displayName: "", branch: "", base: "" }
+    // The create button names the model the namer will call. Loaded once,
+    // off the keypress path; the button re-renders when it lands.
+    if (!this.branchModelLoaded) void this.loadBranchModel()
+  }
+
+  /** The configured branch-naming model, resolved once per session. */
+  private branchModel?: string
+  private branchModelLoaded = false
+
+  private async loadBranchModel() {
+    this.branchModelLoaded = true
+    try {
+      const { defaultBranchNameModel } = await import("./worktree")
+      const { loadMergedConvoyConfig } = await import("./config")
+      const config = await loadMergedConvoyConfig(this.targetDir)
+      this.branchModel = config?.defaults.branchNameModel ?? defaultBranchNameModel
+    } catch {
+      // The note is advisory: without a resolvable model the button simply
+      // doesn't name one, and the proposal path resolves its own.
+      this.branchModel = undefined
+    }
+    if (!this.finished && this.level === "form") this.render()
   }
 
   private handleFormKey(key: KeyEvent) {
@@ -985,15 +1007,12 @@ export class HomeLauncher {
   }, 500)
 
   /**
-   * While the namer proposes, the create button becomes an infinite-loading
-   * progress: a spinner plus a marching bar, repainted every 100ms (the
-   * spinner's own step) so no frame of the sweep is skipped. The guard makes
-   * the tick a no-op the rest of the time; `finish` clears it.
+   * While the namer proposes, a single spinner is repainted every 100ms
+   * (the spinner's own step) so no frame of the rotation is skipped. The
+   * guard makes the tick a no-op the rest of the time; `finish` clears it.
    */
-  private proposeSpin = 0
   private readonly proposeTimer: ReturnType<typeof setInterval> = setInterval(() => {
     if (this.finished || this.level !== "form" || !this.form?.proposing) return
-    this.proposeSpin++
     this.render()
   }, 100)
 
@@ -1596,48 +1615,42 @@ export class HomeLauncher {
     return joinLines(lines.slice(this.detailScroll, this.detailScroll + visible))
   }
 
-  /** The description box's writable surface: a fixed multiline canvas. */
-  private static readonly DESCRIPTION_BOX_ROWS = 4
-
   private formContent(width: number): StyledText {
     const form = this.form
     if (!form) return this.listContent(width)
-    const lines: StyledText[] = []
     // The form speaks the section language: a divider rule names it and
     // carries the mode — no bold header floating over the input.
-    lines.push(...this.headingLines(`new worktree · ${form.mode}`, width))
-    // The writable surface is an input, not a stretched banner: the frame
-    // hugs the placeholder's width, so the text fills the box instead of
-    // swimming in dead columns. The manual fields share the width.
-    const placeholderW = displayWidth("describe what you are about to work on…") + 2
-    const boxW = Math.min(width, placeholderW + 8)
-    // The next move reads as a button: an accent keycap with the enter glyph
-    // — the one loud element, over a calm form. The keycap names the move by
-    // itself: "create" where Enter proposes, "confirm" where it commits.
+    const heading = this.headingLines(`new worktree · ${form.mode}`, width)
+    const lines: StyledText[] = []
+    // The action hangs from the well's left edge, flush with the section
+    // rule above — no inset of its own.
     const cta = (word: string, note?: string): StyledText =>
-      new StyledText([raw(" "), bg(theme.accent)(fg(theme.chipText)(` ↵ ${word} `)), ...(note ? [raw(" "), fg(theme.dim)(note)] : [])])
+      new StyledText([bg(theme.accent)(fg(theme.chipText)(` ↵ ${word} `)), ...(note ? [raw(" "), fg(theme.dim)(note)] : [])])
+    const textW = Math.max(8, width - 4)
+    const well = (rows: TextChunk[][]) => filledLines(rows, width, theme.well)
+    // A blank line between the well and whatever follows: the action never
+    // glues itself to the surface.
+    const breathe = () => lines.push(new StyledText([raw("")]))
     if (form.mode === "auto") {
       if (form.proposal) {
-        // The proposal review: the draft rides a navy rail with the fold's
-        // fact-row rhythm — the same block language the New entry opens
-        // with. No frame around it: nothing here is writable.
+        // The reviewed draft is the same well, now a labeled fact list —
+        // name, branch, base, worktree — one row each. Muted labels, light
+        // values on the dark gray.
         const p = form.proposal
-        const row = (label: string, value: string): StyledText =>
-          new StyledText([bg(theme.navy)(" "), fg(theme.faint)(label.padEnd(9, " ")), raw(" "), fg(theme.text)(truncate(value, Math.max(8, width - 13)))])
-        lines.push(row("name", p.displayName), row("branch", p.branch), row("base", p.base), row("worktree", shortPath(p.worktree, Math.max(8, width - 13))))
-        lines.push(new StyledText([raw("")]))
+        const valueW = Math.max(8, textW - 10)
+        const fact = (label: string, value: string): TextChunk[] => [fg(theme.dim)(label.padEnd(9, " ")), raw(" "), fg(theme.text)(truncate(value, valueW))]
+        lines.push(...well([[], fact("name", p.displayName), fact("branch", p.branch), fact("base", p.base), fact("worktree", shortPath(p.worktree, valueW)), []]))
+        breathe()
         lines.push(cta("confirm"))
       } else {
-        // The description input: an untitled multiline box — the placeholder
-        // says what it is for and trails off, the blinking caret says it is
-        // writable, and the keycap under the box names the next move.
-        const textW = Math.max(8, boxW - 8)
-        const rows: TextChunk[][] = []
+        // A filled well, not a hollow border. A blank painted row pads the
+        // placeholder above and the text below; nothing else rides along.
+        const rows: TextChunk[][] = [[]]
         if (form.description) {
           const wrapped = wrapLines([form.description], textW)
           wrapped.forEach((text, index) => {
             const chunks: TextChunk[] = [fg(theme.text)(text)]
-            if (index === wrapped.length - 1 && this.caretOn) chunks.push(fg(theme.accent)("█"))
+            if (index === wrapped.length - 1 && this.caretOn && !form.proposing) chunks.push(fg(theme.accent)("█"))
             rows.push(chunks)
           })
         } else {
@@ -1645,43 +1658,35 @@ export class HomeLauncher {
           // empty cell when the caret is off — or the text would shuffle
           // one column left on every blink.
           const placeholder = fg(theme.dim)("describe what you are about to work on…")
-          rows.push(this.caretOn ? [fg(theme.accent)("█"), placeholder] : [raw(" "), placeholder])
+          const caret = this.caretOn && !form.proposing
+          rows.push(caret ? [fg(theme.accent)("█"), placeholder] : [raw(" "), placeholder])
         }
-        lines.push(...framedLines(rows, width, { minRows: HomeLauncher.DESCRIPTION_BOX_ROWS, border: "accent", frameWidth: boxW }))
-        // Proposing: the create button becomes an infinite-loading sweep —
-        // a spinner plus a marching bar — saying the namer is working,
-        // nothing is stuck. The tick above repaints every frame.
+        rows.push([])
+        lines.push(...well(rows))
+        breathe()
+        // Proposing: one spinner, left-aligned with the button below it.
         if (form.proposing) {
-          // The sweep: a 5-cell window marching around an 18-cell track.
-          const track = 18
-          const window = 5
-          const head = this.proposeSpin % track
-          const bar = Array.from({ length: track }, (_, i) => ((i >= head && i < head + window) || i + track < head + window ? "━" : "─")).join("")
-          lines.push(
-            new StyledText([
-              fg(theme.accent)(spinnerFrame(Date.now())),
-              raw(" "),
-              fg(theme.dim)("proposing a conventional branch…"),
-              raw("  "),
-              fg(theme.faint)(bar),
-            ]),
-          )
+          lines.push(new StyledText([fg(theme.accent)(spinnerFrame(Date.now())), raw(" "), fg(theme.dim)("proposing a conventional branch…")]))
         } else {
-          lines.push(cta("create"))
+          // The button names its namer: the model about to propose the
+          // conventional branch, so the call isn't a mystery.
+          lines.push(cta("create", this.branchModel ? `using ${this.branchModel}` : undefined))
         }
       }
     } else {
       const fieldRow = (label: string, value: string, active: boolean): TextChunk[] => [
-        fg(active ? theme.accent : theme.faint)(label.padEnd(8)),
-        fg(theme.text)(truncate(active ? `${value}${this.caretOn ? "█" : ""}` : value, Math.max(4, boxW - 12))),
+        fg(theme.dim)(label.padEnd(8)),
+        fg(theme.text)(truncate(active ? `${value}${this.caretOn ? "█" : ""}` : value, Math.max(4, textW - 8))),
       ]
-      lines.push(...framedLines([fieldRow("name", form.displayName, form.field === 0), fieldRow("branch", form.branch, form.field === 1), fieldRow("base", form.base, form.field === 2)], width, { border: "accent", frameWidth: boxW }))
-      lines.push(new StyledText([raw("")]))
+      lines.push(...well([fieldRow("name", form.displayName, form.field === 0), fieldRow("branch", form.branch, form.field === 1), fieldRow("base", form.base, form.field === 2), []]))
+      breathe()
       lines.push(cta(form.field === 2 ? "create" : "next"))
       lines.push(new StyledText([fg(theme.dim)("a conventional prefix is added when missing")]))
     }
     if (form.error) lines.push(new StyledText([raw("")]), new StyledText([fg(theme.red)(form.error)]))
-    return joinLines(lines)
+    // The section rule and the well stack from the top — a compose surface,
+    // not a card floating in the remaining void.
+    return joinLines([...heading, ...lines])
   }
 
   /**
@@ -1692,13 +1697,19 @@ export class HomeLauncher {
     if (this.level === "form") {
       const form = this.form
       const proposalUp = form?.mode === "auto" && Boolean(form.proposal)
+      // A long right-side note used to crowd the keys off the row, leaving
+      // a bare "esc cancel · +2" that named nothing. The keys are the
+      // legend; they keep the whole strip.
+      if (form?.proposing) {
+        return hintsRow([{ keys: "esc", label: "cancel", priority: 0 }], [], width, { style: "spaced" })
+      }
       return hintsRow(
         [
-          { keys: "enter", label: form?.mode === "auto" ? (proposalUp ? "create" : "propose") : "confirm", priority: 1 },
+          { keys: "enter", label: form?.mode === "auto" ? (proposalUp ? "confirm" : "create") : "confirm", priority: 1 },
           { keys: "tab", label: proposalUp ? "refine" : "mode", priority: 2 },
           { keys: "esc", label: proposalUp ? "back" : "cancel", priority: 0 },
         ],
-        [[fg(theme.faint)("nothing is created until the destination is accepted")]],
+        [],
         width,
         { style: "spaced", overflow: moreHintsMarker },
       )
@@ -1757,31 +1768,21 @@ function slugFromName(name: string): string {
 }
 
 /**
- * A rounded frame drawn in text. Untitled by default — the form's header
- * already names the context, so the box carries no title of its own. Rows
- * are padded to the frame's inner width so the right border stays aligned;
- * content wider than the frame is the caller's responsibility to keep
- * clipped, and `minRows` grows the box into a fixed writable canvas. A
- * `frameWidth` narrower than the content area keeps the box an input, not a
- * stretched banner — the caller clips its rows to the narrower width.
+ * A filled well: each row is a full-width painted strip. The span runs two
+ * columns past the text column — one into each padding gutter — so the fill
+ * reaches the pane edges exactly like the section divider's rule. Empty rows
+ * are padding; content rows get a two-space inset so the text isn't glued
+ * to the edge. No border: the fill is the recuadro.
  */
-function framedLines(rows: TextChunk[][], width: number, options: { minRows?: number; border?: "accent" | "faint"; frameWidth?: number } = {}): StyledText[] {
-  const outer = Math.max(20, Math.min(width, options.frameWidth ?? width))
-  const inner = outer - 2
-  const textWidth = Math.max(8, inner - 4)
-  const border = options.border === "accent" ? theme.accent : theme.faint
-  const top = `╭${"─".repeat(Math.max(2, inner - 2))}╮`
-  const bottom = `╰${"─".repeat(Math.max(2, inner - 2))}╯`
-  const lines: StyledText[] = [new StyledText([fg(border)(top)])]
-  const padded = [...rows]
-  while (padded.length < (options.minRows ?? 0)) padded.push([])
-  for (const row of padded) {
-    const used = row.reduce((total, chunk) => total + displayWidth(typeof chunk === "string" ? chunk : (chunk as { text: string }).text), 0)
-    const pad = Math.max(0, textWidth - used)
-    lines.push(new StyledText([fg(border)("│ "), ...row, raw(" ".repeat(pad)), fg(border)(" │")]))
-  }
-  lines.push(new StyledText([fg(border)(bottom)]))
-  return lines
+function filledLines(rows: TextChunk[][], width: number, fill: string): StyledText[] {
+  const span = Math.max(1, width + 2)
+  const insetW = 2
+  return rows.map((row) => {
+    if (row.length === 0) return new StyledText([bg(fill)(fg(fill)(" ".repeat(span)))])
+    const used = insetW + row.reduce((total, chunk) => total + displayWidth(typeof chunk === "string" ? chunk : (chunk as { text: string }).text), 0)
+    const pad = Math.max(0, span - used)
+    return new StyledText([bg(fill)(fg(fill)(" ".repeat(insetW))), ...row.map((chunk) => bg(fill)(chunk)), bg(fill)(fg(fill)(" ".repeat(pad)))])
+  })
 }
 
 /**

@@ -15,6 +15,8 @@ export type Palette = {
   accent: string
   /** A true navy blue — action markers and their rails, distinct from the state colors. */
   navy: string
+  /** The input well: a quiet near-black gray surface behind writable text, never a state color. */
+  well: string
   teal: string
   green: string
   red: string
@@ -38,6 +40,7 @@ const darkPalette: Palette = {
   borderDim: "#1B2438",
   accent: "#7AA2F7",
   navy: "#3D59A1",
+  well: "#16161E",
   teal: "#73DACA",
   green: "#9ECE6A",
   red: "#F7768E",
@@ -58,6 +61,7 @@ const lightPalette: Palette = {
   borderDim: "#C1C6DD",
   accent: "#2E7DE9",
   navy: "#2B4C9B",
+  well: "#DFE1EB",
   teal: "#118C74",
   green: "#587539",
   red: "#F52A65",
@@ -81,6 +85,7 @@ const neutralPalette: Palette = {
   borderDim: "#6E6E6E",
   accent: "#4F9CF9",
   navy: "#3A5FBF",
+  well: "#3D3D3D",
   teal: "#27AE9D",
   green: "#6FAE4F",
   red: "#E0606C",

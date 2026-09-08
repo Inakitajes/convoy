@@ -183,6 +183,10 @@ function navyBg(): { r: number; g: number; b: number } {
   return paletteColor(theme.navy)
 }
 
+function wellBg(): { r: number; g: number; b: number } {
+  return paletteColor(theme.well)
+}
+
 describe("worktrees-first home (capability home-launcher delta)", () => {
   test("the masthead carries identity and the complete version above the worktree list", async () => {
     const session = await openHome()
@@ -547,11 +551,14 @@ describe("new worktree form (auto by default, manual on tab)", () => {
       await session.renderOnce()
       await Bun.sleep(30)
       await session.renderOnce()
-      // The whole draft is shown for review — branch, base, destination —
+      // The whole draft is shown for review — name, branch, base, destination —
       // and nothing resolves until acceptance.
       expect(frameOf(session)).toContain("name")
+      expect(frameOf(session)).toContain("Improve review navigation")
+      expect(frameOf(session)).toContain("branch")
       expect(frameOf(session)).toContain("feat/improve-review-navigation-model")
       expect(frameOf(session)).toContain("base")
+      expect(frameOf(session)).toContain("worktree")
       expect(frameOf(session)).toContain("↵ confirm")
       expect(session.instance.result).toBeInstanceOf(Promise)
       session.press("return") // accept
@@ -568,7 +575,7 @@ describe("new worktree form (auto by default, manual on tab)", () => {
     }
   })
 
-  test("the auto proposal rides the navy rail with the fold's label rhythm", async () => {
+  test("the auto proposal is a labeled gray well, not a hollow frame", async () => {
     const session = await openHome({ proposeBranchName: async () => ({ branch: "feat/model-name" }) })
     try {
       session.press("n")
@@ -578,16 +585,92 @@ describe("new worktree form (auto by default, manual on tab)", () => {
       await session.renderOnce()
       await Bun.sleep(30)
       await session.renderOnce()
-      // The reviewed draft hangs from the navy rail — the block language the
-      // New entry opens with — instead of a frame.
-      const frame = session.captureSpans()
-      const branchRow = frame.lines.find((line) => line.spans.some((span) => span.text.includes("feat/model-name")))!
+      const frame = frameOf(session)
+      expect(frame).toContain("name")
+      expect(frame).toContain("Improve review navigation")
+      expect(frame).toContain("branch")
+      expect(frame).toContain("feat/model-name")
+      expect(frame).toContain("base")
+      expect(frame).toContain("worktree")
+      expect(frame).not.toContain("┌")
+      expect(frame).not.toContain("└")
+      const spans = session.captureSpans()
+      const branchRow = spans.lines.find((line) => line.spans.some((span) => span.text.includes("feat/model-name")))!
       expect(branchRow).toBeDefined()
-      const rail = branchRow.spans.find((span) => span.text.trim() === "" && span.bg.a > 0)
-      expect(rail).toBeDefined()
-      expect(sameColor(rail!.bg, navyBg())).toBe(true)
-      const nameRow = frame.lines.find((line) => line.spans.some((span) => span.text.trim() === "name"))!
-      expect(nameRow.spans.some((span) => span.bg.a > 0 && sameColor(span.bg, navyBg()))).toBe(true)
+      const filled = branchRow.spans.filter((span) => span.bg.a > 0 && sameColor(span.bg, wellBg()))
+      expect(filled.length).toBeGreaterThan(0)
+      const filledWidth = filled.reduce((total, span) => total + span.text.length, 0)
+      expect(filledWidth).toBeGreaterThan(40)
+    } finally {
+      await closeHome(session)
+    }
+  })
+
+  test("the description well spans the content column and the footer names every key", async () => {
+    const session = await openHome()
+    try {
+      session.press("n")
+      await session.renderOnce()
+      const frame = frameOf(session)
+      expect(frame).not.toContain("┌")
+      const spans = session.captureSpans()
+      const describeRow = spans.lines.find((line) => line.spans.some((span) => span.text.includes("describe what you are about to work on")))!
+      expect(describeRow).toBeDefined()
+      const filled = describeRow.spans.filter((span) => span.bg.a > 0 && sameColor(span.bg, wellBg()))
+      const filledWidth = filled.reduce((total, span) => total + span.text.length, 0)
+      expect(filledWidth).toBeGreaterThan(80)
+      const footer = frame.split("\n").filter((line) => line.trim().length > 0).at(-1) ?? ""
+      expect(footer).toContain("esc cancel")
+      expect(footer).toContain("enter create")
+      expect(footer).toContain("tab mode")
+      expect(footer).not.toContain("· +")
+    } finally {
+      await closeHome(session)
+    }
+  })
+
+  test("the create button names the model the namer will use", async () => {
+    const session = await openHome()
+    try {
+      session.press("n")
+      await session.renderOnce()
+      // The model resolves off the keypress path (config load + import);
+      // give it a beat and re-render before asserting.
+      await Bun.sleep(50)
+      await session.renderOnce()
+      const frame = frameOf(session)
+      expect(frame).toContain("↵ create")
+      expect(frame).toContain("using")
+    } finally {
+      await closeHome(session)
+    }
+  })
+
+  test("proposing shows a single left-aligned spinner, not a marching bar", async () => {
+    let release!: (value: { branch: string }) => void
+    const session = await openHome({
+      proposeBranchName: () => new Promise<{ branch: string }>((resolve) => {
+        release = resolve
+      }),
+    })
+    try {
+      session.press("n")
+      await session.renderOnce()
+      for (const char of "Improve review navigation") session.press(char)
+      session.press("return")
+      await session.renderOnce()
+      for (let i = 0; i < 20 && !release; i++) await Bun.sleep(10)
+      const frame = frameOf(session)
+      expect(frame).toContain("proposing a conventional branch")
+      expect(frame).not.toContain("━")
+      const footer = frame.split("\n").filter((line) => line.trim().length > 0).at(-1) ?? ""
+      expect(footer).toContain("esc cancel")
+      expect(footer).not.toContain("enter")
+      expect(footer).not.toContain("tab")
+      release!({ branch: "feat/improve-review-navigation" })
+      await Bun.sleep(30)
+      await session.renderOnce()
+      expect(frameOf(session)).toContain("↵ confirm")
     } finally {
       await closeHome(session)
     }
