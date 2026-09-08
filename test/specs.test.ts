@@ -1,6 +1,6 @@
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { basename, dirname, join } from "node:path"
 import { execFile as nodeExecFile } from "node:child_process"
 import { promisify } from "node:util"
 
@@ -22,8 +22,17 @@ import {
 let root: string
 let symlinkCreated = false
 
-/** Git reports physical paths; /var is a symlink to /private/var on macOS. */
-const phys = (path: string): string => (path.startsWith("/private/") ? path : `/private${path}`)
+/**
+ * Git reports physical paths; /tmp and /var are symlinks on macOS. Tolerates
+ * paths that no longer exist by resolving the nearest existing ancestor.
+ */
+async function phys(path: string): Promise<string> {
+  try {
+    return await realpath(path)
+  } catch {
+    return join(await phys(dirname(path)), basename(path))
+  }
+}
 
 beforeAll(async () => {
   root = await mkdtemp(join(tmpdir(), "convoy-specs-test-"))
@@ -481,8 +490,9 @@ describe("worktree-backed changes read their artifacts from the worktree", () =>
         // worktree copy carries its own title and files.
         const copies = view.changes.filter((change) => change.id === "add-gadget")
         expect(copies).toHaveLength(2)
-        const husk = copies.find((change) => change.checkout !== phys(wt))!
-        const entry = copies.find((change) => change.checkout === phys(wt))!
+        const wtPhys = await phys(wt)
+        const husk = copies.find((change) => change.checkout !== wtPhys)!
+        const entry = copies.find((change) => change.checkout === wtPhys)!
         expect(husk.title).toBe("add-gadget")
         expect(husk.artifacts).toEqual([])
         // Title and artifacts come from the worktree's own proposal.
@@ -519,10 +529,11 @@ describe("worktree-backed changes read their artifacts from the worktree", () =>
         // its own title and files, and neither borrows from the other.
         const copies = view.changes.filter((change) => change.id === "renamed-thing")
         expect(copies).toHaveLength(2)
-        const entry = copies.find((change) => change.checkout === phys(wt))!
+        const wtPhys = await phys(wt)
+        const entry = copies.find((change) => change.checkout === wtPhys)!
         expect(entry.title).toBe("Worktree proposal")
         for (const artifact of entry.artifacts) {
-          expect(artifact.file).toContain(phys(wt))
+          expect(artifact.file).toContain(wtPhys)
         }
         const proposal = entry.artifacts.find((artifact) => artifact.section === "proposal")
         await expect(readFile(proposal!.file, "utf8")).resolves.toBe("# Worktree proposal\n")
@@ -555,15 +566,16 @@ describe("worktree-backed changes read their artifacts from the worktree", () =>
         // Each checkout's copies are their own entries: the launch checkout's
         // real files keep their absolute paths and title; the worktree's husk
         // copies list by id with no artifacts and no borrowed facts.
-        const kept = view.changes.find((change) => change.id === "keep-main" && change.checkout !== phys(wt))
+        const wtPhys = await phys(wt)
+        const kept = view.changes.find((change) => change.id === "keep-main" && change.checkout !== wtPhys)
         expect(kept).toBeDefined()
         expect(kept!.title).toBe("Keep on main")
         expect(kept!.artifacts.map((artifact) => artifact.file)).toEqual([
-          phys(join(repo, "openspec", "changes", "keep-main", "proposal.md")),
+          await phys(join(repo, "openspec", "changes", "keep-main", "proposal.md")),
         ])
         const ghost = view.changes.find((change) => change.id === "ghost-change")
         expect(ghost).toBeDefined()
-        expect(ghost!.checkout).toBe(phys(wt))
+        expect(ghost!.checkout).toBe(wtPhys)
         expect(ghost!.title).toBe("ghost-change")
         expect(ghost!.artifacts).toEqual([])
       })
@@ -588,16 +600,17 @@ describe("worktree-backed changes read their artifacts from the worktree", () =>
 
       await withIsolatedHome(async () => {
         const view = await loadSpecsView(repo)
+        const wtPhys = await phys(wt)
         const strandedEntry = view.changes.find((change) => change.id === "stranded-idea")
         expect(strandedEntry).toBeDefined()
         expect(strandedEntry!.checkout).toBe(view.board.worktrees[0]!.path)
         expect(strandedEntry!.artifacts.map((artifact) => artifact.file)).toEqual([
-          phys(join(repo, "openspec", "changes", "stranded-idea", "proposal.md")),
+          await phys(join(repo, "openspec", "changes", "stranded-idea", "proposal.md")),
         ])
         const worktreeEntry = view.changes.find((change) => change.id === "add-gadget")
         expect(worktreeEntry).toBeDefined()
         expect(worktreeEntry!.artifacts.length).toBeGreaterThan(0)
-        expect(worktreeEntry!.artifacts.every((artifact) => artifact.file.includes(phys(wt)))).toBe(true)
+        expect(worktreeEntry!.artifacts.every((artifact) => artifact.file.includes(wtPhys))).toBe(true)
       })
     } finally {
       await cleanup()
