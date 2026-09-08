@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises"
 
-import { BoxRenderable, StyledText, TextRenderable, bold, createCliRenderer, fg, t } from "@opentui/core"
+import { bg, BoxRenderable, StyledText, TextRenderable, bold, createCliRenderer, fg, t } from "@opentui/core"
 
 import { copyReportToClipboard, writeClipboardOSC52, type ClipboardResult } from "./clipboard"
 import type { BoardWorktree } from "./control-board"
@@ -8,6 +8,7 @@ import { parseMarkdown, renderMarkdownDoc, type MarkdownDoc } from "./markdown-r
 import { stripYamlFrontmatter } from "./openspec"
 import { groupChangeArtifacts, loadSpecsView, specGroupSource, worktreeDisplayName, type SpecGroup, type SpecsChangeEntry, type SpecsResolution, type SpecsView } from "./specs"
 import {
+  displayWidth,
   hintsRow,
   joinLines,
   moreHintsMarker,
@@ -45,16 +46,24 @@ export type SpecsBrowserResume = {
 
 /**
  * One row of the navigation list. The board is worktree-rooted (delta
- * specs-viewer): every Git-registered checkout is a root entry, its local
- * active changes are children beneath it, and the launch checkout's canonical
- * specs close the list. Non-empty sections are peers, separated by headers so
- * each is independently reachable while scrolling.
+ * specs-viewer): every Git-registered checkout is a section divider — never a
+ * selectable row — and its local active changes hang beneath it as the only
+ * entries that section owns. The launch checkout's canonical specs close the
+ * list under their own divider. Selection only ever lands on a change or a
+ * spec: the sections group, the children act.
  */
 type ListRow =
-  | { kind: "header"; label: string }
+  | { kind: "spacer" }
   | { kind: "worktree"; worktree: BoardWorktree }
+  | { kind: "header"; label: string }
   | { kind: "change"; change: SpecsChangeEntry }
   | { kind: "spec"; path: string }
+
+/** Rows the cursor may land on: sections and rules are dead structure. */
+type SelectableRow = Extract<ListRow, { kind: "change" }> | Extract<ListRow, { kind: "spec" }>
+function isSelectableRow(row: ListRow | undefined): row is SelectableRow {
+  return row?.kind === "change" || row?.kind === "spec"
+}
 
 /**
  * One dispatchable or inspectable Actions-menu entry. Availability comes from
@@ -160,10 +169,11 @@ export class SpecsBrowser {
       this.resolveResult = resolve
     })
     const mount = this.scene?.root ?? renderer.root
-    // Land on the first non-header row (the first worktree, or the first spec
-    // when there are no worktrees). A header is a dead row — enter/apply/
-    // iterate no-op on it — so the browser must never park the cursor there.
-    const firstSelectable = this.rows.findIndex((row) => row.kind !== "header")
+    // Land on the first selectable row (the first change, or the first spec
+    // when there are no changes). Sections and rules are dead rows —
+    // enter/apply/iterate no-op on them — so the browser must never park the
+    // cursor there.
+    const firstSelectable = this.rows.findIndex(isSelectableRow)
     this.selectedRow = firstSelectable >= 0 ? firstSelectable : 0
 
     const shell = new BoxRenderable(renderer, {
@@ -208,10 +218,7 @@ export class SpecsBrowser {
       id: "convoy-specs-list",
       height: "100%",
       flexGrow: 1,
-      borderColor: theme.borderDim,
       backgroundColor: theme.bg,
-      title: " browse ",
-      titleAlignment: "left",
       onMouseScroll: wheel,
     })
     list.text.onMouseScroll = wheel
@@ -220,20 +227,24 @@ export class SpecsBrowser {
       id: "convoy-specs-details",
       width: this.detailsWidth(),
       height: "100%",
-      borderColor: theme.borderDim,
       backgroundColor: theme.bg,
-      title: " details ",
-      titleAlignment: "left",
       onMouseScroll: wheel,
     })
     details.text.onMouseScroll = wheel
 
     const footer = this.panel({
       id: "convoy-specs-footer",
-      height: 3,
-      borderColor: theme.borderDim,
+      height: 1,
       backgroundColor: theme.bg,
     })
+
+    // Sections are dividers, not containers — the same rule the home screen
+    // lives by. The border must go through the runtime setter: opentui's
+    // constructor path funnels `border: false` through initializeBorder(),
+    // which forces it back on.
+    list.box.border = false
+    details.box.border = false
+    footer.box.border = false
 
     this.headerText = headerText
     this.headerBox = header
@@ -248,9 +259,9 @@ export class SpecsBrowser {
     this.paletteTargets.push(
       { box: shell, background: "bg" },
       { box: header, background: "bg" },
-      { box: list.box, background: "bg", border: "borderDim" },
-      { box: details.box, background: "bg", border: "borderDim" },
-      { box: footer.box, background: "bg", border: "borderDim" },
+      { box: list.box, background: "bg" },
+      { box: details.box, background: "bg" },
+      { box: footer.box, background: "bg" },
     )
 
     body.add(list.box)
@@ -317,7 +328,7 @@ export class SpecsBrowser {
     if (matchIndex >= 0) this.selectedRow = matchIndex
     if (this.resume.level !== "detail") return
     const row = rows[this.selectedRow]
-    if (!row || row.kind === "header" || row.kind === "worktree") return
+    if (!isSelectableRow(row)) return
     this.enterSelected()
   }
 
@@ -391,7 +402,7 @@ export class SpecsBrowser {
         break
       }
       case "x": {
-        const worktree = this.selectedWorktree() ?? (this.selectedChange() ? this.worktreeFor(this.selectedChange()!) : undefined)
+        const worktree = this.selectedChange() ? this.worktreeFor(this.selectedChange()!) : undefined
         if (worktree?.branch) {
           const change = this.selectedChange()
           const archiveSet = change && change.checkout === worktree.path ? change.id : "(none — whole branch only)"
@@ -524,10 +535,10 @@ export class SpecsBrowser {
 
   /** The worktree the menu acts on, at the current level. */
   private menuTarget(): BoardWorktree | undefined {
-    if (this.level === "root") return this.selectedWorktree()
-    const subject = this.subject
-    if (subject?.kind === "change") return this.worktreeFor(subject.change)
-    return undefined
+    // Sections are not selectable, so the menu always targets the selected
+    // change's containing worktree — at the root and in the reading pane.
+    const change = this.level === "root" ? this.selectedChange() : this.subject?.kind === "change" ? this.subject.change : undefined
+    return change ? this.worktreeFor(change) : undefined
   }
 
   /** The menu entries: the worktree's contextual actions plus refresh. */
@@ -726,7 +737,7 @@ export class SpecsBrowser {
   }
 
   private moveSelection(delta: number) {
-    const selectable = this.rows.map((row, index) => ({ row, index })).filter(({ row }) => row.kind !== "header")
+    const selectable = this.rows.map((row, index) => ({ row, index })).filter(({ row }) => isSelectableRow(row))
     if (selectable.length === 0) return
     const position = selectable.findIndex(({ index }) => index === this.selectedRow)
     // A jump larger than the list is a home/end request: land on the first
@@ -754,11 +765,6 @@ export class SpecsBrowser {
   private selectedChange(): SpecsChangeEntry | undefined {
     const row = this.rows[this.selectedRow]
     return row?.kind === "change" ? row.change : undefined
-  }
-
-  private selectedWorktree(): BoardWorktree | undefined {
-    const row = this.rows[this.selectedRow]
-    return row?.kind === "worktree" ? row.worktree : undefined
   }
 
   /**
@@ -791,15 +797,14 @@ export class SpecsBrowser {
     this.docs.clear()
     const rows = this.rows
     const matchIndex = rows.findIndex((row) => {
-      if (!identity || row.kind === "header") return false
+      if (!identity || !isSelectableRow(row)) return false
       if (row.kind === "change" && identity.kind === "change") return row.change.id === identity.changeId && row.change.checkout === identity.checkout
-      if (row.kind === "worktree" && identity.kind === "worktree") return row.worktree.path === identity.path
       if (row.kind === "spec" && identity.kind === "spec") return row.path === identity.path
       return false
     })
     if (matchIndex >= 0) this.selectedRow = matchIndex
     else {
-      const firstSelectable = rows.findIndex((row) => row.kind !== "header")
+      const firstSelectable = rows.findIndex(isSelectableRow)
       if (firstSelectable >= 0) this.selectedRow = Math.min(firstSelectable, this.selectedRow)
     }
     this.render()
@@ -813,12 +818,10 @@ export class SpecsBrowser {
   /** Enters a change (its reading pane) or a spec (its rendered content). */
   private enterSelected() {
     const row = this.rows[this.selectedRow]
-    if (!row || row.kind === "header") return
+    if (!isSelectableRow(row)) return
     if (row.kind === "change") {
       this.subject = { kind: "change", change: row.change }
       this.groups = groupChangeArtifacts(row.change)
-    } else if (row.kind === "worktree") {
-      return
     } else {
       this.subject = { kind: "spec", path: row.path }
       this.groups = [{ label: "Spec", delta: false, entries: [{ file: row.path }] }]
@@ -867,18 +870,27 @@ export class SpecsBrowser {
 
   private get rows(): ListRow[] {
     const rows: ListRow[] = []
-    // Worktrees lead the board (delta specs-viewer: the root presents
-    // Worktrees from Git inventory); each checkout's local active changes are
-    // its own children, never a global deduplicated list.
-    rows.push({ kind: "header", label: "Worktrees" })
+    // Worktrees lead the board (delta specs-viewer): each checkout renders as
+    // a section divider and its local active changes hang beneath it — never
+    // a global deduplicated list. The same change id landing in two checkouts
+    // is two entries (one per section); an exact duplicate copy is noise and
+    // is collapsed.
+    const seen = new Set<string>()
     for (const worktree of this.view.board.worktrees) {
       rows.push({ kind: "worktree", worktree })
+      let children = 0
       for (const change of this.view.changes) {
-        if (change.checkout === worktree.path) rows.push({ kind: "change", change })
+        if (change.checkout !== worktree.path) continue
+        const identity = `${change.id}\n${change.checkout}`
+        if (seen.has(identity)) continue
+        seen.add(identity)
+        rows.push({ kind: "change", change })
+        children++
       }
+      if (children === 0) rows.push({ kind: "spacer" })
     }
     if (this.view.specs.length > 0) {
-      rows.push({ kind: "header", label: "Canonical Specs" })
+      rows.push({ kind: "spacer" }, { kind: "header", label: "specs" })
       for (const path of this.view.specs) rows.push({ kind: "spec", path })
     }
     return rows
@@ -890,12 +902,12 @@ export class SpecsBrowser {
   }
 
   private detailsWidth() {
-    return Math.max(40, Math.min(62, this.renderer.width - 44))
+    return Math.max(34, Math.min(48, this.renderer.width - 64))
   }
 
   private bodyHeight() {
-    // Header (1) + footer (3).
-    return Math.max(8, this.renderer.height - 4)
+    // Header (1) + footer (1).
+    return Math.max(8, this.renderer.height - 2)
   }
 
   private compactListHeight(bodyHeight: number) {
@@ -903,14 +915,15 @@ export class SpecsBrowser {
   }
 
   private listHeight() {
-    // Header (1) + footer (3) + list panel borders (2); compact stacks instead.
-    if (this.canonicalSelectedAtRoot()) return Math.max(3, this.bodyHeight() - 2)
-    if (this.renderer.width <= compactSpecsMaxWidth) return Math.max(3, this.compactListHeight(this.bodyHeight()) - 2)
-    return Math.max(3, this.renderer.height - 6)
+    // Borderless panels: the list's inner rows are its box height. Compact
+    // screens stack instead.
+    if (this.canonicalSelectedAtRoot()) return Math.max(3, this.bodyHeight())
+    if (this.renderer.width <= compactSpecsMaxWidth) return Math.max(3, this.compactListHeight(this.bodyHeight()))
+    return Math.max(3, this.renderer.height - 2)
   }
 
   private detailsHeight() {
-    return Math.max(4, this.bodyHeight() - 2)
+    return Math.max(4, this.bodyHeight())
   }
 
   // Markdown re-wraps on resize but must not re-parse every frame.
@@ -975,10 +988,8 @@ export class SpecsBrowser {
     }
 
     this.headerText.content = this.headerContent(innerWidth)
-    this.listBox.title = " browse "
     this.listText.content = detail ? "" : this.listContent(compact || fullRootList ? innerWidth : listWidth)
     this.detailsText.content = this.detailsContent((compact && !detail ? innerWidth : detail ? innerWidth : detailsWidth) - 4)
-    this.detailsBox.title = this.detailsTitle()
     this.footerText.content = this.footerContent(innerWidth)
     // The close confirm modal overlays everything while it is armed.
     this.overlay.visible = Boolean(this.pendingClose)
@@ -986,24 +997,11 @@ export class SpecsBrowser {
     this.renderer.requestRender()
   }
 
-  /** The header's only content line: home's `project` label plus the normalized target directory. */
+  /** The header's only content line: the screen's name and its scope, no path — the session's directory is implied. */
   private headerContent(width: number) {
-    const pathWidth = Math.max(1, width - 9)
-    return new StyledText([fg(theme.faint)("project  "), fg(theme.text)(shortPath(this.view.targetDir, pathWidth))])
-  }
-
-  /** The details panel's border title doubles as the reader's title bar. */
-  private detailsTitle(): string {
-    if (this.level !== "detail") return " details "
-    const group = this.groups[this.selectedGroup]
-    if (this.fullscreen) {
-      const subject = this.subject
-      const name = subject?.kind === "change" ? subject.change.id : subject ? specDisplayPath(subject.path) : ""
-      const status = this.copyStatus ? ` · ${copyStatusLabel(this.copyStatus)}` : ""
-      const position = this.readerPosition ? ` · ${this.readerPosition}` : ""
-      return ` ${name} · ${group?.label.toLowerCase() ?? "read"}${status} · c copy · v/esc close${position} `
-    }
-    return group ? ` ${group.label.toLowerCase()} ` : " details "
+    const changes = this.view.changes.length
+    const right = `${this.view.board.worktrees.length} worktree${this.view.board.worktrees.length === 1 ? "" : "s"} · ${changes} change${changes === 1 ? "" : "s"}`
+    return padBetween([bold(fg(theme.accent)("specs"))], [fg(theme.dim)(right)], width)
   }
 
   private listContent(width: number) {
@@ -1022,38 +1020,76 @@ export class SpecsBrowser {
     )
   }
 
+  /**
+   * One list row, speaking home's vocabulary: worktree sections render as
+   * divider rules with their facts riding inside the rule (gray, quiet), and
+   * the children — changes and specs — are the only selectable rows. The
+   * selection is a full-width accent block hanging from an inverted marker in
+   * the section's state color; nothing sits between a section and its
+   * children but the rule itself.
+   */
   private rowLine(row: ListRow, selected: boolean, width: number): StyledText {
-    if (row.kind === "header") {
-      return new StyledText([bold(fg(theme.accent)(` ${truncate(row.label.toUpperCase(), width)}`))])
-    }
+    if (row.kind === "spacer") return new StyledText([raw("")])
+    if (row.kind === "header") return this.dividerLine(row.label, width)
     if (row.kind === "worktree") {
       const worktree = row.worktree
-      const left: TextChunk[] = [selected ? fg(theme.accent)("▸ ") : raw("  "), fg(worktreeDotColor(worktree))("◇"), raw(" ")]
       const name = worktreeDisplayName(worktree)
-      const title = truncate(name, Math.max(12, width - 18))
-      left.push(selected ? bold(fg(theme.text)(title)) : fg(theme.text)(title))
-      const rest: string[] = []
-      rest.push(worktree.detached ? "detached" : (worktree.branch ?? "(no branch)"))
-      if (worktree.changes.length > 0) rest.push(`${worktree.changes.length} change${worktree.changes.length === 1 ? "" : "s"}`)
-      if (worktree.dirt?.kind === "known" && worktree.dirt.value.dirty) rest.push(`${worktree.dirt.value.fileCount} dirty`)
-      if (worktree.activity?.kind === "known" && worktree.activity.value.total > 0) rest.push(`${worktree.activity.value.total} live`)
-      if (!worktree.accessible) rest.push("inaccessible")
-      return padBetween(left, [fg(theme.dim)(` · ${rest.join(" · ")}`)], width)
+      const branchLabel = worktree.detached ? "detached" : (worktree.branch ?? "(no branch)")
+      const facts: string[] = []
+      // The branch is the rule's second fact — unless it merely restates the
+      // checkout's name (`feat-add-foo` vs `feat/add-foo`), which reads as
+      // stutter.
+      if (name.replace(/[_/]/g, "-") !== branchLabel.replace(/[_/]/g, "-")) facts.push(branchLabel)
+      const changes = this.view.changes.filter((entry) => entry.checkout === worktree.path)
+      facts.push(changes.length > 0 ? `${changes.length} change${changes.length === 1 ? "" : "s"}` : "no changes")
+      if (worktree.dirt?.kind === "known" && worktree.dirt.value.dirty) facts.push(`${worktree.dirt.value.fileCount} dirty`)
+      if (worktree.activity?.kind === "known" && worktree.activity.value.total > 0) facts.push(`${worktree.activity.value.total} live`)
+      if (!worktree.accessible) facts.push("inaccessible")
+      return this.dividerLine(`${name} · ${facts.join(" · ")}`, width)
     }
     if (row.kind === "change") {
       const change = row.change
-      const left: TextChunk[] = [selected ? fg(theme.accent)("▸ ") : raw("  "), fg(theme.accent)("◆"), raw(" ")]
+      // The marker rides the containing worktree's state color — the section
+      // color its children hang from. Selected, it inverts over the accent
+      // fill, exactly like a home row.
+      const worktree = this.worktreeFor(change)
+      const markerColor = worktree ? worktreeDotColor(worktree) : theme.accent
+      const marker = selected ? bg(markerColor)(fg(theme.chipText)("◆")) : fg(markerColor)("◆")
       const heading = change.title === change.id ? change.id : `${change.id} — ${change.title}`
-      // Title keeps the left; padBetween clips the state column so the name
-      // is the thing the eye lands on, matching the runs list.
       const title = truncate(heading, Math.max(12, width - 18))
-      left.push(selected ? bold(fg(theme.text)(title)) : fg(theme.text)(title))
-      return padBetween(left, [fg(theme.dim)(artifactCounts(change))], width)
+      const counts = artifactCounts(change)
+      const countText = counts === "—" ? "" : `  ${truncate(counts, Math.max(0, width - displayWidth(heading) - 8))}`
+      if (selected) {
+        return this.highlighted([raw("  "), marker, raw(" "), bold(fg(theme.chipText)(title)), fg(theme.chipText)(countText)], width)
+      }
+      return padBetween([raw("  "), marker, raw(" "), fg(theme.text)(title)], [fg(theme.dim)(countText)], width)
     }
-    const left: TextChunk[] = [selected ? fg(theme.accent)("▸ ") : raw("  "), fg(theme.teal)("◆"), raw(" ")]
-    const name = truncate(specDisplayPath(row.path), Math.max(12, width - 4))
-    left.push(selected ? bold(fg(theme.text)(name)) : fg(theme.text)(name))
-    return padBetween(left, [], width)
+    const marker = selected ? bg(theme.teal)(fg(theme.chipText)("◆")) : fg(theme.teal)("◆")
+    const name = truncate(specDisplayPath(row.path), Math.max(12, width - 8))
+    if (selected) {
+      return this.highlighted([raw("  "), marker, raw(" "), bold(fg(theme.chipText)(name))], width)
+    }
+    return new StyledText([raw("  "), marker, raw(" "), fg(theme.text)(name)])
+  }
+
+  /** A section divider: one dim rule with the label riding inside it. */
+  private dividerLine(label: string, width: number): StyledText {
+    // The label never pushes the rule past the pane's edge: it truncates
+    // first, the rule keeps at least a stub so the divider still reads.
+    const prefix = `── ${truncate(label, Math.max(4, width - 8))} `
+    return new StyledText([fg(theme.dim)(prefix + "─".repeat(Math.max(0, width - prefix.length)))])
+  }
+
+  /**
+   * The selected row's full-width accent block: every chunk rides the fill
+   * unless it already carries its own background (the inverted marker cell),
+   * and the filler reaches the pane's right edge.
+   */
+  private highlighted(chunks: TextChunk[], width: number): StyledText {
+    const used = chunks.reduce((total, chunk) => total + displayWidth(typeof chunk === "string" ? chunk : (chunk as { text: string }).text), 0)
+    const filler = bg(theme.accent)(fg(theme.chipText)(" ".repeat(Math.max(0, width - used))))
+    const hasBg = (chunk: TextChunk) => typeof chunk !== "string" && (chunk as { bg?: unknown }).bg !== undefined
+    return new StyledText(chunks.map((chunk) => (hasBg(chunk) ? chunk : bg(theme.accent)(chunk))).concat(filler))
   }
 
   /**
@@ -1068,60 +1104,19 @@ export class SpecsBrowser {
     if (this.level !== "detail") {
       this.readerPosition = ""
       const row = this.rows[this.selectedRow]
-      if (!row || row.kind === "header") return plain("")
+      if (!row || !isSelectableRow(row)) return plain("")
       const lines: StyledText[] = []
-      if (row.kind === "worktree") {
-        const worktree = row.worktree
-        const add = (label: string, value: string, color = theme.text) => {
-          lines.push(new StyledText([fg(theme.faint)(`${label}: `), fg(color)(truncate(value, Math.max(8, width - label.length - 2)))]))
-        }
-        lines.push(t`${bold(fg(theme.text)(truncate(worktreeDisplayName(worktree), width)))}`)
-        lines.push(t`${fg(theme.dim)(shortPath(worktree.path, width))}`)
-        lines.push(plain(""))
-        add("branch", worktree.detached ? "detached HEAD" : (worktree.branch ?? "(no branch)"))
-        if (worktree.dirt) {
-          add("dirt", worktree.dirt.kind === "known" ? (worktree.dirt.value.dirty ? `${worktree.dirt.value.fileCount} file(s) uncommitted` : "clean") : `unknown (${worktree.dirt.reason})`, worktree.dirt.kind === "known" && worktree.dirt.value.dirty ? theme.yellow : theme.text)
-        }
-        if (worktree.baseDivergence) {
-          add(
-            "base",
-            worktree.baseDivergence.kind === "known"
-              ? `${worktree.baseDivergence.value.ahead} ahead / ${worktree.baseDivergence.value.behind} behind ${this.view.baseBranch ?? "base"}${worktree.baseDivergence.value.baseContainedInSource ? " (base contained)" : ""}`
-              : `unknown (${worktree.baseDivergence.reason})`,
-          )
-        }
-        if (worktree.upstream) {
-          add(
-            "upstream",
-            worktree.upstream.kind === "known"
-              ? worktree.upstream.value.upstream
-                ? `${worktree.upstream.value.ahead ?? 0} ahead / ${worktree.upstream.value.behind ?? 0} behind ${worktree.upstream.value.upstream}`
-                : "no upstream configured"
-              : `unknown (${worktree.upstream.reason})`,
-          )
-        }
-        if (worktree.activity) {
-          add("activity", worktree.activity.kind === "known" ? `${worktree.activity.value.total} live run(s)` : `unknown (${worktree.activity.reason})`)
-        }
-        if (worktree.changesUnknown) add("changes", `unknown (${worktree.changesUnknown})`, theme.yellow)
-        else add("changes", `${worktree.changes.length} active`)
-        if (worktree.archiveCount) add("archives", `${worktree.archiveCount} (browsable on demand)`)
-        if (worktree.specCount) add("specs", `${worktree.specCount}`)
-        if (worktree.locked) add("lock", worktree.locked.reason ? `locked: ${worktree.locked.reason}` : "locked", theme.yellow)
-        if (worktree.prunable) add("prunable", worktree.prunable.reason ?? "stale registration", theme.yellow)
-        if (!worktree.accessible) add("state", "inaccessible — the registered path is missing (repair or `git worktree prune`)", theme.yellow)
-        return joinLines(lines)
-      }
+      // The at-a-glance pane speaks the fold's rhythm: a divider names the
+      // subject, faint labels carry the facts, and the artifact tree descends
+      // with the same faded connectors the home fold uses.
       if (row.kind === "change") {
         const change = row.change
-        lines.push(t`${bold(fg(theme.text)(truncate(change.title, width)))}`)
-        lines.push(t`${fg(theme.dim)(`openspec/changes/${change.id}`)}`)
-        lines.push(plain(""))
-        lines.push(new StyledText([fg(theme.faint)("checkout: "), fg(theme.dim)(truncate(shortPath(change.checkout, Math.max(12, width - 10)), Math.max(8, width - 12)))]))
-        lines.push(plain(""))
-        lines.push(t`${fg(theme.faint)("─".repeat(Math.max(1, width)))}`)
+        lines.push(this.dividerLine(change.id, width))
+        if (change.title !== change.id) lines.push(new StyledText([fg(theme.text)(truncate(change.title, width))]))
+        lines.push(new StyledText([fg(theme.faint)("checkout ".padEnd(10, " ")), fg(theme.dim)(truncate(shortPath(change.checkout, Math.max(12, width - 10)), Math.max(8, width - 11)))]))
+        lines.push(new StyledText([raw("")]))
         if (change.artifacts.length === 0) {
-          lines.push(t`${fg(theme.dim)("no markdown artifacts found for this change")}`)
+          lines.push(new StyledText([fg(theme.dim)("no markdown artifacts found for this change")]))
         } else {
           for (const group of groupChangeArtifacts(change)) {
             lines.push(new StyledText([fg(theme.text)(group.label)]))
@@ -1133,8 +1128,8 @@ export class SpecsBrowser {
         return joinLines(lines)
       }
       const name = specDisplayPath(row.path)
-      lines.push(t`${bold(fg(theme.text)(truncate(name, width)))}`)
-      lines.push(t`${fg(theme.dim)(shortPath(row.path, width))}`)
+      lines.push(this.dividerLine(name, width))
+      lines.push(new StyledText([fg(theme.dim)(shortPath(row.path, width))]))
       return joinLines(lines)
     }
 
@@ -1144,14 +1139,37 @@ export class SpecsBrowser {
       return plain("")
     }
     const subject = this.subject
-    const lines: StyledText[] = []
-
-    // Title row identifying the subject.
     const name = subject?.kind === "change" ? (subject.change.title === subject.change.id ? subject.change.id : `${subject.change.id} — ${subject.change.title}`) : subject ? specDisplayPath(subject.path) : ""
-    lines.push(new StyledText([bold(fg(theme.accent)(` ${truncate(name, width)}`))]))
+    const loadingDivider = (): StyledText[] => {
+      // The fullscreen reader folds its title bar into the divider rule:
+      // group, copy status, and scroll position ride beside the name.
+      if (this.fullscreen) {
+        const status = this.copyStatus ? ` · ${copyStatusLabel(this.copyStatus)}` : ""
+        return [this.dividerLine(`${name} · ${group.label.toLowerCase()} · c copy · v/esc close${status}${this.readerPosition ? ` · ${this.readerPosition}` : ""}`, width)]
+      }
+      return [this.dividerLine(name, width)]
+    }
 
-    // The tab strip: content rows, never a new box; hidden for single groups
-    // and inside the fullscreen reader (which has no tab chrome).
+    // Sources that are still loading stay out of the pane so a pending read
+    // doesn't flash the error placeholder; failures are written by loadBody.
+    const source = specGroupSource(group, (file) => this.bodies.get(file) ?? "(loading…)")
+    const known = group.entries.every((entry) => this.bodies.has(entry.file))
+    const lines: StyledText[] = []
+    if (!known && source.includes("(loading…)")) {
+      this.readerPosition = this.fullscreen ? "all" : ""
+      const blank: StyledText[] = []
+      while (blank.length < this.detailsHeight() - 1) blank.push(plain(""))
+      return joinLines(loadingDivider().concat(blank).slice(0, this.detailsHeight()))
+    }
+    const rendered = this.docFor(source, Math.max(20, width))
+    const overhead = 1 + (this.groups.length > 1 && !this.fullscreen ? 2 : 0)
+    const contentHeight = Math.max(1, this.detailsHeight() - overhead)
+    const maxScroll = Math.max(0, rendered.length - contentHeight)
+    this.detailScroll = Math.max(0, Math.min(this.detailScroll, maxScroll))
+    this.readerPosition = this.fullscreen ? readerScrollPosition(this.detailScroll, maxScroll) : ""
+    // The divider (and the tab strip) are built with the settled position so
+    // the reader's title bar never runs a frame behind the content.
+    lines.push(...loadingDivider())
     if (this.groups.length > 1 && !this.fullscreen) {
       const tabs: TextChunk[] = [raw(" ")]
       this.groups.forEach((candidate, index) => {
@@ -1162,22 +1180,6 @@ export class SpecsBrowser {
       lines.push(new StyledText(tabs))
       lines.push(plain(""))
     }
-
-    // Sources that are still loading stay out of the pane so a pending read
-    // doesn't flash the error placeholder; failures are written by loadBody.
-    const source = specGroupSource(group, (file) => this.bodies.get(file) ?? "(loading…)")
-    const known = group.entries.every((entry) => this.bodies.has(entry.file))
-    if (!known && source.includes("(loading…)")) {
-      this.readerPosition = this.fullscreen ? "all" : ""
-      const blank: StyledText[] = []
-      while (blank.length < this.detailsHeight()) blank.push(plain(""))
-      return joinLines(lines.concat(blank).slice(0, this.detailsHeight()))
-    }
-    const rendered = this.docFor(source, Math.max(20, width))
-    const contentHeight = Math.max(1, this.detailsHeight() - lines.length)
-    const maxScroll = Math.max(0, rendered.length - contentHeight)
-    this.detailScroll = Math.max(0, Math.min(this.detailScroll, maxScroll))
-    this.readerPosition = this.fullscreen ? readerScrollPosition(this.detailScroll, maxScroll) : ""
     const body = rendered.slice(this.detailScroll, this.detailScroll + contentHeight)
     lines.push(...body)
     while (lines.length < this.detailsHeight()) lines.push(plain(""))
@@ -1254,9 +1256,9 @@ export class SpecsBrowser {
     }
 
     const selected = this.rows[this.selectedRow]
-    const canRead = selected?.kind === "change" || selected?.kind === "spec"
+    const canRead = isSelectableRow(selected)
     const change = this.selectedChange()
-    const worktree = change ? this.worktreeFor(change) : this.selectedWorktree()
+    const worktree = change ? this.worktreeFor(change) : undefined
     const hints: Hint[] = [
       actionsHint,
       ...(canRead ? ([{ keys: "enter", label: "read", priority: 2 }] as Hint[]) : []),
@@ -1271,8 +1273,8 @@ export class SpecsBrowser {
       { keys: "r", label: "efresh", priority: 5, style: "glued" },
       { keys: "q", label: this.scene ? "back" : "uit", priority: 1, style: this.scene ? undefined : "glued" },
     ]
-    const selectable = this.rows.filter((row) => row.kind !== "header").length
-    const ordinal = this.rows.slice(0, this.selectedRow + 1).filter((row) => row.kind !== "header").length
+    const selectable = this.rows.filter(isSelectableRow).length
+    const ordinal = this.rows.slice(0, this.selectedRow + 1).filter(isSelectableRow).length
     const right: TextChunk[] = [fg(theme.faint)(`${Math.max(1, ordinal)}/${selectable}`)]
     return hintsRow(hints, [right], width, { style: "spaced", overflow: moreHintsMarker })
   }

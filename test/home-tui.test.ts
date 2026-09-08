@@ -169,17 +169,32 @@ function chipTextFg(): { r: number; g: number; b: number } {
   return { r: parseInt(hex.slice(0, 2), 16) / 255, g: parseInt(hex.slice(2, 4), 16) / 255, b: parseInt(hex.slice(4, 6), 16) / 255 }
 }
 
+/** A palette hex as captured float channels, for span color comparisons. */
+function paletteColor(hex: string): { r: number; g: number; b: number } {
+  const h = hex.replace("#", "")
+  return { r: parseInt(h.slice(0, 2), 16) / 255, g: parseInt(h.slice(2, 4), 16) / 255, b: parseInt(h.slice(4, 6), 16) / 255 }
+}
+
+function accentBg(): { r: number; g: number; b: number } {
+  return paletteColor(theme.accent)
+}
+
+function navyBg(): { r: number; g: number; b: number } {
+  return paletteColor(theme.navy)
+}
+
 describe("worktrees-first home (capability home-launcher delta)", () => {
-  test("the masthead carries identity, the complete version, and the project above the worktree list", async () => {
+  test("the masthead carries identity and the complete version above the worktree list", async () => {
     const session = await openHome()
     try {
       const frame = frameOf(session)
       expect(frame).toContain("████")
-      // The wide masthead right-aligns the version and the project path. The
-      // version's fallback chain is environment-dependent (bun run scripts see
+      // The wide masthead right-aligns the version. The version's fallback
+      // chain is environment-dependent (bun run scripts see
       // npm_package_version), so assert the same value the masthead renders.
       expect(frame).toContain(versionDetails())
-      expect(frame).toContain("/work/acme")
+      // No project path in the chrome: the session's directory is implied.
+      expect(frame).not.toContain("/work/acme")
       // Panels: the worktree list leads, New worktree is explicit, the
       // destinations strip stays separate, and the selected row's details
       // ride inline beneath it — there is no details panel of its own.
@@ -448,6 +463,33 @@ describe("selection surface", () => {
       await closeHome(session)
     }
   })
+
+  test("the detail's selected action rides the accent fill behind an inverted navy marker", async () => {
+    const session = await openHome()
+    try {
+      session.press("down") // New leads
+      await session.renderOnce()
+      session.press("down") // the worktree row
+      await session.renderOnce()
+      session.press("return") // open its detail
+      await session.renderOnce()
+      // The detail speaks the list's row language: the selected action is a
+      // full-width accent block hanging from a navy cell — actions are
+      // navy, like New — while idle actions stay transparent.
+      const frame = session.captureSpans()
+      const actionRow = frame.lines.find((line) => line.spans.some((span) => span.text.includes("Open conversation")))!
+      expect(actionRow).toBeDefined()
+      const marker = actionRow.spans.find((span) => span.text.includes("▸"))!
+      const label = actionRow.spans.find((span) => span.text.includes("Open conversation"))!
+      expect(sameColor(marker.bg, navyBg())).toBe(true)
+      expect(sameColor(marker.fg, chipTextFg())).toBe(true)
+      expect(sameColor(label.bg, accentBg())).toBe(true)
+      const idle = frame.lines.find((line) => line.spans.some((span) => span.text.includes("Fetch remote")))!
+      expect(idle.spans.every((span) => span.bg.a === 0)).toBe(true)
+    } finally {
+      await closeHome(session)
+    }
+  })
 })
 
 describe("new worktree form (auto by default, manual on tab)", () => {
@@ -456,14 +498,38 @@ describe("new worktree form (auto by default, manual on tab)", () => {
     try {
       session.press("n")
       await session.renderOnce()
-      expect(frameOf(session)).toContain("New worktree")
-      // Auto is the default mode.
-      expect(frameOf(session)).toContain("auto")
+      // The section divider names the form and carries the mode.
+      expect(frameOf(session)).toContain("new worktree · auto")
       expect(frameOf(session)).toContain("describe")
+      // The next move reads as a button: an accent keycap naming it.
+      expect(frameOf(session)).toContain("↵ create")
       session.press("escape")
       await session.renderOnce()
       expect(frameOf(session)).toContain("worktrees")
       expect(session.instance.result).toBeInstanceOf(Promise)
+    } finally {
+      await closeHome(session)
+    }
+  })
+
+  test("the description caret actually blinks while the form waits", async () => {
+    const session = await openHome()
+    try {
+      session.press("n")
+      await session.renderOnce()
+      // The input line itself (the masthead's wordmark is blocks too).
+      const inputLine = (frame: string) => frame.split("\n").find((line) => line.includes("describe what you are about to work on")) ?? ""
+      // The caret's on phase.
+      expect(inputLine(frameOf(session))).toContain("█")
+      // Past one blink period the caret must be in its off phase: the tick
+      // recomputes the pane's content, it does not redraw a frozen frame.
+      await Bun.sleep(600)
+      await session.renderOnce()
+      expect(inputLine(frameOf(session))).not.toContain("█")
+      // And the blink keeps cycling.
+      await Bun.sleep(600)
+      await session.renderOnce()
+      expect(inputLine(frameOf(session))).toContain("█")
     } finally {
       await closeHome(session)
     }
@@ -486,7 +552,7 @@ describe("new worktree form (auto by default, manual on tab)", () => {
       expect(frameOf(session)).toContain("name")
       expect(frameOf(session)).toContain("feat/improve-review-navigation-model")
       expect(frameOf(session)).toContain("base")
-      expect(frameOf(session)).toContain("creates this worktree")
+      expect(frameOf(session)).toContain("↵ confirm")
       expect(session.instance.result).toBeInstanceOf(Promise)
       session.press("return") // accept
       const resolution = (await session.instance.result) as Extract<HomeResolution, { type: "new-work" }>
@@ -499,6 +565,31 @@ describe("new worktree form (auto by default, manual on tab)", () => {
     } catch {
       await closeHome(session)
       throw new Error("test failed")
+    }
+  })
+
+  test("the auto proposal rides the navy rail with the fold's label rhythm", async () => {
+    const session = await openHome({ proposeBranchName: async () => ({ branch: "feat/model-name" }) })
+    try {
+      session.press("n")
+      await session.renderOnce()
+      for (const char of "Improve review navigation") session.press(char)
+      session.press("return")
+      await session.renderOnce()
+      await Bun.sleep(30)
+      await session.renderOnce()
+      // The reviewed draft hangs from the navy rail — the block language the
+      // New entry opens with — instead of a frame.
+      const frame = session.captureSpans()
+      const branchRow = frame.lines.find((line) => line.spans.some((span) => span.text.includes("feat/model-name")))!
+      expect(branchRow).toBeDefined()
+      const rail = branchRow.spans.find((span) => span.text.trim() === "" && span.bg.a > 0)
+      expect(rail).toBeDefined()
+      expect(sameColor(rail!.bg, navyBg())).toBe(true)
+      const nameRow = frame.lines.find((line) => line.spans.some((span) => span.text.trim() === "name"))!
+      expect(nameRow.spans.some((span) => span.bg.a > 0 && sameColor(span.bg, navyBg()))).toBe(true)
+    } finally {
+      await closeHome(session)
     }
   })
 
@@ -559,7 +650,7 @@ describe("new worktree form (auto by default, manual on tab)", () => {
       await session.renderOnce()
       await Bun.sleep(30)
       await session.renderOnce()
-      expect(frameOf(session)).toContain("creates this worktree")
+      expect(frameOf(session)).toContain("↵ confirm")
       session.press("escape") // back to the description, form still open
       await session.renderOnce()
       expect(frameOf(session)).toContain("Improve review navigation")

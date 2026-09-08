@@ -100,10 +100,8 @@ async function openReader(options: { clipboard?: ReturnType<typeof fakeClipboard
       testRenderer.renderer.keyInput.emit("keypress", keyEvent(key, opts))
     },
   }
-  // Move to the change child row (the first selectable row is its containing
-  // worktree), enter the change's detail level, then open the reader.
-  session.press("j")
-  await session.renderOnce()
+  // The first selectable row is the first change (sections are dead rows):
+  // enter its detail level, then open the reader.
   session.press("return")
   await session.renderOnce()
   await Bun.sleep(30)
@@ -249,14 +247,14 @@ describe("tabbed detail level", () => {
 })
 
 describe("minimal chrome", () => {
-  test("the header's only content line is the project label plus the normalized target directory", async () => {
+  test("the header's only content line is the screen's name and its scope, no path", async () => {
     const session = await openReader({ view: sampleView() })
-    session.press("v")
+    session.press("v") // close the fullscreen reader: the chrome returns
     await session.renderOnce()
     const frame = session.captureCharFrame()
-    expect(frame).toContain(`project  ${root}`)
-    expect(frame).not.toContain("1 change")
-    expect(frame).not.toContain("0 specs")
+    expect(frame).toContain("specs")
+    expect(frame).toContain("1 worktree · 1 change")
+    expect(frame).not.toContain("project")
     await closeSession(session)
   })
 

@@ -102,7 +102,7 @@ async function selectChangeRow(session: Awaited<ReturnType<typeof openBrowser>>)
   await session.renderOnce()
 }
 
-test("! opens the Actions menu on a worktree row and Enter opens the close confirmation", async () => {
+test("! opens the Actions menu on the selected change and Enter opens the close confirmation", async () => {
   const session = await openBrowser(viewWith(worktree()))
 
   session.press("!")
@@ -122,7 +122,7 @@ test("! opens the Actions menu on a worktree row and Enter opens the close confi
 
   // Only the explicit confirm emits the reviewed resolution.
   session.press("y")
-  await expect(session.instance.result).resolves.toEqual({ type: "close-change", changeID: "", worktreeDir: root, branch: "feat/add-widget" })
+  await expect(session.instance.result).resolves.toEqual({ type: "close-change", changeID: "add-widget", worktreeDir: root, branch: "feat/add-widget" })
 })
 
 test("x on a change row opens the close confirmation with that archive selection", async () => {
@@ -194,7 +194,7 @@ test("the pinned ! actions hint survives footer truncation in a narrow terminal"
   await session.renderOnce()
   expect(session.captureCharFrame()).toContain("Close this worktree?")
   session.press("y")
-  await expect(session.instance.result).resolves.toEqual({ type: "close-change", changeID: "", worktreeDir: root, branch: "feat/add-widget" })
+  await expect(session.instance.result).resolves.toEqual({ type: "close-change", changeID: "add-widget", worktreeDir: root, branch: "feat/add-widget" })
 })
 
 test("the fullscreen reader keeps its copy keys and never opens the menu", async () => {

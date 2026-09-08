@@ -1,4 +1,4 @@
-import { bg, BoxRenderable, StyledText, TextRenderable, bold, createCliRenderer, fg } from "@opentui/core"
+import { bg, BoxRenderable, decodePasteBytes, StyledText, stripAnsiSequences, TextRenderable, bold, createCliRenderer, fg } from "@opentui/core"
 
 import { detectBaseRef } from "./git"
 import { worktreeDotColor } from "./specs-browser"
@@ -12,6 +12,7 @@ import {
   raw,
   setTheme,
   shortPath,
+  spinnerFrame,
   terminalBackgroundHex,
   theme,
   truncate,
@@ -22,7 +23,7 @@ import { homeRendererConfig, sceneForRoute, type TuiRoute, type TuiScene } from 
 
 import { observeWorktreePr, type BoardWorktree } from "./control-board"
 
-import type { BoxOptions, CliRenderer, KeyEvent, TextChunk } from "@opentui/core"
+import type { BoxOptions, CliRenderer, KeyEvent, PasteEvent, TextChunk } from "@opentui/core"
 import type { Hint, PaletteColor } from "./tui-theme"
 import type { PrObservation } from "./pr-observations"
 
@@ -352,11 +353,12 @@ export class HomeLauncher {
       id: "convoy-home-preview",
       width: "100%",
       height: "100%",
-      borderColor: theme.borderDim,
       backgroundColor: theme.bg,
-      title: " details ",
-      titleAlignment: "left",
     })
+    // The detail and the form float on the body like every section: divider
+    // rules carry the chrome, no bordered panel wraps them. The border must
+    // go through the runtime setter (see the list panel above).
+    preview.box.border = false
 
     const hintsBox = new BoxRenderable(renderer, {
       id: "convoy-home-hints",
@@ -385,7 +387,7 @@ export class HomeLauncher {
       { box: bodyBox, background: "bg" },
       { box: list.box, background: "bg" },
       { box: destinations.box, background: "bg" },
-      { box: preview.box, background: "bg", border: "borderDim" },
+      { box: preview.box, background: "bg" },
       { box: hintsBox, background: "bg" },
     )
 
@@ -398,6 +400,7 @@ export class HomeLauncher {
     mount.add(shell)
 
     renderer.keyInput.on("keypress", this.handleKeyPress)
+    renderer.keyInput.on("paste", this.handlePaste)
     renderer.on("theme_mode", this.handleThemeMode)
     renderer.on("resize", this.handleResize)
     // The opening selection lands immediately: its PR evidence starts now,
@@ -970,14 +973,54 @@ export class HomeLauncher {
   /**
    * The form caret blinks so the input reads writable. One timer drives it
    * while a form is open; the guard makes the tick a no-op everywhere else,
-   * and `finish` clears it.
+   * and `finish` clears it. The tick must recompute the pane's content —
+   * a bare requestRender() redraws the previous frame and the caret would
+   * never appear to move.
    */
   private caretOn = true
   private readonly caretTimer: ReturnType<typeof setInterval> = setInterval(() => {
     if (this.finished || this.level !== "form" || !this.form) return
     this.caretOn = !this.caretOn
-    this.renderer.requestRender()
+    this.render()
   }, 500)
+
+  /**
+   * While the namer proposes, the create button becomes an infinite-loading
+   * progress: a spinner plus a marching bar, repainted every 100ms (the
+   * spinner's own step) so no frame of the sweep is skipped. The guard makes
+   * the tick a no-op the rest of the time; `finish` clears it.
+   */
+  private proposeSpin = 0
+  private readonly proposeTimer: ReturnType<typeof setInterval> = setInterval(() => {
+    if (this.finished || this.level !== "form" || !this.form?.proposing) return
+    this.proposeSpin++
+    this.render()
+  }, 100)
+
+  /**
+   * Terminal paste (Ctrl+V / middle-click bracketed paste) rides opentui's
+   * `paste` event — keypress never sees it. The form fields are the only
+   * writable surface here: a paste lands in the description (auto) or the
+   * focused field (manual), newlines flattened so the single-line fields
+   * keep their cursor math.
+   */
+  private readonly handlePaste = (event: PasteEvent) => {
+    if (this.finished || this.level !== "form" || !this.form || this.form.proposal) return
+    const text = sanitizePastedText(stripAnsiSequences(decodePasteBytes(event.bytes)))
+    if (!text) return
+    const clean = text.replace(/\n+/g, " ").replace(/ {2,}/g, " ").trim()
+    if (this.form.mode === "auto") {
+      this.form.description = (this.form.description ? `${this.form.description} ` : "") + clean
+    } else if (this.form.field === 0) {
+      this.form.displayName = `${this.form.displayName}${clean}`
+    } else if (this.form.field === 1) {
+      this.form.branch = `${this.form.branch}${clean}`
+    } else {
+      this.form.base = `${this.form.base}${clean}`
+    }
+    this.form.error = undefined
+    this.render()
+  }
 
   /**
    * Auto mode's proposal: the description asks the namer for a conventional
@@ -1053,7 +1096,9 @@ export class HomeLauncher {
     if (this.finished) return
     this.finished = true
     clearInterval(this.caretTimer)
+    clearInterval(this.proposeTimer)
     this.renderer.keyInput.off("keypress", this.handleKeyPress)
+    this.renderer.keyInput.off("paste", this.handlePaste)
     this.renderer.off("theme_mode", this.handleThemeMode)
     this.renderer.off("resize", this.handleResize)
     if (!this.scene && !this.renderer.isDestroyed) this.renderer.destroy()
@@ -1091,9 +1136,10 @@ export class HomeLauncher {
   }
 
   private mastheadHeight(): number {
-    // The identity block plus one blank row below it: the worktrees panel
-    // never sits flush against the CONVOY wordmark.
-    return (this.wideMasthead() ? 3 : 2) + MASTHEAD_BREATHING_ROWS
+    // The three-row wordmark (one text line when narrow) plus one blank row
+    // below it: the worktrees panel never sits flush against the CONVOY
+    // wordmark.
+    return (this.wideMasthead() ? 3 : 1) + MASTHEAD_BREATHING_ROWS
   }
 
   /** Rows under the masthead, above the hints strip. */
@@ -1124,9 +1170,9 @@ export class HomeLauncher {
     return Math.max(1, this.listPanelHeight(this.bodyHeight()) - HEADING_ROWS)
   }
 
-  /** Rows the detail pane can hold inside its bordered panel. */
+  /** Rows the detail pane can hold: the full body — no panel border to subtract. */
   private detailVisible(): number {
-    return Math.max(3, this.bodyHeight() - 2)
+    return Math.max(3, this.bodyHeight())
   }
 
   private render() {
@@ -1150,10 +1196,9 @@ export class HomeLauncher {
       this.previewBox.visible = true
       this.previewBox.width = "100%"
       this.previewBox.height = "100%"
-      this.previewBox.borderColor = theme.accent
-      // The form floats free — no outer container around the header and its
-      // input box (containers over containers); the detail keeps its panel.
-      this.previewBox.border = this.level !== "form"
+      // No bordered panel at either immersed level: the detail and the form
+      // float on the body, their headings carried by divider rules.
+      this.previewBox.border = false
     } else {
       this.listBox.visible = true
       this.destBox.visible = true
@@ -1169,7 +1214,6 @@ export class HomeLauncher {
 
     const innerWidth = Math.max(8, width - PANEL_GUTTER)
 
-    this.previewBox.title = this.previewTitle()
     this.listText.content = immersed ? "" : this.listContent(innerWidth)
     this.destText.content = immersed ? "" : this.destinationContent(innerWidth)
     this.previewText.content = this.previewContent(innerWidth)
@@ -1179,8 +1223,10 @@ export class HomeLauncher {
 
   /** Masthead: identity, complete version, project path above the worktree list. */
   private mastheadContent(width: number): StyledText {
-    const project = shortPath(this.targetDir, Math.max(1, width - 9))
     if (this.wideMasthead()) {
+      // The full three-row wordmark with the version beside it — the project
+      // path is implied by the session the operator already sits in, no path
+      // in the chrome.
       const lines = [0, 1, 2].map((glyphRow): StyledText => {
         const chunks: TextChunk[] = []
         CONVOY_LETTERS.forEach((letter, index) => {
@@ -1188,13 +1234,12 @@ export class HomeLauncher {
           chunks.push(bold(fg(theme.accent)(CONVOY_WORDMARK[letter]![glyphRow]!)))
         })
         if (glyphRow === 0) return padBetween(chunks, [fg(theme.faint)(versionDetails())], width)
-        if (glyphRow === 1) return padBetween(chunks, [fg(theme.text)(shortPath(this.targetDir, Math.max(1, width - CONVOY_WORDMARK_WIDTH)))], width)
         return new StyledText(chunks)
       })
       return joinLines(lines)
     }
     const versionLine = padBetween([bold(fg(theme.accent)("CONVOY"))], [fg(theme.faint)(versionDetails())], width)
-    return joinLines([versionLine, new StyledText([fg(theme.faint)("project  "), fg(theme.text)(project)])])
+    return joinLines([versionLine])
   }
 
   /**
@@ -1327,10 +1372,13 @@ export class HomeLauncher {
       return new StyledText([plus, raw(" "), fg(theme.text)("New worktree")])
     }
     const arrow = selected ? bg(theme.teal)(fg(theme.chipText)("»")) : fg(theme.teal)("»")
+    // The shortcut rides every destination row: a bracketed key, visible but
+    // quiet, saying that one press jumps straight there.
+    const keyHint = fg(theme.faint)(` [${row.shortcut}]`)
     if (selected) {
-      return this.highlighted([arrow, raw(" "), bold(fg(theme.chipText)(row.label))], width)
+      return this.highlighted([arrow, raw(" "), bold(fg(theme.chipText)(row.label)), fg(theme.chipText)(` [${row.shortcut}]`)], width)
     }
-    return new StyledText([arrow, raw(" "), fg(theme.text)(row.label)])
+    return new StyledText([arrow, raw(" "), fg(theme.text)(row.label), keyHint])
   }
 
   /**
@@ -1346,13 +1394,6 @@ export class HomeLauncher {
     // cell rides the accent fill instead of being repainted by it.
     const hasBg = (chunk: TextChunk) => typeof chunk !== "string" && (chunk as { bg?: unknown }).bg !== undefined
     return new StyledText(chunks.map((chunk) => (hasBg(chunk) ? chunk : bg(theme.accent)(chunk))).concat(filler))
-  }
-
-  /** The full-screen pane's title; at the list level the details ride inline, never in a panel. */
-  private previewTitle(): string {
-    // The form's header line already names it; no panel title over it.
-    if (this.level === "form") return ""
-    return " actions "
   }
 
   private previewContent(width: number): StyledText {
@@ -1465,55 +1506,70 @@ export class HomeLauncher {
     return lines
   }
 
-  /** The detail pane's full line list plus the index of its first action row. */
+  /**
+   * The detail screen, speaking the list's section language: a divider rule
+   * names the worktree, the observed facts ride the fold's label rhythm, and
+   * the actions follow under their own rule. The selected action is one
+   * full-width accent block hanging from an inverted navy marker — actions
+   * are actions, so they carry New's navy, not a state color.
+   */
   private detailLines(width: number): { lines: StyledText[]; actionStart: number } {
     const worktree = this.detailWorktree
     if (!worktree) return { lines: [], actionStart: 0 }
-    const lines: StyledText[] = []
-    // The board's detail anatomy: bold title, dim identity line, then faint
-    // `label: ` rows with observed facts.
-    lines.push(new StyledText([bold(fg(theme.text)(truncate(worktreeDisplayNameOf(worktree), width)))]))
-    lines.push(new StyledText([fg(theme.dim)(truncate(shortPath(worktree.path, width), width))]))
-    const add = (label: string, value: string, color = theme.text) => {
-      lines.push(new StyledText([fg(theme.faint)(`${label}: `), fg(color)(truncate(value, Math.max(8, width - label.length - 2)))]))
+    const lines: StyledText[] = [
+      ...this.headingLines(truncate(worktreeDisplayNameOf(worktree), Math.max(8, width - 12)), width),
+      new StyledText([fg(theme.dim)(truncate(shortPath(worktree.path, width), width))]),
+    ]
+    // The fold's fact-row rhythm: a faint nine-column label, one space, the
+    // honest value.
+    const fact = (label: string, value: string, color = theme.text) => {
+      lines.push(new StyledText([fg(theme.faint)(label.padEnd(9, " ")), raw(" "), fg(color)(truncate(value, Math.max(8, width - 11)))]))
     }
-    add("branch", worktree.detached ? "detached HEAD" : (worktree.branch ?? "(no branch)"))
+    fact("branch", worktree.detached ? "detached HEAD" : (worktree.branch ?? "(no branch)"))
     if (worktree.dirt) {
-      add("dirt", worktree.dirt.kind === "known" ? (worktree.dirt.value.dirty ? `${worktree.dirt.value.fileCount} file(s) uncommitted` : "clean") : `unknown (${worktree.dirt.reason})`, worktree.dirt.kind === "known" && worktree.dirt.value.dirty ? theme.yellow : theme.text)
+      fact("dirt", worktree.dirt.kind === "known" ? (worktree.dirt.value.dirty ? `${worktree.dirt.value.fileCount} file(s) uncommitted` : "clean") : `unknown (${worktree.dirt.reason})`, worktree.dirt.kind === "known" && worktree.dirt.value.dirty ? theme.yellow : theme.text)
     }
     if (worktree.activity) {
-      add("activity", worktree.activity.kind === "known" ? `${worktree.activity.value.total} live run(s)` : `unknown (${worktree.activity.reason})`)
+      fact("activity", worktree.activity.kind === "known" ? `${worktree.activity.value.total} live run(s)` : `unknown (${worktree.activity.reason})`)
     }
     // PR evidence rides the same on-demand observation the row fired on
-    // landing; the detail view never re-queries on its own.
+    // landing; the detail view never re-queries on its own. Unknown is never
+    // "no PR" and a merged PR never reads as completed work.
     const prEvidence = this.prEvidence.get(worktree.path)
     if (prEvidence && prEvidence !== "checking") {
-      // PR evidence keeps its availability: unknown is never rendered as
-      // "no PR" and a merged PR never reads as completed work.
-      add("pr", prObservationText(prEvidence), prEvidence.availability === "known" ? theme.text : theme.yellow)
+      fact("pr", prObservationText(prEvidence), prEvidence.availability === "known" ? theme.text : theme.yellow)
     } else {
-      add("pr", "checking…", theme.dim)
+      fact("pr", "checking…", theme.dim)
     }
-    if (worktree.changesUnknown) add("changes", `unknown (${worktree.changesUnknown})`, theme.yellow)
-    else add("changes", `${worktree.changes.length} active`)
-    for (const local of worktree.changes.slice(0, 4)) {
+    if (worktree.changesUnknown) fact("changes", `unknown (${worktree.changesUnknown})`, theme.yellow)
+    else fact("changes", `${worktree.changes.length} active`)
+    // The change list descends as a file-tree, the same faded connectors the
+    // inline fold uses.
+    const items = worktree.changes.slice(0, 4)
+    items.forEach((local, index) => {
+      const glyph = index === items.length - 1 ? "└─ " : "├─ "
       const title = local.title ? `${local.changeId} — ${local.title}` : local.changeId
-      add("change", title, theme.dim)
-    }
-    if (worktree.locked) add("lock", worktree.locked.reason ? `locked: ${worktree.locked.reason}` : "locked", theme.yellow)
-    if (worktree.prunable) add("prunable", worktree.prunable.reason ?? "stale registration", theme.yellow)
-    if (!worktree.accessible) add("state", "inaccessible — the registered path is missing (repair or `git worktree prune`)", theme.yellow)
+      lines.push(new StyledText([raw(" ".repeat(9)), raw(" "), fg(theme.dim)(glyph), fg(theme.text)(truncate(title, Math.max(8, width - 14)))]))
+    })
+    if (worktree.locked) fact("lock", worktree.locked.reason ? `locked: ${worktree.locked.reason}` : "locked", theme.yellow)
+    if (worktree.prunable) fact("prunable", worktree.prunable.reason ?? "stale registration", theme.yellow)
+    if (!worktree.accessible) fact("state", "inaccessible — the registered path is missing (repair or `git worktree prune`)", theme.yellow)
     lines.push(new StyledText([raw("")]))
-    lines.push(new StyledText([bold(fg(theme.accent)("actions"))]))
+    lines.push(...this.headingLines("actions", width))
     const actionStart = lines.length
     this.detailActions().forEach((action, index) => {
       const selected = index === this.detailSelected
-      const marker = selected ? fg(theme.accent)("▸ ") : raw("  ")
-      // A blocked action dims like the board's disabled entries; its reason
-      // stays inspectable in the attention color instead of disappearing.
-      const label = action.enabled ? (selected ? bold(fg(theme.text)(action.label)) : fg(theme.text)(action.label)) : fg(theme.dim)(action.label)
-      const hint = action.enabled ? fg(theme.faint)(`  [${action.key}]`) : fg(theme.yellow)(`  blocked: ${truncate(action.blocker ?? "", Math.max(0, width - displayWidth(action.label) - 14))}`)
-      lines.push(new StyledText([marker, label, hint]))
+      // The marker inverts on selection: a dark glyph in a navy cell — the
+      // rail the block hangs from.
+      const marker = selected ? bg(theme.navy)(fg(theme.chipText)("▸")) : action.enabled ? fg(theme.faint)("▸") : fg(theme.dim)("▸")
+      const label = selected ? (action.enabled ? bold(fg(theme.chipText)(action.label)) : fg(theme.chipText)(action.label)) : action.enabled ? fg(theme.text)(action.label) : fg(theme.dim)(action.label)
+      const hint = action.enabled
+        ? selected
+          ? fg(theme.chipText)(`  [${action.key}]`)
+          : fg(theme.faint)(`  [${action.key}]`)
+        : fg(theme.yellow)(`  blocked: ${truncate(action.blocker ?? "", Math.max(0, width - displayWidth(action.label) - 14))}`)
+      const chunks: TextChunk[] = [marker, raw(" "), label, hint]
+      lines.push(selected ? this.highlighted(chunks, width) : new StyledText(chunks))
     })
     return { lines, actionStart }
   }
@@ -1547,48 +1603,81 @@ export class HomeLauncher {
     const form = this.form
     if (!form) return this.listContent(width)
     const lines: StyledText[] = []
-    // The form floats free of any outer container; the header carries the
-    // name and the mode.
-    lines.push(new StyledText([raw("")]))
-    lines.push(new StyledText([bold(fg(theme.text)("New worktree")), fg(theme.faint)(`   ${form.mode} · tab switches mode`)]))
-    lines.push(new StyledText([raw("")]))
+    // The form speaks the section language: a divider rule names it and
+    // carries the mode — no bold header floating over the input.
+    lines.push(...this.headingLines(`new worktree · ${form.mode}`, width))
+    // The writable surface is an input, not a stretched banner: the frame
+    // hugs the placeholder's width, so the text fills the box instead of
+    // swimming in dead columns. The manual fields share the width.
+    const placeholderW = displayWidth("describe what you are about to work on…") + 2
+    const boxW = Math.min(width, placeholderW + 8)
+    // The next move reads as a button: an accent keycap with the enter glyph
+    // — the one loud element, over a calm form. The keycap names the move by
+    // itself: "create" where Enter proposes, "confirm" where it commits.
+    const cta = (word: string, note?: string): StyledText =>
+      new StyledText([raw(" "), bg(theme.accent)(fg(theme.chipText)(` ↵ ${word} `)), ...(note ? [raw(" "), fg(theme.dim)(note)] : [])])
     if (form.mode === "auto") {
       if (form.proposal) {
-        // The proposal review: exactly what acceptance will create.
-        const row = (label: string, value: string): TextChunk[] => [fg(theme.faint)(label.padEnd(9, " ")), fg(theme.text)(truncate(value, Math.max(8, width - 16)))]
+        // The proposal review: the draft rides a navy rail with the fold's
+        // fact-row rhythm — the same block language the New entry opens
+        // with. No frame around it: nothing here is writable.
         const p = form.proposal
-        lines.push(...framedLines([row("name", p.displayName), row("branch", p.branch), row("base", p.base), row("worktree", shortPath(p.worktree, Math.max(8, width - 16)))], width))
+        const row = (label: string, value: string): StyledText =>
+          new StyledText([bg(theme.navy)(" "), fg(theme.faint)(label.padEnd(9, " ")), raw(" "), fg(theme.text)(truncate(value, Math.max(8, width - 13)))])
+        lines.push(row("name", p.displayName), row("branch", p.branch), row("base", p.base), row("worktree", shortPath(p.worktree, Math.max(8, width - 13))))
         lines.push(new StyledText([raw("")]))
-        lines.push(new StyledText([fg(theme.dim)("enter creates this worktree · tab refines it in the manual form")]))
+        lines.push(cta("confirm"))
       } else {
         // The description input: an untitled multiline box — the placeholder
-        // says what it is for, the blinking caret says it is writable.
-        const inner = Math.max(12, width - 6)
+        // says what it is for and trails off, the blinking caret says it is
+        // writable, and the keycap under the box names the next move.
+        const textW = Math.max(8, boxW - 8)
         const rows: TextChunk[][] = []
         if (form.description) {
-          const wrapped = wrapLines([form.description], inner - 1)
+          const wrapped = wrapLines([form.description], textW)
           wrapped.forEach((text, index) => {
             const chunks: TextChunk[] = [fg(theme.text)(text)]
             if (index === wrapped.length - 1 && this.caretOn) chunks.push(fg(theme.accent)("█"))
             rows.push(chunks)
           })
         } else {
-          const placeholder = fg(theme.dim)("describe what are you about to work on")
-          rows.push(this.caretOn ? [fg(theme.accent)("█"), placeholder] : [placeholder])
+          // The placeholder always leaves the caret's cell reserved — an
+          // empty cell when the caret is off — or the text would shuffle
+          // one column left on every blink.
+          const placeholder = fg(theme.dim)("describe what you are about to work on…")
+          rows.push(this.caretOn ? [fg(theme.accent)("█"), placeholder] : [raw(" "), placeholder])
         }
-        lines.push(...framedLines(rows, width, { minRows: HomeLauncher.DESCRIPTION_BOX_ROWS, border: "accent" }))
+        lines.push(...framedLines(rows, width, { minRows: HomeLauncher.DESCRIPTION_BOX_ROWS, border: "accent", frameWidth: boxW }))
+        // Proposing: the create button becomes an infinite-loading sweep —
+        // a spinner plus a marching bar — saying the namer is working,
+        // nothing is stuck. The tick above repaints every frame.
         if (form.proposing) {
-          lines.push(new StyledText([raw("")]))
-          lines.push(new StyledText([fg(theme.dim)("proposing a conventional branch…")]))
+          // The sweep: a 5-cell window marching around an 18-cell track.
+          const track = 18
+          const window = 5
+          const head = this.proposeSpin % track
+          const bar = Array.from({ length: track }, (_, i) => ((i >= head && i < head + window) || i + track < head + window ? "━" : "─")).join("")
+          lines.push(
+            new StyledText([
+              fg(theme.accent)(spinnerFrame(Date.now())),
+              raw(" "),
+              fg(theme.dim)("proposing a conventional branch…"),
+              raw("  "),
+              fg(theme.faint)(bar),
+            ]),
+          )
+        } else {
+          lines.push(cta("create"))
         }
       }
     } else {
       const fieldRow = (label: string, value: string, active: boolean): TextChunk[] => [
         fg(active ? theme.accent : theme.faint)(label.padEnd(8)),
-        fg(theme.text)(truncate(active ? `${value}${this.caretOn ? "█" : ""}` : value, Math.max(4, width - 16))),
+        fg(theme.text)(truncate(active ? `${value}${this.caretOn ? "█" : ""}` : value, Math.max(4, boxW - 12))),
       ]
-      lines.push(...framedLines([fieldRow("name", form.displayName, form.field === 0), fieldRow("branch", form.branch, form.field === 1), fieldRow("base", form.base, form.field === 2)], width, { border: "accent" }))
+      lines.push(...framedLines([fieldRow("name", form.displayName, form.field === 0), fieldRow("branch", form.branch, form.field === 1), fieldRow("base", form.base, form.field === 2)], width, { border: "accent", frameWidth: boxW }))
       lines.push(new StyledText([raw("")]))
+      lines.push(cta(form.field === 2 ? "create" : "next"))
       lines.push(new StyledText([fg(theme.dim)("a conventional prefix is added when missing")]))
     }
     if (form.error) lines.push(new StyledText([raw("")]), new StyledText([fg(theme.red)(form.error)]))
@@ -1672,10 +1761,13 @@ function slugFromName(name: string): string {
  * already names the context, so the box carries no title of its own. Rows
  * are padded to the frame's inner width so the right border stays aligned;
  * content wider than the frame is the caller's responsibility to keep
- * clipped, and `minRows` grows the box into a fixed writable canvas.
+ * clipped, and `minRows` grows the box into a fixed writable canvas. A
+ * `frameWidth` narrower than the content area keeps the box an input, not a
+ * stretched banner — the caller clips its rows to the narrower width.
  */
-function framedLines(rows: TextChunk[][], width: number, options: { minRows?: number; border?: "accent" | "faint" } = {}): StyledText[] {
-  const inner = Math.max(14, width - 2)
+function framedLines(rows: TextChunk[][], width: number, options: { minRows?: number; border?: "accent" | "faint"; frameWidth?: number } = {}): StyledText[] {
+  const outer = Math.max(20, Math.min(width, options.frameWidth ?? width))
+  const inner = outer - 2
   const textWidth = Math.max(8, inner - 4)
   const border = options.border === "accent" ? theme.accent : theme.faint
   const top = `╭${"─".repeat(Math.max(2, inner - 2))}╮`
@@ -1697,6 +1789,15 @@ function framedLines(rows: TextChunk[][], width: number, options: { minRows?: nu
  * is prefilled rather than refused. Shared by the manual branch commit and
  * the auto proposal, so both modes speak the same naming rules.
  */
+/**
+ * Pasted text is hostile input: control bytes some terminals leak around
+ * bracketed-paste frames are stripped, tabs collapse to spaces so the wrap
+ * and cursor math stay true. The paste handler flattens newlines itself.
+ */
+function sanitizePastedText(text: string): string {
+  return text.replace(/\t/g, " ").replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "")
+}
+
 function withConventionalPrefix(branch: string, fallbackSlug: string): string {
   const cleaned = branch.replace(/^refs\/heads\//, "").replace(/\s+/g, "-")
   if (!cleaned || /^(feat|fix|refactor|perf|docs|test|chore|build|ci)(\/|$)/.test(cleaned) === false) {

@@ -392,3 +392,47 @@ describe("reports helpers", () => {
     expect(stepValueSummary({ agent: "x", diff: true })).toBe("(inherits) · diff on")
   })
 })
+describe("config layout (columns wide, stacked narrow)", () => {
+  test("a narrow terminal docks the help pane under the list as a bounded footer", async () => {
+    const { createTestRenderer } = await import("@opentui/core/testing")
+    const { ConfigEditor } = await import("../src/config-tui")
+    const { mkdtemp, mkdir, writeFile, rm } = await import("node:fs/promises")
+    const { tmpdir } = await import("node:os")
+    const { join } = await import("node:path")
+    const dir = await mkdtemp(join(tmpdir(), "convoy-config-layout-"))
+    const key = (name: string) =>
+      ({ name, ctrl: false, meta: false, shift: false, option: false, sequence: name, number: false, raw: name, eventType: "keypress", source: "raw", preventDefault: () => {}, stopPropagation: () => {} } as any)
+    try {
+      await mkdir(join(dir, ".convoy"), { recursive: true })
+      await writeFile(join(dir, ".convoy", "config.yaml"), "permissions:\n  allow: []\n  deny: []\nhooks:\n  pre: []\n  post: []\n  pipelines: {}\nattachments: []\n")
+
+      // Narrow: the field pane docks below the list — its frame opens at the
+      // left edge on its own line, under the list's closed bottom border.
+      const narrow = await createTestRenderer({ width: 80, height: 24 })
+      const narrowEditor = new ConfigEditor(narrow.renderer, dir, undefined, undefined)
+      await narrow.renderOnce()
+      await Bun.sleep(10)
+      await narrow.renderOnce()
+      const narrowFrame = narrow.captureCharFrame()
+      const docked = narrowFrame.split("\n").some((line) => line.trimStart().startsWith("╭─ help"))
+      expect(docked).toBe(true)
+      narrow.renderer.keyInput.emit("keypress", key("q"))
+      await narrowEditor.result.catch(() => {})
+
+      // Wide: the field pane rides beside the list — its frame opens on the
+      // same line the list closes on.
+      const wide = await createTestRenderer({ width: 120, height: 30 })
+      const wideEditor = new ConfigEditor(wide.renderer, dir, undefined, undefined)
+      await wide.renderOnce()
+      await Bun.sleep(10)
+      await wide.renderOnce()
+      const wideFrameText = wide.captureCharFrame()
+      const sideBySide = wideFrameText.split("\n").some((line) => line.includes("╮") && line.indexOf("╭─ help") > line.indexOf("╮"))
+      expect(sideBySide).toBe(true)
+      wide.renderer.keyInput.emit("keypress", key("q"))
+      await wideEditor.result.catch(() => {})
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})

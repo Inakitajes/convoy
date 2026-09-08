@@ -99,9 +99,10 @@ describe("the worktree-rooted board (delta specs-viewer)", () => {
         [change("add-foo", worktreeDir, "Title of add-foo"), change("inherited", mainDir, "Inherited")],
       ),
     )
-    expect(frame).toContain("WORKTREES")
-    expect(frame).toContain("repo")
-    expect(frame).toContain("feat-add-foo")
+    // Each checkout is a divider rule carrying its facts; its changes hang
+    // beneath it as the only selectable rows.
+    expect(frame).toContain("── repo · main · 1 change")
+    expect(frame).toContain("── feat-add-foo · 1 change")
     // Both checkouts' local changes are their own children — same board, no
     // global deduplication, no ownership election.
     expect(frame).toContain("add-foo — Title of add-foo")
@@ -109,13 +110,14 @@ describe("the worktree-rooted board (delta specs-viewer)", () => {
     // No feature vocabulary anywhere on the board.
     expect(frame).not.toContain("FEATURES")
     expect(frame).not.toContain("ready to close")
+    // Sections are never selectable rows: no cursor marker on a divider.
+    expect(frame).not.toContain("▸")
   })
 
   test("a worktree-only board remains useful and omits the empty canonical section", async () => {
     const frame = await frameOf(viewWith([worktree({ path: "/wt/iso", branch: "feat/quick-fix" })]))
-    expect(frame).toContain("WORKTREES")
-    expect(frame).toContain("feat/quick-fix")
-    expect(frame).not.toContain("CANONICAL SPECS")
+    expect(frame).toContain("── iso · feat/quick-fix · no changes")
+    expect(frame).not.toContain("── specs")
   })
 
   test("canonical specs render as their own section after the worktrees", async () => {
@@ -123,14 +125,14 @@ describe("the worktree-rooted board (delta specs-viewer)", () => {
       viewWith([worktree({ path: mainDir, branch: "main", main: true })], [], ["openspec/specs/core.md"]),
     )
     const lines = frame.split("\n")
-    const worktrees = lines.findIndex((line) => line.includes("WORKTREES"))
-    const specs = lines.findIndex((line) => line.includes("CANONICAL SPECS"))
+    const worktrees = lines.findIndex((line) => line.includes("── repo · main ·"))
+    const specs = lines.findIndex((line) => line.trimStart().startsWith("── specs"))
     expect(worktrees).toBeGreaterThanOrEqual(0)
     expect(specs).toBeGreaterThan(worktrees)
     expect(frame).toContain("core.md")
   })
 
-  test("a worktree row's details panel shows independent observations, not a lifecycle stage", async () => {
+  test("a worktree section's divider carries the independent observations, not a lifecycle stage", async () => {
     const frame = await frameOf(
       viewWith([
         worktree({
@@ -142,10 +144,9 @@ describe("the worktree-rooted board (delta specs-viewer)", () => {
         }),
       ]),
     )
-    expect(frame).toContain("dirt:")
-    expect(frame).toContain("2 file(s) uncommitted")
-    expect(frame).toContain("activity:")
-    expect(frame).toContain("1 live run(s)")
+    // The facts ride inside the section's rule — no cursor, no detail pane,
+    // no lifecycle stage anywhere.
+    expect(frame).toContain("── feat-add-foo · no changes · 2 dirty · 1 live")
     expect(frame).not.toContain("stage:")
   })
 })
@@ -205,7 +206,7 @@ describe("the fullscreen reader stays at the detail level", () => {
     session.press("v")
     await session.renderOnce()
     // The header is still visible: the reader never opened.
-    expect(session.captureCharFrame()).toContain("project  /repo")
+    expect(session.captureCharFrame()).toContain("specs")
     session.press("c", { ctrl: true })
     await expect(session.instance.result).resolves.toEqual({ type: "exit" })
   })
@@ -223,16 +224,14 @@ describe("compact stacking", () => {
       await testRenderer.renderOnce()
       const frame = testRenderer.captureCharFrame()
       // The bare header row rides above the panels.
-      expect(frame).toContain("project  /repo")
+      expect(frame).toContain("specs")
       const lines = frame.split("\n")
-      const tops = lines.flatMap((line, index) => (line.trimStart().startsWith("╭") ? [index] : []))
-      const bottoms = lines.flatMap((line, index) => (line.trimStart().startsWith("╰") ? [index] : []))
-      // Browse, details, footer: all three bordered panels fully drawn, with
-      // the details panel's bottom border above the footer's top border.
-      expect(tops).toHaveLength(3)
-      expect(bottoms).toHaveLength(3)
-      // Flush stacking: no blank separator row between stacked panels.
-      for (let index = 1; index < tops.length; index++) expect(tops[index]).toBe(bottoms[index - 1]! + 1)
+      // No bordered panels anywhere: sections are dividers, chrome is bare.
+      expect(lines.some((line) => line.trimStart().startsWith("╭"))).toBe(false)
+      // The hints row is the last drawn line — nothing scrolls off the
+      // bottom edge.
+      const lastDrawn = lines.map((line) => line.trimEnd()).filter((line) => line.length > 0).pop() ?? ""
+      expect(lastDrawn).toContain("actions")
     } finally {
       testRenderer.renderer.keyInput.emit("keypress", keyEvent("c", { ctrl: true }))
       await instance.result.catch(() => {})
@@ -256,7 +255,7 @@ describe("a selected canonical spec uses the full root body", () => {
         await testRenderer.renderOnce()
         const frame = testRenderer.captureCharFrame()
         // The redundant details panel is hidden; the list fills the body.
-        expect(frame).not.toContain("╭─ details")
+        expect(frame).not.toContain("╭")
         expect(frame).toContain("core.md")
       } finally {
         testRenderer.renderer.keyInput.emit("keypress", keyEvent("c", { ctrl: true }))

@@ -121,12 +121,15 @@ async function frameOf(view?: SpecsView, width = 120, height = 40) {
   }
 }
 
-test("renders the Worktrees inventory with change children above Canonical Specs", async () => {
+test("renders the worktree sections with change children above the specs divider", async () => {
   const frame = await frameOf()
-  const worktrees = frame.split("\n").findIndex((line) => line.includes("WORKTREES"))
-  const canonical = frame.split("\n").findIndex((line) => line.includes("CANONICAL SPECS"))
-  expect(worktrees).toBeGreaterThanOrEqual(0)
-  expect(canonical).toBeGreaterThan(worktrees)
+  const lines = frame.split("\n")
+  // The checkout is a divider rule carrying its facts; the specs section is
+  // its own divider below every worktree's children.
+  const worktree = lines.findIndex((line) => line.includes("── ") && line.includes("· main · 2 changes"))
+  const specs = lines.findIndex((line) => line.trimStart().startsWith("── specs"))
+  expect(worktree).toBeGreaterThanOrEqual(0)
+  expect(specs).toBeGreaterThan(worktree)
   expect(frame).toContain("add-login — Add login")
   expect(frame).not.toContain("FEATURES")
 })
@@ -139,9 +142,7 @@ test("a change without artifacts still lists by its id", async () => {
 test("enter opens the change's tabbed reading pane and escape returns", async () => {
   const session = await openBrowser()
 
-  session.press("down") // the first selectable row is the containing worktree
-  await session.renderOnce()
-  session.press("return")
+  session.press("return") // the first selectable row is the first change
   await session.renderOnce()
   await settle()
   await session.renderOnce()
@@ -156,7 +157,7 @@ test("enter opens the change's tabbed reading pane and escape returns", async ()
 
   session.press("escape")
   await session.renderOnce()
-  expect(session.captureCharFrame()).toContain("CANONICAL SPECS")
+  expect(session.captureCharFrame()).toContain("── specs")
 
   session.press("q")
   await expect(session.instance.result).resolves.toEqual({ type: "exit" })
@@ -165,9 +166,7 @@ test("enter opens the change's tabbed reading pane and escape returns", async ()
 test("rendered markdown strips frontmatter noise in the detail pane", async () => {
   const session = await openBrowser()
 
-  session.press("down") // the containing worktree row comes first
-  await session.renderOnce()
-  session.press("return")
+  session.press("return") // the first selectable row is the first change
   await session.renderOnce()
   await settle()
   await session.renderOnce()
@@ -192,9 +191,7 @@ test("an unreadable artifact degrades to a placeholder", async () => {
   ghost.changes[0]!.artifacts.push({ section: "other", file: join(root, "missing.md") })
   const session = await openBrowser(ghost)
 
-  session.press("down") // the containing worktree row comes first
-  await session.renderOnce()
-  session.press("return")
+  session.press("return") // the first selectable row is the first change
   await session.renderOnce()
   await settle()
   await session.renderOnce()
@@ -211,9 +208,7 @@ test("an unreadable artifact degrades to a placeholder", async () => {
 test("a applies the selected change from the root list", async () => {
   const session = await openBrowser()
 
-  session.press("down") // select the change child under its worktree
-  await session.renderOnce()
-  session.press("a")
+  session.press("a") // the first selectable row is the change itself
 
   await expect(session.instance.result).resolves.toEqual({ type: "apply-change", changeID: "add-login", checkout: root })
 })
@@ -221,9 +216,7 @@ test("a applies the selected change from the root list", async () => {
 test("i iterates on the selected change from the root list", async () => {
   const session = await openBrowser()
 
-  session.press("down") // select the change child under its worktree
-  await session.renderOnce()
-  session.press("i")
+  session.press("i") // the first selectable row is the change itself
 
   await expect(session.instance.result).resolves.toEqual({ type: "iterate-change", changeID: "add-login", checkout: root, presentation: "foreground" })
 })
@@ -233,9 +226,8 @@ test("selection crosses sections: enter on a canonical spec reads it", async () 
   view.changes = [{ kind: "change", id: "only-change", checkout: root, title: "Only change", artifacts: [] }]
   const session = await openBrowser(view)
 
-  // From the first selectable row (the worktree), down walks change → spec.
-  session.press("down")
-  await session.renderOnce()
+  // From the first change, down walks straight to the spec (sections are
+  // dead rows the cursor never parks on).
   session.press("down")
   await session.renderOnce()
   session.press("return")
@@ -247,8 +239,8 @@ test("selection crosses sections: enter on a canonical spec reads it", async () 
   session.press("b")
   await session.renderOnce()
   const rootFrame = session.captureCharFrame()
-  expect(rootFrame).toContain("WORKTREES")
-  expect(rootFrame).not.toContain("╭─ details")
+  expect(rootFrame).toContain("── specs")
+  expect(rootFrame).not.toContain("╭─")
 
   await close(session)
 })
@@ -266,12 +258,12 @@ test("an empty active-changes section is omitted and the first canonical spec is
   view.changes = []
   const session = await openBrowser(view)
 
-  // No changes: the cursor opens on the worktree row; one down lands on the
-  // first spec row rather than its dead section header.
+  // No changes: the cursor opens directly on the first spec row — the
+  // worktree section and the specs rule are dead rows.
   const frame = session.captureCharFrame()
   expect(frame).not.toContain("ACTIVE CHANGES")
-  expect(frame).toContain("CANONICAL SPECS")
-  expect(frame).toContain("▸")
+  expect(frame).toContain("── specs")
+  expect(frame).toContain("◆")
   session.press("down")
   await session.renderOnce()
   session.press("return")
@@ -286,18 +278,20 @@ test("an empty active-changes section is omitted and the first canonical spec is
 test("up from the first change row stays on it instead of recursing onto the header", async () => {
   const session = await openBrowser()
 
-  // Moving up from the first change child lands on its containing worktree —
-  // a live row, never the dead header row above either of them.
+  // Sections are dead rows: moving up from the second change lands back on
+  // the first — never on the divider above either of them.
   session.press("down")
   await session.renderOnce()
   session.press("up")
   await session.renderOnce()
+  const selected = session
+    .captureSpans()
+    .lines.filter((line) => line.spans.some((span) => span.bg.a > 0))
+    .map((line) => line.spans.map((span) => span.text).join(""))
+  expect(selected.some((line) => line.includes("add-login"))).toBe(true)
   const frame = session.captureCharFrame()
-  expect(frame).toContain("▸ ◇")
-  expect(frame).not.toContain("▸ WORKTREES")
+  expect(frame).not.toContain("▸")
   // Enter still works — back on the change child, the reading pane opens.
-  session.press("down")
-  await session.renderOnce()
   session.press("return")
   await session.renderOnce()
   await settle()
@@ -316,11 +310,21 @@ test("home and g land on the first selectable row, not the leading header", asyn
   await session.renderOnce()
   session.press("home")
   await session.renderOnce()
-  // The first selectable row is the containing worktree, never the header.
-  expect(session.captureCharFrame()).toContain("▸ ◇")
+  // The first selectable row is the first change — never a dead section row.
+  const selectedLine = session
+    .captureSpans()
+    .lines.filter((line) => line.spans.some((span) => span.bg.a > 0))
+    .map((line) => line.spans.map((span) => span.text).join(""))
+    .find((line) => line.trim().length > 0)!
+  expect(selectedLine).toContain("add-login")
   session.press("g")
   await session.renderOnce()
-  expect(session.captureCharFrame()).toContain("▸ ◇")
+  const gLine = session
+    .captureSpans()
+    .lines.filter((line) => line.spans.some((span) => span.bg.a > 0))
+    .map((line) => line.spans.map((span) => span.text).join(""))
+    .find((line) => line.trim().length > 0)!
+  expect(gLine).toContain("add-login")
 
   await close(session)
 })
@@ -328,8 +332,8 @@ test("home and g land on the first selectable row, not the leading header", asyn
 test("compact screens stack the list above the details panel", async () => {
   const frame = await frameOf(undefined, 84, 30)
   const lines = frame.split("\n")
-  const listRow = lines.findIndex((line) => line.includes("browse"))
-  const detailsRow = lines.findIndex((line) => line.includes("details"))
+  const listRow = lines.findIndex((line) => line.includes("add-login — Add login"))
+  const detailsRow = lines.findIndex((line) => line.includes("checkout"))
   expect(listRow).toBeGreaterThanOrEqual(0)
   expect(detailsRow).toBeGreaterThan(listRow)
 })
@@ -339,22 +343,20 @@ test.each([120, 84])("a selected canonical spec uses the full root body at width
   view.changes = []
   const session = await openBrowser(view, width, 30)
   try {
-    // Select the canonical spec row (down from the worktree row).
-    session.press("down")
+    // The canonical spec is the last selectable row: shift+g lands on it.
+    session.press("g", { shift: true })
     await session.renderOnce()
     const frame = session.captureCharFrame()
-    expect(frame).toContain("CANONICAL SPECS")
+    expect(frame).toContain("── specs")
     expect(frame).toContain("cli/spec.md")
-    expect(frame).not.toContain("details")
 
     const boxes = session.instance as unknown as {
       listBox: { width: unknown; height: unknown }
       detailsBox: { visible: boolean }
     }
     expect(boxes.listBox.width).toBe(width - 2)
-    // Full root body: header (1) + footer (3) of the shell, minus the list
-    // panel's own borders (2).
-    expect(boxes.listBox.height).toBe(26)
+    // Full root body: header (1) + footer (1) of the shell, borderless.
+    expect(boxes.listBox.height).toBe(28)
     expect(boxes.detailsBox.visible).toBe(false)
   } finally {
     await close(session)
