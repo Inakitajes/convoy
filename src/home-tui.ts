@@ -82,8 +82,8 @@ export const WORDMARK_GAP = "  "
 const PANEL_GUTTER = 4
 /** The destinations strip's resting height: 4 rows + rounded border. */
 const DESTINATION_PANEL_HEIGHT = 6
-/** The inline detail block hangs right of the row's marker + dot columns. */
-const INLINE_INDENT = 6
+/** The inline detail block aligns with the row's name — only the dot indents. */
+const INLINE_INDENT = 2
 
 /** The CONVOY block letters, shared with the loading transition's centered card. */
 export const CONVOY_WORDMARK: Readonly<Record<string, readonly [string, string, string]>> = {
