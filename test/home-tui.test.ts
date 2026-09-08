@@ -141,18 +141,16 @@ function frameOf(session: Awaited<ReturnType<typeof openHome>>): string {
   return session.captureCharFrame()
 }
 
-/** The underline attribute bit (TextAttributes.UNDERLINE, 1 << 3). */
-const UNDERLINE = 1 << 3
-
 /**
- * The text of every line that carries the underline attribute — the
- * selection's full-width bar. Char frames cannot show attributes, so the
- * selection asserts itself here.
+ * The text of every line that carries a painted background — the selection's
+ * full-width highlight. Char frames cannot show colors, so the selection
+ * asserts itself here: ordinary rows are transparent; only the selected one
+ * rides the accent fill.
  */
-function underlinedLines(session: Awaited<ReturnType<typeof openHome>>): string[] {
+function highlightedLines(session: Awaited<ReturnType<typeof openHome>>): string[] {
   const frame = session.captureSpans()
   return frame.lines
-    .map((line) => line.spans.filter((span) => (span.attributes & UNDERLINE) !== 0).map((span) => span.text).join(""))
+    .map((line) => line.spans.filter((span) => span.bg.a > 0).map((span) => span.text).join(""))
     .filter((text) => text.trim().length > 0)
 }
 
@@ -384,11 +382,11 @@ describe("selection surface", () => {
   test("a remembered worktree row is preselected when it still validates", async () => {
     const remembered = await openHome({ resumeWorktree: wtPath })
     try {
-      // The selection is the row's full-width underline: the remembered
+      // The selection is the row's full-width highlight: the remembered
       // checkout's row carries it, the others do not.
-      const underlined = underlinedLines(remembered)
-      expect(underlined.some((line) => line.includes("add-widget"))).toBe(true)
-      expect(underlined.some((line) => line.includes("repo"))).toBe(false)
+      const highlighted = highlightedLines(remembered)
+      expect(highlighted.some((line) => line.includes("add-widget"))).toBe(true)
+      expect(highlighted.some((line) => line.includes("repo"))).toBe(false)
     } finally {
       await closeHome(remembered)
     }
@@ -397,8 +395,8 @@ describe("selection surface", () => {
     // the first row — never a substituted execution target.
     const fresh = await openHome({})
     try {
-      const underlined = underlinedLines(fresh)
-      expect(underlined.some((line) => line.includes("repo"))).toBe(true)
+      const highlighted = highlightedLines(fresh)
+      expect(highlighted.some((line) => line.includes("repo"))).toBe(true)
     } finally {
       await closeHome(fresh)
     }
@@ -617,8 +615,8 @@ describe("small terminals (list and detail stay navigable)", () => {
       const frame = frameOf(session)
       // The selected row is the twelfth worktree; it must be on screen, not
       // clipped below the fold, and the hints row must survive with it.
-      const underlined = underlinedLines(session)
-      expect(underlined.some((line) => line.includes("work-item-11"))).toBe(true)
+      const highlighted = highlightedLines(session)
+      expect(highlighted.some((line) => line.includes("work-item-11"))).toBe(true)
       expect(frame).toContain("quit")
     } finally {
       await closeHome(session)

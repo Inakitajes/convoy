@@ -1,4 +1,4 @@
-import { BoxRenderable, StyledText, TextRenderable, bold, createCliRenderer, fg, underline } from "@opentui/core"
+import { bg, BoxRenderable, StyledText, TextRenderable, bold, createCliRenderer, fg } from "@opentui/core"
 
 import { detectBaseRef } from "./git"
 import { worktreeDotColor } from "./specs-browser"
@@ -1116,12 +1116,13 @@ export class HomeLauncher {
 
   /**
    * One list row, speaking the board's row vocabulary: an observation-colored
-   * dot on worktree rows. The selection is the row's full-width underline —
-   * no arrow marker, the whole line carries it. A worktree row carries only
-   * its name (the branch it mirrors would repeat it, and the state lives in
-   * the inline details beneath the selected row); the repository's main
-   * checkout carries a `base` tag. Destinations keep their `»` marker — they
-   * are places to go, not checkouts.
+   * dot on worktree rows. The selection is a full-width highlight — the
+   * accent blue carries the whole line, the text rides the contrasting chip
+   * color — with no arrow marker. A worktree row carries only its name (the
+   * branch it mirrors would repeat it, and the state lives in the inline
+   * details beneath the selected row); the repository's main checkout
+   * carries a `base` tag. Destinations keep their `»` marker — they are
+   * places to go, not checkouts.
    */
   private rowLine(row: ListRow, selected: boolean, width: number): StyledText {
     if (row.kind === "worktree") {
@@ -1133,23 +1134,27 @@ export class HomeLauncher {
       const title = truncate(worktreeDisplayNameOf(worktree), Math.max(12, width - 6 - tag))
       left.push(selected ? bold(fg(theme.text)(title)) : fg(theme.text)(title))
       if (worktree.main) left.push(fg(theme.dim)(" · base"))
-      return selected ? this.underlined(left, width) : new StyledText(left)
+      return selected ? this.highlighted(left, width) : new StyledText(left)
     }
     if (row.kind === "new") {
       const left: TextChunk[] = [fg(theme.green)("+"), raw(" "), selected ? bold(fg(theme.text)("New worktree")) : fg(theme.text)("New worktree")]
-      return selected ? this.underlined(left, width) : new StyledText(left)
+      return selected ? this.highlighted(left, width) : new StyledText(left)
     }
     const left: TextChunk[] = [fg(theme.teal)("»"), raw(" ")]
     left.push(selected ? bold(fg(theme.text)(row.label)) : fg(theme.text)(row.label))
     left.push(fg(theme.faint)(`  [${row.shortcut.toUpperCase()}]`))
-    return selected ? this.underlined(left, width) : new StyledText(left)
+    return selected ? this.highlighted(left, width) : new StyledText(left)
   }
 
-  /** The selected row's full-width underline: every chunk, then the filler to the edge. */
-  private underlined(chunks: TextChunk[], width: number): StyledText {
+  /**
+   * The selected row's full-width highlight: the accent blue paints every
+   * chunk and the filler to the edge, and the content rides the contrasting
+   * chip color — the same vocabulary as the selected permission buttons.
+   */
+  private highlighted(chunks: TextChunk[], width: number): StyledText {
     const used = chunks.reduce((total, chunk) => total + displayWidth(typeof chunk === "string" ? chunk : (chunk as { text: string }).text), 0)
-    const filler = underline(raw(" ".repeat(Math.max(0, width - used))))
-    return new StyledText(chunks.map((chunk) => underline(chunk)).concat(filler))
+    const filler = bg(theme.accent)(fg(theme.chipText)(" ".repeat(Math.max(0, width - used))))
+    return new StyledText(chunks.map((chunk) => bg(theme.accent)(fg(theme.chipText)(chunk))).concat(filler))
   }
 
   /** The full-screen pane's title; at the list level the details ride inline, never in a panel. */
