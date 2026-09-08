@@ -77,37 +77,20 @@ export type BoardTasks = { done: number; total: number }
 /**
  * The one assembly. Inventory first, then per-checkout detail (local
  * artifacts, dirt, activity) so a usable list never waits on a giant global
- * snapshot. PR observations are bounded, cached, and advisory: a failed or
- * missing hosting lookup is `unknown`, never a negative fact. Nothing here
- * writes domain state, fetches, or consults legacy feature records.
+ * snapshot — and never on a hosting round-trip: PR evidence is observed
+ * on demand per selected row (observeWorktreePr), bounded, cached, and
+ * advisory there. Nothing here writes domain state, fetches, or consults
+ * legacy feature records.
  */
-export async function assembleControlBoard(
-  targetDir: string,
-  options: { base?: string; prAdapter?: PrAdapter; prCache?: PrCache } = {},
-): Promise<ControlBoard> {
+export async function assembleControlBoard(targetDir: string, options: { base?: string } = {}): Promise<ControlBoard> {
   const inventory = await listWorktrees(targetDir)
   const detectedBase = options.base ?? (await detectBaseRef(targetDir).catch(() => undefined))?.ref
 
-  // Hosting scope for PR observations, resolved once per assembly: a missing
-  // or unanswerable `gh` makes every row's PR evidence unknown — it never
-  // implies the absence of a PR. An injected adapter supplies its own scope,
-  // so a stable placeholder keys its cache entries instead.
-  const hostingRepo = options.prAdapter ? "injected-adapter" : await resolveHostingRepo(targetDir)
-  const prUnavailable: PrObservation | undefined =
-    options.prAdapter || hostingRepo
-      ? undefined
-      : { availability: "unknown", reason: "the hosting repository could not be resolved (is the GitHub CLI installed and authenticated?)", observedAt: Date.now() }
-
   const worktrees: BoardWorktree[] = []
-  // PR observations start concurrently and are awaited under one overall
-  // deadline that begins now — overlapping the loop's own local reads
-  // (design D2: the list never waits on hosting round-trips). A query that
-  // outlives the deadline leaves its row unknown-for-now while the bounded
-  // cache keeps filling for the next refresh.
-  const prDeadline = new Promise<PrObservation>((resolve) =>
-    setTimeout(() => resolve({ availability: "unknown", reason: "the pull-request observation did not complete in time — refresh to retry", observedAt: Date.now() }), prAttachDeadlineMs).unref?.(),
-  )
-  const prPending = new Map<number, Promise<PrObservation>>()
+  // PR evidence is deliberately absent from the assembly: the home fires one
+  // on-demand observation per checkout when the operator's selection lands on
+  // its row (see observeWorktreePr), so the list load never fans out a `gh`
+  // subprocess per worktree and never stalls on a hosting round-trip.
   for (const [index, entry] of inventory.entries.entries()) {
     const row: BoardWorktree = {
       path: entry.path,
@@ -141,34 +124,8 @@ export async function assembleControlBoard(
       } else if (row.branch) {
         row.upstream = await observeUpstreamDivergence(entry.path, row.branch)
       }
-      row.pr = prUnavailable
-        ? { ...prUnavailable }
-        : undefined
-      if (!prUnavailable) {
-        prPending.set(
-          index,
-          observeBoardPr({
-            branch: row.branch,
-            base: detectedBase,
-            hostingRepo,
-            scopeResolved: true,
-            adapter: options.prAdapter ?? ghPrAdapter(entry.path),
-            cache: options.prCache ?? boardPrCache,
-          }),
-        )
-      }
     }
     worktrees.push(row)
-  }
-
-  // Await the PR observations under the deadline; anything still in flight
-  // reads as unknown with its reason, never as absence.
-  if (prPending.size > 0) {
-    await Promise.all(
-      [...prPending].map(async ([index, pending]) => {
-        worktrees[index]!.pr = await Promise.race([pending, prDeadline])
-      }),
-    )
   }
 
   return {
@@ -178,11 +135,46 @@ export async function assembleControlBoard(
   }
 }
 
-/** The advisory in-memory PR cache (30s TTL, bounded concurrency, never persisted). */
-const boardPrCache = new PrCache({ ttlMs: 30_000, timeoutMs: 2_500 })
+/**
+ * The on-demand PR observation for one checkout: the home fires it when the
+ * operator's selection lands on the row — never as a board-load side effect
+ * — so a slow `gh` only ever delays one row's evidence, on its own 10-second
+ * bound, while the rest of the board renders instantly. The shared bounded
+ * cache serves repeated landings within its TTL; every failure mode degrades
+ * to unknown with its reason, never absence.
+ */
+export async function observeWorktreePr(input: {
+  targetDir: string
+  worktree: { path: string; branch?: string; detached: boolean }
+  base?: string
+  adapter?: PrAdapter
+  cache?: PrCache
+}): Promise<PrObservation> {
+  if (!input.worktree.branch) {
+    return { availability: "unknown", reason: "the checkout has no attached branch to scope a pull-request query", observedAt: Date.now() }
+  }
+  const hostingRepo = input.adapter ? "injected-adapter" : await resolveHostingRepo(input.targetDir)
+  if (!hostingRepo) {
+    return { availability: "unknown", reason: "the hosting repository could not be resolved (is the GitHub CLI installed and authenticated?)", observedAt: Date.now() }
+  }
+  const base = input.base ?? (await detectBaseRef(input.targetDir).catch(() => undefined))?.ref
+  return observeBoardPr({
+    branch: input.worktree.branch,
+    base,
+    hostingRepo,
+    scopeResolved: true,
+    adapter: input.adapter ?? ghPrAdapter(input.worktree.path),
+    cache: input.cache ?? boardPrCache,
+  })
+}
 
-/** The overall budget PR observations get before the board renders without them. */
-const prAttachDeadlineMs = 2_000
+/**
+ * The advisory in-memory PR cache (30s TTL, one bounded `gh` call at a time
+ * per query, each on its own 10-second bound — a hung `gh` reads as unknown,
+ * not as absence). Shared with the on-demand observeWorktreePr path, so a
+ * landing on the same row within the TTL never re-queries.
+ */
+const boardPrCache = new PrCache({ ttlMs: 30_000, timeoutMs: 10_000 })
 
 /** Hosting lookups must never stall the board: a hung `gh` reads as unknown. */
 const hostingResolveTimeoutMs = 1_000

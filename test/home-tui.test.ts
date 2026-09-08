@@ -39,6 +39,7 @@ function releaseEnsureFreeBranchName(branch: string, value: string): void {
 
 import { HomeLauncher } from "../src/home-tui"
 import type { HomeResolution, HomeWorkAction } from "../src/home-tui"
+import type { PrObservation } from "../src/pr-observations"
 import { versionDetails } from "../src/version"
 import type { BoardWorktree } from "../src/control-board"
 
@@ -99,7 +100,7 @@ function viewDir(): string {
   return "/work/acme"
 }
 
-async function openHome(options: { worktrees?: BoardWorktree[]; resumeWorktree?: string; resumeNotice?: string; width?: number; height?: number; targetDir?: string; proposeBranchName?: (input: { prompt: string }) => Promise<{ branch: string }> } = {}) {
+async function openHome(options: { worktrees?: BoardWorktree[]; resumeWorktree?: string; resumeNotice?: string; width?: number; height?: number; targetDir?: string; proposeBranchName?: (input: { prompt: string }) => Promise<{ branch: string }>; observePr?: (worktree: BoardWorktree) => Promise<PrObservation> } = {}) {
   const testRenderer = await createTestRenderer({ width: options.width ?? 110, height: options.height ?? 30 })
   const instance = new HomeLauncher(testRenderer.renderer, options.targetDir ?? viewDir(), {
     scene: undefined,
@@ -107,6 +108,8 @@ async function openHome(options: { worktrees?: BoardWorktree[]; resumeWorktree?:
     resumeWorktree: options.resumeWorktree,
     resumeNotice: options.resumeNotice,
     proposeBranchName: options.proposeBranchName,
+    // Hermetic default: no test talks to `gh` unless it injects its own observer.
+    observePr: options.observePr ?? (async () => ({ availability: "unknown", reason: "no PR observation requested by this test", observedAt: 0 })),
   })
   await testRenderer.renderOnce()
   return {
@@ -138,6 +141,21 @@ function frameOf(session: Awaited<ReturnType<typeof openHome>>): string {
   return session.captureCharFrame()
 }
 
+/** The underline attribute bit (TextAttributes.UNDERLINE, 1 << 3). */
+const UNDERLINE = 1 << 3
+
+/**
+ * The text of every line that carries the underline attribute — the
+ * selection's full-width bar. Char frames cannot show attributes, so the
+ * selection asserts itself here.
+ */
+function underlinedLines(session: Awaited<ReturnType<typeof openHome>>): string[] {
+  const frame = session.captureSpans()
+  return frame.lines
+    .map((line) => line.spans.filter((span) => (span.attributes & UNDERLINE) !== 0).map((span) => span.text).join(""))
+    .filter((text) => text.trim().length > 0)
+}
+
 describe("worktrees-first home (capability home-launcher delta)", () => {
   test("the masthead carries identity, the complete version, and the project above the worktree list", async () => {
     const session = await openHome()
@@ -158,7 +176,7 @@ describe("worktrees-first home (capability home-launcher delta)", () => {
       expect(frame).toContain("add-widget")
       expect(frame).toContain("+ New worktree")
       expect(frame).toContain("Pipelines")
-      expect(frame).toContain("enter  Open conversation")
+      expect(frame).toContain("to see actions")
       // Worktrees is the vocabulary; no feature or Spaces branding anywhere.
       expect(frame).not.toContain("New feature")
       expect(frame).not.toContain("Spaces")
@@ -302,7 +320,7 @@ describe("worktrees-first home (capability home-launcher delta)", () => {
     try {
       let frame = frameOf(session)
       // The main checkout's block rides beneath the first row.
-      expect(frame).toContain("enter  Open conversation")
+      expect(frame).toContain("to see actions")
       session.press("down") // onto add-widget
       await session.renderOnce()
       frame = frameOf(session)
@@ -310,6 +328,40 @@ describe("worktrees-first home (capability home-launcher delta)", () => {
       // previous fold, and the destinations strip stays in place below.
       expect(frame).toContain("feat/add-widget")
       expect(frame).toContain(" destinations ")
+    } finally {
+      await closeHome(session)
+    }
+  })
+
+  test("landing on a row requests its PR evidence: checking… then the fact", async () => {
+    const observed: string[] = []
+    const gates = new Map<string, (value: PrObservation) => void>()
+    const session = await openHome({
+      observePr: (worktree) =>
+        new Promise<PrObservation>((resolve) => {
+          observed.push(worktree.path)
+          gates.set(worktree.path, resolve)
+        }),
+    })
+    try {
+      await session.renderOnce()
+      // The opening selection fired exactly one on-demand query.
+      expect(observed).toEqual([mainPath])
+      expect(frameOf(session)).toContain("checking…")
+      gates.get(mainPath)!({ availability: "known", pr: { number: 12, state: "OPEN", title: "Main", url: "https://example.test/pr/12" }, observedAt: 0 })
+      await Bun.sleep(10)
+      await session.renderOnce()
+      expect(frameOf(session)).toContain("#12 OPEN")
+      // Moving to another row requests only that row's evidence.
+      session.press("down")
+      await session.renderOnce()
+      expect(observed).toEqual([mainPath, wtPath])
+      expect(frameOf(session)).toContain("checking…")
+      // Returning to the first row re-lands: a refresh attempt (the cache
+      // decides whether it is a network call).
+      session.press("up")
+      await session.renderOnce()
+      expect(observed.filter((path) => path === mainPath)).toHaveLength(2)
     } finally {
       await closeHome(session)
     }
@@ -332,9 +384,11 @@ describe("selection surface", () => {
   test("a remembered worktree row is preselected when it still validates", async () => {
     const remembered = await openHome({ resumeWorktree: wtPath })
     try {
-      const frame = frameOf(remembered)
-      const listRows = frame.split("\n").filter((line) => line.includes("▸"))
-      expect(listRows.some((line) => line.includes("add-widget"))).toBe(true)
+      // The selection is the row's full-width underline: the remembered
+      // checkout's row carries it, the others do not.
+      const underlined = underlinedLines(remembered)
+      expect(underlined.some((line) => line.includes("add-widget"))).toBe(true)
+      expect(underlined.some((line) => line.includes("repo"))).toBe(false)
     } finally {
       await closeHome(remembered)
     }
@@ -343,9 +397,8 @@ describe("selection surface", () => {
     // the first row — never a substituted execution target.
     const fresh = await openHome({})
     try {
-      const frame = frameOf(fresh)
-      const listRows = frame.split("\n").filter((line) => line.includes("▸"))
-      expect(listRows.some((line) => line.includes("repo"))).toBe(true)
+      const underlined = underlinedLines(fresh)
+      expect(underlined.some((line) => line.includes("repo"))).toBe(true)
     } finally {
       await closeHome(fresh)
     }
@@ -564,8 +617,8 @@ describe("small terminals (list and detail stay navigable)", () => {
       const frame = frameOf(session)
       // The selected row is the twelfth worktree; it must be on screen, not
       // clipped below the fold, and the hints row must survive with it.
-      const selected = frame.split("\n").filter((line) => line.includes("▸"))
-      expect(selected.some((line) => line.includes("work-item-11"))).toBe(true)
+      const underlined = underlinedLines(session)
+      expect(underlined.some((line) => line.includes("work-item-11"))).toBe(true)
       expect(frame).toContain("quit")
     } finally {
       await closeHome(session)

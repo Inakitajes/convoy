@@ -1,4 +1,4 @@
-import { BoxRenderable, StyledText, TextRenderable, bold, createCliRenderer, fg } from "@opentui/core"
+import { BoxRenderable, StyledText, TextRenderable, bold, createCliRenderer, fg, underline } from "@opentui/core"
 
 import { detectBaseRef } from "./git"
 import { worktreeDotColor } from "./specs-browser"
@@ -20,9 +20,11 @@ import {
 import { versionDetails } from "./version"
 import { homeRendererConfig, sceneForRoute, type TuiRoute, type TuiScene } from "./tui-session"
 
+import { observeWorktreePr, type BoardWorktree } from "./control-board"
+
 import type { BoxOptions, CliRenderer, KeyEvent, TextChunk } from "@opentui/core"
-import type { BoardWorktree } from "./control-board"
 import type { Hint, PaletteColor } from "./tui-theme"
+import type { PrObservation } from "./pr-observations"
 
 /**
  * Worktrees-first Home (capability home-launcher delta, tasks 3.1/3.4; gap
@@ -211,6 +213,14 @@ export class HomeLauncher {
   /** The injected naming-model callback; the real bounded namer is the default. */
   private readonly proposeBranchName?: (input: { prompt: string }) => Promise<{ branch: string }>
   private readonly emptyWork: boolean
+  /**
+   * On-demand PR evidence per checkout path: `checking` while the query runs,
+   * the observation once it lands. The board arrives without PR evidence by
+   * design — landing on a row is what requests it.
+   */
+  private readonly prEvidence = new Map<string, PrObservation | "checking">()
+  private readonly prInFlight = new Set<string>()
+  private readonly observePr: (worktree: BoardWorktree) => Promise<PrObservation>
 
   private readonly mastheadText: TextRenderable
   private readonly mastheadBox: BoxRenderable
@@ -266,11 +276,14 @@ export class HomeLauncher {
       resumeNotice?: string
       /** Asks the naming model for a conventional branch name; injected so tests stay hermetic. */
       proposeBranchName?: (input: { prompt: string }) => Promise<{ branch: string }>
+      /** The on-demand PR observation; injected so tests stay hermetic. */
+      observePr?: (worktree: BoardWorktree) => Promise<PrObservation>
     } = {},
   ) {
     this.scene = options.scene
     this.resumeNotice = options.resumeNotice
     this.proposeBranchName = options.proposeBranchName
+    this.observePr = options.observePr ?? ((worktree) => observeWorktreePr({ targetDir: this.targetDir, worktree }))
     this.emptyWork = (options.worktrees ?? []).length === 0
     this.result = new Promise((resolve) => {
       this.resolveResult = resolve
@@ -399,6 +412,9 @@ export class HomeLauncher {
     renderer.keyInput.on("keypress", this.handleKeyPress)
     renderer.on("theme_mode", this.handleThemeMode)
     renderer.on("resize", this.handleResize)
+    // The opening selection lands immediately: its PR evidence starts now,
+    // the rest of the board never waits for it.
+    this.landOnSelected()
     this.render()
   }
 
@@ -472,7 +488,55 @@ export class HomeLauncher {
         this.finish(undefined)
         break
     }
+    // Landing on a row is what requests its PR evidence — never the board
+    // load, and never a plain re-render while already parked on the row.
+    this.landOnSelected()
     this.render()
+  }
+
+  /**
+   * Fires the on-demand PR observation when the selection lands on a
+   * worktree row: moving through the list queries only the checkouts the
+   * operator actually visits, and the shared cache dedupes the request
+   * within its TTL. A parked row never re-fires.
+   */
+  private landOnSelected() {
+    if (this.level !== "list") return
+    const row = this.rows[this.selectedRow]
+    const worktree = row?.kind === "worktree" ? row.worktree : undefined
+    if (!worktree) {
+      this.lastLanded = undefined
+      return
+    }
+    if (worktree.path === this.lastLanded) return
+    this.lastLanded = worktree.path
+    this.ensurePrEvidence(worktree)
+  }
+
+  private lastLanded?: string
+
+  private ensurePrEvidence(worktree: BoardWorktree): void {
+    const path = worktree.path
+    if (this.prInFlight.has(path)) return
+    if (!worktree.branch) {
+      this.prEvidence.set(path, { availability: "unknown", reason: "the checkout has no attached branch to scope a pull-request query", observedAt: Date.now() })
+      return
+    }
+    this.prInFlight.add(path)
+    this.prEvidence.set(path, "checking")
+    void this.observePr(worktree)
+      .then((pr) => {
+        this.prInFlight.delete(path)
+        if (this.finished || this.prEvidence.get(path) !== "checking") return
+        this.prEvidence.set(path, pr)
+        this.render()
+      })
+      .catch(() => {
+        this.prInFlight.delete(path)
+        if (this.finished || this.prEvidence.get(path) !== "checking") return
+        this.prEvidence.set(path, { availability: "unknown", reason: "the pull-request observation failed", observedAt: Date.now() })
+        this.render()
+      })
   }
 
   private activateSelected() {
@@ -1052,33 +1116,40 @@ export class HomeLauncher {
 
   /**
    * One list row, speaking the board's row vocabulary: an observation-colored
-   * dot on worktree rows, and the selected title in bold text with the accent
-   * `▸` marker carrying the selection. A worktree row carries only its name —
-   * the branch it mirrors would repeat it, and the state lives in the inline
-   * details that unfold beneath the selected row. Destinations keep their own
-   * `»` marker — they are places to go, not checkouts.
+   * dot on worktree rows. The selection is the row's full-width underline —
+   * no arrow marker, the whole line carries it. A worktree row carries only
+   * its name (the branch it mirrors would repeat it, and the state lives in
+   * the inline details beneath the selected row); the repository's main
+   * checkout carries a `base` tag. Destinations keep their `»` marker — they
+   * are places to go, not checkouts.
    */
   private rowLine(row: ListRow, selected: boolean, width: number): StyledText {
     if (row.kind === "worktree") {
       const worktree = row.worktree
-      const left: TextChunk[] = [selected ? fg(theme.accent)("▸ ") : raw("  "), fg(worktreeDotColor(worktree))("◇"), raw(" ")]
+      const left: TextChunk[] = [fg(worktreeDotColor(worktree))("◇"), raw(" ")]
       // The main checkout carries a `base` tag: it is the repository's own
       // checkout, not one more feature branch, and the row says so.
       const tag = worktree.main ? 7 : 0 // " · base"
       const title = truncate(worktreeDisplayNameOf(worktree), Math.max(12, width - 6 - tag))
       left.push(selected ? bold(fg(theme.text)(title)) : fg(theme.text)(title))
       if (worktree.main) left.push(fg(theme.dim)(" · base"))
-      return new StyledText(left)
+      return selected ? this.underlined(left, width) : new StyledText(left)
     }
     if (row.kind === "new") {
-      const left: TextChunk[] = [selected ? fg(theme.accent)("▸ ") : raw("  "), fg(theme.green)("+"), raw(" ")]
-      left.push(selected ? bold(fg(theme.text)("New worktree")) : fg(theme.text)("New worktree"))
-      return new StyledText(left)
+      const left: TextChunk[] = [fg(theme.green)("+"), raw(" "), selected ? bold(fg(theme.text)("New worktree")) : fg(theme.text)("New worktree")]
+      return selected ? this.underlined(left, width) : new StyledText(left)
     }
-    const left: TextChunk[] = [selected ? fg(theme.accent)("▸ ") : raw("  "), fg(theme.teal)("»"), raw(" ")]
+    const left: TextChunk[] = [fg(theme.teal)("»"), raw(" ")]
     left.push(selected ? bold(fg(theme.text)(row.label)) : fg(theme.text)(row.label))
     left.push(fg(theme.faint)(`  [${row.shortcut.toUpperCase()}]`))
-    return new StyledText(left)
+    return selected ? this.underlined(left, width) : new StyledText(left)
+  }
+
+  /** The selected row's full-width underline: every chunk, then the filler to the edge. */
+  private underlined(chunks: TextChunk[], width: number): StyledText {
+    const used = chunks.reduce((total, chunk) => total + displayWidth(typeof chunk === "string" ? chunk : (chunk as { text: string }).text), 0)
+    const filler = underline(raw(" ".repeat(Math.max(0, width - used))))
+    return new StyledText(chunks.map((chunk) => underline(chunk)).concat(filler))
   }
 
   /** The full-screen pane's title; at the list level the details ride inline, never in a panel. */
@@ -1131,14 +1202,19 @@ export class HomeLauncher {
       if (worktree.locked) state.push("locked")
       if (worktree.prunable) state.push("prunable")
       add("state", state.join(" · ") || (dirt?.kind === "known" ? "clean" : "unknown"), dirt?.kind === "known" ? stateColor : theme.yellow)
-      // Linked PR at the same level as state: none is honest, unknown is
-      // never "no PR", and a merged PR never reads as completed work.
-      if (worktree.pr) {
-        const pr = worktree.pr
+      // Linked PR at the same level as state, on demand: "checking…" while
+      // the row's own query runs, the honest fact once it lands — none is
+      // honest, unknown is never "no PR", and a merged PR never reads as
+      // completed work.
+      const evidence = this.prEvidence.get(worktree.path)
+      if (evidence && evidence !== "checking") {
+        const pr = evidence
         const linked =
           pr.availability === "known" ? (pr.pr ? `#${pr.pr.number} ${pr.pr.state}` : "none") : pr.availability === "ambiguous" ? `ambiguous (${pr.matches.length})` : `unknown (${pr.reason})`
         const color = pr.availability === "known" ? (pr.pr ? theme.text : theme.dim) : theme.yellow
         add("linked PR", linked, color)
+      } else {
+        add("linked PR", "checking…", theme.dim)
       }
       // Spec changes carry their own counts (active, specs, archived, live)
       // and descend as a file-tree, one shallow indent under the title.
@@ -1161,12 +1237,8 @@ export class HomeLauncher {
           lines.push(new StyledText([raw(indent + "  "), fg(theme.faint)(`… ${worktree.changes.length - items.length} more`)]))
         }
       }
-      const next = this.actionsFor(worktree).find((action) => action.enabled)
-      lines.push(
-        next
-          ? new StyledText([raw(indent), fg(theme.accent)("enter  "), fg(theme.text)(truncate(next.label, Math.max(8, w - 7)))])
-          : new StyledText([raw(indent), fg(theme.faint)("enter  inspect")]),
-      )
+      lines.push(new StyledText([raw(indent), fg(theme.accent)("enter  "), fg(theme.text)("to see actions")]))
+      lines.push(new StyledText([raw("")]))
       return lines
     }
     if (row.kind === "new") {
@@ -1179,6 +1251,7 @@ export class HomeLauncher {
         lines.push(new StyledText([raw(indent), fg(theme.dim)(line)]))
       }
       lines.push(new StyledText([raw(indent), fg(theme.accent)("n  "), fg(theme.text)("name it")]))
+      lines.push(new StyledText([raw("")]))
       return lines
     }
     lines.push(new StyledText([raw(indent), fg(theme.accent)(truncate(row.kicker, w))]))
@@ -1186,6 +1259,7 @@ export class HomeLauncher {
       lines.push(new StyledText([raw(indent), fg(theme.dim)(line)]))
     }
     lines.push(new StyledText([raw(indent), fg(theme.accent)(`${row.shortcut}  `), fg(theme.text)("open")]))
+    lines.push(new StyledText([raw("")]))
     return lines
   }
 
@@ -1198,7 +1272,6 @@ export class HomeLauncher {
     // `label: ` rows with observed facts.
     lines.push(new StyledText([bold(fg(theme.text)(truncate(worktreeDisplayNameOf(worktree), width)))]))
     lines.push(new StyledText([fg(theme.dim)(truncate(shortPath(worktree.path, width), width))]))
-    lines.push(new StyledText([raw("")]))
     const add = (label: string, value: string, color = theme.text) => {
       lines.push(new StyledText([fg(theme.faint)(`${label}: `), fg(color)(truncate(value, Math.max(8, width - label.length - 2)))]))
     }
@@ -1209,10 +1282,15 @@ export class HomeLauncher {
     if (worktree.activity) {
       add("activity", worktree.activity.kind === "known" ? `${worktree.activity.value.total} live run(s)` : `unknown (${worktree.activity.reason})`)
     }
-    if (worktree.pr) {
+    // PR evidence rides the same on-demand observation the row fired on
+    // landing; the detail view never re-queries on its own.
+    const prEvidence = this.prEvidence.get(worktree.path)
+    if (prEvidence && prEvidence !== "checking") {
       // PR evidence keeps its availability: unknown is never rendered as
       // "no PR" and a merged PR never reads as completed work.
-      add("pr", prObservationText(worktree.pr), worktree.pr.availability === "known" ? theme.text : theme.yellow)
+      add("pr", prObservationText(prEvidence), prEvidence.availability === "known" ? theme.text : theme.yellow)
+    } else {
+      add("pr", "checking…", theme.dim)
     }
     if (worktree.changesUnknown) add("changes", `unknown (${worktree.changesUnknown})`, theme.yellow)
     else add("changes", `${worktree.changes.length} active`)

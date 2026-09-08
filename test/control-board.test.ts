@@ -3,8 +3,8 @@ import { mkdir, mkdtemp, rm, writeFile, realpath } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { basename, dirname, join } from "node:path"
 
-import { assembleControlBoard, openspecTaskCounts, worktreeDisplayName } from "../src/control-board"
-import { PrCache } from "../src/pr-observations"
+import { assembleControlBoard, openspecTaskCounts, observeWorktreePr, worktreeDisplayName } from "../src/control-board"
+import { PrCache, type PrObservation } from "../src/pr-observations"
 import { createFixtureRepo, type FixtureRepo } from "./helpers/multi-worktree"
 
 const cleanupDirs: string[] = []
@@ -131,59 +131,71 @@ describe("assembleControlBoard", () => {
   })
 })
 
-describe("board PR observations", () => {
+describe("on-demand PR observations (observeWorktreePr)", () => {
+  test("the board assembly never queries pull requests: evidence is the selection's job", async () => {
+    const fixture = await createFixtureRepo({
+      worktrees: [{ name: "wt", branch: "feat/widget" }],
+    })
+    fixtures.push(fixture)
+    const board = await assembleControlBoard(fixture.root, { base: "main" })
+    const row = board.worktrees.find((worktree) => worktree.branch === "feat/widget")!
+    expect(row.pr).toBeUndefined()
+  })
+
   test("a failed PR lookup is unknown evidence, never absence or a merge claim", async () => {
     const fixture = await createFixtureRepo({ worktrees: [{ name: "wt", branch: "feat/widget" }] })
     fixtures.push(fixture)
-    const board = await assembleControlBoard(fixture.root, {
+    const observation = await observeWorktreePr({
+      targetDir: fixture.root,
+      worktree: { path: await physical(fixture.worktrees["wt"]!), branch: "feat/widget", detached: false },
       base: "main",
-      prAdapter: async () => ({ error: "gh: authentication failed" }),
-      prCache: new PrCache(),
+      adapter: async () => ({ error: "gh: authentication failed" }),
+      cache: new PrCache(),
     })
-    const row = board.worktrees.find((worktree) => worktree.branch === "feat/widget")!
-    expect(row.pr).toBeDefined()
-    expect(row.pr?.availability).toBe("unknown")
-    if (row.pr?.availability === "unknown") expect(row.pr.reason).toMatch(/authentication failed/)
+    expect(observation.availability).toBe("unknown")
+    if (observation.availability === "unknown") expect(observation.reason).toMatch(/authentication failed/)
     // The row never renders the failure as a negative fact.
-    expect(JSON.stringify(row.pr)).not.toMatch(/"availability":"known"/)
+    expect(JSON.stringify(observation)).not.toMatch(/"availability":"known"/)
   })
 
   test("a merged PR is a fact about that PR, never a completion claim", async () => {
     const fixture = await createFixtureRepo({ worktrees: [{ name: "wt", branch: "feat/widget" }] })
     fixtures.push(fixture)
-    const board = await assembleControlBoard(fixture.root, {
+    const observation = await observeWorktreePr({
+      targetDir: fixture.root,
+      worktree: { path: await physical(fixture.worktrees["wt"]!), branch: "feat/widget", detached: false },
       base: "main",
-      prAdapter: async () => [{ number: 7, title: "Old work", url: "https://example.test/pr/7", state: "MERGED", headSha: "0000000000000000000000000000000000000000" }],
-      prCache: new PrCache(),
+      adapter: async () => [{ number: 7, title: "Old work", url: "https://example.test/pr/7", state: "MERGED", headSha: "0000000000000000000000000000000000000000" }],
+      cache: new PrCache(),
     })
-    const row = board.worktrees.find((worktree) => worktree.branch === "feat/widget")!
-    expect(row.pr?.availability).toBe("known")
-    if (row.pr?.availability === "known") {
-      expect(row.pr.pr?.state).toBe("MERGED")
-      expect(row.pr.pr?.number).toBe(7)
+    expect(observation.availability).toBe("known")
+    if (observation.availability === "known") {
+      expect(observation.pr?.state).toBe("MERGED")
+      expect(observation.pr?.number).toBe(7)
     }
-    // No lifecycle vocabulary anywhere on the row: the merged state is a PR
-    // fact, not an integrated/completed summary.
-    expect(JSON.stringify(row)).not.toMatch(/completed|integrated/i)
+    // No lifecycle vocabulary anywhere: the merged state is a PR fact, not an
+    // integrated/completed summary.
+    expect(JSON.stringify(observation)).not.toMatch(/completed|integrated/i)
   })
 
   test("a detached checkout's PR evidence is unknown, not absent", async () => {
     const fixture = await createFixtureRepo({ worktrees: [{ name: "detached", detach: true }] })
     fixtures.push(fixture)
     const queriedBranches: string[] = []
-    const board = await assembleControlBoard(fixture.root, {
+    const observation = await observeWorktreePr({
+      targetDir: fixture.root,
+      worktree: { path: await physical(fixture.worktrees["detached"]!), branch: undefined, detached: true },
       base: "main",
-      prAdapter: async (query) => {
+      adapter: async (query) => {
         queriedBranches.push(query.headBranch)
         return []
       },
-      prCache: new PrCache(),
+      cache: new PrCache(),
     })
-    const row = board.worktrees.find((worktree) => worktree.detached)!
-    expect(row.pr?.availability).toBe("unknown")
-    if (row.pr?.availability === "unknown") expect(row.pr.reason).toMatch(/no attached branch/)
+    expect(observation.availability).toBe("unknown")
+    if (observation.availability === "unknown") expect(observation.reason).toMatch(/no attached branch/)
     // A detached checkout is never queried: it has no branch to scope one.
-    expect(queriedBranches).toEqual(["main"])
+    expect(queriedBranches).toEqual([])
   })
 })
 
