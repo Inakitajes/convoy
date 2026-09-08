@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, writeFile, realpath } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { basename, dirname, join } from "node:path"
 
 import { assembleControlBoard, openspecTaskCounts, worktreeDisplayName } from "../src/control-board"
 import { PrCache } from "../src/pr-observations"
@@ -9,9 +9,17 @@ import { createFixtureRepo, type FixtureRepo } from "./helpers/multi-worktree"
 
 const cleanupDirs: string[] = []
 
-/** The inventory reports physical paths; /var is a symlink to /private/var on macOS. */
-function physical(path: string): string {
-  return path.startsWith("/private/") ? path : `/private${path}`
+/**
+ * The inventory reports physical paths; /tmp and /var are symlinks on macOS.
+ * Tolerates stale registrations whose directory no longer exists by resolving
+ * the nearest existing ancestor instead.
+ */
+async function physical(path: string): Promise<string> {
+  try {
+    return await realpath(path)
+  } catch {
+    return join(await physical(dirname(path)), basename(path))
+  }
 }
 
 afterAll(async () => {
@@ -40,8 +48,8 @@ describe("assembleControlBoard", () => {
     expect(board.worktrees).toHaveLength(3)
     expect(board.worktrees[0]!.main).toBe(true)
     const paths = await Promise.all(board.worktrees.map((worktree) => worktree.path))
-    expect(paths).toContain(physical(fixture.worktrees["spec-less"]!))
-    const detachedPath = physical(fixture.worktrees["detached-wt"]!)
+    expect(paths).toContain(await physical(fixture.worktrees["spec-less"]!))
+    const detachedPath = await physical(fixture.worktrees["detached-wt"]!)
     const detached = board.worktrees.find((worktree) => worktree.path === detachedPath)
     expect(detached?.detached).toBe(true)
     // No adoption prompts, no lifecycle stages anywhere on the rows.
@@ -90,7 +98,7 @@ describe("assembleControlBoard", () => {
     })
     fixtures.push(fixture)
     const board = await assembleControlBoard(fixture.root)
-    const gonePath = physical(fixture.worktrees["gone"]!)
+    const gonePath = await physical(fixture.worktrees["gone"]!)
     const gone = board.worktrees.find((worktree) => worktree.path === gonePath)
     expect(gone).toBeDefined()
     expect(gone!.accessible).toBe(false)
@@ -104,7 +112,7 @@ describe("assembleControlBoard", () => {
     const wt = fixture.worktrees["wt"]!
     await fixture.write(wt, "uncommitted.txt", "dirty\n")
     const board = await assembleControlBoard(fixture.root)
-    const wtPath = physical(wt)
+    const wtPath = await physical(wt)
     const row = board.worktrees.find((worktree) => worktree.path === wtPath)!
     expect(row.dirt?.kind).toBe("known")
     if (row.dirt?.kind === "known") expect(row.dirt.value.dirty).toBe(true)
