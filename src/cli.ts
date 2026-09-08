@@ -326,37 +326,20 @@ async function runHomeSession(targetDir: string): Promise<void> {
   }
 }
 
-/** The resolved context Home opens with: the refreshed worktree inventory plus the navigation hint. */
+/** The resolved context Home opens with: the refreshed worktree inventory. */
 export type HomeContext = {
   worktrees: import("./control-board").BoardWorktree[]
-  resumeWorktree?: string
-  resumeNotice?: string
 }
 
 /**
- * The resolved context Home opens with: the refreshed worktree inventory (task
- * 3.1) plus the last-selection navigation hint (task 3.3). The hint is
- * optional and non-authoritative (capability home-launcher delta): it restores
- * the same checkout only when its live Git registration and administrative
- * directory still verify continuity; otherwise Home opens the current
- * Worktrees list with an explanation, never a replacement selection.
+ * The resolved context Home opens with: the refreshed worktree inventory
+ * (task 3.1). Home's default selection is always the New worktree entry —
+ * the primary action — so no last-selection hint is restored here.
  */
 async function homeWorkContext(targetDir: string): Promise<HomeContext> {
   const { assembleControlBoard } = await import("./control-board")
   const board = await assembleControlBoard(targetDir)
-  const { repoCommonDir } = await import("./repo-store")
-  const { readSessionHints, verifyHintTarget } = await import("./session-hints")
-  const commonDir = await repoCommonDir(targetDir).catch(() => undefined)
-  if (!commonDir) return { worktrees: board.worktrees }
-  const read = await readSessionHints(commonDir).catch(() => undefined)
-  const stored = read?.status === "found" ? read.value.lastSelection : undefined
-  if (!stored) return { worktrees: board.worktrees }
-  const verification = await verifyHintTarget(stored)
-  if (verification.ok) return { worktrees: board.worktrees, resumeWorktree: verification.target.checkoutPath }
-  return {
-    worktrees: board.worktrees,
-    resumeNotice: `the last selected checkout is no longer verifiable (${verification.reason}) — select a worktree explicitly`,
-  }
+  return { worktrees: board.worktrees }
 }
 
 /**

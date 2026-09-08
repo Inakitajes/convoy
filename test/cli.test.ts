@@ -36,8 +36,8 @@ describe("home navigation loop", () => {
       interrupted: () => false,
       route: {} as never,
       targetDir: ".",
-      openHome: async (context) => {
-        contexts.push(context.resumeNotice === undefined ? "ok" : "notice")
+      openHome: async () => {
+        contexts.push("ok")
         return opens++ === 0 ? { type: "destination", destination: "specs" } : undefined
       },
       openWork: async () => {},

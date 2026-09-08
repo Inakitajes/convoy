@@ -101,17 +101,20 @@ function viewDir(): string {
   return "/work/acme"
 }
 
-async function openHome(options: { worktrees?: BoardWorktree[]; resumeWorktree?: string; resumeNotice?: string; width?: number; height?: number; targetDir?: string; proposeBranchName?: (input: { prompt: string }) => Promise<{ branch: string }>; observePr?: (worktree: BoardWorktree) => Promise<PrObservation> } = {}) {
+async function openHome(options: { worktrees?: BoardWorktree[]; width?: number; height?: number; targetDir?: string; proposeBranchName?: (input: { prompt: string }) => Promise<{ branch: string }>; observePr?: (worktree: BoardWorktree) => Promise<PrObservation> } = {}) {
   const testRenderer = await createTestRenderer({ width: options.width ?? 110, height: options.height ?? 30 })
   const instance = new HomeLauncher(testRenderer.renderer, options.targetDir ?? viewDir(), {
     scene: undefined,
     worktrees: options.worktrees ?? worktrees,
-    resumeWorktree: options.resumeWorktree,
-    resumeNotice: options.resumeNotice,
     proposeBranchName: options.proposeBranchName,
     // Hermetic default: no test talks to `gh` unless it injects its own observer.
     observePr: options.observePr ?? (async () => ({ availability: "unknown", reason: "no PR observation requested by this test", observedAt: 0 })),
   })
+  await testRenderer.renderOnce()
+  // Let any immediately-resolved on-demand observation settle its render
+  // before the test interacts — a resumed selection's PR query fires at
+  // construction and must not race a frame capture.
+  await Bun.sleep(5)
   await testRenderer.renderOnce()
   return {
     ...testRenderer,
@@ -180,16 +183,19 @@ describe("worktrees-first home (capability home-launcher delta)", () => {
       // Panels: the worktree list leads, New worktree is explicit, the
       // destinations strip stays separate, and the selected row's details
       // ride inline beneath it — there is no details panel of its own.
-      expect(frame).toContain(" worktrees ")
-      expect(frame).toContain(" destinations ")
+      expect(frame).toContain("worktrees")
+      expect(frame).toContain("go to")
       expect(frame).not.toContain(" details ")
       expect(frame).toContain("add-widget")
       expect(frame).toContain("+ New worktree")
+      // New leads the list; its block folds beneath it.
+      expect(frame).toContain("A fresh checkout")
       expect(frame).toContain("Pipelines")
-      expect(frame).toContain("to see actions")
+      expect(frame).toContain("go to")
       // Worktrees is the vocabulary; no feature or Spaces branding anywhere.
       expect(frame).not.toContain("New feature")
       expect(frame).not.toContain("Spaces")
+      expect(frame).not.toContain("name it")
     } finally {
       await closeHome(session)
     }
@@ -218,7 +224,9 @@ describe("worktrees-first home (capability home-launcher delta)", () => {
   test("enter on a worktree row opens its detail with distinct action labels", async () => {
     const session = await openHome()
     try {
-      session.press("down") // the cursor starts on the main checkout
+      session.press("down") // New leads; two downs reach add-widget
+      await session.renderOnce()
+      session.press("down")
       await session.renderOnce()
       session.press("return")
       await session.renderOnce()
@@ -236,6 +244,8 @@ describe("worktrees-first home (capability home-launcher delta)", () => {
   test("the detail exposes the independent Git and publication actions", async () => {
     const session = await openHome()
     try {
+      session.press("down") // New leads
+      await session.renderOnce()
       session.press("down") // the worktree row
       await session.renderOnce()
       session.press("return") // open its detail
@@ -254,7 +264,8 @@ describe("worktrees-first home (capability home-launcher delta)", () => {
   test("removal is blocked on the main checkout with its reason and never fires", async () => {
     const session = await openHome()
     try {
-      // The cursor starts on the main checkout row.
+      session.press("down") // onto the main checkout
+      await session.renderOnce()
       session.press("return") // open its detail
       await session.renderOnce()
       const frame = frameOf(session)
@@ -271,6 +282,8 @@ describe("worktrees-first home (capability home-launcher delta)", () => {
   test("a detail action resolves the same worktree with its action", async () => {
     const session = await openHome()
     try {
+      session.press("down") // New leads
+      await session.renderOnce()
       session.press("down") // the worktree row
       await session.renderOnce()
       session.press("return") // open its detail
@@ -292,6 +305,8 @@ describe("worktrees-first home (capability home-launcher delta)", () => {
     })
     const session = await openHome({ worktrees: [worktree({ path: mainPath, branch: "main", main: true }), busy] })
     try {
+      session.press("down") // New leads
+      await session.renderOnce()
       session.press("down") // the busy worktree row
       await session.renderOnce()
       session.press("return") // open its detail
@@ -311,15 +326,15 @@ describe("worktrees-first home (capability home-launcher delta)", () => {
   test("highlighting a destination unfolds its details inside the destinations strip", async () => {
     const session = await openHome()
     try {
-      // Skip both worktree rows and New worktree to land on Pipelines.
+      // Skip New and both worktree rows to land on Pipelines.
       session.press("j")
       session.press("j")
       session.press("j")
       await session.renderOnce()
       const frame = frameOf(session)
       expect(frame).toContain("From intent to ship")
-      expect(frame).toContain("Compose agents into a reviewed, repeatable path")
-      expect(frame).toContain(" destinations ")
+      expect(frame).toContain("Compose agents into a repeatable path")
+      expect(frame).toContain("go to")
     } finally {
       await closeHome(session)
     }
@@ -329,15 +344,19 @@ describe("worktrees-first home (capability home-launcher delta)", () => {
     const session = await openHome()
     try {
       let frame = frameOf(session)
-      // The main checkout's block rides beneath the first row.
-      expect(frame).toContain("to see actions")
+      // New leads the list: its block rides beneath the first row.
+      expect(frame).toContain("A fresh checkout")
+      session.press("down") // onto the main checkout
+      await session.renderOnce()
+      frame = frameOf(session)
+      expect(frame).toContain("branch")
       session.press("down") // onto add-widget
       await session.renderOnce()
       frame = frameOf(session)
       // The block now hangs under add-widget: its branch line replaces the
       // previous fold, and the destinations strip stays in place below.
       expect(frame).toContain("feat/add-widget")
-      expect(frame).toContain(" destinations ")
+      expect(frame).toContain("go to")
     } finally {
       await closeHome(session)
     }
@@ -355,7 +374,11 @@ describe("worktrees-first home (capability home-launcher delta)", () => {
     })
     try {
       await session.renderOnce()
-      // The opening selection fired exactly one on-demand query.
+      // The opening selection is the New entry: not a checkout, so no
+      // on-demand query fires yet.
+      expect(observed).toEqual([])
+      session.press("down") // onto the main checkout
+      await session.renderOnce()
       expect(observed).toEqual([mainPath])
       expect(frameOf(session)).toContain("checking…")
       gates.get(mainPath)!({ availability: "known", pr: { number: 12, state: "OPEN", title: "Main", url: "https://example.test/pr/12" }, observedAt: 0 })
@@ -391,74 +414,193 @@ describe("worktrees-first home (capability home-launcher delta)", () => {
 })
 
 describe("selection surface", () => {
-  test("a remembered worktree row is preselected when it still validates", async () => {
-    const remembered = await openHome({ resumeWorktree: wtPath })
+  test("the New worktree entry is always the default selection", async () => {
+    const session = await openHome()
     try {
-      // The selection is the row's full-width highlight: the remembered
-      // checkout's row carries it, the others do not.
-      const highlighted = highlightedLines(remembered)
-      expect(highlighted.some((line) => line.includes("add-widget"))).toBe(true)
+      // The primary action carries the full-width highlight on open; the
+      // checkouts below do not.
+      const highlighted = highlightedLines(session)
+      expect(highlighted.some((line) => line.includes("New worktree"))).toBe(true)
       expect(highlighted.some((line) => line.includes("repo"))).toBe(false)
-      // The highlight never repaints the observation dot: the diamond keeps
-      // its own state color while the text rides the chip color.
-      const frame = remembered.captureSpans()
-      const selectedRow = frame.lines.find((line) => line.spans.some((span) => span.bg.a > 0))!
-      const dot = selectedRow.spans.find((span) => span.text.includes("◇"))!
-      const title = selectedRow.spans.find((span) => span.text.includes("add-widget"))!
-      expect(sameColor(dot.fg, title.fg)).toBe(false)
-      expect(sameColor(title.fg, chipTextFg())).toBe(true)
     } finally {
-      await closeHome(remembered)
-    }
-
-    // Without a verifiable hint the list opens with no preselection beyond
-    // the first row — never a substituted execution target.
-    const fresh = await openHome({})
-    try {
-      const highlighted = highlightedLines(fresh)
-      expect(highlighted.some((line) => line.includes("repo"))).toBe(true)
-    } finally {
-      await closeHome(fresh)
+      await closeHome(session)
     }
   })
 
-  test("a lost selection notice is shown above the list without substituting", async () => {
-    const lost = await openHome({
-      worktrees: [worktree({ path: mainPath, branch: "main", main: true })],
-      resumeNotice: "the last selected worktree (/wt/gone) is no longer registered in Git",
-    })
+  test("a selected worktree row inverts its marker over the accent fill", async () => {
+    const session = await openHome()
     try {
-      const frame = frameOf(lost)
-      expect(frame).toContain("no longer registered")
-      expect(frame).toContain("repo")
+      session.press("down") // New leads
+      await session.renderOnce()
+      session.press("down") // onto add-widget
+      await session.renderOnce()
+      // The selected marker inverts: a dark glyph on its own state color —
+      // the cell the rail below hangs from — while the title rides the chip
+      // color on the accent fill.
+      const frame = session.captureSpans()
+      const selectedRow = frame.lines.find((line) => line.spans.some((span) => span.bg.a > 0))!
+      const dot = selectedRow.spans.find((span) => span.text.includes("◇"))!
+      const title = selectedRow.spans.find((span) => span.text.includes("add-widget"))!
+      expect(sameColor(dot.fg, chipTextFg())).toBe(true)
+      expect(sameColor(dot.bg, title.bg)).toBe(false)
+      expect(sameColor(title.fg, chipTextFg())).toBe(true)
     } finally {
-      await closeHome(lost)
+      await closeHome(session)
     }
   })
 })
 
-describe("new worktree form", () => {
+describe("new worktree form (auto by default, manual on tab)", () => {
   test("cancelling the form makes no resolution and returns to the list", async () => {
     const session = await openHome()
     try {
       session.press("n")
       await session.renderOnce()
       expect(frameOf(session)).toContain("New worktree")
+      // Auto is the default mode.
+      expect(frameOf(session)).toContain("auto")
+      expect(frameOf(session)).toContain("describe")
       session.press("escape")
       await session.renderOnce()
-      expect(frameOf(session)).toContain(" worktrees ")
+      expect(frameOf(session)).toContain("worktrees")
       expect(session.instance.result).toBeInstanceOf(Promise)
     } finally {
       await closeHome(session)
     }
   })
 
-  test("the naming model refines the prefilled branch while the field is untouched (task 3.4)", async () => {
+  test("auto mode: describing the work shows a reviewed proposal, accepting resolves the draft", async () => {
     const session = await openHome({
       proposeBranchName: async ({ prompt }) => ({ branch: `feat/${prompt.toLowerCase().replace(/\s+/g, "-")}-model` }),
     })
     try {
       session.press("n")
+      await session.renderOnce()
+      for (const char of "Improve review navigation") session.press(char)
+      session.press("return")
+      await session.renderOnce()
+      await Bun.sleep(30)
+      await session.renderOnce()
+      // The whole draft is shown for review — branch, base, destination —
+      // and nothing resolves until acceptance.
+      expect(frameOf(session)).toContain("name")
+      expect(frameOf(session)).toContain("feat/improve-review-navigation-model")
+      expect(frameOf(session)).toContain("base")
+      expect(frameOf(session)).toContain("creates this worktree")
+      expect(session.instance.result).toBeInstanceOf(Promise)
+      session.press("return") // accept
+      const resolution = (await session.instance.result) as Extract<HomeResolution, { type: "new-work" }>
+      expect(resolution.type).toBe("new-work")
+      expect(resolution.draft?.displayName).toBe("Improve review navigation")
+      expect(resolution.draft?.branch).toBe("feat/improve-review-navigation-model")
+      // No git repository at the fake target: the detected default is main.
+      expect(resolution.draft?.base).toBe("main")
+      expect(resolution.draft?.worktree).toContain("improve-review-navigation-model")
+    } catch {
+      await closeHome(session)
+      throw new Error("test failed")
+    }
+  })
+
+  test("auto mode: a naming failure degrades to the deterministic slug proposal", async () => {
+    const session = await openHome({
+      proposeBranchName: async () => {
+        throw new Error("the namer is unavailable")
+      },
+    })
+    try {
+      session.press("n")
+      await session.renderOnce()
+      for (const char of "Improve review navigation") session.press(char)
+      session.press("return")
+      await session.renderOnce()
+      await Bun.sleep(30)
+      await session.renderOnce()
+      // The namer is advisory: the slug proposal still lands, and the
+      // failure never surfaces as a form error.
+      expect(frameOf(session)).toContain("feat/improve-review-navigation")
+      expect(frameOf(session)).not.toContain("unavailable")
+      session.press("escape")
+      await session.renderOnce()
+      expect(session.instance.result).toBeInstanceOf(Promise)
+    } finally {
+      await closeHome(session)
+    }
+  })
+
+  test("auto mode: a too-short description is refused without proposing", async () => {
+    const session = await openHome()
+    try {
+      session.press("n")
+      await session.renderOnce()
+      session.press("a")
+      session.press("return")
+      await session.renderOnce()
+      await Bun.sleep(10)
+      await session.renderOnce()
+      expect(frameOf(session)).toContain("describe the work in a few words")
+      session.press("escape")
+      await session.renderOnce()
+      expect(session.instance.result).toBeInstanceOf(Promise)
+    } finally {
+      await closeHome(session)
+    }
+  })
+
+  test("auto mode: escape from the proposal steps back to the description, a second escape cancels", async () => {
+    const session = await openHome({
+      proposeBranchName: async () => ({ branch: "feat/model-name" }),
+    })
+    try {
+      session.press("n")
+      await session.renderOnce()
+      for (const char of "Improve review navigation") session.press(char)
+      session.press("return")
+      await session.renderOnce()
+      await Bun.sleep(30)
+      await session.renderOnce()
+      expect(frameOf(session)).toContain("creates this worktree")
+      session.press("escape") // back to the description, form still open
+      await session.renderOnce()
+      expect(frameOf(session)).toContain("Improve review navigation")
+      expect(session.instance.result).toBeInstanceOf(Promise)
+      session.press("escape") // now it cancels
+      await session.renderOnce()
+      expect(frameOf(session)).toContain("worktrees")
+      expect(session.instance.result).toBeInstanceOf(Promise)
+    } finally {
+      await closeHome(session)
+    }
+  })
+
+  test("tab switches to the manual form and carries the description over as the name", async () => {
+    const session = await openHome()
+    try {
+      session.press("n")
+      await session.renderOnce()
+      for (const char of "Improve review navigation") session.press(char)
+      session.press("tab")
+      await session.renderOnce()
+      expect(frameOf(session)).toContain("manual")
+      expect(frameOf(session)).toContain("Improve review navigation")
+      // The branch prefill rides the name's slug.
+      expect(frameOf(session)).toContain("improve-review-navigation")
+      session.press("escape")
+      await session.renderOnce()
+      expect(session.instance.result).toBeInstanceOf(Promise)
+    } finally {
+      await closeHome(session)
+    }
+  })
+
+  test("manual mode: the naming model refines the prefilled branch while the field is untouched (task 3.4)", async () => {
+    const session = await openHome({
+      proposeBranchName: async ({ prompt }) => ({ branch: `feat/${prompt.toLowerCase().replace(/\s+/g, "-")}-model` }),
+    })
+    try {
+      session.press("n")
+      await session.renderOnce()
+      session.press("tab") // manual mode
       await session.renderOnce()
       for (const char of "Improve review navigation") session.press(char)
       session.press("return")
@@ -476,7 +618,7 @@ describe("new worktree form", () => {
     }
   })
 
-  test("a naming-model failure keeps the editable deterministic prefill", async () => {
+  test("manual mode: a naming-model failure keeps the editable deterministic prefill", async () => {
     const session = await openHome({
       proposeBranchName: async () => {
         throw new Error("the namer is unavailable")
@@ -484,6 +626,8 @@ describe("new worktree form", () => {
     })
     try {
       session.press("n")
+      await session.renderOnce()
+      session.press("tab") // manual mode
       await session.renderOnce()
       for (const char of "Improve review navigation") session.press(char)
       session.press("return")
@@ -500,7 +644,7 @@ describe("new worktree form", () => {
     }
   })
 
-  test("a suggestion landing during the free-name check never overwrites an edit, a field advance, or a cancellation", async () => {
+  test("manual mode: a suggestion landing during the free-name check never overwrites an edit, a field advance, or a cancellation", async () => {
     // The namer resolves immediately, so the suggestion passes its pre-await
     // guards and parks inside the gated free-name check; the operator action
     // then lands in that await window — the exact spot an unchecked
@@ -512,6 +656,8 @@ describe("new worktree form", () => {
     }
     async function reachParkedSuggestion(session: Awaited<ReturnType<typeof openHome>>, namerGate: ReturnType<typeof makeNamerGate>) {
       session.press("n")
+      await session.renderOnce()
+      session.press("tab") // manual mode
       await session.renderOnce()
       for (const char of "Improve review navigation") session.press(char)
       session.press("return")
@@ -575,7 +721,7 @@ describe("new worktree form", () => {
           releaseEnsureFreeBranchName("feat/model-name", "feat/model-name")
           await Bun.sleep(20)
           await session.renderOnce()
-          expect(frameOf(session)).toContain(" worktrees ")
+          expect(frameOf(session)).toContain("worktrees")
           expect(frameOf(session)).not.toContain("model-name")
           expect(session.instance.result).toBeInstanceOf(Promise)
         } finally {
@@ -588,10 +734,12 @@ describe("new worktree form", () => {
     }
   })
 
-  test("the form collects name, branch, and base before any mutation", async () => {
+  test("manual mode: the form collects name, branch, and base before any mutation", async () => {
     const session = await openHome()
     try {
       session.press("n")
+      await session.renderOnce()
+      session.press("tab") // manual mode
       await session.renderOnce()
       for (const char of "Improve review navigation") session.press(char)
       session.press("return")
@@ -615,7 +763,7 @@ describe("small terminals (list and detail stay navigable)", () => {
     const session = await openHome({ width: 60, height: 24 })
     try {
       const frame = frameOf(session)
-      expect(frame).toContain(" worktrees ")
+      expect(frame).toContain("worktrees")
       expect(frame).toContain("New worktree")
     } finally {
       await closeHome(session)
@@ -628,7 +776,7 @@ describe("small terminals (list and detail stay navigable)", () => {
     )
     const session = await openHome({ worktrees: many, width: 100, height: 24 })
     try {
-      for (let i = 0; i < 11; i++) {
+      for (let i = 0; i < 12; i++) {
         session.press("down")
         await session.renderOnce()
       }
@@ -646,9 +794,16 @@ describe("small terminals (list and detail stay navigable)", () => {
   test("a short terminal keeps the selected detail action and its hints visible", async () => {
     const session = await openHome({ height: 14 })
     try {
-      session.press("return") // open the first worktree's detail
+      session.press("down") // New leads; onto the main checkout
       await session.renderOnce()
-      const frame = frameOf(session)
+      session.press("return") // open its detail
+      await session.renderOnce()
+      // The detail pane scrolls here, so the render is read via spans —
+      // char-frame capture of a scrolled pane trips an opentui native bug.
+      const frame = session
+        .captureSpans()
+        .lines.map((line) => line.spans.map((span) => span.text).join(""))
+        .join("\n")
       const selected = frame.split("\n").filter((line) => line.includes("▸"))
       expect(selected.some((line) => line.includes("Open conversation"))).toBe(true)
       expect(frame).toContain("enter")
@@ -660,12 +815,19 @@ describe("small terminals (list and detail stay navigable)", () => {
   test("a resize re-clamps the detail pane without stranding it", async () => {
     const session = await openHome({ height: 30 })
     try {
-      session.press("return")
+      session.press("down") // New leads; onto the main checkout
+      await session.renderOnce()
+      session.press("return") // open its detail
       await session.renderOnce()
       expect(frameOf(session)).toContain("Open conversation")
       ;(session.renderer as unknown as { resize(width: number, height: number): void }).resize(110, 12)
       await session.renderOnce()
-      const frame = frameOf(session)
+      // After the resize the pane is scrolled; spans read the render without
+      // tripping opentui's scrolled char-frame capture bug.
+      const frame = session
+        .captureSpans()
+        .lines.map((line) => line.spans.map((span) => span.text).join(""))
+        .join("\n")
       const selected = frame.split("\n").filter((line) => line.includes("▸"))
       expect(selected.some((line) => line.includes("Open conversation"))).toBe(true)
     } finally {

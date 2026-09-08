@@ -30,8 +30,9 @@ import type { PrObservation } from "./pr-observations"
  * Worktrees-first Home (capability home-launcher delta, tasks 3.1/3.4; gap
  * CC-1): the primary screen is the repository's Worktrees list — every
  * Git-registered checkout, main, external, detached, locked, missing-path,
- * and spec-less alike — plus an explicit New worktree entry and auxiliary
- * destinations as navigation actions. A worktree is a Git checkout, not a
+ * and spec-less alike — led by an explicit New worktree entry (the primary
+ * action, right above the base checkout) and auxiliary destinations as
+ * navigation actions. A worktree is a Git checkout, not a
  * domain record: rows carry observed facts (branch, path, dirt, activity,
  * local changes), never feature identities, lifecycle summaries, or
  * Completed history.
@@ -80,8 +81,10 @@ const MASTHEAD_BREATHING_ROWS = 1
 export const WORDMARK_GAP = "  "
 /** Rounded border + paddingX:1 on each side of a panel. */
 const PANEL_GUTTER = 4
-/** The destinations strip's resting height: 4 rows + rounded border. */
-const DESTINATION_PANEL_HEIGHT = 6
+/** Section headings: one divider line with the label, then a breathing blank. */
+const HEADING_ROWS = 2
+/** The destinations strip's resting height: heading + 4 rows + a trailing blank before the footer. */
+const DESTINATION_PANEL_HEIGHT = HEADING_ROWS + 4 + 1
 /** The inline detail block aligns with the row's name — only the dot indents. */
 const INLINE_INDENT = 2
 
@@ -111,28 +114,28 @@ const AUXILIARY: ReadonlyArray<{
     shortcut: "p",
     label: "Pipelines",
     kicker: "From intent to ship",
-    description: "Compose agents into a reviewed, repeatable path from intent to shipped code.",
+    description: "Compose agents into a repeatable path from intent to ship.",
   },
   {
     id: "specs",
     shortcut: "s",
     label: "Specs",
     kicker: "The living spec",
-    description: "Explore, shape, run, and close work around the project's living specification.",
+    description: "Explore, shape, and run work around the living spec.",
   },
   {
     id: "runs",
     shortcut: "r",
     label: "Runs",
     kicker: "Live and history",
-    description: "Follow live execution and revisit the history, reports, and decisions behind every run.",
+    description: "Follow live runs and revisit their history and decisions.",
   },
   {
     id: "config",
     shortcut: "c",
     label: "Config",
     kicker: "Models and agents",
-    description: "Tune models, agents, pipelines, permissions, hooks, and project defaults.",
+    description: "Tune models, agents, permissions, and project defaults.",
   },
 ]
 
@@ -155,13 +158,9 @@ export async function launchHomeTui(
   options: {
     route?: TuiRoute
     initialSelection?: HomeSelection
-    /** The worktree selection to restore, when it still validates against Git. */
-    resumeWorktree?: string
     kittyGraphics?: boolean
     /** The repository's worktree rows; loaded by the session loop and refreshed on every open. */
     worktrees?: BoardWorktree[]
-    /** Why the remembered worktree could not be restored, shown above the list. */
-    resumeNotice?: string
   } = {},
 ): Promise<HomeResolution> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
@@ -173,15 +172,13 @@ export async function launchHomeTui(
     return new HomeLauncher(options.route.session.renderer, targetDir, {
       scene,
       worktrees: options.worktrees,
-      resumeWorktree: options.resumeWorktree,
-      resumeNotice: options.resumeNotice,
     }).result
   }
 
   const renderer = await createCliRenderer(homeRendererConfig(false))
   const mode = await renderer.waitForThemeMode(1_000).catch(() => null)
   setTheme(paletteForTerminal(mode, terminalBackgroundHex(renderer)))
-  return new HomeLauncher(renderer, targetDir, { worktrees: options.worktrees, resumeWorktree: options.resumeWorktree, resumeNotice: options.resumeNotice }).result
+  return new HomeLauncher(renderer, targetDir, { worktrees: options.worktrees }).result
 }
 
 export class HomeLauncher {
@@ -190,7 +187,7 @@ export class HomeLauncher {
   private resolveResult!: (resolution: HomeResolution) => void
   private finished = false
   private readonly scene?: TuiScene
-  /** "list": the worktree list; "detail": one worktree's actions; "form": new-worktree fields. */
+  /** "list": the worktree list; "detail": one worktree's actions; "form": new worktree. */
   private level: "list" | "detail" | "form" = "list"
   private rows: ListRow[] = []
   private selectedRow = 0
@@ -206,10 +203,29 @@ export class HomeLauncher {
    * actions — name, branch, facts — stays readable.
    */
   private detailFollow = true
-  /** New-worktree form state: one input field at a time, committed in sequence. */
-  private form: { field: 0 | 1 | 2; displayName: string; branch: string; base: string; error?: string } | undefined
-  /** Why the remembered worktree could not be restored. */
-  private readonly resumeNotice?: string
+  /**
+   * New-worktree form state, in one of two modes. "auto" (the default) is a
+   * single description input: committing it asks the namer for a conventional
+   * branch and shows the whole draft — name, branch, base, destination — as a
+   * reviewed proposal. "manual" is the name → branch → base field sequence.
+   */
+  private form:
+    | {
+        mode: "auto" | "manual"
+        /** Auto: the work description input. */
+        description: string
+        /** Auto: the naming proposal is being prepared. */
+        proposing?: boolean
+        /** Auto: the reviewed proposal, ready to accept. */
+        proposal?: { displayName: string; branch: string; base: string; worktree: string }
+        /** Manual: which field carries the caret. */
+        field: 0 | 1 | 2
+        displayName: string
+        branch: string
+        base: string
+        error?: string
+      }
+    | undefined
   /** The injected naming-model callback; the real bounded namer is the default. */
   private readonly proposeBranchName?: (input: { prompt: string }) => Promise<{ branch: string }>
   private readonly emptyWork: boolean
@@ -224,8 +240,6 @@ export class HomeLauncher {
 
   private readonly mastheadText: TextRenderable
   private readonly mastheadBox: BoxRenderable
-  private readonly noticeText: TextRenderable
-  private readonly noticeBox: BoxRenderable
   private readonly bodyBox: BoxRenderable
   private readonly listText: TextRenderable
   private readonly listBox: BoxRenderable
@@ -272,8 +286,6 @@ export class HomeLauncher {
     options: {
       scene?: TuiScene
       worktrees?: BoardWorktree[]
-      resumeWorktree?: string
-      resumeNotice?: string
       /** Asks the naming model for a conventional branch name; injected so tests stay hermetic. */
       proposeBranchName?: (input: { prompt: string }) => Promise<{ branch: string }>
       /** The on-demand PR observation; injected so tests stay hermetic. */
@@ -281,7 +293,6 @@ export class HomeLauncher {
     } = {},
   ) {
     this.scene = options.scene
-    this.resumeNotice = options.resumeNotice
     this.proposeBranchName = options.proposeBranchName
     this.observePr = options.observePr ?? ((worktree) => observeWorktreePr({ targetDir: this.targetDir, worktree }))
     this.emptyWork = (options.worktrees ?? []).length === 0
@@ -289,14 +300,8 @@ export class HomeLauncher {
       this.resolveResult = resolve
     })
     this.rows = this.buildRows(options.worktrees ?? [])
-    // A restored worktree lands on its row only when it still validates
-    // against the live Git inventory; a missing remembered worktree falls
-    // back to the list with the explanation shown — never silently selecting
-    // another execution target.
-    if (options.resumeWorktree) {
-      const index = this.rows.findIndex((row) => row.kind === "worktree" && row.worktree.path === options.resumeWorktree)
-      if (index >= 0) this.selectedRow = index
-    }
+    // The default selection is always the New worktree entry — the list's
+    // first row, the primary action.
 
     const mount = this.scene?.root ?? renderer.root
     const shell = new BoxRenderable(renderer, {
@@ -317,18 +322,6 @@ export class HomeLauncher {
     const mastheadText = new TextRenderable(renderer, { content: "", fg: theme.text, width: "100%", wrapMode: "none" })
     mastheadBox.add(mastheadText)
 
-    const noticeBox = new BoxRenderable(renderer, {
-      id: "convoy-home-notice",
-      width: "100%",
-      height: 1,
-      flexShrink: 0,
-      backgroundColor: theme.bg,
-      paddingX: CHROME_PADDING_COLS,
-      visible: Boolean(options.resumeNotice),
-    })
-    const noticeText = new TextRenderable(renderer, { content: "", fg: theme.yellow, width: "100%", wrapMode: "none" })
-    noticeBox.add(noticeText)
-
     const bodyBox = new BoxRenderable(renderer, {
       id: "convoy-home-body",
       width: "100%",
@@ -341,21 +334,20 @@ export class HomeLauncher {
       id: "convoy-home-list",
       height: "100%",
       flexGrow: 1,
-      borderColor: theme.accent,
       backgroundColor: theme.bg,
-      title: " worktrees ",
-      titleAlignment: "left",
     })
     const destinations = this.panel({
       id: "convoy-home-destinations",
       width: "100%",
       height: DESTINATION_PANEL_HEIGHT,
       flexShrink: 0,
-      borderColor: theme.borderDim,
       backgroundColor: theme.bg,
-      title: " destinations ",
-      titleAlignment: "left",
     })
+    // Sections are dividers, not containers. The border must go through the
+    // runtime setter: opentui's constructor path funnels `border: false`
+    // through initializeBorder(), which forces it back on.
+    list.box.border = false
+    destinations.box.border = false
     const preview = this.panel({
       id: "convoy-home-preview",
       width: "100%",
@@ -379,8 +371,6 @@ export class HomeLauncher {
 
     this.mastheadText = mastheadText
     this.mastheadBox = mastheadBox
-    this.noticeText = noticeText
-    this.noticeBox = noticeBox
     this.bodyBox = bodyBox
     this.listText = list.text
     this.listBox = list.box
@@ -392,10 +382,9 @@ export class HomeLauncher {
     this.paletteTargets.push(
       { box: shell, background: "bg" },
       { box: mastheadBox, background: "bg" },
-      { box: noticeBox, background: "bg" },
       { box: bodyBox, background: "bg" },
-      { box: list.box, background: "bg", border: "accent" },
-      { box: destinations.box, background: "bg", border: "borderDim" },
+      { box: list.box, background: "bg" },
+      { box: destinations.box, background: "bg" },
       { box: preview.box, background: "bg", border: "borderDim" },
       { box: hintsBox, background: "bg" },
     )
@@ -404,7 +393,6 @@ export class HomeLauncher {
     bodyBox.add(destinations.box)
     bodyBox.add(preview.box)
     shell.add(mastheadBox)
-    shell.add(noticeBox)
     shell.add(bodyBox)
     shell.add(hintsBox)
     mount.add(shell)
@@ -419,14 +407,15 @@ export class HomeLauncher {
   }
 
   /**
-   * The list always shows the worktree surface: checkouts and New worktree in
-   * the worktrees panel; the four destinations live in their own strip below,
-   * never mixed into the checkout list.
+   * The list always shows the worktree surface: New worktree leads — the
+   * primary action, right above the base checkout — then the checkouts; the
+   * four destinations live in their own strip below, never mixed into the
+   * checkout list.
    */
   private buildRows(worktrees: BoardWorktree[]): ListRow[] {
     const rows: ListRow[] = []
-    for (const worktree of worktrees) rows.push({ kind: "worktree", worktree })
     rows.push({ kind: "new" })
+    for (const worktree of worktrees) rows.push({ kind: "worktree", worktree })
     for (const entry of AUXILIARY) {
       rows.push({
         kind: "auxiliary",
@@ -745,19 +734,71 @@ export class HomeLauncher {
 
   private openNewWorkForm() {
     this.level = "form"
-    this.form = { field: 0, displayName: "", branch: "", base: "" }
+    // Auto mode is the default: describe the work, get a conventional
+    // proposal. Tab reaches the manual name/branch/base sequence.
+    this.form = { mode: "auto", description: "", field: 0, displayName: "", branch: "", base: "" }
   }
 
   private handleFormKey(key: KeyEvent) {
     const form = this.form
     if (!form) return
     if (key.name === "escape") {
-      // Cancelling before acceptance makes no repository effects.
+      // From a shown (or in-flight) proposal, escape steps back to the
+      // description input; from the inputs, cancelling makes no repository
+      // effects.
+      if (form.mode === "auto" && (form.proposal || form.proposing)) {
+        this.proposeToken++
+        form.proposing = false
+        form.proposal = undefined
+        this.render()
+        return
+      }
       this.form = undefined
       this.level = "list"
       this.render()
       return
     }
+    if (key.name === "tab") {
+      this.switchFormMode()
+      return
+    }
+    if (form.mode === "auto") {
+      this.handleAutoFormKey(form, key)
+      return
+    }
+    this.handleManualFormKey(form, key)
+  }
+
+  /** Auto mode: one description input; enter proposes, enter again accepts. */
+  private handleAutoFormKey(form: NonNullable<HomeLauncher["form"]>, key: KeyEvent) {
+    // While the proposal is up (or being prepared) only enter/escape act.
+    if (form.proposal) {
+      if (key.name === "return" || key.name === "linefeed") this.acceptAutoProposal()
+      return
+    }
+    if (form.proposing) return
+    if (key.name === "backspace") {
+      form.description = form.description.slice(0, -1)
+      form.error = undefined
+      this.render()
+      return
+    }
+    if (key.name === "return" || key.name === "linefeed") {
+      void this.proposeAutoDraft(form.description)
+      return
+    }
+    const char = !key.ctrl && !key.meta && !key.option && key.sequence && key.sequence.length === 1 ? key.sequence : undefined
+    // A description is prose: any printable character rides, not just the
+    // name-safe set the manual fields accept.
+    if (char && /^[\x20-\x7E\u00A0-\uFFFF]$/.test(char)) {
+      form.description += char
+      form.error = undefined
+      this.render()
+    }
+  }
+
+  /** Manual mode: the original one-field-at-a-time sequence. */
+  private handleManualFormKey(form: NonNullable<HomeLauncher["form"]>, key: KeyEvent) {
     if (key.name === "backspace") {
       const value = form.field === 0 ? form.displayName : form.field === 1 ? form.branch : form.base
       const next = value.slice(0, -1)
@@ -783,18 +824,44 @@ export class HomeLauncher {
   }
 
   /**
+   * Switching modes carries the work over: the auto description becomes the
+   * manual name (its slug the branch prefill), the manual name becomes the
+   * auto description. Every in-flight naming call is invalidated first, so a
+   * late suggestion or proposal can never land in the other mode.
+   */
+  private switchFormMode() {
+    const form = this.form
+    if (!form) return
+    this.proposeToken++
+    this.suggestBranchNameToken++
+    if (form.mode === "auto") {
+      form.mode = "manual"
+      form.proposing = false
+      form.proposal = undefined
+      if (!form.displayName) form.displayName = form.description.trim()
+      if (form.displayName && !form.branch) form.branch = slugFromName(form.displayName)
+      form.field = 0
+    } else {
+      form.mode = "auto"
+      if (!form.description) form.description = form.displayName.trim()
+    }
+    form.error = undefined
+    this.render()
+  }
+
+  /**
    * Asks the configured naming model for a conventional branch name for the
    * reviewed description (work-context delta, task 3.4). Bounded: the namer
    * has its own timeout and the deterministic prefill already on the field is
    * the editable fallback, so a slow or unavailable model never blocks the
-   * form. The suggestion lands only while the operator is still on the
-   * branch field and has not typed a name of their own.
+   * form. The suggestion lands only while the operator is still in manual
+   * mode on the branch field and has not typed a name of their own.
    */
   private suggestBranchNameToken = 0
   private async suggestBranchName(description: string): Promise<void> {
     const token = ++this.suggestBranchNameToken
     const form = this.form
-    if (!form) return
+    if (!form || form.mode !== "manual") return
     const deterministic = form.branch
     try {
       const { ensureFreeBranchName } = await import("./worktree")
@@ -813,7 +880,7 @@ export class HomeLauncher {
       }
       if (token !== this.suggestBranchNameToken) return
       const current = this.form
-      if (!current || current !== form || current.field !== 1) return
+      if (!current || current !== form || current.mode !== "manual" || current.field !== 1) return
       if (current.branch !== deterministic) return
       const cleaned = proposed.replace(/^refs\/heads\//, "").replace(/\s+/g, "-")
       if (!cleaned) return
@@ -832,7 +899,7 @@ export class HomeLauncher {
       // check must survive — the suggestion never overwrites them.
       if (token !== this.suggestBranchNameToken) return
       const target = this.form
-      if (!target || target !== form || target.field !== 1) return
+      if (!target || target !== form || target.mode !== "manual" || target.field !== 1) return
       if (target.branch !== deterministic) return
       target.branch = resolved
       this.render()
@@ -861,15 +928,9 @@ export class HomeLauncher {
       return
     }
     if (form.field === 1) {
-      const branch = form.branch.trim()
-      const cleaned = branch.replace(/^refs\/heads\//, "").replace(/\s+/g, "-")
-      if (!cleaned || /^(feat|fix|refactor|perf|docs|test|chore|build|ci)(\/|$)/.test(cleaned) === false) {
-        // Conventional prefix stays the allocation convention; a missing one
-        // is prefilled rather than refused, so the review stays editable.
-        form.branch = `feat/${cleaned || slugFromName(form.displayName)}`
-      } else {
-        form.branch = cleaned
-      }
+      // Conventional prefix stays the allocation convention; a missing one is
+      // prefilled rather than refused, so the review stays editable.
+      form.branch = withConventionalPrefix(form.branch, slugFromName(form.displayName))
       const { ensureFreeBranchName } = await import("./worktree")
       try {
         form.branch = await ensureFreeBranchName(form.branch, this.targetDir)
@@ -901,11 +962,97 @@ export class HomeLauncher {
     }
   }
 
+  // ── auto mode: describe, propose, review, accept ────────────────────────
+
+  /** Proposal requests are token-guarded: a mode switch, a step-back, or a cancellation invalidates every in-flight call. */
+  private proposeToken = 0
+
+  /**
+   * The form caret blinks so the input reads writable. One timer drives it
+   * while a form is open; the guard makes the tick a no-op everywhere else,
+   * and `finish` clears it.
+   */
+  private caretOn = true
+  private readonly caretTimer: ReturnType<typeof setInterval> = setInterval(() => {
+    if (this.finished || this.level !== "form" || !this.form) return
+    this.caretOn = !this.caretOn
+    this.renderer.requestRender()
+  }, 500)
+
+  /**
+   * Auto mode's proposal: the description asks the namer for a conventional
+   * branch (the same bounded namer the manual refinement uses; the
+   * deterministic slug is the fallback so a slow or failed model never blocks
+   * the draft), the base is the detected default, and the destination follows
+   * the documented location conventions. Nothing is created here: the whole
+   * draft is shown for review, and acceptance hands it to the session loop.
+   */
+  private async proposeAutoDraft(description: string): Promise<void> {
+    const token = ++this.proposeToken
+    const form = this.form
+    if (!form || form.mode !== "auto" || form.proposal) return
+    const trimmed = description.trim()
+    if (trimmed.length < 2) {
+      form.error = "describe the work in a few words (at least 2 characters)"
+      this.render()
+      return
+    }
+    form.proposing = true
+    form.error = undefined
+    this.render()
+    try {
+      const { ensureFreeBranchName, resolveWorktreeDir, defaultBranchNameModel, proposeBranchName } = await import("./worktree")
+      let proposed = ""
+      try {
+        if (this.proposeBranchName) {
+          proposed = (await this.proposeBranchName({ prompt: trimmed })).branch
+        } else {
+          const { loadMergedConvoyConfig } = await import("./config")
+          const config = await loadMergedConvoyConfig(this.targetDir)
+          proposed = (await proposeBranchName({ prompt: trimmed, targetDir: this.targetDir, model: config?.defaults.branchNameModel ?? defaultBranchNameModel })).branch
+        }
+      } catch {
+        // The namer is advisory: its failure degrades to the deterministic
+        // slug instead of blocking the proposal.
+        proposed = ""
+      }
+      if (token !== this.proposeToken || this.form !== form || form.mode !== "auto") return
+      const branch = withConventionalPrefix(proposed, slugFromName(trimmed))
+      // The free-name check is advisory here, as in the manual path: the
+      // reviewed creation re-checks occupancy either way.
+      const free = await ensureFreeBranchName(branch, this.targetDir).catch(() => branch)
+      if (token !== this.proposeToken || this.form !== form || form.mode !== "auto") return
+      const base = (await detectBaseRef(this.targetDir).catch(() => undefined))?.ref ?? "main"
+      const worktree = await resolveWorktreeDir(free, this.targetDir)
+      if (token !== this.proposeToken || this.form !== form || form.mode !== "auto") return
+      form.branch = free
+      form.base = base
+      form.proposing = false
+      form.proposal = { displayName: trimmed, branch: free, base, worktree }
+      this.render()
+    } catch (error) {
+      if (token !== this.proposeToken || this.form !== form || form.mode !== "auto") return
+      form.proposing = false
+      form.error = error instanceof Error ? error.message : String(error)
+      this.render()
+    }
+  }
+
+  /** Accepting the reviewed proposal is what resolves the draft — the only moment auto mode finishes. */
+  private acceptAutoProposal() {
+    const form = this.form
+    if (!form?.proposal) return
+    const draft = form.proposal
+    this.form = undefined
+    this.finish({ type: "new-work", draft })
+  }
+
   // ── rendering ───────────────────────────────────────────────────────────
 
   private finish(resolution: HomeResolution) {
     if (this.finished) return
     this.finished = true
+    clearInterval(this.caretTimer)
     this.renderer.keyInput.off("keypress", this.handleKeyPress)
     this.renderer.off("theme_mode", this.handleThemeMode)
     this.renderer.off("resize", this.handleResize)
@@ -949,10 +1096,9 @@ export class HomeLauncher {
     return (this.wideMasthead() ? 3 : 2) + MASTHEAD_BREATHING_ROWS
   }
 
-  /** Rows under the masthead (and resume notice, when shown), above the hints strip. */
+  /** Rows under the masthead, above the hints strip. */
   private bodyHeight(): number {
-    const notice = this.resumeNotice ? 1 : 0
-    return Math.max(3, this.renderer.height - this.mastheadHeight() - notice - 1)
+    return Math.max(3, this.renderer.height - this.mastheadHeight() - 1)
   }
 
   /**
@@ -965,7 +1111,8 @@ export class HomeLauncher {
   private destPanelHeight(): number {
     if (this.selectedRow < this.workRowCount()) return DESTINATION_PANEL_HEIGHT
     const detail = this.inlineDetailLines(this.rows[this.selectedRow]!, Math.max(8, this.renderer.width - PANEL_GUTTER))
-    return DESTINATION_PANEL_HEIGHT + detail.length
+    // The selected destination's block plus its spacing line above.
+    return DESTINATION_PANEL_HEIGHT + 1 + detail.length
   }
 
   private listPanelHeight(bodyHeight: number): number {
@@ -974,7 +1121,7 @@ export class HomeLauncher {
 
   private listInnerHeight(): number {
     if (this.level !== "list") return 1
-    return Math.max(1, this.listPanelHeight(this.bodyHeight()) - 2)
+    return Math.max(1, this.listPanelHeight(this.bodyHeight()) - HEADING_ROWS)
   }
 
   /** Rows the detail pane can hold inside its bordered panel. */
@@ -993,11 +1140,6 @@ export class HomeLauncher {
 
     this.mastheadBox.height = mastheadRows
     this.mastheadText.content = this.mastheadContent(width - CHROME_PADDING_COLS * 2)
-    this.noticeBox.visible = Boolean(this.resumeNotice)
-    if (this.resumeNotice) {
-      this.noticeText.content = new StyledText([fg(theme.yellow)(truncate(this.resumeNotice, Math.max(1, width - CHROME_PADDING_COLS * 2)))])
-    }
-
     // One vertical stack: worktrees on top (the selected row unfolding its
     // inline details beneath it), the destinations strip below.
     this.bodyBox.gap = 0
@@ -1009,6 +1151,9 @@ export class HomeLauncher {
       this.previewBox.width = "100%"
       this.previewBox.height = "100%"
       this.previewBox.borderColor = theme.accent
+      // The form floats free — no outer container around the header and its
+      // input box (containers over containers); the detail keeps its panel.
+      this.previewBox.border = this.level !== "form"
     } else {
       this.listBox.visible = true
       this.destBox.visible = true
@@ -1017,14 +1162,13 @@ export class HomeLauncher {
       this.listBox.height = listHeight
       this.destBox.width = "100%"
       this.destBox.height = destHeight
-      this.listBox.borderColor = theme.accent
-      this.destBox.borderColor = theme.borderDim
+      // No borderColor ever touches the section boxes: opentui's
+      // initializeBorder() forces `_border` back to true the moment a color
+      // is assigned, and the sections are dividers, not containers.
     }
 
     const innerWidth = Math.max(8, width - PANEL_GUTTER)
 
-    this.listBox.title = " worktrees "
-    this.destBox.title = " destinations "
     this.previewBox.title = this.previewTitle()
     this.listText.content = immersed ? "" : this.listContent(innerWidth)
     this.destText.content = immersed ? "" : this.destinationContent(innerWidth)
@@ -1061,13 +1205,19 @@ export class HomeLauncher {
    * lines, sliding down until the selected row plus its block fit on screen,
    * so the fold never pushes the selection off the fold.
    */
+  /**
+   * The worktrees section: a heading divider (rule + label, both gray) and
+   * the windowed rows. The selected row unfolds its inline block beneath it
+   * — spacing above the block, the block, spacing below — so the selection
+   * reads as one huge, breathing selector.
+   */
   private listContent(width: number): StyledText {
     const inner = Math.max(1, this.listInnerHeight())
     const workRows = this.workRowCount()
     const selected = this.selectedRow < workRows ? this.selectedRow : -1
     const detail = selected >= 0 ? this.inlineDetailLines(this.rows[selected]!, width) : []
     const detailH = detail.length
-    const rowHeight = (row: number) => (row === selected ? 1 + detailH : 1)
+    const rowHeight = (row: number) => (row === selected ? 2 + detailH : 1)
     let start = this.scroll
     const linesBetween = (from: number, to: number): number => {
       let count = 0
@@ -1075,14 +1225,22 @@ export class HomeLauncher {
       return count
     }
     if (selected >= 0) {
-      while (start < selected && linesBetween(start, selected) + 1 + detailH > inner) start++
+      while (start < selected && linesBetween(start, selected) + 2 + detailH > inner) start++
     }
     start = Math.max(0, Math.min(start, Math.max(0, workRows - 1)))
     this.scroll = start
-    const lines: StyledText[] = []
-    let used = 0
+    const lines: StyledText[] = [...this.headingLines("worktrees", width)]
+    let used = HEADING_ROWS
     for (let i = start; i < workRows; i++) {
       if (used >= inner) break
+      if (i === selected && !(i === start && start === 0)) {
+        // Spacing above the block, mirroring the blank below it — except
+        // when the block opens the section: the heading already breathes
+        // below the divider, and doubling it leaves a dead line.
+        lines.push(new StyledText([raw("")]))
+        used++
+        if (used >= inner) break
+      }
       lines.push(this.rowLine(this.rows[i]!, i === selected, width))
       used++
       if (i === selected) {
@@ -1096,6 +1254,16 @@ export class HomeLauncher {
     return joinLines(lines)
   }
 
+  /** A section heading: one dim divider line with the label riding inside it, then a breathing blank. */
+  private headingLines(label: string, width: number): StyledText[] {
+    const total = Math.max(12, width + 2)
+    const prefix = `── ${label} `
+    return [
+      new StyledText([fg(theme.dim)(prefix + "─".repeat(Math.max(4, total - prefix.length)))]),
+      new StyledText([raw("")]),
+    ]
+  }
+
   /**
    * The destinations strip: the four auxiliary entries. The highlighted
    * destination unfolds the same inline detail block beneath it — the strip
@@ -1106,11 +1274,19 @@ export class HomeLauncher {
     const auxRows = this.rows.slice(workRows)
     const localSelected = this.selectedRow - workRows
     const detail = localSelected >= 0 ? this.inlineDetailLines(auxRows[localSelected]!, width) : []
-    const lines: StyledText[] = []
+    const lines: StyledText[] = this.headingLines("go to", width)
     auxRows.forEach((row, index) => {
+      if (index === localSelected && index !== 0) {
+        // Spacing above the block, mirroring the blank below it — except
+        // when the block opens the section, where the heading already
+        // breathes below the divider.
+        lines.push(new StyledText([raw("")]))
+      }
       lines.push(this.rowLine(row, index === localSelected, width))
       if (index === localSelected) lines.push(...detail)
     })
+    // One last breath between the section and the footer.
+    lines.push(new StyledText([raw("")]))
     return joinLines(lines)
   }
 
@@ -1127,14 +1303,14 @@ export class HomeLauncher {
   private rowLine(row: ListRow, selected: boolean, width: number): StyledText {
     if (row.kind === "worktree") {
       const worktree = row.worktree
-      const dot = fg(worktreeDotColor(worktree))("◇")
+      // Selected, the marker inverts: a dark glyph on its own state color —
+      // the rail cell the block hangs from. Unselected, the plain diamond.
+      const dot = selected ? bg(worktreeDotColor(worktree))(fg(theme.chipText)("◇")) : fg(worktreeDotColor(worktree))("◇")
       // The main checkout carries a `base` tag: it is the repository's own
       // checkout, not one more feature branch, and the row says so.
       const tag = worktree.main ? 7 : 0 // " · base"
       const title = truncate(worktreeDisplayNameOf(worktree), Math.max(12, width - 6 - tag))
       if (selected) {
-        // The highlight never repaints the dot: its observation color is the
-        // row's state, and the accent fill would erase it.
         const left: TextChunk[] = [dot, raw(" "), bold(fg(theme.chipText)(title))]
         if (worktree.main) left.push(fg(theme.chipText)(" · base"))
         return this.highlighted(left, width)
@@ -1144,15 +1320,17 @@ export class HomeLauncher {
       return new StyledText(left)
     }
     if (row.kind === "new") {
-      const plus = fg(theme.green)("+")
+      // The plus rides a true navy, not a state color: New is an action,
+      // and the navy cell keeps it distinct from observations.
+      const plus = selected ? bg(theme.navy)(fg(theme.chipText)("+")) : fg(theme.navy)("+")
       if (selected) return this.highlighted([plus, raw(" "), bold(fg(theme.chipText)("New worktree"))], width)
       return new StyledText([plus, raw(" "), fg(theme.text)("New worktree")])
     }
-    const arrow = fg(theme.teal)("»")
+    const arrow = selected ? bg(theme.teal)(fg(theme.chipText)("»")) : fg(theme.teal)("»")
     if (selected) {
-      return this.highlighted([arrow, raw(" "), bold(fg(theme.chipText)(row.label)), fg(theme.chipText)(`  [${row.shortcut.toUpperCase()}]`)], width)
+      return this.highlighted([arrow, raw(" "), bold(fg(theme.chipText)(row.label))], width)
     }
-    return new StyledText([arrow, raw(" "), fg(theme.text)(row.label), fg(theme.faint)(`  [${row.shortcut.toUpperCase()}]`)])
+    return new StyledText([arrow, raw(" "), fg(theme.text)(row.label)])
   }
 
   /**
@@ -1164,12 +1342,16 @@ export class HomeLauncher {
   private highlighted(chunks: TextChunk[], width: number): StyledText {
     const used = chunks.reduce((total, chunk) => total + displayWidth(typeof chunk === "string" ? chunk : (chunk as { text: string }).text), 0)
     const filler = bg(theme.accent)(fg(theme.chipText)(" ".repeat(Math.max(0, width - used))))
-    return new StyledText(chunks.map((chunk) => bg(theme.accent)(chunk)).concat(filler))
+    // Chunks that already carry a background keep it — the state-color rail
+    // cell rides the accent fill instead of being repainted by it.
+    const hasBg = (chunk: TextChunk) => typeof chunk !== "string" && (chunk as { bg?: unknown }).bg !== undefined
+    return new StyledText(chunks.map((chunk) => (hasBg(chunk) ? chunk : bg(theme.accent)(chunk))).concat(filler))
   }
 
   /** The full-screen pane's title; at the list level the details ride inline, never in a panel. */
   private previewTitle(): string {
-    if (this.level === "form") return " new worktree "
+    // The form's header line already names it; no panel title over it.
+    if (this.level === "form") return ""
     return " actions "
   }
 
@@ -1180,28 +1362,37 @@ export class HomeLauncher {
   }
 
   /**
-   * The inline detail block hanging under the selected row: observed facts,
-   * not a lifecycle summary, indented right of the marker + dot columns — the
-   * same fold a pipeline step drops beneath itself. Enter still opens the
-   * worktree's actions.
+   * The inline detail block hanging under the selected row: observed facts
+   * for checkouts, one short line for New, kicker plus one short line for
+   * destinations. A blank row opens every fold — the block breathes below
+   * the highlighted row instead of sitting glued to it — and no fold repeats
+   * what Enter already does.
+   */
+  /**
+   * The selected row's inline block. The accent fills every line — the row
+   * above, the facts, and the padding — so the fold reads as one huge
+   * selector instead of text glued beneath a bright line. Nothing sits
+   * between the row and its facts; a padded blank closes the block and one
+   * unpainted blank separates it from whatever follows.
    */
   private inlineDetailLines(row: ListRow, width: number): StyledText[] {
     const w = Math.max(8, width - INLINE_INDENT)
-    const indent = " ".repeat(INLINE_INDENT)
+    // The block's left rail: the marker's column carries the marker's state
+    // color down the whole block — the antagonist to the accent fill.
+    const railColor = row.kind === "worktree" ? worktreeDotColor(row.worktree) : row.kind === "new" ? theme.navy : theme.teal
+    const rail = bg(railColor)(" ")
+    const indent = " ".repeat(Math.max(1, INLINE_INDENT - 1))
+    const line = (chunks: TextChunk[]) => this.highlighted([rail, ...chunks], width)
     const lines: StyledText[] = []
+    const fact = (label: string, value: string, warn = false) =>
+      lines.push(line([raw(indent), fg(theme.chipText)(label.padEnd(9, " ")), raw(" "), fg(warn ? theme.yellow : theme.chipText)(truncate(value, Math.max(8, w - 10)))]))
     if (row.kind === "worktree") {
       const worktree = row.worktree
-      // The fact rows share one 9-column label grid with an explicit gap;
-      // the tree hangs closer to the left edge than the value column.
-      const add = (label: string, value: string, color = theme.text) => {
-        lines.push(new StyledText([raw(indent), fg(theme.faint)(label.padEnd(9, " ")), raw(" "), fg(color)(truncate(value, Math.max(8, w - 10)))]))
-      }
-      add("branch", worktree.detached ? "detached HEAD" : (worktree.branch ?? "(no branch)"), theme.dim)
-      add("path", shortPath(worktree.path, Math.max(8, w - 10)), theme.dim)
+      fact("branch", worktree.detached ? "detached HEAD" : (worktree.branch ?? "(no branch)"))
+      fact("path", shortPath(worktree.path, Math.max(8, w - 10)))
       // State speaks the commit/sync condition only: working tree, upstream,
       // base divergence. Counts live in the changes section below.
       const state: string[] = []
-      const stateColor = theme.dim
       const dirt = worktree.dirt
       if (dirt?.kind === "known" && dirt.value.dirty) state.push(`${dirt.value.fileCount} uncommitted`)
       if (worktree.upstream?.kind === "known") {
@@ -1216,7 +1407,7 @@ export class HomeLauncher {
       if (!worktree.accessible) state.push("inaccessible")
       if (worktree.locked) state.push("locked")
       if (worktree.prunable) state.push("prunable")
-      add("state", state.join(" · ") || (dirt?.kind === "known" ? "clean" : "unknown"), dirt?.kind === "known" ? stateColor : theme.yellow)
+      fact("state", state.join(" · ") || (dirt?.kind === "known" ? "clean" : "unknown"), dirt?.kind !== "known")
       // Linked PR at the same level as state, on demand: "checking…" while
       // the row's own query runs, the honest fact once it lands — none is
       // honest, unknown is never "no PR", and a merged PR never reads as
@@ -1226,54 +1417,50 @@ export class HomeLauncher {
         const pr = evidence
         const linked =
           pr.availability === "known" ? (pr.pr ? `#${pr.pr.number} ${pr.pr.state}` : "none") : pr.availability === "ambiguous" ? `ambiguous (${pr.matches.length})` : `unknown (${pr.reason})`
-        const color = pr.availability === "known" ? (pr.pr ? theme.text : theme.dim) : theme.yellow
-        add("linked PR", linked, color)
+        fact("linked PR", linked, pr.availability !== "known")
       } else {
-        add("linked PR", "checking…", theme.dim)
+        fact("linked PR", "checking…")
       }
       // Spec changes carry their own counts (active, specs, archived, live)
       // and descend as a file-tree, one shallow indent under the title.
       if (worktree.changesUnknown) {
-        add("changes", `unknown (${worktree.changesUnknown})`, theme.yellow)
+        fact("changes", `unknown (${worktree.changesUnknown})`, true)
       } else {
         const counts: string[] = []
         if (worktree.changes.length > 0) counts.push(`${worktree.changes.length} active`)
         if (worktree.specCount) counts.push(`${worktree.specCount} spec${worktree.specCount === 1 ? "" : "s"}`)
         if (worktree.archiveCount) counts.push(`${worktree.archiveCount} archived`)
         if (worktree.activity?.kind === "known" && worktree.activity.value.total > 0) counts.push(`${worktree.activity.value.total} live`)
-        add("changes", counts.join(" · ") || "none", theme.dim)
+        fact("changes", counts.join(" · ") || "none")
         const items = worktree.changes.slice(0, 6)
         items.forEach((local, index) => {
           const glyph = index === items.length - 1 ? "└─ " : "├─ "
           const entry = local.title ? `${local.changeId}  ${local.title}` : local.changeId
-          lines.push(new StyledText([raw(indent + "  " + glyph), fg(theme.dim)(truncate(entry, Math.max(8, w - 5)))]))
+          // The tree connector rides a faded blue — present, but deliberately
+          // blurred against the accent fill.
+          lines.push(line([raw(indent + "  "), fg(theme.dim)(glyph), fg(theme.chipText)(truncate(entry, Math.max(8, w - 5)))]))
         })
         if (worktree.changes.length > items.length) {
-          lines.push(new StyledText([raw(indent + "  "), fg(theme.faint)(`… ${worktree.changes.length - items.length} more`)]))
+          lines.push(line([raw(indent + "  "), fg(theme.dim)(`… ${worktree.changes.length - items.length} more`)]))
         }
       }
-      lines.push(new StyledText([raw(indent), fg(theme.accent)("enter  "), fg(theme.text)("to see actions")]))
-      lines.push(new StyledText([raw("")]))
-      return lines
-    }
-    if (row.kind === "new") {
+    } else if (row.kind === "new") {
       if (this.emptyWork) {
-        for (const line of wrapLines(["No checkouts in this repository yet."], w)) {
-          lines.push(new StyledText([raw(indent), fg(theme.dim)(line)]))
+        for (const text of wrapLines(["No checkouts yet."], w)) {
+          lines.push(line([raw(indent), fg(theme.chipText)(text)]))
         }
       }
-      for (const line of wrapLines(["An isolated checkout before any proposal — no commit, no pull request, no registration."], w)) {
-        lines.push(new StyledText([raw(indent), fg(theme.dim)(line)]))
+      for (const text of wrapLines(["A fresh checkout to start something new."], w)) {
+        lines.push(line([raw(indent), fg(theme.chipText)(text)]))
       }
-      lines.push(new StyledText([raw(indent), fg(theme.accent)("n  "), fg(theme.text)("name it")]))
-      lines.push(new StyledText([raw("")]))
-      return lines
+    } else {
+      lines.push(line([raw(indent), fg(theme.chipText)(truncate(row.kicker, w))]))
+      for (const text of wrapLines([row.description], w)) {
+        lines.push(line([raw(indent), fg(theme.chipText)(text)]))
+      }
     }
-    lines.push(new StyledText([raw(indent), fg(theme.accent)(truncate(row.kicker, w))]))
-    for (const line of wrapLines([row.description], w)) {
-      lines.push(new StyledText([raw(indent), fg(theme.dim)(line)]))
-    }
-    lines.push(new StyledText([raw(indent), fg(theme.accent)(`${row.shortcut}  `), fg(theme.text)("open")]))
+    // The block closes unpainted: one transparent blank of breathing room —
+    // spacing, not highlight.
     lines.push(new StyledText([raw("")]))
     return lines
   }
@@ -1353,22 +1540,58 @@ export class HomeLauncher {
     return joinLines(lines.slice(this.detailScroll, this.detailScroll + visible))
   }
 
+  /** The description box's writable surface: a fixed multiline canvas. */
+  private static readonly DESCRIPTION_BOX_ROWS = 4
+
   private formContent(width: number): StyledText {
     const form = this.form
     if (!form) return this.listContent(width)
     const lines: StyledText[] = []
-    lines.push(new StyledText([bold(fg(theme.text)("New worktree"))]))
-    lines.push(new StyledText([fg(theme.dim)("creates an isolated checkout before any proposal — no commit, no pull request, no registration")]))
+    // The form floats free of any outer container; the header carries the
+    // name and the mode.
     lines.push(new StyledText([raw("")]))
-    const field = (label: string, value: string, active: boolean, hint?: string) => {
-      const shown = active ? `${value}▏` : value
-      lines.push(new StyledText([fg(active ? theme.accent : theme.faint)(`${label}`), fg(theme.text)(shown), ...(hint ? [fg(theme.faint)(`  ${hint}`)] : [])]))
+    lines.push(new StyledText([bold(fg(theme.text)("New worktree")), fg(theme.faint)(`   ${form.mode} · tab switches mode`)]))
+    lines.push(new StyledText([raw("")]))
+    if (form.mode === "auto") {
+      if (form.proposal) {
+        // The proposal review: exactly what acceptance will create.
+        const row = (label: string, value: string): TextChunk[] => [fg(theme.faint)(label.padEnd(9, " ")), fg(theme.text)(truncate(value, Math.max(8, width - 16)))]
+        const p = form.proposal
+        lines.push(...framedLines([row("name", p.displayName), row("branch", p.branch), row("base", p.base), row("worktree", shortPath(p.worktree, Math.max(8, width - 16)))], width))
+        lines.push(new StyledText([raw("")]))
+        lines.push(new StyledText([fg(theme.dim)("enter creates this worktree · tab refines it in the manual form")]))
+      } else {
+        // The description input: an untitled multiline box — the placeholder
+        // says what it is for, the blinking caret says it is writable.
+        const inner = Math.max(12, width - 6)
+        const rows: TextChunk[][] = []
+        if (form.description) {
+          const wrapped = wrapLines([form.description], inner - 1)
+          wrapped.forEach((text, index) => {
+            const chunks: TextChunk[] = [fg(theme.text)(text)]
+            if (index === wrapped.length - 1 && this.caretOn) chunks.push(fg(theme.accent)("█"))
+            rows.push(chunks)
+          })
+        } else {
+          const placeholder = fg(theme.dim)("describe what are you about to work on")
+          rows.push(this.caretOn ? [fg(theme.accent)("█"), placeholder] : [placeholder])
+        }
+        lines.push(...framedLines(rows, width, { minRows: HomeLauncher.DESCRIPTION_BOX_ROWS, border: "accent" }))
+        if (form.proposing) {
+          lines.push(new StyledText([raw("")]))
+          lines.push(new StyledText([fg(theme.dim)("proposing a conventional branch…")]))
+        }
+      }
+    } else {
+      const fieldRow = (label: string, value: string, active: boolean): TextChunk[] => [
+        fg(active ? theme.accent : theme.faint)(label.padEnd(8)),
+        fg(theme.text)(truncate(active ? `${value}${this.caretOn ? "█" : ""}` : value, Math.max(4, width - 16))),
+      ]
+      lines.push(...framedLines([fieldRow("name", form.displayName, form.field === 0), fieldRow("branch", form.branch, form.field === 1), fieldRow("base", form.base, form.field === 2)], width, { border: "accent" }))
+      lines.push(new StyledText([raw("")]))
+      lines.push(new StyledText([fg(theme.dim)("a conventional prefix is added when missing")]))
     }
-    field("name     ", form.displayName, form.field === 0, "a short title for the work")
-    field("branch   ", form.branch, form.field === 1, "editable; conventional prefix added when missing")
-    field("base     ", form.base, form.field === 2, "detected default")
-    lines.push(new StyledText([raw("")]))
-    if (form.error) lines.push(new StyledText([fg(theme.red)(form.error)]))
+    if (form.error) lines.push(new StyledText([raw("")]), new StyledText([fg(theme.red)(form.error)]))
     return joinLines(lines)
   }
 
@@ -1378,10 +1601,13 @@ export class HomeLauncher {
    */
   private hintsContent(width: number): StyledText {
     if (this.level === "form") {
+      const form = this.form
+      const proposalUp = form?.mode === "auto" && Boolean(form.proposal)
       return hintsRow(
         [
-          { keys: "enter", label: "confirm", priority: 1 },
-          { keys: "esc", label: "cancel", priority: 0 },
+          { keys: "enter", label: form?.mode === "auto" ? (proposalUp ? "create" : "propose") : "confirm", priority: 1 },
+          { keys: "tab", label: proposalUp ? "refine" : "mode", priority: 2 },
+          { keys: "esc", label: proposalUp ? "back" : "cancel", priority: 0 },
         ],
         [[fg(theme.faint)("nothing is created until the destination is accepted")]],
         width,
@@ -1439,4 +1665,42 @@ function slugFromName(name: string): string {
       .replace(/[^a-z0-9._-]+/g, "-")
       .replace(/^-+|-+$/g, "") || "work"
   )
+}
+
+/**
+ * A rounded frame drawn in text. Untitled by default — the form's header
+ * already names the context, so the box carries no title of its own. Rows
+ * are padded to the frame's inner width so the right border stays aligned;
+ * content wider than the frame is the caller's responsibility to keep
+ * clipped, and `minRows` grows the box into a fixed writable canvas.
+ */
+function framedLines(rows: TextChunk[][], width: number, options: { minRows?: number; border?: "accent" | "faint" } = {}): StyledText[] {
+  const inner = Math.max(14, width - 2)
+  const textWidth = Math.max(8, inner - 4)
+  const border = options.border === "accent" ? theme.accent : theme.faint
+  const top = `╭${"─".repeat(Math.max(2, inner - 2))}╮`
+  const bottom = `╰${"─".repeat(Math.max(2, inner - 2))}╯`
+  const lines: StyledText[] = [new StyledText([fg(border)(top)])]
+  const padded = [...rows]
+  while (padded.length < (options.minRows ?? 0)) padded.push([])
+  for (const row of padded) {
+    const used = row.reduce((total, chunk) => total + displayWidth(typeof chunk === "string" ? chunk : (chunk as { text: string }).text), 0)
+    const pad = Math.max(0, textWidth - used)
+    lines.push(new StyledText([fg(border)("│ "), ...row, raw(" ".repeat(pad)), fg(border)(" │")]))
+  }
+  lines.push(new StyledText([fg(border)(bottom)]))
+  return lines
+}
+
+/**
+ * The conventional-commit prefix is the allocation convention; a missing one
+ * is prefilled rather than refused. Shared by the manual branch commit and
+ * the auto proposal, so both modes speak the same naming rules.
+ */
+function withConventionalPrefix(branch: string, fallbackSlug: string): string {
+  const cleaned = branch.replace(/^refs\/heads\//, "").replace(/\s+/g, "-")
+  if (!cleaned || /^(feat|fix|refactor|perf|docs|test|chore|build|ci)(\/|$)/.test(cleaned) === false) {
+    return `feat/${cleaned || fallbackSlug}`
+  }
+  return cleaned
 }
