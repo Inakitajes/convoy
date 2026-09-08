@@ -1127,34 +1127,44 @@ export class HomeLauncher {
   private rowLine(row: ListRow, selected: boolean, width: number): StyledText {
     if (row.kind === "worktree") {
       const worktree = row.worktree
-      const left: TextChunk[] = [fg(worktreeDotColor(worktree))("◇"), raw(" ")]
+      const dot = fg(worktreeDotColor(worktree))("◇")
       // The main checkout carries a `base` tag: it is the repository's own
       // checkout, not one more feature branch, and the row says so.
       const tag = worktree.main ? 7 : 0 // " · base"
       const title = truncate(worktreeDisplayNameOf(worktree), Math.max(12, width - 6 - tag))
-      left.push(selected ? bold(fg(theme.text)(title)) : fg(theme.text)(title))
+      if (selected) {
+        // The highlight never repaints the dot: its observation color is the
+        // row's state, and the accent fill would erase it.
+        const left: TextChunk[] = [dot, raw(" "), bold(fg(theme.chipText)(title))]
+        if (worktree.main) left.push(fg(theme.chipText)(" · base"))
+        return this.highlighted(left, width)
+      }
+      const left: TextChunk[] = [dot, raw(" "), fg(theme.text)(title)]
       if (worktree.main) left.push(fg(theme.dim)(" · base"))
-      return selected ? this.highlighted(left, width) : new StyledText(left)
+      return new StyledText(left)
     }
     if (row.kind === "new") {
-      const left: TextChunk[] = [fg(theme.green)("+"), raw(" "), selected ? bold(fg(theme.text)("New worktree")) : fg(theme.text)("New worktree")]
-      return selected ? this.highlighted(left, width) : new StyledText(left)
+      const plus = fg(theme.green)("+")
+      if (selected) return this.highlighted([plus, raw(" "), bold(fg(theme.chipText)("New worktree"))], width)
+      return new StyledText([plus, raw(" "), fg(theme.text)("New worktree")])
     }
-    const left: TextChunk[] = [fg(theme.teal)("»"), raw(" ")]
-    left.push(selected ? bold(fg(theme.text)(row.label)) : fg(theme.text)(row.label))
-    left.push(fg(theme.faint)(`  [${row.shortcut.toUpperCase()}]`))
-    return selected ? this.highlighted(left, width) : new StyledText(left)
+    const arrow = fg(theme.teal)("»")
+    if (selected) {
+      return this.highlighted([arrow, raw(" "), bold(fg(theme.chipText)(row.label)), fg(theme.chipText)(`  [${row.shortcut.toUpperCase()}]`)], width)
+    }
+    return new StyledText([arrow, raw(" "), fg(theme.text)(row.label), fg(theme.faint)(`  [${row.shortcut.toUpperCase()}]`)])
   }
 
   /**
    * The selected row's full-width highlight: the accent blue paints every
-   * chunk and the filler to the edge, and the content rides the contrasting
-   * chip color — the same vocabulary as the selected permission buttons.
+   * chunk and the filler to the edge. Chunk colors arrive already chosen —
+   * the row decides what rides the chip color and what keeps its own
+   * observation color — so the highlight only ever adds the background.
    */
   private highlighted(chunks: TextChunk[], width: number): StyledText {
     const used = chunks.reduce((total, chunk) => total + displayWidth(typeof chunk === "string" ? chunk : (chunk as { text: string }).text), 0)
     const filler = bg(theme.accent)(fg(theme.chipText)(" ".repeat(Math.max(0, width - used))))
-    return new StyledText(chunks.map((chunk) => bg(theme.accent)(fg(theme.chipText)(chunk))).concat(filler))
+    return new StyledText(chunks.map((chunk) => bg(theme.accent)(chunk)).concat(filler))
   }
 
   /** The full-screen pane's title; at the list level the details ride inline, never in a panel. */

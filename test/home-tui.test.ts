@@ -40,6 +40,7 @@ function releaseEnsureFreeBranchName(branch: string, value: string): void {
 import { HomeLauncher } from "../src/home-tui"
 import type { HomeResolution, HomeWorkAction } from "../src/home-tui"
 import type { PrObservation } from "../src/pr-observations"
+import { theme } from "../src/tui-theme"
 import { versionDetails } from "../src/version"
 import type { BoardWorktree } from "../src/control-board"
 
@@ -152,6 +153,17 @@ function highlightedLines(session: Awaited<ReturnType<typeof openHome>>): string
   return frame.lines
     .map((line) => line.spans.filter((span) => span.bg.a > 0).map((span) => span.text).join(""))
     .filter((text) => text.trim().length > 0)
+}
+
+/** Channel-wise RGBA comparison with a small float tolerance. */
+function sameColor(a: { r: number; g: number; b: number }, b: { r: number; g: number; b: number }): boolean {
+  return [a.r - b.r, a.g - b.g, a.b - b.b].every((delta) => Math.abs(delta) < 0.01)
+}
+
+/** The chip text color of the test-run palette (dark), as captured float channels. */
+function chipTextFg(): { r: number; g: number; b: number } {
+  const hex = theme.chipText.replace("#", "")
+  return { r: parseInt(hex.slice(0, 2), 16) / 255, g: parseInt(hex.slice(2, 4), 16) / 255, b: parseInt(hex.slice(4, 6), 16) / 255 }
 }
 
 describe("worktrees-first home (capability home-launcher delta)", () => {
@@ -387,6 +399,14 @@ describe("selection surface", () => {
       const highlighted = highlightedLines(remembered)
       expect(highlighted.some((line) => line.includes("add-widget"))).toBe(true)
       expect(highlighted.some((line) => line.includes("repo"))).toBe(false)
+      // The highlight never repaints the observation dot: the diamond keeps
+      // its own state color while the text rides the chip color.
+      const frame = remembered.captureSpans()
+      const selectedRow = frame.lines.find((line) => line.spans.some((span) => span.bg.a > 0))!
+      const dot = selectedRow.spans.find((span) => span.text.includes("◇"))!
+      const title = selectedRow.spans.find((span) => span.text.includes("add-widget"))!
+      expect(sameColor(dot.fg, title.fg)).toBe(false)
+      expect(sameColor(title.fg, chipTextFg())).toBe(true)
     } finally {
       await closeHome(remembered)
     }
