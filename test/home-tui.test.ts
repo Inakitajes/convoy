@@ -149,10 +149,12 @@ describe("worktrees-first home (capability home-launcher delta)", () => {
       // npm_package_version), so assert the same value the masthead renders.
       expect(frame).toContain(versionDetails())
       expect(frame).toContain("/work/acme")
-      // Panels: the worktree list leads, New worktree is explicit, destinations
-      // remain reachable, and the preview speaks the selected checkout.
+      // Panels: the worktree list leads, New worktree is explicit, the
+      // destinations strip stays separate, and the selected row's details
+      // ride inline beneath it — there is no details panel of its own.
       expect(frame).toContain(" worktrees ")
-      expect(frame).toContain(" next ")
+      expect(frame).toContain(" destinations ")
+      expect(frame).not.toContain(" details ")
       expect(frame).toContain("add-widget")
       expect(frame).toContain("+ New worktree")
       expect(frame).toContain("Pipelines")
@@ -278,10 +280,10 @@ describe("worktrees-first home (capability home-launcher delta)", () => {
     }
   })
 
-  test("highlighting a destination fills the preview with its kicker and description", async () => {
+  test("highlighting a destination unfolds its details inside the destinations strip", async () => {
     const session = await openHome()
     try {
-      // Skip both worktree rows and New worktree to land on Pipelines (the rule is not selectable).
+      // Skip both worktree rows and New worktree to land on Pipelines.
       session.press("j")
       session.press("j")
       session.press("j")
@@ -289,7 +291,25 @@ describe("worktrees-first home (capability home-launcher delta)", () => {
       const frame = frameOf(session)
       expect(frame).toContain("From intent to ship")
       expect(frame).toContain("Compose agents into a reviewed, repeatable path")
-      expect(frame).toContain(" pipelines ")
+      expect(frame).toContain(" destinations ")
+    } finally {
+      await closeHome(session)
+    }
+  })
+
+  test("the inline detail folds under one row and unfolds under the next as the selection moves", async () => {
+    const session = await openHome()
+    try {
+      let frame = frameOf(session)
+      // The main checkout's block rides beneath the first row.
+      expect(frame).toContain("enter  Open conversation")
+      session.press("down") // onto add-widget
+      await session.renderOnce()
+      frame = frameOf(session)
+      // The block now hangs under add-widget: its branch line replaces the
+      // previous fold, and the destinations strip stays in place below.
+      expect(frame).toContain("feat/add-widget")
+      expect(frame).toContain(" destinations ")
     } finally {
       await closeHome(session)
     }

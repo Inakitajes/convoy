@@ -34,9 +34,13 @@ import type { Hint, PaletteColor } from "./tui-theme"
  * local changes), never feature identities, lifecycle summaries, or
  * Completed history.
  *
- * Chrome matches the rest of Convoy: a lean identity masthead, rounded
- * panels (list + preview), and a one-row hints strip — never a dedicated
- * footer panel, never a destination poster.
+ * Chrome matches the rest of Convoy: a lean identity masthead above a single
+ * vertical stack — the worktrees panel on top, the destinations strip for
+ * pipelines/specs/runs/config below it. The details are not a panel of their
+ * own: the selected row unfolds its facts inline beneath it, the way a
+ * pipeline step drops its body, and the fold travels with the selection —
+ * one row's hints strip at the bottom, never a dedicated footer panel, never
+ * a destination poster, never the destinations mixed into the checkout list.
  */
 
 /** One of the auxiliary home destinations (pipelines, specs, runs, config). */
@@ -68,13 +72,16 @@ export type HomeResolution =
 
 export type HomeSelection = HomeDestination | undefined
 
-/** Below this width the home stacks the worktree list above the preview. */
-export const compactHomeMaxWidth = 72
-
 const CHROME_PADDING_COLS = 1
+/** Blank rows between the CONVOY masthead and the first panel. */
+const MASTHEAD_BREATHING_ROWS = 1
 export const WORDMARK_GAP = "  "
 /** Rounded border + paddingX:1 on each side of a panel. */
 const PANEL_GUTTER = 4
+/** The destinations strip's resting height: 4 rows + rounded border. */
+const DESTINATION_PANEL_HEIGHT = 6
+/** The inline detail block hangs right of the row's marker + dot columns. */
+const INLINE_INDENT = 6
 
 /** The CONVOY block letters, shared with the loading transition's centered card. */
 export const CONVOY_WORDMARK: Readonly<Record<string, readonly [string, string, string]>> = {
@@ -130,7 +137,6 @@ const AUXILIARY: ReadonlyArray<{
 type ListRow =
   | { kind: "worktree"; worktree: BoardWorktree }
   | { kind: "new" }
-  | { kind: "rule" }
   | { kind: "auxiliary"; destination: HomeDestination; label: string; shortcut: string; kicker: string; description: string }
 
 /** The worktree detail's action rows: distinct labels per action. */
@@ -213,6 +219,8 @@ export class HomeLauncher {
   private readonly bodyBox: BoxRenderable
   private readonly listText: TextRenderable
   private readonly listBox: BoxRenderable
+  private readonly destText: TextRenderable
+  private readonly destBox: BoxRenderable
   private readonly previewText: TextRenderable
   private readonly previewBox: BoxRenderable
   private readonly hintsText: TextRenderable
@@ -312,8 +320,7 @@ export class HomeLauncher {
       id: "convoy-home-body",
       width: "100%",
       flexGrow: 1,
-      flexDirection: "row",
-      gap: 1,
+      flexDirection: "column",
       backgroundColor: theme.bg,
     })
 
@@ -326,13 +333,23 @@ export class HomeLauncher {
       title: " worktrees ",
       titleAlignment: "left",
     })
+    const destinations = this.panel({
+      id: "convoy-home-destinations",
+      width: "100%",
+      height: DESTINATION_PANEL_HEIGHT,
+      flexShrink: 0,
+      borderColor: theme.borderDim,
+      backgroundColor: theme.bg,
+      title: " destinations ",
+      titleAlignment: "left",
+    })
     const preview = this.panel({
       id: "convoy-home-preview",
-      width: 48,
+      width: "100%",
       height: "100%",
       borderColor: theme.borderDim,
       backgroundColor: theme.bg,
-      title: " next ",
+      title: " details ",
       titleAlignment: "left",
     })
 
@@ -354,6 +371,8 @@ export class HomeLauncher {
     this.bodyBox = bodyBox
     this.listText = list.text
     this.listBox = list.box
+    this.destText = destinations.text
+    this.destBox = destinations.box
     this.previewText = preview.text
     this.previewBox = preview.box
     this.hintsText = hintsText
@@ -363,11 +382,13 @@ export class HomeLauncher {
       { box: noticeBox, background: "bg" },
       { box: bodyBox, background: "bg" },
       { box: list.box, background: "bg", border: "accent" },
+      { box: destinations.box, background: "bg", border: "borderDim" },
       { box: preview.box, background: "bg", border: "borderDim" },
       { box: hintsBox, background: "bg" },
     )
 
     bodyBox.add(list.box)
+    bodyBox.add(destinations.box)
     bodyBox.add(preview.box)
     shell.add(mastheadBox)
     shell.add(noticeBox)
@@ -381,12 +402,15 @@ export class HomeLauncher {
     this.render()
   }
 
-  /** The list always shows the worktree surface: checkouts, New worktree, destinations. */
+  /**
+   * The list always shows the worktree surface: checkouts and New worktree in
+   * the worktrees panel; the four destinations live in their own strip below,
+   * never mixed into the checkout list.
+   */
   private buildRows(worktrees: BoardWorktree[]): ListRow[] {
     const rows: ListRow[] = []
     for (const worktree of worktrees) rows.push({ kind: "worktree", worktree })
     rows.push({ kind: "new" })
-    rows.push({ kind: "rule" })
     for (const entry of AUXILIARY) {
       rows.push({
         kind: "auxiliary",
@@ -400,8 +424,13 @@ export class HomeLauncher {
     return rows
   }
 
+  /** Rows before the first auxiliary row: what the worktrees panel renders. */
+  private workRowCount(): number {
+    return this.rows.findIndex((row) => row.kind === "auxiliary")
+  }
+
   private isSelectable(row: ListRow | undefined): boolean {
-    return row !== undefined && row.kind !== "rule"
+    return row !== undefined
   }
 
   // ── keys ────────────────────────────────────────────────────────────────
@@ -851,7 +880,9 @@ export class HomeLauncher {
   }
 
   private mastheadHeight(): number {
-    return this.wideMasthead() ? 3 : 2
+    // The identity block plus one blank row below it: the worktrees panel
+    // never sits flush against the CONVOY wordmark.
+    return (this.wideMasthead() ? 3 : 2) + MASTHEAD_BREATHING_ROWS
   }
 
   /** Rows under the masthead (and resume notice, when shown), above the hints strip. */
@@ -860,19 +891,26 @@ export class HomeLauncher {
     return Math.max(3, this.renderer.height - this.mastheadHeight() - notice - 1)
   }
 
-  private compactListHeight(bodyHeight: number): number {
-    return Math.max(5, Math.min(9, Math.floor(bodyHeight * 0.35)))
+  /**
+   * The destinations strip grows by the selected entry's inline detail block;
+   * at rest it is a fixed 4-row strip. The worktree list takes whatever is
+   * left, so the details' space follows the selection: highlighting a
+   * worktree gives its block the list's slack, highlighting a destination
+   * gives it the strip's.
+   */
+  private destPanelHeight(): number {
+    if (this.selectedRow < this.workRowCount()) return DESTINATION_PANEL_HEIGHT
+    const detail = this.inlineDetailLines(this.rows[this.selectedRow]!, Math.max(8, this.renderer.width - PANEL_GUTTER))
+    return DESTINATION_PANEL_HEIGHT + detail.length
   }
 
-  private previewWidth(): number {
-    return Math.max(36, Math.min(56, this.renderer.width - 44))
+  private listPanelHeight(bodyHeight: number): number {
+    return Math.max(3, bodyHeight - this.destPanelHeight())
   }
 
   private listInnerHeight(): number {
     if (this.level !== "list") return 1
-    const body = this.bodyHeight()
-    const panel = this.renderer.width <= compactHomeMaxWidth ? this.compactListHeight(body) : body
-    return Math.max(1, panel - 2)
+    return Math.max(1, this.listPanelHeight(this.bodyHeight()) - 2)
   }
 
   /** Rows the detail pane can hold inside its bordered panel. */
@@ -883,12 +921,11 @@ export class HomeLauncher {
   private render() {
     if (this.renderer.isDestroyed || this.scene?.isClosed) return
     const width = Math.max(1, this.renderer.width)
-    const compact = width <= compactHomeMaxWidth
     const immersed = this.level !== "list"
     const mastheadRows = this.mastheadHeight()
-    const previewWidth = this.previewWidth()
-    const listWidth = Math.max(32, width - previewWidth - 7)
     const bodyHeight = this.bodyHeight()
+    const destHeight = this.destPanelHeight()
+    const listHeight = Math.max(3, bodyHeight - destHeight)
 
     this.mastheadBox.height = mastheadRows
     this.mastheadText.content = this.mastheadContent(width - CHROME_PADDING_COLS * 2)
@@ -897,43 +934,37 @@ export class HomeLauncher {
       this.noticeText.content = new StyledText([fg(theme.yellow)(truncate(this.resumeNotice, Math.max(1, width - CHROME_PADDING_COLS * 2)))])
     }
 
-    this.bodyBox.flexDirection = !immersed && compact ? "column" : "row"
-    this.bodyBox.gap = !immersed && compact ? 0 : 1
+    // One vertical stack: worktrees on top (the selected row unfolding its
+    // inline details beneath it), the destinations strip below.
+    this.bodyBox.gap = 0
 
     if (immersed) {
       this.listBox.visible = false
+      this.destBox.visible = false
       this.previewBox.visible = true
       this.previewBox.width = "100%"
       this.previewBox.height = "100%"
       this.previewBox.borderColor = theme.accent
-    } else if (compact) {
-      this.listBox.visible = true
-      this.previewBox.visible = true
-      const listHeight = this.compactListHeight(bodyHeight)
-      this.listBox.width = "100%"
-      this.listBox.height = listHeight
-      this.previewBox.width = "100%"
-      this.previewBox.height = Math.max(3, bodyHeight - listHeight)
-      this.listBox.borderColor = theme.accent
-      this.previewBox.borderColor = theme.borderDim
     } else {
       this.listBox.visible = true
-      this.previewBox.visible = true
-      this.listBox.width = "auto"
-      this.listBox.height = "100%"
-      this.previewBox.width = previewWidth
-      this.previewBox.height = "100%"
+      this.destBox.visible = true
+      this.previewBox.visible = false
+      this.listBox.width = "100%"
+      this.listBox.height = listHeight
+      this.destBox.width = "100%"
+      this.destBox.height = destHeight
       this.listBox.borderColor = theme.accent
-      this.previewBox.borderColor = theme.borderDim
+      this.destBox.borderColor = theme.borderDim
     }
 
-    const listInnerWidth = Math.max(8, (compact || immersed ? width : listWidth) - PANEL_GUTTER)
-    const previewInnerWidth = Math.max(8, (immersed || compact ? width : previewWidth) - PANEL_GUTTER)
+    const innerWidth = Math.max(8, width - PANEL_GUTTER)
 
     this.listBox.title = " worktrees "
+    this.destBox.title = " destinations "
     this.previewBox.title = this.previewTitle()
-    this.listText.content = immersed ? "" : this.listContent(listInnerWidth)
-    this.previewText.content = this.previewContent(previewInnerWidth)
+    this.listText.content = immersed ? "" : this.listContent(innerWidth)
+    this.destText.content = immersed ? "" : this.destinationContent(innerWidth)
+    this.previewText.content = this.previewContent(innerWidth)
     this.hintsText.content = this.hintsContent(width - CHROME_PADDING_COLS * 2)
     this.renderer.requestRender()
   }
@@ -958,130 +989,204 @@ export class HomeLauncher {
     return joinLines([versionLine, new StyledText([fg(theme.faint)("project  "), fg(theme.text)(project)])])
   }
 
+  /**
+   * The worktrees panel: checkouts and New worktree only — never the
+   * destinations. The selected row unfolds its inline detail block right
+   * beneath it (the pipeline-step accordion): moving the selection folds the
+   * previous block and unfolds it under the new row. The window scrolls by
+   * lines, sliding down until the selected row plus its block fit on screen,
+   * so the fold never pushes the selection off the fold.
+   */
   private listContent(width: number): StyledText {
-    const visible = Math.max(1, this.listInnerHeight())
-    if (this.selectedRow < this.scroll) this.scroll = this.selectedRow
-    if (this.selectedRow >= this.scroll + visible) this.scroll = this.selectedRow - visible + 1
-    this.scroll = Math.max(0, Math.min(this.scroll, Math.max(0, this.rows.length - visible)))
-    const lines = this.rows
-      .map((row, index) => ({ row, index }))
-      .slice(this.scroll, this.scroll + visible)
-      .map(({ row, index }) => this.rowLine(row, index === this.selectedRow, width))
+    const inner = Math.max(1, this.listInnerHeight())
+    const workRows = this.workRowCount()
+    const selected = this.selectedRow < workRows ? this.selectedRow : -1
+    const detail = selected >= 0 ? this.inlineDetailLines(this.rows[selected]!, width) : []
+    const detailH = detail.length
+    const rowHeight = (row: number) => (row === selected ? 1 + detailH : 1)
+    let start = this.scroll
+    const linesBetween = (from: number, to: number): number => {
+      let count = 0
+      for (let i = from; i < to; i++) count += rowHeight(i)
+      return count
+    }
+    if (selected >= 0) {
+      while (start < selected && linesBetween(start, selected) + 1 + detailH > inner) start++
+    }
+    start = Math.max(0, Math.min(start, Math.max(0, workRows - 1)))
+    this.scroll = start
+    const lines: StyledText[] = []
+    let used = 0
+    for (let i = start; i < workRows; i++) {
+      if (used >= inner) break
+      lines.push(this.rowLine(this.rows[i]!, i === selected, width))
+      used++
+      if (i === selected) {
+        for (const line of detail) {
+          if (used >= inner) break
+          lines.push(line)
+          used++
+        }
+      }
+    }
+    return joinLines(lines)
+  }
+
+  /**
+   * The destinations strip: the four auxiliary entries. The highlighted
+   * destination unfolds the same inline detail block beneath it — the strip
+   * grows only while a destination carries the selection.
+   */
+  private destinationContent(width: number): StyledText {
+    const workRows = this.workRowCount()
+    const auxRows = this.rows.slice(workRows)
+    const localSelected = this.selectedRow - workRows
+    const detail = localSelected >= 0 ? this.inlineDetailLines(auxRows[localSelected]!, width) : []
+    const lines: StyledText[] = []
+    auxRows.forEach((row, index) => {
+      lines.push(this.rowLine(row, index === localSelected, width))
+      if (index === localSelected) lines.push(...detail)
+    })
     return joinLines(lines)
   }
 
   /**
    * One list row, speaking the board's row vocabulary: an observation-colored
    * dot on worktree rows, and the selected title in bold text with the accent
-   * `▸` marker carrying the selection. Destinations sit under a faint rule
-   * instead of a shouted section header — the panel title already says
-   * worktrees.
+   * `▸` marker carrying the selection. A worktree row carries only its name —
+   * the branch it mirrors would repeat it, and the state lives in the inline
+   * details that unfold beneath the selected row. Destinations keep their own
+   * `»` marker — they are places to go, not checkouts.
    */
   private rowLine(row: ListRow, selected: boolean, width: number): StyledText {
-    if (row.kind === "rule") {
-      return new StyledText([fg(theme.faint)("─".repeat(Math.max(1, width)))])
-    }
     if (row.kind === "worktree") {
       const worktree = row.worktree
       const left: TextChunk[] = [selected ? fg(theme.accent)("▸ ") : raw("  "), fg(worktreeDotColor(worktree))("◇"), raw(" ")]
-      const title = truncate(worktreeDisplayNameOf(worktree), Math.max(12, width - 18))
+      // The main checkout carries a `base` tag: it is the repository's own
+      // checkout, not one more feature branch, and the row says so.
+      const tag = worktree.main ? 7 : 0 // " · base"
+      const title = truncate(worktreeDisplayNameOf(worktree), Math.max(12, width - 6 - tag))
       left.push(selected ? bold(fg(theme.text)(title)) : fg(theme.text)(title))
-      const state: TextChunk[] = [fg(theme.dim)(worktreeSummary(worktree))]
-      return padBetween(left, state, width)
+      if (worktree.main) left.push(fg(theme.dim)(" · base"))
+      return new StyledText(left)
     }
     if (row.kind === "new") {
       const left: TextChunk[] = [selected ? fg(theme.accent)("▸ ") : raw("  "), fg(theme.green)("+"), raw(" ")]
       left.push(selected ? bold(fg(theme.text)("New worktree")) : fg(theme.text)("New worktree"))
       return new StyledText(left)
     }
-    const left: TextChunk[] = [selected ? fg(theme.accent)("▸ ") : raw("  "), fg(theme.teal)("◇"), raw(" ")]
+    const left: TextChunk[] = [selected ? fg(theme.accent)("▸ ") : raw("  "), fg(theme.teal)("»"), raw(" ")]
     left.push(selected ? bold(fg(theme.text)(row.label)) : fg(theme.text)(row.label))
     left.push(fg(theme.faint)(`  [${row.shortcut.toUpperCase()}]`))
     return new StyledText(left)
   }
 
+  /** The full-screen pane's title; at the list level the details ride inline, never in a panel. */
   private previewTitle(): string {
     if (this.level === "form") return " new worktree "
-    if (this.level === "detail") return " actions "
-    const row = this.rows[this.selectedRow]
-    if (row?.kind === "new") return " new "
-    if (row?.kind === "auxiliary") return ` ${row.label.toLowerCase()} `
-    return " next "
+    return " actions "
   }
 
   private previewContent(width: number): StyledText {
     if (this.level === "detail") return this.detailContent(width)
     if (this.level === "form") return this.formContent(width)
-    const row = this.rows[this.selectedRow]
-    if (row?.kind === "worktree") return this.worktreePreview(row.worktree, width)
-    if (row?.kind === "new") return this.newPreview(width)
-    if (row?.kind === "auxiliary") return this.destinationPreview(row, width)
     return new StyledText([raw("")])
   }
 
-  /** List-level preview: observed facts, not a lifecycle summary. Enter still opens actions. */
-  private worktreePreview(worktree: BoardWorktree, width: number): StyledText {
+  /**
+   * The inline detail block hanging under the selected row: observed facts,
+   * not a lifecycle summary, indented right of the marker + dot columns — the
+   * same fold a pipeline step drops beneath itself. Enter still opens the
+   * worktree's actions.
+   */
+  private inlineDetailLines(row: ListRow, width: number): StyledText[] {
+    const w = Math.max(8, width - INLINE_INDENT)
+    const indent = " ".repeat(INLINE_INDENT)
     const lines: StyledText[] = []
-    lines.push(new StyledText([bold(fg(theme.text)(truncate(worktreeDisplayNameOf(worktree), width)))]))
-    lines.push(new StyledText([fg(worktreeDotColor(worktree))("◇ "), fg(theme.dim)(truncate(worktreeSummary(worktree), Math.max(8, width - 2)))]))
-    lines.push(new StyledText([raw("")]))
-    lines.push(new StyledText([fg(theme.dim)(truncate(worktree.detached ? "detached HEAD" : (worktree.branch ?? "(no branch)"), width))]))
-    lines.push(new StyledText([fg(theme.faint)(truncate(shortPath(worktree.path, Math.max(8, width)), width))]))
-    const meta: string[] = []
-    if (worktree.dirt?.kind === "known") meta.push(worktree.dirt.value.dirty ? `${worktree.dirt.value.fileCount} uncommitted` : "clean")
-    if (worktree.activity?.kind === "known" && worktree.activity.value.total > 0) meta.push(`${worktree.activity.value.total} live`)
-    if (worktree.changes.length > 0) meta.push(`${worktree.changes.length} change${worktree.changes.length === 1 ? "" : "s"}`)
-    if (worktree.archiveCount) meta.push(`${worktree.archiveCount} archived`)
-    const prShort = shortPrFact(worktree.pr)
-    if (prShort) meta.push(prShort)
-    if (meta.length > 0) {
-      lines.push(new StyledText([raw("")]))
-      for (const line of wrapLines([meta.join(" · ")], width)) lines.push(new StyledText([fg(theme.dim)(line)]))
-    }
-    for (const local of worktree.changes.slice(0, 3)) {
-      const title = local.title ? `${local.changeId} — ${local.title}` : local.changeId
-      lines.push(new StyledText([fg(theme.dim)(truncate(`◆ ${title}`, Math.max(8, width))) ]))
-    }
-    const next = this.actionsFor(worktree).find((action) => action.enabled)
-    lines.push(new StyledText([raw("")]))
-    if (next) {
-      lines.push(new StyledText([fg(theme.accent)("enter  "), fg(theme.text)(truncate(next.label, Math.max(8, width - 7)))]))
-    } else {
-      lines.push(new StyledText([fg(theme.faint)("enter  inspect")]))
-    }
-    return joinLines(lines)
-  }
-
-  private newPreview(width: number): StyledText {
-    const lines: StyledText[] = []
-    lines.push(new StyledText([bold(fg(theme.text)("New worktree"))]))
-    lines.push(new StyledText([fg(theme.accent)("Start here")]))
-    lines.push(new StyledText([raw("")]))
-    if (this.emptyWork) {
-      for (const line of wrapLines(["No checkouts in this repository yet."], width)) {
-        lines.push(new StyledText([fg(theme.dim)(line)]))
+    if (row.kind === "worktree") {
+      const worktree = row.worktree
+      // The fact rows share one 9-column label grid with an explicit gap;
+      // the tree hangs closer to the left edge than the value column.
+      const add = (label: string, value: string, color = theme.text) => {
+        lines.push(new StyledText([raw(indent), fg(theme.faint)(label.padEnd(9, " ")), raw(" "), fg(color)(truncate(value, Math.max(8, w - 10)))]))
       }
-      lines.push(new StyledText([raw("")]))
+      add("branch", worktree.detached ? "detached HEAD" : (worktree.branch ?? "(no branch)"), theme.dim)
+      add("path", shortPath(worktree.path, Math.max(8, w - 10)), theme.dim)
+      // State speaks the commit/sync condition only: working tree, upstream,
+      // base divergence. Counts live in the changes section below.
+      const state: string[] = []
+      const stateColor = theme.dim
+      const dirt = worktree.dirt
+      if (dirt?.kind === "known" && dirt.value.dirty) state.push(`${dirt.value.fileCount} uncommitted`)
+      if (worktree.upstream?.kind === "known") {
+        if (worktree.upstream.value.ahead) state.push(`${worktree.upstream.value.ahead} unpushed`)
+        if (worktree.upstream.value.behind) state.push(`${worktree.upstream.value.behind} to pull`)
+      }
+      if (worktree.baseDivergence?.kind === "known") {
+        if (worktree.baseDivergence.value.behind) state.push(`${worktree.baseDivergence.value.behind} behind base`)
+        if (worktree.baseDivergence.value.ahead) state.push(`${worktree.baseDivergence.value.ahead} ahead of base`)
+      }
+      if (worktree.detached) state.push("detached")
+      if (!worktree.accessible) state.push("inaccessible")
+      if (worktree.locked) state.push("locked")
+      if (worktree.prunable) state.push("prunable")
+      add("state", state.join(" · ") || (dirt?.kind === "known" ? "clean" : "unknown"), dirt?.kind === "known" ? stateColor : theme.yellow)
+      // Linked PR at the same level as state: none is honest, unknown is
+      // never "no PR", and a merged PR never reads as completed work.
+      if (worktree.pr) {
+        const pr = worktree.pr
+        const linked =
+          pr.availability === "known" ? (pr.pr ? `#${pr.pr.number} ${pr.pr.state}` : "none") : pr.availability === "ambiguous" ? `ambiguous (${pr.matches.length})` : `unknown (${pr.reason})`
+        const color = pr.availability === "known" ? (pr.pr ? theme.text : theme.dim) : theme.yellow
+        add("linked PR", linked, color)
+      }
+      // Spec changes carry their own counts (active, specs, archived, live)
+      // and descend as a file-tree, one shallow indent under the title.
+      if (worktree.changesUnknown) {
+        add("changes", `unknown (${worktree.changesUnknown})`, theme.yellow)
+      } else {
+        const counts: string[] = []
+        if (worktree.changes.length > 0) counts.push(`${worktree.changes.length} active`)
+        if (worktree.specCount) counts.push(`${worktree.specCount} spec${worktree.specCount === 1 ? "" : "s"}`)
+        if (worktree.archiveCount) counts.push(`${worktree.archiveCount} archived`)
+        if (worktree.activity?.kind === "known" && worktree.activity.value.total > 0) counts.push(`${worktree.activity.value.total} live`)
+        add("changes", counts.join(" · ") || "none", theme.dim)
+        const items = worktree.changes.slice(0, 6)
+        items.forEach((local, index) => {
+          const glyph = index === items.length - 1 ? "└─ " : "├─ "
+          const entry = local.title ? `${local.changeId}  ${local.title}` : local.changeId
+          lines.push(new StyledText([raw(indent + "  " + glyph), fg(theme.dim)(truncate(entry, Math.max(8, w - 5)))]))
+        })
+        if (worktree.changes.length > items.length) {
+          lines.push(new StyledText([raw(indent + "  "), fg(theme.faint)(`… ${worktree.changes.length - items.length} more`)]))
+        }
+      }
+      const next = this.actionsFor(worktree).find((action) => action.enabled)
+      lines.push(
+        next
+          ? new StyledText([raw(indent), fg(theme.accent)("enter  "), fg(theme.text)(truncate(next.label, Math.max(8, w - 7)))])
+          : new StyledText([raw(indent), fg(theme.faint)("enter  inspect")]),
+      )
+      return lines
     }
-    for (const line of wrapLines(["An isolated checkout before any proposal — no commit, no pull request, no registration."], width)) {
-      lines.push(new StyledText([fg(theme.dim)(line)]))
+    if (row.kind === "new") {
+      if (this.emptyWork) {
+        for (const line of wrapLines(["No checkouts in this repository yet."], w)) {
+          lines.push(new StyledText([raw(indent), fg(theme.dim)(line)]))
+        }
+      }
+      for (const line of wrapLines(["An isolated checkout before any proposal — no commit, no pull request, no registration."], w)) {
+        lines.push(new StyledText([raw(indent), fg(theme.dim)(line)]))
+      }
+      lines.push(new StyledText([raw(indent), fg(theme.accent)("n  "), fg(theme.text)("name it")]))
+      return lines
     }
-    lines.push(new StyledText([raw("")]))
-    lines.push(new StyledText([fg(theme.accent)("n  "), fg(theme.text)("name it")]))
-    return joinLines(lines)
-  }
-
-  private destinationPreview(row: Extract<ListRow, { kind: "auxiliary" }>, width: number): StyledText {
-    const lines: StyledText[] = []
-    lines.push(new StyledText([bold(fg(theme.text)(truncate(row.label, width)))]))
-    lines.push(new StyledText([fg(theme.accent)(truncate(row.kicker, width))]))
-    lines.push(new StyledText([raw("")]))
-    for (const line of wrapLines([row.description], width)) {
-      lines.push(new StyledText([fg(theme.dim)(line)]))
+    lines.push(new StyledText([raw(indent), fg(theme.accent)(truncate(row.kicker, w))]))
+    for (const line of wrapLines([row.description], w)) {
+      lines.push(new StyledText([raw(indent), fg(theme.dim)(line)]))
     }
-    lines.push(new StyledText([raw("")]))
-    lines.push(new StyledText([fg(theme.accent)(`${row.shortcut}  `), fg(theme.text)("open")]))
-    return joinLines(lines)
+    lines.push(new StyledText([raw(indent), fg(theme.accent)(`${row.shortcut}  `), fg(theme.text)("open")]))
+    return lines
   }
 
   /** The detail pane's full line list plus the index of its first action row. */
@@ -1218,25 +1323,6 @@ export class HomeLauncher {
 function worktreeDisplayNameOf(worktree: BoardWorktree): string {
   const base = worktree.path.split("/").filter(Boolean).pop() ?? worktree.path
   return base
-}
-
-/** The row's right-column summary: independent facts, never a lifecycle stage. */
-function worktreeSummary(worktree: BoardWorktree): string {
-  const parts: string[] = []
-  parts.push(worktree.detached ? "detached" : (worktree.branch ?? "(no branch)"))
-  if (worktree.changes.length > 0) parts.push(`${worktree.changes.length} change${worktree.changes.length === 1 ? "" : "s"}`)
-  if (worktree.dirt?.kind === "known" && worktree.dirt.value.dirty) parts.push(`${worktree.dirt.value.fileCount} dirty`)
-  if (worktree.activity?.kind === "known" && worktree.activity.value.total > 0) parts.push(`${worktree.activity.value.total} live`)
-  if (!worktree.accessible) parts.push("inaccessible")
-  return parts.join(" · ")
-}
-
-/** Compact PR fact for the preview's meta line; unknown stays unknown. */
-function shortPrFact(pr: BoardWorktree["pr"]): string | undefined {
-  if (!pr) return undefined
-  if (pr.availability === "known") return pr.pr ? `PR #${pr.pr.number} ${pr.pr.state}` : "no PR"
-  if (pr.availability === "ambiguous") return `PR ambiguous (${pr.matches.length})`
-  return "PR unknown"
 }
 
 /** The detail pane's PR line: number/title/URL/state when known, availability otherwise. */
