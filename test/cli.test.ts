@@ -572,7 +572,7 @@ describe("parseCommand default prompt fallback", () => {
   })
 
   test("uses the pipeline's defaultPrompt when no prompt is given", async () => {
-    const cmd = await parseCommand(["-p", "review"])
+    const cmd = await parseCommand(["-p", "review", "--manual"])
     expect(cmd.type).toBe("run")
     if (cmd.type === "run") {
       expect(cmd.options.prompt).toBe(
@@ -601,7 +601,7 @@ describe("parseCommand default prompt fallback", () => {
     expect(implement.type).toBe("run")
     if (implement.type === "run") {
       expect(implement.options.prompt).toBe("Implement the attached OpenSpec change.")
-      expect(implement.options.change).toBe("add-login")
+      expect(implement.options.changes).toEqual(["add-login"])
       expect(implement.options.plan?.openspec?.changeIds).toEqual(["add-login"])
     }
 
@@ -613,7 +613,7 @@ describe("parseCommand default prompt fallback", () => {
   })
 
   test("a positional prompt beats the defaultPrompt", async () => {
-    const cmd = await parseCommand(["-p", "review", "my own prompt"])
+    const cmd = await parseCommand(["-p", "review", "--manual", "my own prompt"])
     expect(cmd.type).toBe("run")
     if (cmd.type === "run") {
       expect(cmd.options.prompt).toBe("my own prompt")
@@ -630,7 +630,7 @@ describe("parseCommand default prompt fallback", () => {
     dirs.push(dir)
     const promptFile = join(dir, "prd.md")
     await writeFile(promptFile, "from file")
-    const cmd = await parseCommand(["-p", "review", "--prompt-file", promptFile])
+    const cmd = await parseCommand(["-p", "review", "--manual", "--prompt-file", promptFile])
     expect(cmd.type).toBe("run")
     if (cmd.type === "run") {
       expect(cmd.options.prompt).toBe("from file")
@@ -670,7 +670,7 @@ describe("parseCommand default prompt fallback", () => {
         "      - implementer",
       ].join("\n"),
     )
-    const cmd = await parseCommand([])
+    const cmd = await parseCommand(["--manual"])
     expect(cmd.type).toBe("run")
     if (cmd.type === "run") {
       expect(cmd.options.prompt).toBe("Triage the incoming reports and summarize.")

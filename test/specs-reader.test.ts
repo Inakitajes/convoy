@@ -7,6 +7,7 @@ import { join } from "node:path"
 import { SpecsBrowser } from "../src/specs-browser"
 import type { ClipboardResult } from "../src/clipboard"
 import type { SpecsChangeEntry, SpecsResolution, SpecsView } from "../src/specs"
+import type { ControlBoard } from "../src/control-board"
 
 function keyEvent(name: string, options: { ctrl?: boolean; shift?: boolean; sequence?: string } = {}) {
   return {
@@ -50,6 +51,7 @@ function sampleChange(): SpecsChangeEntry {
   return {
     kind: "change",
     id: "add-login",
+    checkout: root,
     title: "Add login",
     artifacts: [
       { section: "proposal", file: join(dir, "proposal.md") },
@@ -61,8 +63,18 @@ function sampleChange(): SpecsChangeEntry {
   }
 }
 
+function sampleBoard(): ControlBoard {
+  return {
+    commonDir: root,
+    baseBranch: "main",
+    worktrees: [
+      { path: root, branch: "main", detached: false, main: true, bare: false, accessible: true, changes: [] },
+    ],
+  }
+}
+
 function sampleView(): SpecsView {
-  return { targetDir: root, present: true, changes: [sampleChange()], specs: [] }
+  return { targetDir: root, present: true, board: sampleBoard(), changes: [sampleChange()], specs: [] }
 }
 
 /** A fake clipboard transport capturing what would be copied. */
@@ -88,7 +100,10 @@ async function openReader(options: { clipboard?: ReturnType<typeof fakeClipboard
       testRenderer.renderer.keyInput.emit("keypress", keyEvent(key, opts))
     },
   }
-  // Enter the change's detail level, then open the reader.
+  // Move to the change child row (the first selectable row is its containing
+  // worktree), enter the change's detail level, then open the reader.
+  session.press("j")
+  await session.renderOnce()
   session.press("return")
   await session.renderOnce()
   await Bun.sleep(30)

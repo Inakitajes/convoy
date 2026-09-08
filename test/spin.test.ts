@@ -222,6 +222,36 @@ describe("spin", () => {
     expect(await git(repo, "branch", "--list")).not.toContain("feat")
   })
 
+  test("spin registers no feature identity and its output advertises no retired feature command (CC-4)", async () => {
+    await freshEnv()
+    const repo = await makeRepo()
+    await proposeUncommittedChange(repo, "add-widget")
+
+    const chunks: string[] = []
+    const originalWrite = process.stdout.write.bind(process.stdout)
+    process.stdout.write = ((chunk: unknown) => {
+      chunks.push(String(chunk))
+      return true
+    }) as typeof process.stdout.write
+    let result: Awaited<ReturnType<typeof runSpin>> | undefined
+    try {
+      result = await runSpin({ targetDir: repo })
+      printSpinHandoff(result)
+    } finally {
+      process.stdout.write = originalWrite
+    }
+    const output = chunks.join("")
+    // No feature id in the result, no registration line, no retired command.
+    expect(result).toBeDefined()
+    expect(result! as Record<string, unknown>).not.toHaveProperty("featureId")
+    expect(output).not.toContain("convoy feature")
+    expect(output).not.toMatch(/registered/)
+    // The lifecycle registry was never written: spin's success is Git state.
+    const commonDir = (await git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")).trim()
+    const featureRecords = await readdir(join(commonDir, "convoy", "features").replace(/^\/private/, "/")).catch(() => [])
+    expect(featureRecords).toEqual([])
+  })
+
   test("handoff output names the worktree, the branch, and /move", async () => {
     const chunks: string[] = []
     const originalWrite = process.stdout.write.bind(process.stdout)
@@ -237,7 +267,6 @@ describe("spin", () => {
         movedFiles: ["openspec/changes/add-widget/proposal.md"],
         committedOnBase: false,
         prefix: "feat",
-        featureId: "00000000-0000-4000-8000-000000000001",
       })
     } finally {
       process.stdout.write = originalWrite
@@ -264,7 +293,6 @@ describe("spin", () => {
         movedFiles: [],
         committedOnBase: true,
         prefix: "feat",
-        featureId: "00000000-0000-4000-8000-000000000002",
       })
     } finally {
       process.stdout.write = originalWrite

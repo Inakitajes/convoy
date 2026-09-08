@@ -1,526 +1,288 @@
-import { readdir, readFile } from "node:fs/promises"
 import { join } from "node:path"
 
-import { execFile } from "./git"
-import { detectBaseRef, isAncestor, statusPorcelain } from "./git"
-import {
-  branchIdFromBranch,
-  collectDirRelativeMarkdown,
-  isOpenSpecChangeId,
-  listChangeIds,
-  openspecDirName,
-  titleFromProposal,
-} from "./openspec"
-import { listRuns } from "./runs"
-import { verifiedCloseReceipt } from "./feature-close"
+import { detectBaseRef, execFile } from "./git"
+import { listWorktrees } from "./worktree-inventory"
+import { readCheckoutActiveChanges, readCheckoutArchives, readCheckoutCanonicalSpecs, type LocalActiveChange } from "./checkout-openspec"
+import { observeBaseDivergence, observeDirt, observeExecutionActivity, observeUpstreamDivergence, type Observed } from "./worktree-observations"
+import { PrCache, type PrAdapter, type PrFacts, type PrObservation } from "./pr-observations"
 
 /**
- * The control board's data layer: a live join over git, OpenSpec state, and
- * run history that derives every displayed fact at render time (design D1).
+ * The worktree control board's data layer (change `worktree-control-center`,
+ * tasks 3.1–3.3, design D1/D2; gaps CC-1/CC-2): every Git-registered checkout
+ * is a root inventory entry, and every fact on a row is an independent,
+ * freshly observed observation — Git dirt, base/upstream divergence,
+ * execution activity, and the checkout's own local OpenSpec artifacts. There
+ * is no lifecycle stage, no feature registry consult, no landing receipt, and
+ * no cross-checkout ownership: same-id changes in different checkouts stay
+ * independent children of their containing checkout, and a failed probe is
+ * `unknown`, never a negative fact.
  *
- * `assembleControlBoard` is the pure join over injected reads — it owns all
- * the derivation logic and is unit-tested against fixture reads. The thin
- * `createBoardReads` adapter performs the actual filesystem/git/CLI reads.
- * Convoy persists nothing here: a row's existence in the world is its
- * existence on the board, so there is no cache to go stale.
+ * The old feature-stage join (`FeatureStage`/`deriveStage`,
+ * `verifiedCloseReceipt`, registered-context reads) is retired, not extended:
+ * the board's authority is the Git worktree inventory plus the selected
+ * checkout's files.
  */
 
-/** One checkout of the repo, from `git worktree list`. */
+/** One checkout of the repository, from the shared Git inventory. */
 export type BoardWorktree = {
-  dir: string
-  /** The branch checked out here; undefined on a detached HEAD. */
+  /** Absolute checkout path (the main checkout first, in `git worktree list` order). */
+  path: string
+  /** Checked-out branch without `refs/heads/`; undefined on a detached HEAD. */
   branch?: string
-  /** The main checkout (the first `git worktree list` entry). */
+  detached: boolean
+  /** The repository's main checkout (the first inventory entry). */
   main: boolean
+  /** A bare entry is repository metadata, not an executable checkout. */
+  bare: boolean
+  /** False when the registered path is missing — shown as inaccessible with repair guidance. */
+  accessible: boolean
+  head?: string
+  locked?: { reason?: string }
+  prunable?: { reason?: string }
+  /** Working-tree dirt; unknown is never reported as clean. */
+  dirt?: Observed<{ dirty: boolean; fileCount: number }>
+  /** Divergence against the explicitly selected base, when one is selected. */
+  baseDivergence?: Observed<{ ahead: number; behind: number; baseContainedInSource: boolean }>
+  /** Divergence against the branch's configured upstream; no upstream is a distinct condition. */
+  upstream?: Observed<{ upstream?: string; ahead?: number; behind?: number }>
+  /** Live managed writers attached to this checkout; client attachment is not activity. */
+  activity?: Observed<{ liveRunIds: string[]; total: number }>
+  /**
+   * Scoped pull-request observation for this checkout's branch (task 2.6,
+   * design D2): known (with the PR facts or a verified empty result),
+   * unknown (missing tool, failed query — never "no PR"), or ambiguous.
+   * A merged PR here is a fact about that PR, never a completion claim.
+   */
+  pr?: PrObservation
+  /** This checkout's own local active changes (never borrowed from another checkout). */
+  changes: LocalActiveChange[]
+  /** Set when the local changes could not be read — unknown, not empty. */
+  changesUnknown?: string
+  /** Local archive count (browsable on demand; never a lifecycle summary). */
+  archiveCount?: number
+  /** Local canonical spec count. */
+  specCount?: number
 }
 
-/** A convoy run as the board joins it: by frozen branch or by target directory. */
-export type BoardRun = {
-  runID: string
-  branch?: string
-  targetDir?: string
-  live: boolean
+export type ControlBoard = {
+  /** The repository's common directory, when Git reported one. */
+  commonDir?: string
+  /** The repository's detected base branch (a suggestion, never an assumption). */
+  baseBranch?: string
+  worktrees: BoardWorktree[]
 }
 
 export type BoardTasks = { done: number; total: number }
 
 /**
- * The lifecycle stage of an active change, derived (never stored): stranded on
- * the base checkout, proposed in a worktree without runs, carrying live or
- * past runs, complete-but-unarchived, or probably squash-merged.
+ * The one assembly. Inventory first, then per-checkout detail (local
+ * artifacts, dirt, activity) so a usable list never waits on a giant global
+ * snapshot. PR observations are bounded, cached, and advisory: a failed or
+ * missing hosting lookup is `unknown`, never a negative fact. Nothing here
+ * writes domain state, fetches, or consults legacy feature records.
  */
-export type FeatureStage = "stranded" | "proposing" | "implementing" | "ready" | "probably-merged"
+export async function assembleControlBoard(
+  targetDir: string,
+  options: { base?: string; prAdapter?: PrAdapter; prCache?: PrCache } = {},
+): Promise<ControlBoard> {
+  const inventory = await listWorktrees(targetDir)
+  const detectedBase = options.base ?? (await detectBaseRef(targetDir).catch(() => undefined))?.ref
 
-export type FeatureRow = {
-  id: string
-  /** First heading of proposal.md; absent when the proposal is missing or unreadable. */
-  title?: string
-  /** Where the change's files live: the base checkout or a feature worktree. */
-  location: "main" | "worktree"
-  worktreeDir?: string
-  /** The feature branch, only when the worktree's branch still matches the change id (the shared resolver rule). */
-  branch?: string
-  tasks?: BoardTasks
-  runs: BoardRun[]
-  liveRuns: number
-  /** The proposal file sits uncommitted in this checkout. */
-  uncommittedProposal: boolean
-  /** Whether the feature branch contains the base branch's tip; undefined without a branch or base. */
-  synced?: boolean
-  /** Patch-equivalent with the base (`git cherry`): reported as probability, never certainty (design D6). */
-  probablyMerged: boolean
-  /** Set only when a verified close receipt exists — definite local close state (design D7). */
-  landing?: { sha: string }
-  stage: FeatureStage
+  // Hosting scope for PR observations, resolved once per assembly: a missing
+  // or unanswerable `gh` makes every row's PR evidence unknown — it never
+  // implies the absence of a PR. An injected adapter supplies its own scope,
+  // so a stable placeholder keys its cache entries instead.
+  const hostingRepo = options.prAdapter ? "injected-adapter" : await resolveHostingRepo(targetDir)
+  const prUnavailable: PrObservation | undefined =
+    options.prAdapter || hostingRepo
+      ? undefined
+      : { availability: "unknown", reason: "the hosting repository could not be resolved (is the GitHub CLI installed and authenticated?)", observedAt: Date.now() }
+
+  const worktrees: BoardWorktree[] = []
+  // PR observations start concurrently and are awaited under one overall
+  // deadline that begins now — overlapping the loop's own local reads
+  // (design D2: the list never waits on hosting round-trips). A query that
+  // outlives the deadline leaves its row unknown-for-now while the bounded
+  // cache keeps filling for the next refresh.
+  const prDeadline = new Promise<PrObservation>((resolve) =>
+    setTimeout(() => resolve({ availability: "unknown", reason: "the pull-request observation did not complete in time — refresh to retry", observedAt: Date.now() }), prAttachDeadlineMs).unref?.(),
+  )
+  const prPending = new Map<number, Promise<PrObservation>>()
+  for (const [index, entry] of inventory.entries.entries()) {
+    const row: BoardWorktree = {
+      path: entry.path,
+      ...(entry.branch ? { branch: entry.branch } : {}),
+      detached: entry.detached === true,
+      main: index === 0,
+      bare: entry.bare === true,
+      accessible: entry.accessible,
+      ...(entry.head ? { head: entry.head } : {}),
+      ...(entry.locked ? { locked: entry.locked } : {}),
+      ...(entry.prunable ? { prunable: entry.prunable } : {}),
+      changes: [],
+    }
+    if (entry.accessible && !entry.bare) {
+      const [changes, archives, specs, dirt, activity] = await Promise.all([
+        readCheckoutActiveChanges(entry.path),
+        readCheckoutArchives(entry.path),
+        readCheckoutCanonicalSpecs(entry.path),
+        observeDirt(entry.path),
+        observeExecutionActivity(entry.path),
+      ])
+      if (changes.kind === "known") row.changes = changes.value
+      else row.changesUnknown = changes.reason
+      if (archives.kind === "known" && archives.value.length > 0) row.archiveCount = archives.value.length
+      if (specs.kind === "known" && specs.value.length > 0) row.specCount = specs.value.length
+      row.dirt = dirt
+      row.activity = activity
+      if (row.branch && detectedBase) {
+        row.baseDivergence = await observeBaseDivergence(entry.path, detectedBase)
+        row.upstream = await observeUpstreamDivergence(entry.path, row.branch)
+      } else if (row.branch) {
+        row.upstream = await observeUpstreamDivergence(entry.path, row.branch)
+      }
+      row.pr = prUnavailable
+        ? { ...prUnavailable }
+        : undefined
+      if (!prUnavailable) {
+        prPending.set(
+          index,
+          observeBoardPr({
+            branch: row.branch,
+            base: detectedBase,
+            hostingRepo,
+            scopeResolved: true,
+            adapter: options.prAdapter ?? ghPrAdapter(entry.path),
+            cache: options.prCache ?? boardPrCache,
+          }),
+        )
+      }
+    }
+    worktrees.push(row)
+  }
+
+  // Await the PR observations under the deadline; anything still in flight
+  // reads as unknown with its reason, never as absence.
+  if (prPending.size > 0) {
+    await Promise.all(
+      [...prPending].map(async ([index, pending]) => {
+        worktrees[index]!.pr = await Promise.race([pending, prDeadline])
+      }),
+    )
+  }
+
+  return {
+    ...(inventory.commonDir ? { commonDir: inventory.commonDir } : {}),
+    ...(detectedBase ? { baseBranch: detectedBase } : {}),
+    worktrees,
+  }
 }
 
-export type WorktreeWithoutSpec = {
-  dir: string
-  branch?: string
-  runCount: number
-}
+/** The advisory in-memory PR cache (30s TTL, bounded concurrency, never persisted). */
+const boardPrCache = new PrCache({ ttlMs: 30_000, timeoutMs: 2_500 })
 
-export type ControlBoard = {
-  /** False when the main checkout has no `openspec/` at all. */
-  present: boolean
-  rows: FeatureRow[]
-  worktreesWithoutSpec: WorktreeWithoutSpec[]
-  specs: string[]
-  baseBranch?: string
-}
+/** The overall budget PR observations get before the board renders without them. */
+const prAttachDeadlineMs = 2_000
 
-/** Everything the join needs from the world; every method is an injected read. */
-export type BoardReads = {
-  worktrees(): Promise<BoardWorktree[]>
-  openspecPresent(dir: string): Promise<boolean>
-  changeIds(dir: string): Promise<string[]>
-  /** Whether `openspec/changes/<id>/` holds any markdown file; a husk holds none. */
-  changeHasMarkdown(dir: string, id: string): Promise<boolean>
-  changeTitle(dir: string, id: string): Promise<string | undefined>
-  taskCounts(dir: string): Promise<ReadonlyMap<string, BoardTasks>>
-  runs(): Promise<BoardRun[]>
-  status(dir: string): Promise<string>
-  /** Whether `branch` contains `ref`'s tip (ancestry). */
-  contains(branch: string, ref: string): Promise<boolean>
-  /** `git cherry` patch equivalence: true when the branch has commits but none are absent from `ref`. */
-  patchEquivalent(ref: string, branch: string): Promise<boolean>
-  baseBranch(): Promise<string | undefined>
-  canonicalSpecs(dir: string): Promise<string[]>
-  /**
-   * Checkout paths registered as a feature's current context (read-only
-   * lifecycle-store read). A registered feature's worktree stays in the
-   * feature lifecycle surface — never downgraded to a specless worktree,
-   * runs or no runs (delta control-board: "including those with no runs"
-   * applies to *unassociated* worktrees only).
-   */
-  registeredContextDirs(): Promise<string[]>
-}
+/** Hosting lookups must never stall the board: a hung `gh` reads as unknown. */
+const hostingResolveTimeoutMs = 1_000
 
-/**
- * The change's linked feature branch: the worktree's branch only while its id
- * still matches the change (the same rule `resolveChange` applies for
- * branch↔change matching). A renamed branch deliberately orphans run linkage —
- * the row degrades to showing the change without runs (design D1's accepted
- * trade-off).
- */
-export function branchForChange(changeId: string, worktreeBranch?: string): string | undefined {
-  if (!worktreeBranch) return undefined
-  return branchIdFromBranch(worktreeBranch) === changeId ? worktreeBranch : undefined
-}
+/** The hosting resolution is advisory and short-lived, like the PR cache itself. */
+const hostingCacheTtlMs = 30_000
+let hostingCache: { dir: string; repo?: string; at: number } | undefined
 
-/**
- * Whether a `git status --porcelain` output marks the change's proposal as
- * uncommitted. Matches the exact file so unrelated dirt (including other
- * changes' files) never flips the marker.
- */
-export function hasUncommittedProposal(status: string, changeId: string): boolean {
-  const path = `openspec/changes/${changeId}/proposal.md`
-  return status
-    .split("\n")
-    .some((line) => {
-      const file = line.length > 3 ? line.slice(3).trim() : ""
-      return file === path || file === `"${path}"`
-    })
-}
-
-/**
- * The one join. Worktree rows are built first so a change that exists both
- * stranded on main and inside its worktree renders as the worktree row; main
- * gets the leftovers. `worktreesWithoutSpec` collects non-main worktrees that
- * carry runs but no OpenSpec change.
- */
-export async function assembleControlBoard(reads: BoardReads): Promise<ControlBoard> {
-  const [worktrees, baseBranch, runs, registered] = await Promise.all([
-    reads.worktrees(),
-    reads.baseBranch(),
-    reads.runs(),
-    reads.registeredContextDirs(),
+/** Resolves `owner/repo` for the repository through `gh`; unknown when it cannot answer in time. */
+async function resolveHostingRepo(dir: string): Promise<string | undefined> {
+  if (hostingCache && hostingCache.dir === dir && Date.now() - hostingCache.at <= hostingCacheTtlMs) return hostingCache.repo
+  const outcome = await Promise.race([
+    execFile("gh", ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"], { cwd: dir, allowFailure: true }).catch(() => undefined),
+    new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), hostingResolveTimeoutMs).unref?.()),
   ])
-  const main = worktrees.find((worktree) => worktree.main) ?? worktrees[0]
-  if (!main) return { present: false, rows: [], worktreesWithoutSpec: [], specs: [] }
-
-  const present = await reads.openspecPresent(main.dir)
-  const specs = present ? await reads.canonicalSpecs(main.dir) : []
-
-  const rows: FeatureRow[] = []
-  const seen = new Set<string>()
-  const specless: WorktreeWithoutSpec[] = []
-
-  // Feature worktrees first: their rows outrank a same-id row stranded on main.
-  // Pass 1 collects every worktree listing each change id — a merge or leftover
-  // tooling state can list one id in several worktrees. Pass 2 resolves which
-  // checkout supplies the row (precedence, not first-listed-wins).
-  const features = worktrees.filter((worktree) => !worktree.main)
-  const candidates = new Map<string, BoardWorktree[]>()
-  for (const worktree of features) {
-    const changePresent = (await reads.openspecPresent(worktree.dir)) && (await reads.changeIds(worktree.dir)).length > 0
-    if (!changePresent) {
-      // Registered features stay in the feature lifecycle surface; only
-      // unassociated worktrees land in the peer section — including those
-      // with no runs (delta control-board), so the run count no longer gates
-      // the listing.
-      if (registered.some((dir) => sameCheckoutPath(dir, worktree.dir))) continue
-      const worktreeRuns = worktreeRunsFor(worktree, runs)
-      specless.push({ dir: worktree.dir, ...(worktree.branch ? { branch: worktree.branch } : {}), runCount: worktreeRuns.length })
-      continue
-    }
-    for (const id of await reads.changeIds(worktree.dir)) {
-      const list = candidates.get(id)
-      if (list) list.push(worktree)
-      else candidates.set(id, [worktree])
-    }
-  }
-
-  for (const [id, list] of candidates) {
-    const winner = await resolveClaim(reads, id, list)
-    seen.add(id)
-    rows.push(await buildRow(reads, { id, dir: winner.dir, worktree: winner, baseBranch, runs }))
-  }
-
-  // Whatever is left lives stranded on the base checkout.
-  if (present) {
-    for (const id of await reads.changeIds(main.dir)) {
-      if (seen.has(id)) continue
-      seen.add(id)
-      rows.push(await buildRow(reads, { id, dir: main.dir, baseBranch, runs }))
-    }
-  }
-
-  return { present, rows, worktreesWithoutSpec: specless, specs, ...(baseBranch ? { baseBranch } : {}) }
-}
-
-/** Runs recorded against a worktree's checked-out branch. */
-function worktreeRunsFor(worktree: BoardWorktree, runs: BoardRun[]): BoardRun[] {
-  if (!worktree.branch) return []
-  return runs.filter((run) => run.branch === worktree.branch)
-}
-
-/** Path equality the way the lifecycle observations compare registered paths (trailing-slash insensitive). */
-function sameCheckoutPath(a: string, b: string): boolean {
-  return a.replace(/\/+$/, "") === b.replace(/\/+$/, "")
+  const result = outcome
+  const repo = result && result.exitCode === 0 ? (result.stdout.trim().includes("/") ? result.stdout.trim() : undefined) : undefined
+  hostingCache = { dir, ...(repo !== undefined ? { repo } : {}), at: Date.now() }
+  return repo
 }
 
 /**
- * Which checkout supplies a change's row when several worktrees list the id:
- * the worktree whose branch matches the change id (the same resolver rule
- * `branchForChange` applies) outranks every other copy; among the rest, a copy
- * carrying change markdown outranks a husk directory with none; remaining ties
- * keep stable `git worktree list` order. Resolution never drops a row — when
- * no candidate bears markdown and no branch matches, the first-listed
- * candidate wins and the row degrades exactly as before (design D3).
+ * The board's PR observation for one checkout: scoped to the hosting
+ * repository, the checkout's branch as head, and the selected base. Served
+ * through the shared bounded cache; every failure mode degrades to unknown
+ * with its reason and observation time.
  */
-async function resolveClaim(reads: BoardReads, id: string, list: BoardWorktree[]): Promise<BoardWorktree> {
-  const branchMatch = list.find((worktree) => branchForChange(id, worktree.branch) !== undefined)
-  if (branchMatch) return branchMatch
-  // A lone candidate wins on list order regardless of artifacts, so the
-  // markdown read is spent only where it can change the outcome.
-  if (list.length === 1) return list[0]!
-  for (const worktree of list) {
-    if (await reads.changeHasMarkdown(worktree.dir, id)) return worktree
+async function observeBoardPr(input: {
+  branch?: string
+  base?: string
+  hostingRepo?: string
+  /** False when the hosting repository could not be resolved for the gh-backed adapter. */
+  scopeResolved: boolean
+  adapter: PrAdapter
+  cache: PrCache
+}): Promise<PrObservation> {
+  if (!input.branch) {
+    return { availability: "unknown", reason: "the checkout has no attached branch to scope a pull-request query", observedAt: Date.now() }
   }
-  return list[0]!
-}
-
-async function buildRow(
-  reads: BoardReads,
-  input: { id: string; dir: string; worktree?: BoardWorktree; baseBranch?: string; runs: BoardRun[] },
-): Promise<FeatureRow> {
-  const { id, dir, worktree, baseBranch, runs } = input
-  const branch = branchForChange(id, worktree?.branch)
-  const taskMap = await reads.taskCounts(dir)
-  const status = await reads.status(dir)
-  const uncommittedProposal = hasUncommittedProposal(status, id)
-
-  // Worktree rows join runs on the exact branch; a stranded main row joins on
-  // the shared id rule, so `feat/<id>` runs recorded before the worktree was
-  // removed still link.
-  const linkedRuns = branch
-    ? runs.filter((run) => run.branch === branch)
-    : runs.filter((run) => run.branch && branchIdFromBranch(run.branch) === id)
-
-  const synced = branch && baseBranch ? await reads.contains(branch, baseBranch) : undefined
-  // Landing receipts are definite local close state (design D7, task 6.2): a
-  // verified receipt (landing still reachable from the base) settles a close
-  // even though a squash landing left no merge ancestry for `git cherry` to
-  // find. Probable patch-equivalence without a receipt stays probabilistic —
-  // never upgraded to certainty, and never claimed as a hosted PR state.
-  const receipt = branch ? await verifiedCloseReceipt(dir, branch, id).catch(() => undefined) : undefined
-  const patchEquivalent =
-    branch && baseBranch && synced === false ? await reads.patchEquivalent(baseBranch, branch) : false
-  const probablyMerged = patchEquivalent || receipt !== undefined
-
-  const stage = deriveStage({ id, worktree: worktree !== undefined, runs: linkedRuns, tasks: taskMap.get(id), probablyMerged })
-
-  return {
-    id,
-    ...(await reads.changeTitle(dir, id).then((title) => (title ? { title } : {}))),
-    location: worktree ? "worktree" : "main",
-    ...(worktree ? { worktreeDir: worktree.dir } : {}),
-    ...(branch ? { branch } : {}),
-    ...(taskMap.has(id) ? { tasks: taskMap.get(id)! } : {}),
-    runs: linkedRuns,
-    liveRuns: linkedRuns.filter((run) => run.live).length,
-    uncommittedProposal,
-    ...(synced === undefined ? {} : { synced }),
-    probablyMerged,
-    // A verified receipt is definite local close state; patch equivalence is
-    // never upgraded to certainty, and neither claims a hosted PR merged.
-    ...(receipt ? { landing: { sha: receipt.landingSha } } : {}),
-    stage,
+  if (!input.base) {
+    return { availability: "unknown", reason: "no base could be detected to scope the pull-request query", observedAt: Date.now() }
   }
+  if (!input.scopeResolved || !input.hostingRepo) {
+    return { availability: "unknown", reason: "the hosting repository could not be resolved (is the GitHub CLI installed and authenticated?)", observedAt: Date.now() }
+  }
+  const query = { hostingRepo: input.hostingRepo, headRepo: input.hostingRepo, headBranch: input.branch, baseRepo: input.hostingRepo, baseBranch: input.base }
+  return input.cache.observe(query, input.adapter)
 }
 
-/**
- * Stage resolution order: probably-merged wins (it changes the offered
- * remediation), then completeness *in a worktree* (ready to close), then run
- * linkage (implementing), then mere presence in a worktree (proposing), then
- * stranded. `ready` requires a worktree because a completed-but-stranded change
- * (all tasks done, still on the base checkout) has no close/continue keys — it
- * can only be spun out, so it must read "stranded on main" (SC-9).
- */
-function deriveStage(input: {
-  id: string
-  worktree: boolean
-  runs: BoardRun[]
-  tasks?: BoardTasks
-  probablyMerged: boolean
-}): FeatureStage {
-  if (input.probablyMerged) return "probably-merged"
-  const tasks = input.tasks
-  if (input.worktree && tasks && tasks.total > 0 && tasks.done >= tasks.total) return "ready"
-  if (input.runs.length > 0) return "implementing"
-  if (input.worktree) return "proposing"
-  return "stranded"
-}
-
-// ── the filesystem/git/CLI adapter ───────────────────────────────────────
-
-/**
- * Real reads against `targetDir`'s repo. Kept dumb on purpose: every decision
- * lives in the pure join above so the board's logic stays testable without a
- * repository on disk. The subprocess-spawning reads (`worktrees`, `taskCounts`,
- * `status`) are memoized per adapter instance — one board assembly — so a
- * checkout with N changes costs one `openspec list` and one `git status` per
- * directory, not per row (design D1's stated bound).
- */
-export function createBoardReads(targetDir: string): BoardReads {
-  let worktreesCache: Promise<BoardWorktree[]> | undefined
-  const taskCountsCache = new Map<string, Promise<ReadonlyMap<string, BoardTasks>>>()
-  const statusCache = new Map<string, Promise<string>>()
-  const markdownCache = new Map<string, Promise<boolean>>()
-  return {
-    async worktrees() {
-      worktreesCache ??= (async () => {
-        const result = await execFile("git", ["worktree", "list", "--porcelain"], { cwd: targetDir, allowFailure: true })
-        if (result.exitCode !== 0) return []
-        const out: BoardWorktree[] = []
-        let dir: string | undefined
-        let branch: string | undefined
-        const flush = () => {
-          if (dir) out.push({ dir, ...(branch ? { branch } : {}), main: out.length === 0 })
-          dir = undefined
-          branch = undefined
-        }
-        for (const line of result.stdout.split("\n")) {
-          if (line.startsWith("worktree ")) dir = line.slice("worktree ".length)
-          else if (line.startsWith("branch refs/heads/")) branch = line.slice("branch refs/heads/".length)
-          else if (line === "") flush()
-        }
-        flush()
-        return out
-      })()
-      return worktreesCache
-    },
-
-    async openspecPresent(dir) {
-      try {
-        await readdir(join(dir, openspecDirName))
-        return true
-      } catch {
-        return false
-      }
-    },
-
-    async changeIds(dir) {
-      return listChangeIds(join(dir, openspecDirName, "changes"))
-    },
-
-    async changeHasMarkdown(dir, id) {
-      const root = join(dir, openspecDirName, "changes", id)
-      let cached = markdownCache.get(root)
-      if (!cached) {
-        // collectDirRelativeMarkdown's traversal stance (hidden entries and
-        // symlinks skipped, errors answer empty) with a boolean collapse:
-        // true when any `.md` file exists, false on error or an empty husk.
-        cached = collectDirRelativeMarkdown(root, ".").then((files) => files.length > 0)
-        markdownCache.set(root, cached)
-      }
-      return cached
-    },
-
-    async changeTitle(dir, id) {
-      try {
-        const body = await readFile(join(dir, openspecDirName, "changes", id, "proposal.md"), "utf8")
-        return titleFromProposal(body, id)
-      } catch {
-        return undefined
-      }
-    },
-
-    async taskCounts(dir) {
-      let counts = taskCountsCache.get(dir)
-      if (!counts) {
-        counts = openspecTaskCounts(dir)
-        taskCountsCache.set(dir, counts)
-      }
-      return counts
-    },
-
-    async runs() {
-      let entries
-      try {
-        entries = await listRuns()
-      } catch {
-        return []
-      }
-      // A run's frozen branch is not persisted; it is recovered from the
-      // checkout it targeted — a worktree directory whose branch is on record
-      // via `git worktree list`.
-      const worktrees = await this.worktrees()
-      const branchByDir = new Map(worktrees.filter((worktree) => worktree.branch).map((worktree) => [worktree.dir, worktree.branch!]))
-      return entries.map((entry) => ({
-        runID: entry.runID,
-        ...(entry.targetDir && branchByDir.has(entry.targetDir) ? { branch: branchByDir.get(entry.targetDir)! } : {}),
-        ...(entry.targetDir ? { targetDir: entry.targetDir } : {}),
-        live: entry.live,
+/** The `gh`-backed adapter: every PR state for the exact head/base scope, tolerant of failure. */
+function ghPrAdapter(checkout: string): PrAdapter {
+  return async (query) => {
+    let result
+    try {
+      result = await execFile(
+        "gh",
+        [
+          "pr",
+          "list",
+          "--repo",
+          query.hostingRepo,
+          "--state",
+          "all",
+          "--head",
+          query.headBranch,
+          "--base",
+          query.baseBranch,
+          "--json",
+          "number,title,url,state,headRefOid",
+        ],
+        { cwd: checkout, allowFailure: true },
+      )
+    } catch (error) {
+      return { error: `the pull-request query failed: ${error instanceof Error ? error.message : String(error)}` }
+    }
+    if (result.exitCode !== 0) {
+      return { error: `the pull-request query failed: ${(result.stderr || result.stdout).trim().slice(0, 200)}` }
+    }
+    try {
+      const parsed = JSON.parse(result.stdout) as Array<{ number: number; title: string; url: string; state: string; headRefOid?: string }>
+      if (!Array.isArray(parsed)) return { error: "the pull-request query returned an unexpected shape" }
+      const facts: PrFacts[] = parsed.map((pr) => ({
+        number: pr.number,
+        title: pr.title,
+        url: pr.url,
+        state: pr.state,
+        ...(pr.headRefOid ? { headSha: pr.headRefOid } : {}),
       }))
-    },
-
-    async status(dir) {
-      let cached = statusCache.get(dir)
-      if (!cached) {
-        cached = statusPorcelain(dir).catch(() => "")
-        statusCache.set(dir, cached)
-      }
-      return cached
-    },
-
-    async contains(branch, ref) {
-      return isAncestor(ref, branch, targetDir)
-    },
-
-    async patchEquivalent(ref, branch) {
-      const result = await execFile("git", ["cherry", ref, branch], { cwd: targetDir, allowFailure: true })
-      if (result.exitCode !== 0) return false
-      const lines = result.stdout.split("\n").filter((line) => line.trim() !== "")
-      // No commits outside the ref, or nothing to compare: nothing is proven.
-      if (lines.length === 0) return false
-      // Every listed commit is patch-equivalent to one in the ref — a squash
-      // merge erases ancestry, so this is the honest strongest claim (D6).
-      return lines.every((line) => line.startsWith("-"))
-    },
-
-    async baseBranch() {
-      const detected = await detectBaseRef(targetDir).catch(() => undefined)
-      return detected?.ref
-    },
-
-    async canonicalSpecs(dir) {
-      return collectDirRelativeMarkdown(join(dir, openspecDirName, "specs"), join(openspecDirName, "specs"))
-    },
-
-    async registeredContextDirs() {
-      // Read-only lifecycle-store read (the board never writes the registry):
-      // every valid feature record's current context checkout path. A store
-      // failure degrades to no registered contexts — the same failure also
-      // removes the feature rows from the view, so the degradation is
-      // consistent rather than a silent ownership claim.
-      try {
-        const { lifecycleCommonDir, isFound } = await import("./feature-lifecycle/store")
-        const { listFeatureIds, readFeatureRecord } = await import("./feature-lifecycle/records")
-        const commonDir = await lifecycleCommonDir(targetDir)
-        if (!commonDir) return []
-        const ids = await listFeatureIds(commonDir)
-        const dirs: string[] = []
-        for (const featureId of ids) {
-          const read = await readFeatureRecord(commonDir, featureId)
-          if (isFound(read) && read.value.context?.checkoutPath) dirs.push(read.value.context.checkoutPath)
-        }
-        return dirs
-      } catch {
-        return []
-      }
-    },
-  }
-}
-
-/** `openspec list --json` when the CLI answers; checkbox parsing otherwise. Shared with close's preflight. */
-export async function openspecTaskCounts(dir: string): Promise<ReadonlyMap<string, BoardTasks>> {
-  return (await taskCountsFromOpenspecCli(dir)) ?? (await taskCountsFromTasksFiles(dir))
-}
-
-/**
- * `openspec list --json` — the tool that owns OpenSpec state counts tasks. A
- * missing CLI binary throws at spawn time (not a non-zero exit), so the spawn
- * itself is guarded: absence means the checkbox fallback serves, exactly like
- * a non-zero exit or an unexpected output shape.
- */
-async function taskCountsFromOpenspecCli(dir: string): Promise<ReadonlyMap<string, BoardTasks> | undefined> {
-  let result
-  try {
-    result = await execFile("openspec", ["list", "--json"], { cwd: dir, allowFailure: true })
-  } catch {
-    return undefined
-  }
-  if (result.exitCode !== 0) return undefined
-  try {
-    const parsed = JSON.parse(result.stdout) as { changes?: Array<{ name?: string; completedTasks?: number; totalTasks?: number }> }
-    if (!Array.isArray(parsed.changes)) return undefined
-    const out = new Map<string, BoardTasks>()
-    for (const change of parsed.changes) {
-      if (typeof change.name !== "string") continue
-      out.set(change.name, { done: change.completedTasks ?? 0, total: change.totalTasks ?? 0 })
+      return facts
+    } catch (error) {
+      return { error: `the pull-request query returned unreadable output: ${error instanceof Error ? error.message : String(error)}` }
     }
-    return out
-  } catch {
-    return undefined
   }
 }
 
-/**
- * Fallback when the CLI is absent or its output changed shape: count the
- * checkbox states in each change's `tasks.md` directly. Same numbers, one
- * file read per change, no CLI dependency.
- */
-async function taskCountsFromTasksFiles(dir: string): Promise<ReadonlyMap<string, BoardTasks>> {
-  const out = new Map<string, BoardTasks>()
-  const ids = await readdir(join(dir, openspecDirName, "changes")).catch(() => [])
-  for (const id of ids.filter(isOpenSpecChangeId)) {
-    const body = await readFile(join(dir, openspecDirName, "changes", id, "tasks.md"), "utf8").catch(() => undefined)
-    if (body === undefined) continue
-    const total = (body.match(/^\s*[-*+]\s+\[[ xX]\]/gm) ?? []).length
-    const done = (body.match(/^\s*[-*+]\s+\[[xX]\]/gm) ?? []).length
-    out.set(id, { done, total })
-  }
-  return out
+/** The checkout folder basename: the visible worktree name (design D1). */
+export function worktreeDisplayName(worktree: { path: string; branch?: string; detached: boolean }): string {
+  const base = worktree.path.split("/").filter(Boolean).pop() ?? worktree.path
+  return base
 }
+
+/** Re-exported shared task-count read (OpenSpec CLI with checkbox fallback). */
+export { openspecTaskCounts } from "./task-counts"

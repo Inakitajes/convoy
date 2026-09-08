@@ -30,7 +30,8 @@ function keyEvent(name: string, options: { ctrl?: boolean; raw?: string } = {}):
 const view: SpecsView = {
   targetDir: "/work/acme",
   present: true,
-  changes: [{ kind: "change", id: "add-login", title: "Add login", artifacts: [] }],
+  board: { commonDir: "/work/acme", baseBranch: "main", worktrees: [{ path: "/work/acme", branch: "main", detached: false, main: true, bare: false, accessible: true, changes: [] }] },
+  changes: [{ kind: "change", id: "add-login", checkout: "/work/acme", title: "Add login", artifacts: [] }],
   specs: [],
 }
 
@@ -50,7 +51,7 @@ test("Home and a destination swap scenes without destroying the shared renderer"
 
   try {
     const firstScene = session.openScene("convoy-home-scene")
-    const home = new HomeLauncher(testRenderer.renderer, view.targetDir, { scene: firstScene, workRows: [] })
+    const home = new HomeLauncher(testRenderer.renderer, view.targetDir, { scene: firstScene, worktrees: [] })
     testRenderer.renderer.keyInput.emit("keypress", keyEvent("s"))
     await expect(home.result).resolves.toEqual({ type: "destination", destination: "specs" })
 
@@ -68,7 +69,7 @@ test("Home and a destination swap scenes without destroying the shared renderer"
     expect(testRenderer.renderer.isDestroyed).toBeFalse()
 
     const secondScene = session.openScene("convoy-home-scene")
-    const returnedHome = new HomeLauncher(testRenderer.renderer, view.targetDir, { scene: secondScene, workRows: [] })
+    const returnedHome = new HomeLauncher(testRenderer.renderer, view.targetDir, { scene: secondScene, worktrees: [] })
     await testRenderer.renderOnce()
       expect(testRenderer.captureCharFrame()).toContain("Pipelines")
 

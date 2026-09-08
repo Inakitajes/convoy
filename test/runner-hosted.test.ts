@@ -617,7 +617,7 @@ describe("run() with a hosted progress", () => {
       await writeFile(join(repo, "openspec", "changes", "add-login", "specs", "auth", "spec.md"), "## ADDED Scenarios\n")
       await writeFile(join(repo, "openspec", "specs", "auth", "spec.md"), "# Auth spec\n")
 
-      const bundle = await loadOpenSpecBundle({ targetDir: repo })
+      const bundle = await loadOpenSpecBundle({ targetDir: repo, explicitIds: ["add-login"] })
       expect(bundle).toBeDefined()
       const options = makeOptions(repo)
       const plan = buildRunPlan({ ...options, openspec: bundle!, promptSource: "inline" })
@@ -634,10 +634,10 @@ describe("run() with a hosted progress", () => {
     }
   })
 
-  test("attaches the spec bundle from the launch checkout when the run's checkout lacks it (isolated worktree)", async () => {
-    // An isolated worktree starts from the base ref, so a freshly proposed —
-    // still uncommitted — change exists only in the launch checkout the plan
-    // was resolved against. The contract must not silently vanish there.
+  test("never attaches the spec bundle from the launch checkout when the run's checkout lacks it (CC-6)", async () => {
+    // Delta run-launcher: the execution checkout is the only artifact source.
+    // A change that exists only in the launch checkout is disclosed as
+    // missing, never borrowed across checkouts.
     const launch = await cleanRepo()
     const isolated = await cleanRepo()
     const workspace = await mkdtemp(join(tmpdir(), "convoy-openspec-fallback-"))
@@ -668,7 +668,9 @@ describe("run() with a hosted progress", () => {
       const prepared = await preparePhaseRun({ dir: workspace, runID: "current" }, phase, { ...options, plan }, [], [])
 
       const filenames = prepared.attachments.map((part) => part.filename)
-      expect(filenames).toContain("proposal.md")
+      // The launch checkout's copy was NOT attached: the missing selected
+      // source is skipped with a warning, never substituted.
+      expect(filenames).not.toContain("proposal.md")
     } finally {
       await rm(workspace, { recursive: true, force: true })
       await rm(launch, { recursive: true, force: true })
@@ -699,7 +701,7 @@ describe("run() with a hosted progress", () => {
       await writeFile(join(repo, "openspec", "changes", "add-login", "tasks.md"), "# Tasks\n")
       await writeFile(join(repo, "openspec", "specs", "auth", "spec.md"), "# Auth spec\n")
 
-      const bundle = await loadOpenSpecBundle({ targetDir: repo })
+      const bundle = await loadOpenSpecBundle({ targetDir: repo, explicitIds: ["add-login"] })
       const options = makeOptions(repo)
       const plan = buildRunPlan({ ...options, openspec: bundle!, promptSource: "inline" })
       const prepared = await preparePhaseRun({ dir: workspace, runID: "current" }, phase, { ...options, plan }, [], [])

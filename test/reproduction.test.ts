@@ -162,7 +162,7 @@ describe("HN-018: advisor token leaked via process.env", () => {
 //
 // addAllAndCommit (git.ts) calls findSuspiciousStagedFiles before committing.
 // commitAsUser does NOT. Close's squash-merge candidate is committed through
-// commitAsUser in the integration worktree, so feature-close.ts scans the
+// commitAsUser in the integration worktree, so worktree-squash.ts scans the
 // staged files itself before the commit runs — the candidate commit must not
 // become a secret-scan bypass merely because it no longer goes through a
 // finish-time rewrite.
@@ -184,10 +184,10 @@ describe("HN-020: finish skips secret scanning", () => {
   })
 
   test("close's candidate commit scans the staged files before committing (fix)", async () => {
-    // The scan lives in feature-close.ts's candidate creation, before the
+    // The scan lives in worktree-squash.ts's candidate creation, before the
     // commitAsUser call in the integration worktree.
     const source = await readFile(
-      join(import.meta.dir, "..", "src", "feature-close.ts"),
+      join(import.meta.dir, "..", "src", "worktree-squash.ts"),
       "utf8",
     )
 

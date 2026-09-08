@@ -23,9 +23,6 @@ import { readRunMetadata, type RunMetadata } from "./metadata"
 import { preflightRunPlan } from "./preflight"
 import type { LaunchBranchCheck, LaunchBranchProposal, LaunchFeaturePreset, LaunchRunPreparation, LaunchRunSelection } from "./launch-tui"
 import type { SpinOptions } from "./spin"
-import type { CloseOptions } from "./feature-close-command"
-import { resolveFeatureForLaunch, revalidateFeatureLink } from "./feature-lifecycle/launch"
-import { resolveWorkContext, type ValidatedWorkContext } from "./feature-lifecycle/work-context"
 import { formatVersion } from "./version"
 import type { UpdateResult } from "./update"
 import type { TuiRoute } from "./tui-session"
@@ -75,10 +72,10 @@ export type ParsedArgs = {
   gateway?: ModelGateway
   planOnly?: boolean
   noConfirm?: boolean
-  /** --change: explicit OpenSpec change id; wins over every selection heuristic. */
-  change?: string
-  /** --feature: explicit feature id; resolves the feature/contract/context link (feature-lifecycle). */
-  featureId?: string
+  /** --change: explicit OpenSpec change ids, in review order (repeatable); selection is explicit only. */
+  changes: string[]
+  /** --manual: the explicit no-change run mode (valid with zero selected changes). */
+  manual?: boolean
 }
 
 export type InitOptions = {
@@ -95,8 +92,9 @@ export type CliCommand =
   | { type: "specs"; targetDir: string }
   | { type: "spin"; options: SpinOptions }
   | { type: "opencode-install" }
-  | { type: "close"; options: CloseOptions }
-  | { type: "feature"; args: string[] }
+  | { type: "close"; args: string[] }
+  | { type: "worktrees"; args: string[] }
+  | { type: "retired-feature"; args: string[] }
   | { type: "config"; targetDir: string }
   | { type: "init"; options: InitOptions }
   | { type: "agents"; action: "eject"; agentName: string; options: InitOptions }
@@ -155,13 +153,35 @@ export async function parseAndRun(argv: string[]) {
     return
   }
   if (command.type === "close") {
-    const { runCloseCommand } = await import("./feature-close-command")
-    await runCloseCommand(command.options)
+    const { parseCloseCommandArgs, runCloseCommandFromArgs } = await import("./worktree-commands")
+    await runCloseCommandFromArgs(parseCloseCommandArgs(command.args))
     return
   }
-  if (command.type === "feature") {
-    const { runFeatureCommand, parseFeatureArgs } = await import("./feature-lifecycle/command-cli")
-    await runFeatureCommand(parseFeatureArgs(command.args))
+  if (command.type === "worktrees") {
+    const { runWorktreesCommand, parseWorktreesArgs } = await import("./worktree-commands")
+    if (command.args.length === 0) {
+      await runWorktreesCommand({ kind: "inventory" })
+      return
+    }
+    if (command.args[0] === "--help" || command.args[0] === "-h") {
+      const { worktreesHelp } = await import("./worktree-commands")
+      process.stdout.write(worktreesHelp())
+      return
+    }
+    const parsed = parseWorktreesArgs(command.args)
+    // The worktree-scoped run delegates to the launcher this process already
+    // owns (design D4: one run path, explicit execution checkout and change
+    // selection); the parser above has already required the explicit mode.
+    if (parsed.kind === "run") {
+      await runWorktreeScopedRun(parsed)
+      return
+    }
+    await runWorktreesCommand(parsed)
+    return
+  }
+  if (command.type === "retired-feature") {
+    process.stderr.write(`${retiredFeatureDiagnostic(command.args)}\n`)
+    process.exitCode = 1
     return
   }
   if (command.type === "config") {
@@ -221,13 +241,6 @@ export async function parseAndRun(argv: string[]) {
     process.stdout.write(renderRunPlan(plan, true))
   }
   await preflightRunPlan(plan)
-  // Execution-time identity revalidation (capability feature-lifecycle, task
-  // 4.4): the reviewed feature link must still verify — same repository,
-  // association revision, branch, and base. A changed target refuses before
-  // anything is created; this is additional to the dirty-tree gate below.
-  if (plan.feature) {
-    await revalidateFeatureLink({ cwd: command.options.targetDir, link: plan.feature })
-  }
   // Nothing has touched the repo yet; the worktree is the first effect, and only
   // once the plan has been accepted.
   let options = command.options
@@ -250,9 +263,9 @@ export async function parseAndRun(argv: string[]) {
  */
 async function refuseConflictingWriter(executionDir: string, plan: RunPlan): Promise<void> {
   if (!hasWritableStep(plan.pipeline)) return
-  const { lifecycleCommonDir } = await import("./feature-lifecycle/store")
-  const { readWriterClaim, claimLiveness, writerConflictGuidance } = await import("./feature-lifecycle/writer-claims")
-  const commonDir = await lifecycleCommonDir(executionDir).catch(() => undefined)
+  const { repoCommonDir } = await import("./repo-store")
+  const { readWriterClaim, claimLiveness, writerConflictGuidance } = await import("./writer-claims")
+  const commonDir = await repoCommonDir(executionDir).catch(() => undefined)
   if (!commonDir) return
   const { currentBranch } = await import("./git")
   const branch = plan.target.branch ?? (await currentBranch(executionDir).catch(() => undefined))
@@ -292,8 +305,8 @@ async function runHomeSession(targetDir: string): Promise<void> {
       route,
       targetDir,
       openHome: (context) => launchHomeTui(targetDir, { route, kittyGraphics, ...context }),
-      openWork: async (featureId, action, sessionId) => {
-        await dispatchWorkAction(targetDir, route, featureId, action, sessionId)
+      openWork: async (worktree, action) => {
+        await dispatchWorkAction(targetDir, route, worktree, action)
       },
       createWork: async (draft) => {
         await createWorkFromDraft(targetDir, route, draft)
@@ -310,39 +323,59 @@ async function runHomeSession(targetDir: string): Promise<void> {
   }
 }
 
-/** The resolved context Home opens with: refreshed rows plus the remembered selection (task 6.4). */
-async function homeWorkContext(targetDir: string): Promise<{ workRows: import("./specs").LifecycleFeatureRow[]; resumeFeature?: import("./specs").LifecycleFeatureRow; resumeNotice?: string }> {
-  const { loadLifecycleFeatureRows } = await import("./specs")
-  const workRows = (await loadLifecycleFeatureRows(targetDir)) ?? []
-  const { lifecycleCommonDir } = await import("./feature-lifecycle/store")
-  const { readPreferences } = await import("./feature-lifecycle/preferences")
-  const commonDir = await lifecycleCommonDir(targetDir).catch(() => undefined)
-  if (!commonDir) return { workRows }
-  const preferences = await readPreferences(commonDir)
-  if (preferences.status !== "found" || !preferences.value.lastFeatureId) return { workRows }
-  const remembered = workRows.find((row) => row.featureId === preferences.value.lastFeatureId)
-  if (remembered) return { workRows, resumeFeature: remembered }
-  // The remembered work no longer resolves: the list opens with an
-  // explanation instead of silently selecting another execution target.
+/**
+ * The resolved context Home opens with: the refreshed worktree inventory (task
+ * 3.1) plus the last-selection navigation hint (task 3.3). The hint is
+ * optional and non-authoritative (capability home-launcher delta): it restores
+ * the same checkout only when its live Git registration and administrative
+ * directory still verify continuity; otherwise Home opens the current
+ * Worktrees list with an explanation, never a replacement selection.
+ */
+async function homeWorkContext(targetDir: string): Promise<{ worktrees: import("./control-board").BoardWorktree[]; resumeWorktree?: string; resumeNotice?: string }> {
+  const { assembleControlBoard } = await import("./control-board")
+  const board = await assembleControlBoard(targetDir)
+  const { repoCommonDir } = await import("./repo-store")
+  const { readSessionHints, verifyHintTarget } = await import("./session-hints")
+  const commonDir = await repoCommonDir(targetDir).catch(() => undefined)
+  if (!commonDir) return { worktrees: board.worktrees }
+  const read = await readSessionHints(commonDir).catch(() => undefined)
+  const stored = read?.status === "found" ? read.value.lastSelection : undefined
+  if (!stored) return { worktrees: board.worktrees }
+  const verification = await verifyHintTarget(stored)
+  if (verification.ok) return { worktrees: board.worktrees, resumeWorktree: verification.target.checkoutPath }
   return {
-    workRows,
-    resumeNotice: `the last selected work (${preferences.value.lastFeatureId}) no longer resolves — it may have been completed or its records are unreadable`,
+    worktrees: board.worktrees,
+    resumeNotice: `the last selected checkout is no longer verifiable (${verification.reason}) — select a worktree explicitly`,
   }
 }
 
-/** Remembers the work the operator opened (navigation state, task 6.4). */
-async function rememberWorkSelection(targetDir: string, featureId: string): Promise<void> {
-  const { lifecycleCommonDir } = await import("./feature-lifecycle/store")
-  const { writeLastFeatureSelection } = await import("./feature-lifecycle/preferences")
-  const commonDir = await lifecycleCommonDir(targetDir).catch(() => undefined)
-  if (commonDir) await writeLastFeatureSelection(commonDir, featureId).catch(() => {})
+/**
+ * The `convoy worktrees run` entry (design D4, gap CC-10): the explicit
+ * execution checkout and the explicit ordered change selection (or the
+ * explicit manual/no-change mode the parser required) drive the standard
+ * launcher against that checkout. A missing selected source stops — never a
+ * same-id copy from another checkout, never a launch-directory fallback.
+ */
+async function runWorktreeScopedRun(command: { worktree: string; changes: string[]; manual: boolean }): Promise<void> {
+  const { observeCheckoutTarget } = await import("./worktree-target")
+  try {
+    await observeCheckoutTarget(command.worktree)
+  } catch (error) {
+    throw new Error(`the selected checkout is not a valid target: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  const { validateRunSelection } = await import("./worktree-commands")
+  await validateRunSelection(command.worktree, command.changes)
+  const { currentBranch } = await import("./git")
+  const branch = await currentBranch(command.worktree)
+  const preset = branch ? { worktreeDir: command.worktree, branch, contracts: command.changes } : undefined
+  // The full ordered selection rides into the launcher and the durable plan:
+  // `--change B --change A` reviews and freezes B then A, never just the first.
+  await launchInteractiveRun(process.cwd(), command.changes, preset, undefined)
+  process.stdout.write(`run prepared against ${command.worktree}${command.changes.length > 0 ? ` with ${command.changes.join(", ")}` : " (manual/no-change mode)"}\n`)
 }
 
-/** Runs one work detail action from Home (task 6.3): every action resolves the same work. */
-async function dispatchWorkAction(targetDir: string, route: TuiRoute, featureId: string, action: HomeWorkAction, sessionId?: string): Promise<void> {
-  await rememberWorkSelection(targetDir, featureId)
-  const { resolveWorkContext } = await import("./feature-lifecycle/work-context")
-  const resolved = await resolveWorkContext({ launchDir: targetDir, featureId })
+/** Runs one worktree detail action from Home: every action targets the same validated checkout. */
+async function dispatchWorkAction(targetDir: string, route: TuiRoute, worktree: string, action: HomeWorkAction): Promise<void> {
   if (action === "specs") {
     await openSpecsBrowser(targetDir, route)
     return
@@ -351,70 +384,139 @@ async function dispatchWorkAction(targetDir: string, route: TuiRoute, featureId:
     await openRunsBrowser(undefined, route)
     return
   }
-  if (action === "history") {
-    // The specs browser's feature history view is the read-only surface.
-    await openSpecsBrowser(targetDir, route)
-    return
-  }
-  if (resolved.status !== "validated") {
+  // Fresh target validation before any effect: the row was observed at view
+  // load; the action re-observes so a moved/removed checkout reports instead
+  // of executing against a replacement (capability work-context delta).
+  const { observeCheckoutTarget } = await import("./worktree-target")
+  let branch: string | undefined
+  let observedTarget: import("./worktree-target").ObservedCheckoutTarget | undefined
+  try {
+    const target = await observeCheckoutTarget(worktree)
+    branch = target.branch
+    observedTarget = target
+  } catch (error) {
     const { showNoticeTui } = await import("./notice-tui")
-    await showNoticeTui(route, { title: "work context unavailable", message: [resolved.reason, ...resolved.remediation].join("\n") })
+    await showNoticeTui(route, {
+      title: "worktree unavailable",
+      message: `${worktree} is no longer a valid checkout:\n${error instanceof Error ? error.message : String(error)}\n\nRefresh the Worktrees list and reselect.`,
+    })
     return
   }
-  const context = resolved.context
+  // The acted-on checkout becomes the last-selection hint (task 3.3): a
+  // non-authoritative navigation hint, restored only when it still verifies.
+  if (observedTarget) {
+    const { repoCommonDir } = await import("./repo-store")
+    const { saveLastSelection } = await import("./session-hints")
+    const commonDir = await repoCommonDir(targetDir).catch(() => undefined)
+    if (commonDir) await saveLastSelection(commonDir, observedTarget).catch(() => {})
+  }
   if (action === "conversation") {
-    await resumeFeatureConversation({
-      launchDir: targetDir,
-      route,
-      featureId: context.feature!.featureId,
-      checkout: context.executionCheckout,
-      branch: context.branch ?? context.feature!.context?.branch ?? "",
-      displayName: context.feature!.displayName,
-      ...(sessionId ? { sessionId } : {}),
-    })
+    await openCheckoutConversation({ launchDir: targetDir, route, checkout: worktree, displayName: branch ?? "worktree" })
     return
   }
   if (action === "conversation-external") {
-    await openFeatureConversationExternal({
-      launchDir: targetDir,
-      route,
-      featureId: context.feature!.featureId,
-      checkout: context.executionCheckout,
-      branch: context.branch ?? context.feature!.context?.branch ?? "",
-    })
+    await openCheckoutConversationExternal({ launchDir: targetDir, route, checkout: worktree, branch: branch ?? "" })
     return
   }
   if (action === "propose") {
-    await proposeForFeature({
-      launchDir: targetDir,
-      route,
-      featureId: context.feature!.featureId,
-      checkout: context.executionCheckout,
-      branch: context.branch ?? context.feature!.context?.branch ?? "",
-      displayName: context.feature!.displayName,
-    })
+    await proposeInCheckout({ launchDir: targetDir, route, checkout: worktree, branch: branch ?? "", displayName: branch ?? "worktree" })
     return
   }
   if (action === "pipeline") {
-    // The work-scoped pipeline launch reuses the verified checkout and the
-    // complete reviewed contract set (a focused contract is UI context).
-    const preset = featurePresetFromContext(context)
-    const focused = context.focusedContract?.changeId
-    await launchInteractiveRun(targetDir, focused, preset, route)
+    // The worktree-scoped pipeline launch reuses the validated checkout and
+    // its actual branch; change selection stays an explicit launcher decision.
+    await launchInteractiveRun(targetDir, undefined, { worktreeDir: worktree, branch: branch ?? "" }, route)
     return
   }
   if (action === "close") {
-    const { runCloseCommand } = await import("./feature-close-command")
-    await runCloseCommand({ targetDir, featureId: context.feature!.featureId }, route)
+    const { runWorktreeClose } = await import("./worktree-commands")
+    const { detectBaseRef } = await import("./git")
+    const detected = await detectBaseRef(targetDir).catch(() => undefined)
+    const base = detected?.ref
+    if (!base) {
+      await reportHandoffBlocker("no base could be detected for close — pass an explicit base with `convoy worktrees close --base <ref>`", [], route)
+      return
+    }
+    await runWorktreeClose({ checkout: worktree, base, changes: [], route }, targetDir)
+    return
+  }
+  if (action === "fetch" || action === "sync" || action === "push" || action === "pr" || action === "squash" || action === "remove" || action === "delete-branch") {
+    await runWorktreeMenuOperation(targetDir, route, worktree, action, branch)
     return
   }
 }
 
 /**
- * Creates work before proposal (tasks 5.1/5.2): the reviewed draft becomes a
- * creation intent, then the worktree, then the pre-proposal feature record.
- * A retry reuses a validated matching result instead of creating another
- * worktree, and cancellation before acceptance never reaches this path.
+ * Runs one of Home's independent Git/publication menu actions through the same
+ * guarded command surface the CLI uses (capability home-launcher delta: shared
+ * per-action guards, handlers revalidate before effects). The menu action
+ * never bypasses the operation guards — it delegates to `runWorktreesCommand`,
+ * so a blocked action reports the same reason the CLI would.
+ */
+async function runWorktreeMenuOperation(targetDir: string, route: TuiRoute, worktree: string, action: "fetch" | "sync" | "push" | "pr" | "squash" | "remove" | "delete-branch", branch: string | undefined): Promise<void> {
+  const { runWorktreesCommand } = await import("./worktree-commands")
+  const { showNoticeTui } = await import("./notice-tui")
+  const blocked = async (message: string): Promise<void> => {
+    await showNoticeTui(route, { title: "worktree action", message })
+  }
+  try {
+    if (action === "fetch") {
+      // Fetch names an explicit remote; with exactly one configured remote it
+      // is unambiguous, otherwise the operator selects it through the CLI.
+      const { execFile } = await import("./git")
+      const remotes = await execFile("git", ["remote"], { cwd: worktree, allowFailure: true })
+      const names = remotes.stdout.split("\n").map((line) => line.trim()).filter(Boolean)
+      if (names.length !== 1) {
+        await blocked(
+          names.length === 0
+            ? "no remote is configured for this checkout — add one with `git remote add` first"
+            : `several remotes are configured (${names.join(", ")}) — run \`convoy worktrees fetch --worktree <path> --remote <name>\` explicitly`,
+        )
+        return
+      }
+      await runWorktreesCommand({ kind: "fetch", worktree, remote: names[0]! })
+      return
+    }
+    if (action === "sync" || action === "squash") {
+      const { detectBaseRef } = await import("./git")
+      const detected = await detectBaseRef(targetDir).catch(() => undefined)
+      if (!detected?.ref) {
+        await blocked(`no base could be detected — pass an explicit base with \`convoy worktrees ${action} --worktree <path> --base <ref>\``)
+        return
+      }
+      await runWorktreesCommand(action === "sync" ? { kind: "sync", worktree, base: detected.ref } : { kind: "squash", worktree, base: detected.ref })
+      return
+    }
+    if (action === "push") {
+      await runWorktreesCommand({ kind: "push", worktree })
+      return
+    }
+    if (action === "pr") {
+      await runWorktreesCommand({ kind: "pr", worktree, push: false })
+      return
+    }
+    if (action === "remove") {
+      await runWorktreesCommand({ kind: "remove", worktree })
+      return
+    }
+    // delete-branch: the menu projects it as blocked while this worktree holds
+    // the branch; the guarded command below is the same one the CLI runs.
+    if (!branch) {
+      await blocked("the checkout has no attached branch to delete")
+      return
+    }
+    await runWorktreesCommand({ kind: "delete-branch", branch, force: false })
+  } catch (error) {
+    await blocked(error instanceof Error ? error.message : String(error))
+  }
+}
+
+/**
+ * Creates the reviewed worktree before any proposal (capability work-context
+ * delta, task 3.4/3.5): the reviewed draft becomes an unresolved creation
+ * operation, then the Git worktree. No feature record, spec, commit, PR, or
+ * authoring session is created; a retry reconciles the pending operation
+ * against actual Git state instead of duplicating the checkout.
  */
 async function createWorkFromDraft(
   targetDir: string,
@@ -422,73 +524,63 @@ async function createWorkFromDraft(
   draft: { displayName: string; branch: string; base: string; worktree: string },
 ): Promise<void> {
   const { execFile } = await import("./git")
-  const { lifecycleCommonDir, ensureRepositoryRecord, isFound } = await import("./feature-lifecycle/store")
-  const { beginCreationIntent, completeCreationIntent } = await import("./feature-lifecycle/creation")
-  const { featureNewWork } = await import("./feature-lifecycle/commands")
+  const { repoCommonDir } = await import("./repo-store")
+  const { createOperation, acknowledgeStep, resolveOperation } = await import("./operation-journal")
   const { showNoticeTui } = await import("./notice-tui")
 
-  const commonDir = await lifecycleCommonDir(targetDir)
+  const commonDir = await repoCommonDir(targetDir)
   if (!commonDir) {
-    await showNoticeTui(route, { title: "new feature", message: "not a git repository — nothing was created" })
-    return
-  }
-  const repoRecord = await ensureRepositoryRecord(commonDir)
-  if (!isFound(repoRecord)) {
-    await showNoticeTui(route, { title: "new feature", message: "the lifecycle store could not be initialized — nothing was created" })
+    await showNoticeTui(route, { title: "new worktree", message: "not a git repository — nothing was created" })
     return
   }
 
-  // 1. Intent before any filesystem effect (design D3): recovery evidence.
-  const intent = await beginCreationIntent(commonDir, {
-    repositoryId: repoRecord.value.repositoryId,
-    displayName: draft.displayName,
-    branch: draft.branch,
-    base: draft.base,
-    worktree: draft.worktree,
+  // 1. Intent before any filesystem effect (design D9): recovery evidence
+  //    outside the checkout this operation may create.
+  const { ensureOperationsRoot } = await import("./operation-journal")
+  await ensureOperationsRoot(commonDir).catch(() => {})
+  const created = await createOperation(commonDir, {
+    kind: "worktree-create",
+    intent: { displayName: draft.displayName, branch: draft.branch, base: draft.base, worktree: draft.worktree },
+    steps: ["create"],
   })
+  const operationId = created.ok ? created.operation.operationId : undefined
+  if (operationId) {
+    const { recordStepIntent } = await import("./operation-journal")
+    await recordStepIntent(commonDir, operationId, "create", { branch: draft.branch, worktree: draft.worktree, base: draft.base }).catch(() => {})
+  }
 
   // 2. The worktree at the reviewed destination. A retry after a partial
   //    creation reuses a validated matching worktree instead of failing on
-  //    the existing path (design D3: never create a duplicate; never delete
-  //    potential authored content).
+  //    the existing path (never create a duplicate; never delete potential
+  //    authored content).
   const { findWorktreeDirForBranch } = await import("./git")
   const existing = await findWorktreeDirForBranch(draft.branch, targetDir).catch(() => undefined)
   if (!existing) {
     const added = await execFile("git", ["worktree", "add", "-b", draft.branch, draft.worktree, draft.base], { cwd: targetDir, allowFailure: true })
     if (added.exitCode !== 0) {
       await showNoticeTui(route, {
-        title: "new feature",
-        message: `creating the worktree failed:\n${(added.stderr || added.stdout).trim()}\n\nThe creation intent is retained; retry after fixing the cause — the work stays recoverable.`,
+        title: "new worktree",
+        message: `creating the worktree failed:\n${(added.stderr || added.stdout).trim()}\n\n${operationId ? `The creation intent is retained — inspect or cancel it with \`convoy worktrees recover --operation ${operationId}\`.` : "Nothing was created."}`,
       })
       return
     }
   }
 
-  // 3. The pre-proposal feature record (empty contract set, display name
-  //    independent of change ids).
-  try {
-    const feature = await featureNewWork({
-      cwd: targetDir,
-      branch: draft.branch,
-      worktree: existing ?? draft.worktree,
-      changeIds: [],
-      base: draft.base,
-      displayName: draft.displayName,
-    })
-    await completeCreationIntent(commonDir, intent.operationId, feature.featureId)
-    await rememberWorkSelection(targetDir, feature.featureId)
-    await showNoticeTui(route, {
-      title: "work created",
-      message: `${feature.displayName} is ready at ${draft.worktree} on ${draft.branch}\n\nSelect it on the work list to open a conversation or propose the first change.`,
-    })
-  } catch (error) {
-    // Registration failed: the worktree is preserved and the pending intent
-    // is the recovery evidence — a retry reconciles instead of duplicating.
-    await showNoticeTui(route, {
-      title: "new feature",
-      message: `the checkout was created but registering the feature failed:\n${error instanceof Error ? error.message : String(error)}\n\nThe worktree at ${draft.worktree} is preserved. Retry creation for the same branch to reconcile it.`,
-    })
+  // 3. Acknowledge the verified creation and release the operation journal:
+  //    a resolved creation leaves no recovery record behind (design D9).
+  if (operationId) {
+    await acknowledgeStep(commonDir, operationId, "create", { worktree: existing ?? draft.worktree }).catch(() => {})
+    await resolveOperation({ commonDir, operationId, gitCwd: targetDir, outcome: "resolved" }).catch(() => {})
   }
+  // The created checkout becomes the last-selection hint (task 3.3).
+  const { observeCheckoutTarget } = await import("./worktree-target")
+  const { saveLastSelection } = await import("./session-hints")
+  const createdTarget = await observeCheckoutTarget(existing ?? draft.worktree).catch(() => undefined)
+  if (createdTarget) await saveLastSelection(commonDir, createdTarget).catch(() => {})
+  await showNoticeTui(route, {
+    title: "worktree created",
+    message: `${draft.displayName} is ready at ${existing ?? draft.worktree} on ${draft.branch}\n\nSelect it on the Worktrees list to open a conversation or propose the first change.`,
+  })
 }
 
 /** Pure navigation loop: destination close means back; only Home close quits. */
@@ -496,8 +588,8 @@ export async function runHomeNavigationLoop(options: {
   interrupted: () => boolean
   route: TuiRoute
   targetDir: string
-  openHome: (context: { workRows: import("./specs").LifecycleFeatureRow[]; resumeFeature?: import("./specs").LifecycleFeatureRow; resumeNotice?: string }) => Promise<HomeResolution>
-  openWork: (featureId: string, action: HomeWorkAction, sessionId?: string) => Promise<void>
+  openHome: (context: { worktrees: import("./control-board").BoardWorktree[]; resumeWorktree?: string; resumeNotice?: string }) => Promise<HomeResolution>
+  openWork: (worktree: string, action: HomeWorkAction) => Promise<void>
   createWork: (draft: { displayName: string; branch: string; base: string; worktree: string }) => Promise<void>
   openDestination: (selection: HomeDestination) => Promise<void>
 }): Promise<void> {
@@ -508,7 +600,7 @@ export async function runHomeNavigationLoop(options: {
     if (resolution.type === "destination") {
       await options.openDestination(resolution.destination)
     } else if (resolution.type === "work") {
-      await options.openWork(resolution.featureId, resolution.action, resolution.sessionId)
+      await options.openWork(resolution.worktree, resolution.action)
     } else if (resolution.type === "new-work" && resolution.draft) {
       await options.createWork(resolution.draft)
     }
@@ -538,35 +630,36 @@ async function buildReviewedPlan(input: BuildRunPlanInput): Promise<RunPlan> {
   // resolve the change the same way the runtime attaches it later.
   const openspec = await loadOpenSpecBundle({
     targetDir: input.targetDir,
-    explicitId: input.change,
-    branch,
-    ...(input.baseRef && input.baseRef !== "HEAD" ? { diffFiles: await listChangedFiles(input.baseRef, input.targetDir).catch(() => []) } : {}),
+    explicitIds: input.changes,
   })
-  // An explicitly pinned change is authoritative: resolving to nothing must
-  // refuse the run rather than silently fall back to diff inference — the
-  // operator asked for that contract, and a typo or an archived id should
-  // surface here, before any worktree or agent run.
-  if (input.change && (!openspec || openspec.changeIds.length === 0)) {
-    throw new Error(`--change "${input.change}" matched no active change under openspec/changes/ (archived or absent; run without --change to auto-resolve)`)
+  // Every explicitly requested id must resolve: a typo or an archived id
+  // refuses the run naming it, rather than silently dropping that contract.
+  const requested = input.changes ?? []
+  if (requested.length > 0) {
+    const missing = openspec ? requested.filter((id) => !openspec.changeIds.includes(id)) : requested
+    if (missing.length > 0) {
+      throw new Error(`--change "${missing.join('", "')}" matched no active change under openspec/changes/ (archived or absent)`)
+    }
   }
-  // Selection rule 5: in an OpenSpec repo, the default implementation pipeline
-  // (full-cycle) needs a change contract; review keeps today's diff-inference fallback.
-  if (openspec && openspec.changeIds.length === 0 && input.pipeline.name === defaultPipelineName) {
-    throw new Error("no change; run /opsx:propose first (or pass --change <id>)")
+  // Selection is explicit only (run-launcher delta): a launch with zero
+  // selected changes is valid solely through the explicit no-change mode —
+  // `--manual` headless, or the launcher's Manual-prompt decision. Nothing
+  // auto-attaches a singleton, a branch match, or a diff composition, and a
+  // resume/retry keeps its frozen context instead of re-selecting.
+  if (openspec && openspec.changeIds.length === 0 && !input.manual && !input.resumeRunID) {
+    const { listChangeIds } = await import("./openspec")
+    const activeCount = (await listChangeIds(join(input.targetDir, "openspec", "changes"))).length
+    throw new Error(
+      activeCount === 0
+        ? "no active change under openspec/changes/: run /opsx:propose first, or pass --manual for an explicit no-change run"
+        : "no change is selected: pass --change <id> (repeatable, in review order) or --manual for an explicit no-change run; in the launcher, esc at the prompt opens the change list to pick from",
+    )
   }
-  // The feature link (capability feature-lifecycle, tasks 4.3/4.4): an
-  // explicit `--feature` must resolve to a verified association — it never
-  // falls through to naming heuristics, and a refusal carries the exact
-  // adoption command. Without `--feature`, an unassociated context launches
-  // unlinked (the ordinary flow).
-  const feature = await resolveFeatureForLaunch({
-    cwd: input.targetDir,
-    ...(input.featureId ? { featureId: input.featureId } : {}),
-    ...(input.change ? { changeId: input.change } : {}),
-    ...(input.branch ? { branch: input.branch } : {}),
-    ...(input.worktreeDir ? { worktreeDir: input.worktreeDir } : {}),
-  })
-  return buildRunPlan({ ...input, prdHistoryPreview: preview, ...(openspec ? { openspec } : {}), ...(feature ? { feature } : {}) })
+  // No feature link is resolved or persisted on the launch path (capability
+  // feature-lifecycle retirement): the reviewed plan carries the explicit
+  // checkout and ordered local changes, and execution validates those Git
+  // facts — never a feature association.
+  return buildRunPlan({ ...input, prdHistoryPreview: preview, ...(openspec ? { openspec } : {}) })
 }
 
 /** The result of deciding whether goal mode applies to a resolved run. */
@@ -734,8 +827,8 @@ export async function prepareWorktreeForRun(sourceDir: string, options: RunOptio
 
 async function launchInteractiveRun(
   targetDir: string,
-  presetChange?: string,
-  presetFeature?: Omit<LaunchFeaturePreset, "changeID">,
+  presetChanges?: readonly string[],
+  presetFeature?: LaunchFeaturePreset,
   route?: TuiRoute,
 ) {
   // Imported lazily so normal CLI invocations don't pull in OpenTUI until they
@@ -744,13 +837,14 @@ async function launchInteractiveRun(
   const selection = await launchRunTui(
     {
       targetDir,
-      // A specs-viewer handoff arrives with the change already chosen: the
-      // launcher pins that spec row instead of running its auto-detect heuristics.
-      ...(presetChange ? { presetChange } : {}),
-      // A feature handoff arrives with the verified worktree/branch and, when
-      // the board could resolve it, the stable feature identity: the launcher
-      // reuses them and never asks the namer (work-context, D1/D2).
-      ...(presetFeature ? { presetFeature: { changeID: presetChange ?? "", ...presetFeature } } : {}),
+      // A specs-viewer or `worktrees run` handoff arrives with the changes
+      // already chosen, in review order: the launcher pins that selection
+      // instead of running any auto-detect heuristic. An empty list is the
+      // explicit no-change mode.
+      ...(presetChanges ? { presetChanges } : {}),
+      // A worktree handoff arrives with the verified worktree/branch: the
+      // launcher reuses them and never asks the namer (work-context, D1/D2).
+      ...(presetFeature ? { presetFeature } : {}),
       prepareRun: (runSelection) => prepareInteractiveRun(targetDir, runSelection),
       proposeBranchName: (input) => proposeInteractiveBranchName(targetDir, input),
       checkBranchName: (name) => checkInteractiveBranchName(targetDir, name),
@@ -771,14 +865,6 @@ async function launchInteractiveRun(
   const plan = selection.plan
   const runSelection = selection.selection
   await preflightRunPlan(plan)
-  // Destination revalidation before any effect (task 1.4): the reviewed
-  // feature link must still verify — same repository, association revision,
-  // branch/worktree, and recorded base. A context that moved or an
-  // association that advanced after Review refuses here instead of
-  // executing elsewhere or silently adopting the replacement.
-  if (plan.feature) {
-    await revalidateFeatureLink({ cwd: targetDir, link: plan.feature })
-  }
   if (runSelection.initializeGit) {
     const { initializeRepoWithInitialCommit } = await import("./git")
     await initializeRepoWithInitialCommit(targetDir, { baseRef: options.baseRef === "HEAD" ? undefined : options.baseRef })
@@ -810,7 +896,13 @@ async function launchInteractiveRun(
   await executeRun(options, plan, route)
 }
 
-async function prepareInteractiveRun(targetDir: string, selection: LaunchRunSelection): Promise<LaunchRunPreparation> {
+/**
+ * The launcher's reviewed preparation: the operator's explicit checkout and
+ * ordered change selection (or the explicit no-change decision) resolve the
+ * frozen plan. Exported for the selection-regression tests (the same pattern
+ * as runHomeNavigationLoop).
+ */
+export async function prepareInteractiveRun(targetDir: string, selection: LaunchRunSelection): Promise<LaunchRunPreparation> {
   const parsed = parseArgs([])
   parsed.targetDir = selection.targetDir
   // Base detection and configuration resolve against the execution checkout
@@ -829,12 +921,13 @@ async function prepareInteractiveRun(targetDir: string, selection: LaunchRunSele
   parsed.gateway = selection.gateway
   parsed.worktree = Boolean(selection.isolateWorktree)
   if (selection.branchName) parsed.branch = selection.branchName
-  if (selection.change) parsed.change = selection.change
-  // A feature-scoped handoff resolves its plan link by stable identity and
-  // uses the recorded intended base instead of re-detecting one: the frozen
-  // link then revalidates identity/revision/branch/base at execution time
-  // (advisor: identity over context heuristics; run-launcher task 4.4).
-  if (selection.featureId) parsed.featureId = selection.featureId
+  // The operator's explicit ordered selection (each pick an acceptance) and
+  // the explicit no-change decision ride into the plan verbatim: B then A
+  // stays B then A, and nothing auto-attaches (run-launcher delta).
+  parsed.changes = [...selection.changes]
+  if (selection.manualNoChanges) parsed.manual = true
+  // A worktree handoff uses its recorded intended base instead of re-detecting
+  // one (work-context, D5).
   if (selection.baseRef) parsed.baseRef = selection.baseRef
 
   const options = { ...(await resolveRunOptions(parsed)), prompt: selection.prompt }
@@ -949,415 +1042,147 @@ async function dispatchSpecsResolution(targetDir: string, resolution: SpecsResol
     case "exit":
       return undefined
     case "apply-change": {
-      if (resolution.featureId) {
-        const resolved = await resolveWorkContext({ launchDir: targetDir, featureId: resolution.featureId, changeId: resolution.changeID })
-        if (resolved.status !== "validated") {
-          await reportHandoffBlocker(resolved.reason, resolved.remediation, route)
-          return { changeId: resolution.changeID, featureId: resolution.featureId }
-        }
-        const context = resolved.context
-        // The pinned contract must exist in the verified checkout: a missing
-        // source reports its condition rather than letting the launcher fall
-        // back to another contract or to the launch copy (specs-viewer).
-        if (!(await handoffContractSourcePresent(context))) {
-          await reportHandoffBlocker(
-            `contract "${resolution.changeID}" has no readable source in the feature's verified checkout (${context.executionCheckout})`,
-            ["rebind or revise the feature's association: `convoy feature show`"],
-            route,
-          )
-          return { changeId: resolution.changeID, featureId: resolution.featureId }
-        }
-        // The launcher keeps running in the launch checkout (no chdir, D1);
-        // the preset carries the feature's verified checkout, which resource
-        // loading and preparation resolve against.
-        await launchInteractiveRun(targetDir, resolution.changeID, featurePresetFromContext(context), route)
-        return { changeId: resolution.changeID, featureId: resolution.featureId }
-      }
-      await launchInteractiveRun(targetDir, resolution.changeID, undefined, route)
-      return { changeId: resolution.changeID }
-    }
-    case "iterate-change": {
-      if (resolution.featureId) {
-        const resolved = await resolveWorkContext({ launchDir: targetDir, featureId: resolution.featureId, changeId: resolution.changeID })
-        if (resolved.status !== "validated") {
-          await reportHandoffBlocker(resolved.reason, resolved.remediation, route)
-          return { changeId: resolution.changeID, featureId: resolution.featureId }
-        }
-        const context = resolved.context
-        if (!(await handoffContractSourcePresent(context))) {
-          await reportHandoffBlocker(
-            `contract "${resolution.changeID}" has no readable source in the feature's verified checkout (${context.executionCheckout})`,
-            ["rebind or revise the feature's association: `convoy feature show`"],
-            route,
-          )
-          return { changeId: resolution.changeID, featureId: resolution.featureId }
-        }
-        if (resolution.presentation === "external" || !route) {
-          // Explicit external presentation (or the standalone browser, whose
-          // renderer this process no longer owns): the window flow.
-          const view = await loadSpecsView(targetDir)
-          const input = buildIterateSessionInput(context.executionCheckout, view, resolution.changeID)
-          const { openIterateOpencodeWindow } = await import("./opencode")
-          await openIterateOpencodeWindow(input)
-        } else {
-          await resumeFeatureConversation({
-            launchDir: targetDir,
-            route,
-            featureId: context.feature!.featureId,
-            checkout: context.executionCheckout,
-            branch: context.branch ?? context.feature!.context?.branch ?? "",
-            displayName: context.feature!.displayName,
-          })
-        }
-        return { changeId: resolution.changeID, featureId: resolution.featureId }
-      }
-      const view = await loadSpecsView(targetDir)
-      const input = buildIterateSessionInput(targetDir, view, resolution.changeID)
-      const { openIterateOpencodeWindow } = await import("./opencode")
-      await openIterateOpencodeWindow(input)
-      return { changeId: resolution.changeID }
-    }
-    case "propose-feature": {
-      // Foreground authoring runs inside the home session's terminal; the
-      // standalone browser delegates to the CLI flow instead of taking over
-      // a renderer it no longer owns.
-      if (!route) {
+      // The launcher keeps running in the launch checkout (no chdir); the
+      // preset carries the change's own checkout, which resource loading and
+      // preparation resolve against — never the launch directory by fallback.
+      const preset = await checkoutPreset(resolution.checkout)
+      if (!preset) {
         await reportHandoffBlocker(
-          "Propose runs foreground from the home session in this build",
-          ["launch `convoy` (interactive) and pick the work, or run `convoy feature new-work` to prepare work and propose there"],
+          `the change's checkout (${resolution.checkout}) is no longer a valid target`,
+          ["refresh the board and reselect the change"],
           route,
         )
-        return { featureId: resolution.featureId }
+        return { changeId: resolution.changeID, checkout: resolution.checkout }
       }
-      const resolved = await resolveWorkContext({ launchDir: targetDir, featureId: resolution.featureId })
-      if (resolved.status !== "validated") {
-        await reportHandoffBlocker(resolved.reason, resolved.remediation, route)
-        return { featureId: resolution.featureId }
+      await launchInteractiveRun(targetDir, [resolution.changeID], preset, route)
+      return { changeId: resolution.changeID, checkout: resolution.checkout }
+    }
+    case "iterate-change": {
+      if (resolution.presentation === "external" || !route) {
+        // Explicit external presentation (or the standalone browser, whose
+        // renderer this process no longer owns): the window flow.
+        const view = await loadSpecsView(targetDir)
+        const input = buildIterateSessionInput(targetDir, view, resolution.changeID)
+        const { openIterateOpencodeWindow } = await import("./opencode")
+        await openIterateOpencodeWindow(input)
+      } else {
+        await openCheckoutConversation({ launchDir: targetDir, route, checkout: resolution.checkout, displayName: resolution.changeID })
       }
-      const context = resolved.context
-      await proposeForFeature({ launchDir: targetDir, route, featureId: context.feature!.featureId, checkout: context.executionCheckout, branch: context.branch ?? context.feature!.context?.branch ?? "", displayName: context.feature!.displayName })
-      return { featureId: resolution.featureId }
+      return { changeId: resolution.changeID, checkout: resolution.checkout }
     }
     case "spin-change": {
       // Spin out reuses `convoy spin`'s whole flow verbatim: same refusals,
-      // same worktree conventions, same /move handoff.
+      // same worktree conventions, same /move handoff. Spin registers
+      // nothing (capability feature-spin delta): the created checkout
+      // appears through Git inventory like any other worktree.
       const { runSpin, printSpinHandoff } = await import("./spin")
       const result = await runSpin({ targetDir, changeID: resolution.changeID })
       printSpinHandoff(result)
-      // Interactive adoption (capability feature-spin, task 5.5): the
-      // stable feature spin registered is selected on the reopened board —
-      // no second record — where its managed conversation action opens in
-      // its worktree without a manual `cd`.
-      await reportHandoffBlocker(
-        `spin registered feature ${result.featureId} (${result.branch})`,
-        ["the feature is now selected — its actions offer conversation and pipeline launches without changing directories"],
-        route,
-      )
-      return { featureId: result.featureId }
+      return { changeId: resolution.changeID }
     }
     case "continue-change": {
-      if (resolution.featureId) {
-        // Fresh destination validation before the launcher opens: the row's
-        // worktree was verified at view load; the handoff re-resolves through
-        // identity so a moved/removed context reports instead of launching
-        // against the stale path (task 1.4). The launcher itself keeps
-        // running in the launch checkout; the validated preset carries the
-        // feature's verified checkout for resource loading and preparation.
-        const resolved = await resolveWorkContext({ launchDir: targetDir, featureId: resolution.featureId, changeId: resolution.changeID })
-        if (resolved.status !== "validated") {
-          await reportHandoffBlocker(resolved.reason, resolved.remediation, route)
-          return { changeId: resolution.changeID, featureId: resolution.featureId }
-        }
-        await launchInteractiveRun(targetDir, resolution.changeID, featurePresetFromContext(resolved.context), route)
-        return { featureId: resolution.featureId }
+      // Fresh destination validation before the launcher opens: the row's
+      // worktree was observed at view load; the handoff re-observes so a
+      // moved/removed checkout reports instead of launching against the
+      // stale path.
+      const preset = await checkoutPreset(resolution.worktreeDir, resolution.branch)
+      if (!preset) {
+        await reportHandoffBlocker(
+          `the reviewed checkout (${resolution.worktreeDir}) is no longer a valid target`,
+          ["refresh the board and reselect the worktree"],
+          route,
+        )
+        return { changeId: resolution.changeID, checkout: resolution.worktreeDir }
       }
-      await launchInteractiveRun(targetDir, resolution.changeID, { worktreeDir: resolution.worktreeDir, branch: resolution.branch }, route)
-      return { changeId: resolution.changeID }
+      await launchInteractiveRun(targetDir, [resolution.changeID], preset, route)
+      return { changeId: resolution.changeID, checkout: resolution.worktreeDir }
     }
     case "close-change": {
-      // The board's handoff goes through the dual-mode dispatcher: a TTY gets
-      // the live checklist (progress, message confirmation, cleanup offers),
-      // a pipe gets the headless stdout summary — same event stream either way.
-      const { runCloseCommand } = await import("./feature-close-command")
-      await runCloseCommand(
-        {
-          targetDir,
-          changeID: resolution.changeID,
-          worktreeDir: resolution.worktreeDir,
-          branch: resolution.branch,
-        },
-        route,
-      )
-      return { changeId: resolution.changeID }
+      // The board's handoff runs the same worktree close composite as the
+      // CLI (capability feature-close, design D8): sync as needed, archive
+      // the explicitly selected local change, squash the whole branch.
+      const { runWorktreeClose } = await import("./worktree-commands")
+      const { detectBaseRef } = await import("./git")
+      const detected = await detectBaseRef(targetDir).catch(() => undefined)
+      const base = detected?.ref
+      if (!base) throw new Error("no base could be detected for close — pass an explicit base")
+      await runWorktreeClose({ checkout: resolution.worktreeDir, base, changes: [resolution.changeID] }, targetDir)
+      return { changeId: resolution.changeID, checkout: resolution.worktreeDir }
     }
-    case "close-feature": {
-      // The identity-keyed handoff (task 6.4): close resolves through the
-      // feature's stable id, so a removed worktree still reaches the close
-      // review — it reports the recorded landing (with remaining follow-ups)
-      // or the concrete missing-context blocker, never a silent no-op.
-      const { runCloseCommand } = await import("./feature-close-command")
-      await runCloseCommand({ targetDir, featureId: resolution.featureId }, route)
-      return { featureId: resolution.featureId }
-    }
-    case "archive-change-main": {
-      const { runArchiveOnMain } = await import("./feature-close-command")
-      await runArchiveOnMain({ targetDir, changeID: resolution.changeID })
-      return { changeId: resolution.changeID }
-    }
-  }
-}
-
-/** The launcher preset a validated work context produces: identity, revision, contracts, recorded base. */
-function featurePresetFromContext(context: ValidatedWorkContext["context"]): {
-  worktreeDir: string
-  branch: string
-  featureId: string
-  associationRevision?: number
-  contracts?: readonly string[]
-  baseRef?: string
-} {
-  return {
-    worktreeDir: context.executionCheckout,
-    branch: context.branch ?? context.feature?.context?.branch ?? "",
-    featureId: context.feature!.featureId,
-    ...(context.associationRevision !== undefined ? { associationRevision: context.associationRevision } : {}),
-    ...(context.contracts.length > 0 ? { contracts: context.contracts } : {}),
-    ...(context.intendedBase ? { baseRef: context.intendedBase } : {}),
   }
 }
 
 /**
- * Whether the focused contract's planning source exists in the validated
- * checkout (active change tree or archive path). Authoring and implementation
- * need real files there; a missing source reports its condition instead of
- * silently reading the launch checkout's copy.
+ * The launcher preset for an explicit checkout: the observed branch, validated
+ * before the launcher opens. `undefined` when the checkout is gone or no
+ * longer a registered checkout of this repository — never a fallback to the
+ * launch directory.
  */
-async function handoffContractSourcePresent(context: ValidatedWorkContext["context"]): Promise<boolean> {
-  const source = context.focusedContract?.sourceRoot
-  if (!source) return true
+async function checkoutPreset(checkout: string, requireBranch?: string): Promise<{ worktreeDir: string; branch: string } | undefined> {
+  const { observeCheckoutTarget } = await import("./worktree-target")
   try {
-    await stat(source)
-    return true
+    const target = await observeCheckoutTarget(checkout)
+    if (requireBranch !== undefined && target.branch !== requireBranch) return undefined
+    if (!target.branch) return undefined
+    return { worktreeDir: target.checkoutPath, branch: target.branch }
   } catch {
-    return false
+    return undefined
   }
-}
-
-/** Reports an unavailable handoff without launching anything. */
-async function reportHandoffBlocker(reason: string, remediation: readonly string[], route?: TuiRoute): Promise<void> {
-  const message = [reason, ...remediation].join("\n")
-  if (route) {
-    const { showNoticeTui } = await import("./notice-tui")
-    await showNoticeTui(route, { title: "work context unavailable", message })
-    return
-  }
-  process.stderr.write(`${message}\n`)
 }
 
 /**
- * Explicit external presentation of the work's authoring conversation
- * (task 4.6): the writer claim is taken before any pane is created, pane
- * creation and harness startup are reported independently, and a successful
- * pane whose harness session cannot be verified is never reported as a
- * running conversation. The claim is deliberately not released on return —
- * the external client may still be writing — and is reconciled later
- * against actual session activity (same-owner resume or idle release).
+ * Opens (or resumes) the authoring conversation for a validated checkout
+ * (capability work-conversations delta): the checkout locator and harness
+ * session reference are navigation metadata only — no feature registry, no
+ * spec ownership. A verifiable linked session is resumed exactly; without
+ * one a new conversation is created and its reference stored; the writer
+ * claim is taken before any writer work and reconciled against actual
+ * session activity on return. Exported for the conversation-resume tests.
  */
-async function openFeatureConversationExternal(input: { launchDir: string; checkout: string; branch: string; featureId: string; route?: TuiRoute }): Promise<void> {
-  const { readConversationRecord, addConversation, touchConversationSelection } = await import("./feature-lifecycle/conversations")
-  const { createAuthoringConversation, openConversationExternal } = await import("./conversations")
-  const { lifecycleCommonDir } = await import("./feature-lifecycle/store")
-  const commonDir = await lifecycleCommonDir(input.launchDir).catch(() => undefined)
+export async function openCheckoutConversation(input: { launchDir: string; route: TuiRoute; checkout: string; displayName: string }): Promise<void> {
+  const { createAuthoringConversation, openConversationForeground, validateAuthoringSession } = await import("./conversations")
 
-  // The resume target: the remembered default, else the most recently linked
-  // conversation; without any linked conversation a new one is created.
-  let sessionId: string | undefined
-  if (commonDir) {
-    const record = await readConversationRecord(commonDir, input.featureId)
-    const candidates = record.status === "found" ? [...record.value.conversations] : []
-    candidates.sort((a, b) => (b.lastSelectedAt ?? b.createdAt) - (a.lastSelectedAt ?? a.createdAt))
-    sessionId = candidates[0]?.sessionId
-  }
-  if (!sessionId) {
-    const created = await createAuthoringConversation({ checkout: input.checkout, title: input.featureId })
-    sessionId = created.sessionId
-  }
-  if (commonDir) {
-    await addConversation({ commonDir, featureId: input.featureId, sessionId })
-    await touchConversationSelection({ commonDir, featureId: input.featureId, sessionId })
-  }
-
-  if (!(await claimAuthoringWriter({ launchDir: input.launchDir, checkout: input.checkout, branch: input.branch, sessionId, route: input.route }))) return
-  // The service (task 4.3) verifies the linked session independently of the
-  // pane: an unverified service blocks the handoff, a failed boot falls back
-  // to the adapter's bounded boot.
-  const serverResolution = await resolveAuthoringServer({ launchDir: input.launchDir, checkout: input.checkout, route: input.route })
-  if (serverResolution.status === "blocked") return
-  const outcome = await openConversationExternal({
-    checkout: input.checkout,
-    ref: { harness: "opencode", sessionId },
-    ...(serverResolution.status === "service" ? { server: { url: serverResolution.url } } : {}),
-  })
-  if (outcome.status === "failed") {
-    // No pane was created, so no writer was started: release the claim this
-    // path took instead of wedging the checkout.
-    if (commonDir) {
-      const { releaseWriterClaim } = await import("./feature-lifecycle/writer-claims")
-      await releaseWriterClaim({ commonDir, branch: input.branch, owner: sessionId })
-    }
-    await reportHandoffBlocker(`no window was opened: ${outcome.reason}`, ["open the conversation foreground from the work detail, or install Herdr/Zellij for panes"], input.route)
-    return
-  }
-  // Pane created — the harness session is reported separately (task 4.6), and
-  // the pane's client itself is outside Convoy's view (pane backends expose no
-  // child handle), so client startup is disclosed as unknown: nothing here
-  // claims a running conversation from pane success plus a resolvable session.
-  const lines =
-    outcome.status === "opened"
-      ? [`pane opened in ${outcome.backend} — the linked session was verified available, but Convoy cannot observe the pane's client`]
-      : [`pane created in ${outcome.backend}, but the linked session could not be verified yet: ${outcome.reason}`]
-  await reportHandoffBlocker(lines[0], outcome.status === "opened" ? ["confirm the conversation started in that window; resume it from the work detail later"] : ["reopen the conversation once the harness client has started; Convoy did not claim it running"], input.route)
-}
-
-/**
- * Resolves the authoring server for a CLI handoff (task 4.3): the repository's
- * conversation service — discovered, liveness-verified, and independent of run
- * servers and views — supplies one reused OpenCode server for every authoring
- * call in the flow. Outcomes:
- * - `service` — a live service URL to pass through as the handle (never
- *   closed by the caller; the service outlives the flow).
- * - `fallback` — the lifecycle store is absent or the service boot failed;
- *   the flow uses the previous bounded per-call boots.
- * - `blocked` — an existing service is in an unverified state (alive PID,
- *   unanswerable URL) or its discovery record is unreadable: fail closed and
- *   report, never boot a second server over unverified state.
- */
-async function resolveAuthoringServer(input: { launchDir: string; checkout: string; route?: TuiRoute }): Promise<{ status: "service"; url: string } | { status: "fallback" } | { status: "blocked"; reason: string }> {
-  const { lifecycleCommonDir } = await import("./feature-lifecycle/store")
-  const commonDir = await lifecycleCommonDir(input.launchDir).catch(() => undefined)
-  if (!commonDir) return { status: "fallback" }
-  const { ensureConversationService } = await import("./conversation-service")
-  const service = await ensureConversationService({ commonDir, checkout: input.checkout }).catch((error: unknown) => ({ status: "unavailable" as const, reason: error instanceof Error ? error.message : String(error) }))
-  if (service.status === "live") return { status: "service", url: service.url }
-  if (service.status === "uncertain") {
-    await reportHandoffBlocker(service.reason, ["the service is kept running and nothing was booted over it — resolve its state, then retry"], input.route)
-    return { status: "blocked", reason: service.reason }
-  }
-  return { status: "fallback" }
-}
-
-/** The shared writer-claim acquisition for an authoring conversation in a checkout. */
-async function claimAuthoringWriter(input: { launchDir: string; checkout: string; branch: string; sessionId: string; route?: TuiRoute }): Promise<boolean> {
-  const { lifecycleCommonDir } = await import("./feature-lifecycle/store")
-  const { acquireWriterClaim, writerConflictGuidance } = await import("./feature-lifecycle/writer-claims")
-  const commonDir = await lifecycleCommonDir(input.launchDir).catch(() => undefined)
-  if (!commonDir) return true
-  const acquired = await acquireWriterClaim({
-    commonDir,
-    branch: input.branch,
-    checkoutPath: input.checkout,
-    kind: "authoring",
-    owner: input.sessionId,
-    // Re-opening the conversation that already holds the claim is the same
-    // writer continuing, not a takeover (design D5 reconciliation).
-    reconcileOwner: input.sessionId,
-  })
-  if (acquired.status === "acquired") return true
-  const guidance = acquired.status === "conflict" ? writerConflictGuidance(acquired.existing) : ["a writer claim for this checkout is in an uncertain state — reconcile it before starting another writer"]
-  await reportHandoffBlocker(guidance[0], guidance.slice(1), input.route)
-  return false
-}
-
-/** Releases the authoring claim when the session is provably quiescent (design D5). */
-async function releaseAuthoringWriterIfIdle(input: { launchDir: string; checkout: string; branch: string; sessionId: string }): Promise<void> {
-  const { lifecycleCommonDir } = await import("./feature-lifecycle/store")
-  const { releaseWriterClaim } = await import("./feature-lifecycle/writer-claims")
-  const { sessionActivity } = await import("./conversations")
-  const commonDir = await lifecycleCommonDir(input.launchDir).catch(() => undefined)
-  if (!commonDir) return
-  // The activity query goes through the authoring service when one is live
-  // (task 4.3) so the answer reflects the same server the work ran on; any
-  // discovery failure falls back to the adapter's bounded boot, and either
-  // failure reads as "unknown" — which keeps the claim. No blockers are
-  // reported here: the release path is bookkeeping, not a user handoff.
-  let serviceHandle: { url: string } | undefined
-  try {
-    const { ensureConversationService } = await import("./conversation-service")
-    const service = await ensureConversationService({ commonDir, checkout: input.checkout })
-    if (service.status === "live") serviceHandle = { url: service.url }
-  } catch {
-    serviceHandle = undefined
-  }
-  const activity = await sessionActivity({ checkout: input.checkout, ref: { harness: "opencode", sessionId: input.sessionId }, ...(serviceHandle ? { server: serviceHandle } : {}) }).catch(() => "unknown" as const)
-  // A busy or unanswerable session keeps its claim: view detachment is not
-  // evidence the agent stopped (design D5). The claim's staleness rules
-  // reconcile it later if the process is gone.
-  if (activity === "idle") await releaseWriterClaim({ commonDir, branch: input.branch, owner: input.sessionId })
-}
-
-/**
- * Opens (or resumes) the feature's authoring conversation foreground in this
- * terminal (tasks 4.5/3.2): the default resume target is the most recently
- * selected linked conversation; without one a new conversation is created
- * and linked. On client exit the specs session reopens with the feature
- * selected and its assessment refreshed — no pipeline starts during
- * authoring, and the writer claim reconciles against actual session
- * activity instead of the view having closed.
- */
-async function resumeFeatureConversation(input: {
-  launchDir: string
-  route: TuiRoute
-  featureId: string
-  checkout: string
-  branch: string
-  displayName: string
-  /** An explicit selector choice: resume this exact reference, not the default. */
-  sessionId?: string
-}): Promise<void> {
-  const { readConversationRecord, addConversation, touchConversationSelection } = await import("./feature-lifecycle/conversations")
-  const { createAuthoringConversation, validateAuthoringSession, openConversationForeground } = await import("./conversations")
-  const { lifecycleCommonDir } = await import("./feature-lifecycle/store")
-  const commonDir = await lifecycleCommonDir(input.launchDir).catch(() => undefined)
-  if (!commonDir) return
-
-  // The authoring service (task 4.3): one live, liveness-verified OpenCode
-  // server for every probe and creation below — independent of run servers
-  // and of any view. An unverified service blocks the handoff; a failed boot
-  // falls back to the previous bounded per-call boots.
   const server = await resolveAuthoringServer({ launchDir: input.launchDir, checkout: input.checkout, route: input.route })
   if (server.status === "blocked") return
   const serviceHandle = server.status === "service" ? { url: server.url } : undefined
 
-  // Choose the conversation to open: an explicit selector choice resumes that
-  // exact reference; otherwise the remembered default, else the most recently
-  // linked one. An unavailable reference is reported and replaced by an
-  // explicit new conversation without claiming continuity.
-  const record = await readConversationRecord(commonDir, input.featureId)
-  const candidates = record.status === "found" ? [...record.value.conversations] : []
-  if (input.sessionId) {
-    candidates.length = 0
-    candidates.push({ sessionId: input.sessionId, harness: "opencode", createdAt: 0 })
-  } else {
-    candidates.sort((a, b) => (b.lastSelectedAt ?? b.createdAt) - (a.lastSelectedAt ?? a.createdAt))
-  }
-  let ref: { harness: "opencode"; sessionId: string } | undefined
-  let unavailableNotice: string | undefined
-  for (const candidate of candidates) {
-    const probe = { harness: "opencode" as const, sessionId: candidate.sessionId }
-    const validated = await validateAuthoringSession({ ref: probe, checkout: input.checkout, ...(serviceHandle ? { server: serviceHandle } : {}) })
-    if (validated.status === "available") {
-      ref = probe
-      break
+  // Resume the exactly linked session when a verifiable reference exists
+  // (capability work-conversations): the stored reference is navigation
+  // metadata, validated against live Git continuity and the harness before
+  // any use. An unavailable linked session is reported — never silently
+  // replaced — and the stale hint is dropped so the next explicit selection
+  // starts a new conversation. Hints are keyed by the canonical checkout
+  // path, so the lookup observes the target first.
+  const { repoCommonDir } = await import("./repo-store")
+  const { readVerifiableConversationRef, clearConversationRef, saveConversationRef } = await import("./session-hints")
+  const { observeCheckoutTarget } = await import("./worktree-target")
+  const commonDir = await repoCommonDir(input.launchDir).catch(() => undefined)
+  const target = await observeCheckoutTarget(input.checkout).catch(() => undefined)
+  const canonicalCheckout = target?.checkoutPath ?? input.checkout
+  if (commonDir) {
+    const linked = await readVerifiableConversationRef(commonDir, canonicalCheckout).catch(() => undefined)
+    if (linked) {
+      const validation = await validateAuthoringSession({ ref: linked.ref, checkout: input.checkout, ...(serviceHandle ? { server: serviceHandle } : {}) }).catch((error: unknown) => ({ status: "unavailable" as const, reason: error instanceof Error ? error.message : String(error) }))
+      if (validation.status === "available") {
+        await openLinkedConversation(input, linked.ref, serviceHandle)
+        return
+      }
+      await clearConversationRef(commonDir, canonicalCheckout).catch(() => {})
+      await reportHandoffBlocker(
+        `the linked session could not be opened: ${validation.reason}`,
+        ["select Open conversation again to start a new conversation in this checkout"],
+        input.route,
+      )
+      return
     }
-    unavailableNotice = `the linked session ${candidate.sessionId} is unavailable (${validated.reason}) — a new conversation was created; continuity was not claimed`
   }
-  if (!ref) {
-    ref = await createAuthoringConversation({ checkout: input.checkout, title: input.displayName, ...(serviceHandle ? { server: serviceHandle } : {}) })
-  }
-  await addConversation({ commonDir, featureId: input.featureId, sessionId: ref.sessionId })
-  await touchConversationSelection({ commonDir, featureId: input.featureId, sessionId: ref.sessionId })
 
-  if (!(await claimAuthoringWriter({ launchDir: input.launchDir, checkout: input.checkout, branch: input.branch, sessionId: ref.sessionId, route: input.route }))) return
+  const ref = await createAuthoringConversation({ checkout: input.checkout, title: input.displayName, ...(serviceHandle ? { server: serviceHandle } : {}) })
+  if (commonDir && target) await saveConversationRef(commonDir, target, ref).catch(() => {})
+  const { currentBranch } = await import("./git")
+  const branch = (await currentBranch(input.checkout).catch(() => undefined)) ?? ""
+
+  if (!(await claimAuthoringWriter({ launchDir: input.launchDir, checkout: input.checkout, branch, sessionId: ref.sessionId, route: input.route }))) return
   // Suspend the shared home-session renderer; the conversation owns the
   // terminal until its client exits (design D4).
   input.route.session.renderer.suspend()
@@ -1367,41 +1192,111 @@ async function resumeFeatureConversation(input: {
   } finally {
     input.route.session.renderer.resume()
   }
-  await releaseAuthoringWriterIfIdle({ launchDir: input.launchDir, checkout: input.checkout, branch: input.branch, sessionId: ref.sessionId })
-  if (unavailableNotice || exitCode !== 0) {
+  await releaseAuthoringWriterIfIdle({ launchDir: input.launchDir, checkout: input.checkout, branch, sessionId: ref.sessionId })
+  if (exitCode !== 0) {
     await reportHandoffBlocker(
-      unavailableNotice ?? `the conversation client exited with code ${exitCode}`,
-      ["reopen the work to continue — its conversation and artifacts refreshed on return"],
+      `the conversation client exited with code ${exitCode}`,
+      ["reopen the worktree to continue — its artifacts and observations refresh on return"],
+      input.route,
+    )
+  }
+}
+
+/** Opens a verified linked session in the foreground and returns to the same checkout (shared by create and resume). */
+async function openLinkedConversation(
+  input: { launchDir: string; checkout: string; route: TuiRoute; displayName: string },
+  ref: { harness: "opencode"; sessionId: string },
+  serviceHandle: { url: string } | undefined,
+): Promise<void> {
+  const { openConversationForeground } = await import("./conversations")
+  const { currentBranch } = await import("./git")
+  const branch = (await currentBranch(input.checkout).catch(() => undefined)) ?? ""
+  if (!(await claimAuthoringWriter({ launchDir: input.launchDir, checkout: input.checkout, branch, sessionId: ref.sessionId, route: input.route }))) return
+  input.route.session.renderer.suspend()
+  let exitCode: number
+  try {
+    exitCode = await openConversationForeground({ checkout: input.checkout, ref, suspend: () => {}, resume: () => {} })
+  } finally {
+    input.route.session.renderer.resume()
+  }
+  await releaseAuthoringWriterIfIdle({ launchDir: input.launchDir, checkout: input.checkout, branch, sessionId: ref.sessionId })
+  if (exitCode !== 0) {
+    await reportHandoffBlocker(
+      `the conversation client exited with code ${exitCode}`,
+      ["reopen the worktree to continue — its artifacts and observations refresh on return"],
       input.route,
     )
   }
 }
 
 /**
- * Runs the project's authoring workflow for a feature (task 5.3): validates
- * the project command through the supported command API, creates the
- * authoring conversation, invokes the command inside it, and hands the
- * terminal to the foreground client. On return, newly authored changes are
- * surfaced for explicit association review — a differing change id never
- * renames the work's branch. Exported for the propose-flow tests (the same
- * pattern as runHomeNavigationLoop).
+ * Explicit external presentation of a checkout's authoring conversation: the
+ * writer claim is taken before any pane is created, and a successful pane
+ * whose harness session cannot be verified is never reported as a running
+ * conversation. The claim is deliberately not released on return — the
+ * external client may still be writing — and is reconciled later against
+ * actual session activity.
  */
-export async function proposeForFeature(input: {
-  launchDir: string
-  route: TuiRoute
-  featureId: string
-  checkout: string
-  branch: string
-  displayName: string
-}): Promise<void> {
+async function openCheckoutConversationExternal(input: { launchDir: string; checkout: string; branch: string; route?: TuiRoute }): Promise<void> {
+  const { createAuthoringConversation, openConversationExternal, validateAuthoringSession } = await import("./conversations")
+
+  const serverResolution = await resolveAuthoringServer({ launchDir: input.launchDir, checkout: input.checkout, route: input.route })
+  if (serverResolution.status === "blocked") return
+  const serviceHandle = serverResolution.status === "service" ? { url: serverResolution.url } : undefined
+
+  // The external pane presents the same exact session reference as the
+  // foreground presentation: a verifiable linked session is reused, never
+  // silently replaced with a new one.
+  const { repoCommonDir } = await import("./repo-store")
+  const { readVerifiableConversationRef, saveConversationRef } = await import("./session-hints")
+  const commonDir = await repoCommonDir(input.launchDir).catch(() => undefined)
+  let ref: { harness: "opencode"; sessionId: string } | undefined
+  if (commonDir) {
+    const linked = await readVerifiableConversationRef(commonDir, input.checkout).catch(() => undefined)
+    if (linked) {
+      const validation = await validateAuthoringSession({ ref: linked.ref, checkout: input.checkout, ...(serviceHandle ? { server: serviceHandle } : {}) }).catch(() => ({ status: "unavailable" as const, reason: "probe failed" }))
+      if (validation.status === "available") ref = linked.ref
+    }
+  }
+  if (!ref) {
+    ref = await createAuthoringConversation({
+      checkout: input.checkout,
+      title: input.branch,
+      ...(serviceHandle ? { server: serviceHandle } : {}),
+    })
+    if (commonDir) {
+      const { observeCheckoutTarget } = await import("./worktree-target")
+      const target = await observeCheckoutTarget(input.checkout).catch(() => undefined)
+      if (target) await saveConversationRef(commonDir, target, ref).catch(() => {})
+    }
+  }
+  if (!(await claimAuthoringWriter({ launchDir: input.launchDir, checkout: input.checkout, branch: input.branch, sessionId: ref.sessionId, route: input.route }))) return
+  const outcome = await openConversationExternal({
+    checkout: input.checkout,
+    ref,
+    ...(serviceHandle ? { server: serviceHandle } : {}),
+  })
+  if (outcome.status === "failed") {
+    // No pane was created, so no writer was started: release the claim this
+    // path took instead of wedging the checkout.
+    const { releaseWriterClaim } = await import("./writer-claims")
+    if (commonDir) await releaseWriterClaim({ commonDir, branch: input.branch, owner: ref.sessionId }).catch(() => {})
+    await reportHandoffBlocker(`the external window could not be opened: ${outcome.reason}`, ["open the conversation foreground from the worktree instead"], input.route)
+  }
+}
+
+/**
+ * Runs the project's authoring workflow in a validated checkout (capability
+ * work-context delta): validates the project command through the supported
+ * command API, creates the authoring conversation, invokes the command inside
+ * it, and hands the terminal to the foreground client. New artifacts are
+ * usable without association review or registry writes; a differing change id
+ * never renames the worktree's branch.
+ */
+async function proposeInCheckout(input: { launchDir: string; route: TuiRoute; checkout: string; branch: string; displayName: string }): Promise<void> {
   const { bootOpencodeServerFrom } = await import("./opencode")
   const { createAuthoringConversation, listAuthoringCommands, invokeAuthoringCommand, openConversationForeground } = await import("./conversations")
-  const { addConversation, touchConversationSelection } = await import("./feature-lifecycle/conversations")
-  const { lifecycleCommonDir } = await import("./feature-lifecycle/store")
 
-  // The authoring service (task 4.3) supplies one live server for command
-  // discovery, creation, and command invocation; an unverified service blocks
-  // the handoff, and a failed boot falls back to a bounded per-flow boot.
   const serverResolution = await resolveAuthoringServer({ launchDir: input.launchDir, checkout: input.checkout, route: input.route })
   if (serverResolution.status === "blocked") return
   let serviceHandle: { url: string; close?(): void } | undefined
@@ -1428,28 +1323,22 @@ export async function proposeForFeature(input: {
     commandName = commands.find((name) => name === "opsx-propose") ?? commands.find((name) => name.endsWith("propose"))
   }
   if (!commandName) {
-    // Propose is unavailable, exactly as the work-context capability requires:
-    // the action is reported rather than faked, and ordinary conversation
-    // stays usable through the feature detail.
     await reportHandoffBlocker(
-      `this project has no supported proposal workflow command (looked for opsx-propose under .opencode/commands/)`,
-      ["author the change manually in a conversation, then adopt it with `convoy feature adopt`"],
+      "this project has no supported proposal workflow command (looked for opsx-propose under .opencode/commands/)",
+      ["author the change manually in a conversation"],
       input.route,
     )
+    boundedClose?.()
     return
   }
 
   // The writer claim precedes any writer work (capability work-conversations:
   // a conflicting managed writer is refused before a second writer starts).
-  // Creating the conversation and invoking the authoring command both start
-  // writer work, so the claim is acquired — or the conflict refused — first.
-  // Until the session exists the claim is owned by this process; it is
-  // re-owned by the session id after creation so the idle release and
-  // conflict guidance keep naming the actual writer.
-  const commonDir = await lifecycleCommonDir(input.launchDir).catch(() => undefined)
+  const { repoCommonDir } = await import("./repo-store")
+  const { acquireWriterClaim, writerConflictGuidance } = await import("./writer-claims")
+  const commonDir = await repoCommonDir(input.launchDir).catch(() => undefined)
   let claimed = false
   if (commonDir) {
-    const { acquireWriterClaim, writerConflictGuidance } = await import("./feature-lifecycle/writer-claims")
     const acquired = await acquireWriterClaim({
       commonDir,
       branch: input.branch,
@@ -1475,31 +1364,26 @@ export async function proposeForFeature(input: {
     ref = await createAuthoringConversation({ checkout: input.checkout, title: input.displayName, server: serviceHandle })
     await invokeAuthoringCommand({ ref, server: serviceHandle, command: commandName })
   } catch (error) {
-    // No confirmed writer remains: release the provisional claim instead of
-    // wedging the checkout for the next attempt.
-    if (commonDir && claimed) {
-      const { releaseWriterClaim } = await import("./feature-lifecycle/writer-claims")
-      await releaseWriterClaim({ commonDir, branch: input.branch, ownerPid: process.pid })
-    }
-    await reportHandoffBlocker(error instanceof Error ? error.message : String(error), ["the conversation was not started; retry Propose or open an ordinary conversation"], input.route)
-    return
-  } finally {
-    // A bounded fallback boot dies with this flow; the service never does.
+    await reportHandoffBlocker(
+      `the authoring workflow could not start: ${error instanceof Error ? error.message : String(error)}`,
+      ["open an ordinary conversation in the worktree instead"],
+      input.route,
+    )
     boundedClose?.()
+    if (claimed && commonDir) {
+      const { releaseWriterClaim } = await import("./writer-claims")
+      await releaseWriterClaim({ commonDir, branch: input.branch, owner: ref?.sessionId ?? "convoy" }).catch(() => {})
+    }
+    return
+  }
+  if (!ref) return
+  // Re-own the claim by the session id so the idle release and conflict
+  // guidance keep naming the actual writer.
+  if (claimed && commonDir) {
+    const { acquireWriterClaim } = await import("./writer-claims")
+    await acquireWriterClaim({ commonDir, branch: input.branch, checkoutPath: input.checkout, kind: "authoring", owner: ref.sessionId, reconcileOwner: "convoy" }).catch(() => {})
   }
 
-  if (!ref) return
-  // Re-own the claim with the session id — the claim is never dropped here,
-  // so no window opens where a second writer could slip in; a reown failure
-  // leaves it process-owned for the claim's staleness rules to reconcile.
-  if (commonDir && claimed) {
-    const { reownWriterClaim } = await import("./feature-lifecycle/writer-claims")
-    await reownWriterClaim({ commonDir, branch: input.branch, owner: ref.sessionId }).catch(() => {})
-  }
-  if (commonDir) {
-    await addConversation({ commonDir, featureId: input.featureId, sessionId: ref.sessionId, label: "proposal" })
-    await touchConversationSelection({ commonDir, featureId: input.featureId, sessionId: ref.sessionId })
-  }
   input.route.session.renderer.suspend()
   let exitCode: number
   try {
@@ -1508,26 +1392,96 @@ export async function proposeForFeature(input: {
     input.route.session.renderer.resume()
   }
   await releaseAuthoringWriterIfIdle({ launchDir: input.launchDir, checkout: input.checkout, branch: input.branch, sessionId: ref.sessionId })
-
-  // Association review on return (task 5.4): newly authored changes are
-  // surfaced for the explicit revise workflow — never auto-associated, and
-  // a differing change id never renames the branch.
-  const { activeChangeIdsAt } = await import("./feature-lifecycle/observe")
-  const { resolveFeature } = await import("./feature-lifecycle/resolver")
-  const authored = await activeChangeIdsAt(input.checkout).catch(() => [] as string[])
-  const resolution = await resolveFeature({ cwd: input.launchDir, featureId: input.featureId }).catch(() => undefined)
-  const known = resolution?.status === "verified" ? resolution.feature.contracts.map((contract) => contract.changeId) : []
-  const fresh = authored.filter((id) => !known.includes(id))
-  if (fresh.length > 0) {
-    await reportHandoffBlocker(
-      `newly authored change${fresh.length === 1 ? "" : "s"}: ${fresh.join(", ")}`,
-      [`review and associate ${fresh.length === 1 ? "it" : "them"} explicitly via the actions menu (\`convoy feature revise ${input.featureId}\` adds a contract)`],
-      input.route,
-    )
-  }
   if (exitCode !== 0) {
-    await reportHandoffBlocker(`the conversation client exited with code ${exitCode}`, ["reopen the work to continue"], input.route)
+    await reportHandoffBlocker(`the authoring client exited with code ${exitCode}`, ["reopen the worktree to continue"], input.route)
   }
+}
+
+/** Reports an unavailable handoff without launching anything. */
+async function reportHandoffBlocker(reason: string, remediation: readonly string[], route?: TuiRoute): Promise<void> {
+  const message = [reason, ...remediation].join("\n")
+  if (route) {
+    const { showNoticeTui } = await import("./notice-tui")
+    await showNoticeTui(route, { title: "work context unavailable", message })
+    return
+  }
+  process.stderr.write(`${message}\n`)
+}
+
+/**
+ * Resolves the authoring server for a CLI handoff (task 4.3): the repository's
+ * conversation service — discovered, liveness-verified, and independent of run
+ * servers and views — supplies one reused OpenCode server for every authoring
+ * call in the flow. Outcomes:
+ * - `service` — a live service URL to pass through as the handle (never
+ *   closed by the caller; the service outlives the flow).
+ * - `fallback` — the lifecycle store is absent or the service boot failed;
+ *   the flow uses the previous bounded per-call boots.
+ * - `blocked` — an existing service is in an unverified state (alive PID,
+ *   unanswerable URL) or its discovery record is unreadable: fail closed and
+ *   report, never boot a second server over unverified state.
+ */
+async function resolveAuthoringServer(input: { launchDir: string; checkout: string; route?: TuiRoute }): Promise<{ status: "service"; url: string } | { status: "fallback" } | { status: "blocked"; reason: string }> {
+  const { repoCommonDir } = await import("./repo-store")
+  const commonDir = await repoCommonDir(input.launchDir).catch(() => undefined)
+  if (!commonDir) return { status: "fallback" }
+  const { ensureConversationService } = await import("./conversation-service")
+  const service = await ensureConversationService({ commonDir, checkout: input.checkout }).catch((error: unknown) => ({ status: "unavailable" as const, reason: error instanceof Error ? error.message : String(error) }))
+  if (service.status === "live") return { status: "service", url: service.url }
+  if (service.status === "uncertain") {
+    await reportHandoffBlocker(service.reason, ["the service is kept running and nothing was booted over it — resolve its state, then retry"], input.route)
+    return { status: "blocked", reason: service.reason }
+  }
+  return { status: "fallback" }
+}
+
+/** The shared writer-claim acquisition for an authoring conversation in a checkout. */
+async function claimAuthoringWriter(input: { launchDir: string; checkout: string; branch: string; sessionId: string; route?: TuiRoute }): Promise<boolean> {
+  const { repoCommonDir } = await import("./repo-store")
+  const { acquireWriterClaim, writerConflictGuidance } = await import("./writer-claims")
+  const commonDir = await repoCommonDir(input.launchDir).catch(() => undefined)
+  if (!commonDir) return true
+  const acquired = await acquireWriterClaim({
+    commonDir,
+    branch: input.branch,
+    checkoutPath: input.checkout,
+    kind: "authoring",
+    owner: input.sessionId,
+    // Re-opening the conversation that already holds the claim is the same
+    // writer continuing, not a takeover (design D5 reconciliation).
+    reconcileOwner: input.sessionId,
+  })
+  if (acquired.status === "acquired") return true
+  const guidance = acquired.status === "conflict" ? writerConflictGuidance(acquired.existing) : ["a writer claim for this checkout is in an uncertain state — reconcile it before starting another writer"]
+  await reportHandoffBlocker(guidance[0], guidance.slice(1), input.route)
+  return false
+}
+
+/** Releases the authoring claim when the session is provably quiescent (design D5). */
+async function releaseAuthoringWriterIfIdle(input: { launchDir: string; checkout: string; branch: string; sessionId: string }): Promise<void> {
+  const { repoCommonDir } = await import("./repo-store")
+  const { releaseWriterClaim } = await import("./writer-claims")
+  const { sessionActivity } = await import("./conversations")
+  const commonDir = await repoCommonDir(input.launchDir).catch(() => undefined)
+  if (!commonDir) return
+  // The activity query goes through the authoring service when one is live
+  // (task 4.3) so the answer reflects the same server the work ran on; any
+  // discovery failure falls back to the adapter's bounded boot, and either
+  // failure reads as "unknown" — which keeps the claim. No blockers are
+  // reported here: the release path is bookkeeping, not a user handoff.
+  let serviceHandle: { url: string } | undefined
+  try {
+    const { ensureConversationService } = await import("./conversation-service")
+    const service = await ensureConversationService({ commonDir, checkout: input.checkout })
+    if (service.status === "live") serviceHandle = { url: service.url }
+  } catch {
+    serviceHandle = undefined
+  }
+  const activity = await sessionActivity({ checkout: input.checkout, ref: { harness: "opencode", sessionId: input.sessionId }, ...(serviceHandle ? { server: serviceHandle } : {}) }).catch(() => "unknown" as const)
+  // A busy or unanswerable session keeps its claim: view detachment is not
+  // evidence the agent stopped (design D5). The claim's staleness rules
+  // reconcile it later if the process is gone.
+  if (activity === "idle") await releaseWriterClaim({ commonDir, branch: input.branch, owner: input.sessionId })
 }
 
 // The browser resumes with default flags; metadata recovers both the repo the
@@ -1673,8 +1627,10 @@ export async function parseCommand(argv: string[]): Promise<CliCommand> {
     return { type: "specs", targetDir: process.cwd() }
   }
   if (argv[0] === "control") {
+    // The compatibility alias opens the same worktree control board (design
+    // D4): one board, every entry point — never a competing model.
     if (argv.length > 1) throw new Error("usage: convoy control")
-    return { type: "specs", targetDir: process.cwd() }
+    return { type: "worktrees", args: [] }
   }
   if (argv[0] === "spin") {
     if (argv.slice(1).some((arg) => arg === "--help" || arg === "-h")) {
@@ -1684,19 +1640,29 @@ export async function parseCommand(argv: string[]): Promise<CliCommand> {
     return { type: "spin", options: parseSpinArgs(argv.slice(1)) }
   }
   if (argv[0] === "close") {
+    // `convoy close` delegates to the shared worktree composite (capability
+    // feature-close, design D4/D8): one close implementation, every entry
+    // point. Legacy branch selectors resolve uniquely through Git; feature-id
+    // and cleanup spellings stop with migration guidance.
     if (argv.slice(1).some((arg) => arg === "--help" || arg === "-h")) {
-      const { closeHelp } = await import("./feature-close-command")
-      return { type: "help", text: closeHelp() }
+      const { closeCommandHelp } = await import("./worktree-commands")
+      return { type: "help", text: closeCommandHelp() }
     }
-    const { parseCloseArgs } = await import("./feature-close-command")
-    return { type: "close", options: parseCloseArgs(argv.slice(1)) }
+    return { type: "close", args: argv.slice(1) }
+  }
+  if (argv[0] === "worktrees") {
+    // The worktree control center's CLI surface (design D4): bare `convoy
+    // worktrees` prints the inventory; subcommands are parsed and dispatched
+    // by the worktree-commands module.
+    return { type: "worktrees", args: argv.slice(1) }
   }
   if (argv[0] === "feature") {
-    if (argv.slice(1).some((arg) => arg === "--help" || arg === "-h")) {
-      const { featureHelp } = await import("./feature-lifecycle/command-cli")
-      return { type: "help", text: featureHelp() }
-    }
-    return { type: "feature", args: argv.slice(1) }
+    // The feature lifecycle is retired (capability feature-lifecycle): the
+    // command is recognized by spelling alone — before any subcommand or flag
+    // parsing that could mistake it for a prompt — and fails non-zero with
+    // worktree-selection guidance before any Git, registry, or pipeline
+    // effect. No alias fabricates an association to keep it alive.
+    return { type: "retired-feature", args: argv.slice(1) }
   }
   if (argv[0] === "config") {
     if (argv.length > 1) throw new Error("usage: convoy config")
@@ -1771,7 +1737,7 @@ export async function parseCommand(argv: string[]): Promise<CliCommand> {
   if (!prompt && !hasResume) {
     // A pinned OpenSpec change is the contract: inject a short canned prompt
     // so `convoy --change add-login -p implement` does not require a brief.
-    if (parsed.change) {
+    if (parsed.changes.length > 0) {
       prompt = openSpecPromptFor(resolvedOptions.pipeline.name)
     } else if (!hasInlinePrompt && !hasPromptFile && resolvedOptions.pipeline.defaultPrompt) {
       // A concrete-action pipeline (review, ship, hunter, ...) may carry a
@@ -1948,8 +1914,8 @@ export async function resolveRunOptions(parsed: ParsedArgs): Promise<Omit<RunOpt
     skipSteps: parsed.skipSteps,
     resumeRunID: parsed.resumeRunID ?? "",
     prdHistory: defaults.prdHistory ?? true,
-    ...(parsed.change ? { change: parsed.change } : {}),
-    ...(parsed.featureId ? { featureId: parsed.featureId } : {}),
+    ...(parsed.changes.length > 0 ? { changes: parsed.changes } : {}),
+    ...(parsed.manual ? { manual: true } : {}),
     keepRunDir: parsed.keepRunDir ?? true,
     modelOverride: parsed.modelOverride ?? "",
     advisorOverride: parsed.advisorOverride ?? "",
@@ -2019,6 +1985,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     files: [],
     onlySteps: [],
     skipSteps: [],
+    changes: [],
     targetDir: process.cwd(),
   }
   const positional: string[] = []
@@ -2154,11 +2121,20 @@ export function parseArgs(argv: string[]): ParsedArgs {
         parsed.branch = takeValue()
         break
       case "--change":
-        parsed.change = takeValue()
+        parsed.changes.push(takeValue())
         break
-      case "--feature":
-        parsed.featureId = takeValue()
+      case "--manual":
+        parsed.manual = true
         break
+      case "--feature": {
+        // Retired with the feature registry (capability feature-lifecycle):
+        // feature-ID selectors fail here — before plan review, worktree
+        // creation, or any other side effect — and never become prompts.
+        const value = takeValue()
+        throw new Error(
+          `retired flag: --feature (got "${value}")\n\nFeature identity is retired: worktrees are ordinary Git checkouts, not\nregistered features, and no association links a change to a branch.\n\nSelect the execution checkout and its local changes explicitly instead:\n\n  convoy worktrees run --worktree <path> --change <id> ...   # explicit selection\n  convoy worktrees                                           # inventory / control center\n\nInteractive runs pick the checkout and changes in the launcher's review.`,
+        )
+      }
       case "--base":
         parsed.baseRef = takeValue()
         break
@@ -2227,6 +2203,32 @@ function retiredFinishDiagnostic(): string {
   ].join("\n")
 }
 
+/**
+ * The retired-command diagnostic (capability feature-lifecycle): every
+ * `convoy feature` subcommand fails non-zero before any effect and points at
+ * the worktree control center — checkouts are selected explicitly per action,
+ * never adopted, bound, or registered.
+ */
+export function retiredFeatureDiagnostic(args: string[]): string {
+  const attempted = args.length > 0 ? ` (you ran: convoy feature ${args.join(" ")})` : ""
+  return [
+    `convoy feature was removed.${attempted}`,
+    "",
+    "Worktrees are ordinary Git checkouts, not registered features: there is",
+    "nothing to adopt, bind, revise, or recover. Select the checkout explicitly",
+    "for each action instead:",
+    "",
+    "  convoy worktrees                 # inventory / control center",
+    "  convoy worktrees sync --worktree <path> --base <ref>",
+    "  convoy worktrees push --worktree <path>",
+    "  convoy worktrees archive --worktree <path> --change <id>",
+    "  convoy worktrees close --worktree <path> --base <local-branch>",
+    "",
+    "Run pipelines with an explicit execution checkout and explicitly selected",
+    "local changes; browsing never registers or adopts work.",
+  ].join("\n")
+}
+
 function help() {
   return `convoy [prompt]
 
@@ -2242,6 +2244,7 @@ Usage:
   convoy update [--check]
   convoy runs [run-id]
   convoy specs
+  convoy worktrees [--help]
   convoy spin
   convoy close
   convoy opencode install
@@ -2259,16 +2262,21 @@ Commands:
                            (source checkouts are never modified)
   runs [run-id]            Browse run history: resume a run, read its summary/reports,
                            or open a subshell in its run dir (under ~/.convoy/runs)
-  specs                     The feature board: every active change and canonical spec
-                             with live derived state (stage, tasks, runs, sync, merged-ness)
-                             and row actions — spin out, continue, close, archive on main
-                             ("convoy control" remains as a compatibility alias)
+  worktrees                The worktree control center: every registered checkout with
+                           its independent Git/OpenSpec facts, plus guarded fetch, sync,
+                           push, archive, remove, delete-branch, and recover actions
+                           ("convoy worktrees --help" for the full surface)
+  specs                     The artifact-focused reader: each checkout's local active
+                            changes, archives, and canonical specs, with read, apply,
+                            iterate, archive, and close-review actions
+                            ("convoy control" opens the worktree control board instead)
   spin                      Spin an uncommitted OpenSpec change out of the base checkout into
                             an isolated worktree on a conventionally named branch (feat/…, fix/…,
                             change/…) and print the /move handoff for the current OpenCode session
-  close                     Close a feature in one sequence: preflight, sync the base branch,
-                             archive via the OpenSpec CLI, squash convoy's commits, and merge
-                             into the base branch ("convoy close --help" for options)
+  close                     The optional composition of the worktree operations: review an
+                             explicit checkout and base, sync as needed, archive the explicitly
+                             selected local changes, then squash the whole branch onto the base
+                             ("convoy close --help" for options)
   opencode install          Install the global /convoy-spin OpenCode command — a thin wrapper at
                              ~/.config/opencode/commands/convoy-spin.md that runs convoy spin
                              from a session (opt-in, idempotent; touches no other command file)
@@ -2315,11 +2323,15 @@ Flags:
                            (default: worktree on a trunk branch, current tree on any other)
   --branch <name>          Name for the worktree branch, instead of asking the naming model
   --change <id>            OpenSpec change id to review/implement (openspec/changes/<id>).
-                           Resolves the spec bundle (current specs + that change) as the contract
-                           attached to every step, and overrides every selection heuristic.
-                           The launcher lists active changes so you can pick one instead of
-                           typing a prompt. A run without --change on a single-change branch
-                           auto-resolves the active change.
+                           Repeatable and order-significant: the reviewed plan freezes the
+                           selected ids in the order given, and the spec bundle (current
+                           specs + those changes) attaches to every step. Selection is
+                           explicit only — the launcher lists active changes so you can
+                           pick one instead of typing a prompt, and nothing is attached
+                           automatically.
+  --manual                 Explicit no-change run: valid with zero selected changes, without
+                           inventing or importing a spec. A headless launch requires
+                           --change or --manual.
   --dir <path>             Target repo (default: cwd)
 
 Goal mode:

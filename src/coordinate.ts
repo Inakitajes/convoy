@@ -321,9 +321,9 @@ export async function runCoordinateBoot(
   // conflict or persistence failure stops the run (fail closed).
   let writerClaim: { branch: string } | undefined
   if (hasWritableStep(plan.pipeline)) {
-    const { lifecycleCommonDir } = await import("./feature-lifecycle/store")
-    const { acquireWriterClaim, writerConflictGuidance } = await import("./feature-lifecycle/writer-claims")
-    const commonDir = await lifecycleCommonDir(plan.target.directory)
+    const { repoCommonDir } = await import("./repo-store")
+    const { acquireWriterClaim, writerConflictGuidance } = await import("./writer-claims")
+    const commonDir = await repoCommonDir(plan.target.directory)
     if (commonDir) {
       const { currentBranch } = await import("./git")
       const branch = plan.target.branch ?? (await currentBranch(plan.target.directory).catch(() => undefined))
@@ -382,9 +382,9 @@ export async function runCoordinateBoot(
     }
   } finally {
     if (writerClaim) {
-      const { lifecycleCommonDir } = await import("./feature-lifecycle/store")
-      const { releaseWriterClaim } = await import("./feature-lifecycle/writer-claims")
-      const commonDir = await lifecycleCommonDir(plan.target.directory).catch(() => undefined)
+      const { repoCommonDir } = await import("./repo-store")
+      const { releaseWriterClaim } = await import("./writer-claims")
+      const commonDir = await repoCommonDir(plan.target.directory).catch(() => undefined)
       if (commonDir) await releaseWriterClaim({ commonDir, branch: writerClaim.branch, ownerPid: process.pid })
     }
     server.close()

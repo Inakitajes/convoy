@@ -1,7 +1,7 @@
 import { BoxRenderable, StyledText, TextRenderable, bold, createCliRenderer, fg } from "@opentui/core"
 
 import { detectBaseRef } from "./git"
-import { lifecycleColor } from "./specs-browser"
+import { worktreeDotColor } from "./specs-browser"
 import {
   displayWidth,
   hintsRow,
@@ -21,16 +21,18 @@ import { versionDetails } from "./version"
 import { homeRendererConfig, sceneForRoute, type TuiRoute, type TuiScene } from "./tui-session"
 
 import type { BoxOptions, CliRenderer, KeyEvent, TextChunk } from "@opentui/core"
+import type { BoardWorktree } from "./control-board"
 import type { Hint, PaletteColor } from "./tui-theme"
-import type { LifecycleFeatureRow } from "./specs"
 
 /**
- * Work-first Home (capability home-launcher / work-context, tasks 6.2–6.4):
- * the primary screen is the repository's work list — registered features and
- * an explicit New feature entry — with auxiliary destinations reachable as
- * navigation actions. Work vocabulary is the existing Feature domain; every
- * summary, blocker, and action comes from the shared lifecycle assessment
- * rows (`LifecycleFeatureRow`), never a locally inferred status.
+ * Worktrees-first Home (capability home-launcher delta, tasks 3.1/3.4; gap
+ * CC-1): the primary screen is the repository's Worktrees list — every
+ * Git-registered checkout, main, external, detached, locked, missing-path,
+ * and spec-less alike — plus an explicit New worktree entry and auxiliary
+ * destinations as navigation actions. A worktree is a Git checkout, not a
+ * domain record: rows carry observed facts (branch, path, dirt, activity,
+ * local changes), never feature identities, lifecycle summaries, or
+ * Completed history.
  *
  * Chrome matches the rest of Convoy: a lean identity masthead, rounded
  * panels (list + preview), and a one-row hints strip — never a dedicated
@@ -40,19 +42,33 @@ import type { LifecycleFeatureRow } from "./specs"
 /** One of the auxiliary home destinations (pipelines, specs, runs, config). */
 export type HomeDestination = "pipelines" | "specs" | "runs" | "config"
 
-/** The action an opened work detail resolves to. */
-export type HomeWorkAction = "conversation" | "conversation-external" | "propose" | "pipeline" | "specs" | "runs" | "close" | "history"
+/** The action an opened worktree detail resolves to. */
+export type HomeWorkAction =
+  | "conversation"
+  | "conversation-external"
+  | "propose"
+  | "pipeline"
+  | "specs"
+  | "runs"
+  | "fetch"
+  | "sync"
+  | "push"
+  | "pr"
+  | "squash"
+  | "remove"
+  | "delete-branch"
+  | "close"
 
 /** What a closed Home asks the surrounding session to do. */
 export type HomeResolution =
   | { type: "destination"; destination: HomeDestination }
-  | { type: "work"; featureId: string; action: HomeWorkAction; /** The explicitly selected authoring conversation (the selector's choice). */ sessionId?: string }
+  | { type: "work"; worktree: string; action: HomeWorkAction }
   | { type: "new-work"; draft?: { displayName: string; branch: string; base: string; worktree: string } }
   | undefined
 
 export type HomeSelection = HomeDestination | undefined
 
-/** Below this width the home stacks the work list above the preview. */
+/** Below this width the home stacks the worktree list above the preview. */
 export const compactHomeMaxWidth = 72
 
 const CHROME_PADDING_COLS = 1
@@ -111,12 +127,12 @@ const AUXILIARY: ReadonlyArray<{
 ]
 
 type ListRow =
-  | { kind: "work"; feature: LifecycleFeatureRow }
+  | { kind: "worktree"; worktree: BoardWorktree }
   | { kind: "new" }
   | { kind: "rule" }
   | { kind: "auxiliary"; destination: HomeDestination; label: string; shortcut: string; kicker: string; description: string }
 
-/** The work detail's action rows: distinct labels per action (task 6.3). */
+/** The worktree detail's action rows: distinct labels per action. */
 type DetailAction = {
   id: HomeWorkAction
   key: string
@@ -130,12 +146,12 @@ export async function launchHomeTui(
   options: {
     route?: TuiRoute
     initialSelection?: HomeSelection
-    /** The work selection to restore (task 6.4), when it still validates. */
-    resumeFeature?: LifecycleFeatureRow
+    /** The worktree selection to restore, when it still validates against Git. */
+    resumeWorktree?: string
     kittyGraphics?: boolean
-    /** The repository's feature rows; loaded by the session loop and refreshed on every open. */
-    workRows?: LifecycleFeatureRow[]
-    /** Why the remembered work could not be restored, shown above the list. */
+    /** The repository's worktree rows; loaded by the session loop and refreshed on every open. */
+    worktrees?: BoardWorktree[]
+    /** Why the remembered worktree could not be restored, shown above the list. */
     resumeNotice?: string
   } = {},
 ): Promise<HomeResolution> {
@@ -147,8 +163,8 @@ export async function launchHomeTui(
     const scene = sceneForRoute(options.route, "convoy-home-scene")!
     return new HomeLauncher(options.route.session.renderer, targetDir, {
       scene,
-      workRows: options.workRows,
-      resumeFeature: options.resumeFeature,
+      worktrees: options.worktrees,
+      resumeWorktree: options.resumeWorktree,
       resumeNotice: options.resumeNotice,
     }).result
   }
@@ -156,7 +172,7 @@ export async function launchHomeTui(
   const renderer = await createCliRenderer(homeRendererConfig(false))
   const mode = await renderer.waitForThemeMode(1_000).catch(() => null)
   setTheme(paletteForTerminal(mode, terminalBackgroundHex(renderer)))
-  return new HomeLauncher(renderer, targetDir, { workRows: options.workRows, resumeFeature: options.resumeFeature, resumeNotice: options.resumeNotice }).result
+  return new HomeLauncher(renderer, targetDir, { worktrees: options.worktrees, resumeWorktree: options.resumeWorktree, resumeNotice: options.resumeNotice }).result
 }
 
 export class HomeLauncher {
@@ -165,34 +181,28 @@ export class HomeLauncher {
   private resolveResult!: (resolution: HomeResolution) => void
   private finished = false
   private readonly scene?: TuiScene
-  /** "list": the work list; "detail": one work's actions; "conversations": the authoring selector; "form": new-work fields. */
-  private level: "list" | "detail" | "conversations" | "form" = "list"
+  /** "list": the worktree list; "detail": one worktree's actions; "form": new-worktree fields. */
+  private level: "list" | "detail" | "form" = "list"
   private rows: ListRow[] = []
   private selectedRow = 0
   /** First visible list row; re-clamped on every render so navigation and resize both keep the selection on screen. */
   private scroll = 0
-  private detailFeature?: LifecycleFeatureRow
+  private detailWorktree?: BoardWorktree
   private detailSelected = 0
   /** First visible detail line; same re-clamping contract as `scroll`. */
   private detailScroll = 0
   /**
    * Whether the detail pane follows the selected action. Action navigation
    * sets it; explicit paging (pgup/pgdn) clears it so the metadata above the
-   * actions — title, status, contracts, blockers — stays readable.
+   * actions — name, branch, facts — stays readable.
    */
   private detailFollow = true
-  /**
-   * The authoring-conversation selector (capability work-conversations): when
-   * the work has several linked conversations, the conversation action opens
-   * this list — every linked conversation, most recently selected first,
-   * separate from run phase sessions — instead of silently resuming the most
-   * recent one. The default (single conversation or none) is unchanged.
-   */
-  private conversationSelected = 0
-  /** New-work form state: one input field at a time, committed in sequence. */
+  /** New-worktree form state: one input field at a time, committed in sequence. */
   private form: { field: 0 | 1 | 2; displayName: string; branch: string; base: string; error?: string } | undefined
-  /** Why the remembered work could not be restored (task 6.4). */
+  /** Why the remembered worktree could not be restored. */
   private readonly resumeNotice?: string
+  /** The injected naming-model callback; the real bounded namer is the default. */
+  private readonly proposeBranchName?: (input: { prompt: string }) => Promise<{ branch: string }>
   private readonly emptyWork: boolean
 
   private readonly mastheadText: TextRenderable
@@ -234,7 +244,6 @@ export class HomeLauncher {
     key.stopPropagation()
     if (this.level === "list") this.handleListKey(key)
     else if (this.level === "detail") this.handleDetailKey(key)
-    else if (this.level === "conversations") this.handleConversationsKey(key)
     else this.handleFormKey(key)
   }
 
@@ -243,23 +252,27 @@ export class HomeLauncher {
     private readonly targetDir: string,
     options: {
       scene?: TuiScene
-      workRows?: LifecycleFeatureRow[]
-      resumeFeature?: LifecycleFeatureRow
+      worktrees?: BoardWorktree[]
+      resumeWorktree?: string
       resumeNotice?: string
+      /** Asks the naming model for a conventional branch name; injected so tests stay hermetic. */
+      proposeBranchName?: (input: { prompt: string }) => Promise<{ branch: string }>
     } = {},
   ) {
     this.scene = options.scene
     this.resumeNotice = options.resumeNotice
-    this.emptyWork = (options.workRows ?? []).length === 0
+    this.proposeBranchName = options.proposeBranchName
+    this.emptyWork = (options.worktrees ?? []).length === 0
     this.result = new Promise((resolve) => {
       this.resolveResult = resolve
     })
-    this.rows = this.buildRows(options.workRows ?? [])
-    // Restored work lands on its row (task 6.4); a missing remembered work
-    // falls back to the list with the explanation shown — never silently
-    // selecting another execution target.
-    if (options.resumeFeature) {
-      const index = this.rows.findIndex((row) => row.kind === "work" && row.feature.featureId === options.resumeFeature!.featureId)
+    this.rows = this.buildRows(options.worktrees ?? [])
+    // A restored worktree lands on its row only when it still validates
+    // against the live Git inventory; a missing remembered worktree falls
+    // back to the list with the explanation shown — never silently selecting
+    // another execution target.
+    if (options.resumeWorktree) {
+      const index = this.rows.findIndex((row) => row.kind === "worktree" && row.worktree.path === options.resumeWorktree)
       if (index >= 0) this.selectedRow = index
     }
 
@@ -309,7 +322,7 @@ export class HomeLauncher {
       flexGrow: 1,
       borderColor: theme.accent,
       backgroundColor: theme.bg,
-      title: " work ",
+      title: " worktrees ",
       titleAlignment: "left",
     })
     const preview = this.panel({
@@ -367,10 +380,10 @@ export class HomeLauncher {
     this.render()
   }
 
-  /** The list always shows the work surface: features, New feature, destinations. */
-  private buildRows(workRows: LifecycleFeatureRow[]): ListRow[] {
+  /** The list always shows the worktree surface: checkouts, New worktree, destinations. */
+  private buildRows(worktrees: BoardWorktree[]): ListRow[] {
     const rows: ListRow[] = []
-    for (const feature of workRows) rows.push({ kind: "work", feature })
+    for (const worktree of worktrees) rows.push({ kind: "worktree", worktree })
     rows.push({ kind: "new" })
     rows.push({ kind: "rule" })
     for (const entry of AUXILIARY) {
@@ -435,8 +448,8 @@ export class HomeLauncher {
   private activateSelected() {
     const row = this.rows[this.selectedRow]
     if (!this.isSelectable(row) || !row) return
-    if (row.kind === "work") {
-      this.detailFeature = row.feature
+    if (row.kind === "worktree") {
+      this.detailWorktree = row.worktree
       this.detailSelected = 0
       this.detailScroll = 0
       this.detailFollow = true
@@ -452,53 +465,117 @@ export class HomeLauncher {
   }
 
   private detailActions(): DetailAction[] {
-    return this.detailFeature ? this.actionsFor(this.detailFeature) : []
+    return this.detailWorktree ? this.actionsFor(this.detailWorktree) : []
   }
 
-  private actionsFor(feature: LifecycleFeatureRow): DetailAction[] {
-    const actions = feature.actions ?? []
-    const find = (id: string) => actions.find((action) => action.id === id)
-    const close = find("close")
-    const verified = feature.branch !== undefined && feature.checkoutPath !== undefined
+  private actionsFor(worktree: BoardWorktree): DetailAction[] {
+    // Shared per-action guards, projected as advisory enabled states: a
+    // blocked action stays inspectable with its reason (design D4). The
+    // handlers revalidate the same guards before any effect.
+    const verified = worktree.accessible && !worktree.bare
+    const writerBusy = worktree.activity?.kind === "known" && worktree.activity.value.total > 0
+    const attached = worktree.branch !== undefined
+    const inaccessible = "the checkout is not accessible — repair or prune the registration first"
+    const detached = "the checkout has a detached HEAD — this action needs an attached branch to name the source"
+    const busy = "a managed writer is active in this checkout — inspect or stop it before mutating"
     return [
       {
         id: "conversation",
         key: "v",
-        label: feature.lastSelectedConversationId ? "Resume conversation" : "Open conversation",
+        label: "Open conversation",
         enabled: verified,
-        blocker: verified ? undefined : "the work's checkout is not verified — rebind before authoring",
+        blocker: verified ? undefined : inaccessible,
       },
       {
         id: "conversation-external",
         key: "w",
         label: "Open in window",
         enabled: verified,
-        blocker: verified ? undefined : "the work's checkout is not verified — rebind before authoring",
+        blocker: verified ? undefined : inaccessible,
       },
       {
         id: "propose",
         key: "p",
-        label: feature.contracts.length === 0 ? "Propose a change" : "Propose next change",
+        label: "Propose a change",
         enabled: verified,
-        blocker: verified ? undefined : "the work's checkout is not verified — rebind before authoring",
+        blocker: verified ? undefined : inaccessible,
       },
       {
         id: "pipeline",
         key: "e",
         label: "Execute pipeline",
         enabled: verified,
-        blocker: verified ? undefined : "the work's checkout is not verified",
+        blocker: verified ? undefined : inaccessible,
       },
       { id: "specs", key: "s", label: "Open specs", enabled: true },
       { id: "runs", key: "r", label: "Open runs", enabled: true },
       {
+        id: "fetch",
+        key: "f",
+        label: "Fetch remote",
+        enabled: verified,
+        blocker: verified ? undefined : inaccessible,
+      },
+      {
+        id: "sync",
+        key: "y",
+        label: "Sync with base",
+        enabled: verified && attached && !writerBusy,
+        blocker: !verified ? inaccessible : !attached ? detached : writerBusy ? busy : undefined,
+      },
+      {
+        id: "push",
+        key: "u",
+        label: "Push branch",
+        enabled: verified && attached && !writerBusy,
+        blocker: !verified ? inaccessible : !attached ? detached : writerBusy ? busy : undefined,
+      },
+      {
+        id: "pr",
+        key: "g",
+        label: "Compose pull request",
+        enabled: verified && attached,
+        blocker: !verified ? inaccessible : !attached ? detached : undefined,
+      },
+      {
+        id: "squash",
+        key: "m",
+        label: "Squash to base",
+        enabled: verified && attached && !writerBusy,
+        blocker: !verified ? inaccessible : !attached ? detached : writerBusy ? busy : undefined,
+      },
+      {
+        id: "remove",
+        key: "d",
+        label: "Remove worktree",
+        enabled: verified && !worktree.main && !writerBusy,
+        blocker: !verified
+          ? inaccessible
+          : worktree.main
+            ? "the repository's main checkout is never removed"
+            : writerBusy
+              ? busy
+              : undefined,
+      },
+      {
+        id: "delete-branch",
+        key: "z",
+        label: "Delete branch",
+        // The branch is checked out in this very worktree, so deletion is
+        // refused here by Git's own safety — the honest projection of the
+        // shared guard, not a hidden action.
+        enabled: false,
+        blocker: !attached
+          ? "the checkout has no attached branch to delete"
+          : `branch ${worktree.branch} is checked out in this worktree — remove the worktree (keeping the branch) before deleting it`,
+      },
+      {
         id: "close",
         key: "x",
         label: "Close review",
-        enabled: close?.enabled === true,
-        blocker: close?.enabled === true ? undefined : (close?.blockers ?? ["close prerequisites not met"])[0],
+        enabled: verified && attached && !writerBusy,
+        blocker: !verified ? inaccessible : !attached ? detached : writerBusy ? busy : undefined,
       },
-      { id: "history", key: "h", label: "Open history", enabled: true },
     ]
   }
 
@@ -552,10 +629,10 @@ export class HomeLauncher {
   }
 
   private resolveDetail(action: DetailAction) {
-    if (!this.detailFeature) return
+    if (!this.detailWorktree) return
     if (!action.enabled) {
-      // Blocked actions stay inspectable with their reason (shared
-      // assessment vocabulary) instead of disappearing or firing.
+      // Blocked actions stay inspectable with their reason (shared guard
+      // vocabulary) instead of disappearing or firing.
       this.render()
       return
     }
@@ -567,62 +644,10 @@ export class HomeLauncher {
       this.finish({ type: "destination", destination: "runs" })
       return
     }
-    if (action.id === "conversation" && (this.detailFeature.conversations?.length ?? 0) > 1) {
-      // Several linked conversations: the selector makes every one reachable
-      // (capability work-conversations) instead of always resuming the most
-      // recently selected reference. One or none keeps the direct default.
-      this.conversationSelected = 0
-      this.level = "conversations"
-      this.render()
-      return
-    }
-    this.finish({ type: "work", featureId: this.detailFeature.featureId, action: action.id })
+    this.finish({ type: "work", worktree: this.detailWorktree.path, action: action.id })
   }
 
-  /** The work's linked authoring conversations, most recently selected first. */
-  private linkedConversations(): Array<{ sessionId: string; label?: string; last: boolean }> {
-    const feature = this.detailFeature
-    if (!feature?.conversations) return []
-    return [...feature.conversations]
-      .sort((a, b) => (b.lastSelectedAt ?? 0) - (a.lastSelectedAt ?? 0))
-      .map((conversation) => ({
-        sessionId: conversation.sessionId,
-        ...(conversation.label ? { label: conversation.label } : {}),
-        last: conversation.sessionId === feature.lastSelectedConversationId,
-      }))
-  }
-
-  private handleConversationsKey(key: KeyEvent) {
-    const conversations = this.linkedConversations()
-    switch (key.name) {
-      case "up":
-      case "k":
-        this.conversationSelected = Math.max(0, this.conversationSelected - 1)
-        break
-      case "down":
-      case "j":
-        this.conversationSelected = Math.min(conversations.length - 1, this.conversationSelected + 1)
-        break
-      case "return":
-      case "linefeed":
-      case "o": {
-        const chosen = conversations[this.conversationSelected]
-        if (chosen && this.detailFeature) {
-          this.finish({ type: "work", featureId: this.detailFeature.featureId, action: "conversation", sessionId: chosen.sessionId })
-        }
-        return
-      }
-      case "escape":
-      case "q":
-      case "backspace":
-      case "b":
-        this.level = "detail"
-        break
-    }
-    this.render()
-  }
-
-  // ── new-work form (task 5.1) ────────────────────────────────────────────
+  // ── new-worktree form ───────────────────────────────────────────────────
 
   private openNewWorkForm() {
     this.level = "form"
@@ -633,7 +658,7 @@ export class HomeLauncher {
     const form = this.form
     if (!form) return
     if (key.name === "escape") {
-      // Cancelling before acceptance makes no repository effects (task 5.1).
+      // Cancelling before acceptance makes no repository effects.
       this.form = undefined
       this.level = "list"
       this.render()
@@ -663,6 +688,65 @@ export class HomeLauncher {
     }
   }
 
+  /**
+   * Asks the configured naming model for a conventional branch name for the
+   * reviewed description (work-context delta, task 3.4). Bounded: the namer
+   * has its own timeout and the deterministic prefill already on the field is
+   * the editable fallback, so a slow or unavailable model never blocks the
+   * form. The suggestion lands only while the operator is still on the
+   * branch field and has not typed a name of their own.
+   */
+  private suggestBranchNameToken = 0
+  private async suggestBranchName(description: string): Promise<void> {
+    const token = ++this.suggestBranchNameToken
+    const form = this.form
+    if (!form) return
+    const deterministic = form.branch
+    try {
+      const { ensureFreeBranchName } = await import("./worktree")
+      let proposed: string | undefined
+      if (this.proposeBranchName) {
+        proposed = (await this.proposeBranchName({ prompt: description })).branch
+      } else {
+        const { defaultBranchNameModel, proposeBranchName } = await import("./worktree")
+        const { loadMergedConvoyConfig } = await import("./config")
+        const config = await loadMergedConvoyConfig(this.targetDir)
+        proposed = (await proposeBranchName({
+          prompt: description,
+          targetDir: this.targetDir,
+          model: config?.defaults.branchNameModel ?? defaultBranchNameModel,
+        })).branch
+      }
+      if (token !== this.suggestBranchNameToken) return
+      const current = this.form
+      if (!current || current !== form || current.field !== 1) return
+      if (current.branch !== deterministic) return
+      const cleaned = proposed.replace(/^refs\/heads\//, "").replace(/\s+/g, "-")
+      if (!cleaned) return
+      // The free-name check is advisory here: when it cannot run (e.g. the
+      // target is not readable yet), the reviewed creation still re-checks
+      // occupancy, and the field stays editable either way. It resolves into
+      // a local value — the guards below are what decide the assignment.
+      let resolved: string
+      try {
+        resolved = await ensureFreeBranchName(cleaned, this.targetDir)
+      } catch {
+        resolved = cleaned
+      }
+      // Re-check every guard after the await: an operator edit, a field
+      // advance, a newer suggestion, or a cancellation during the free-name
+      // check must survive — the suggestion never overwrites them.
+      if (token !== this.suggestBranchNameToken) return
+      const target = this.form
+      if (!target || target !== form || target.field !== 1) return
+      if (target.branch !== deterministic) return
+      target.branch = resolved
+      this.render()
+    } catch {
+      // The deterministic prefill stays; a naming failure is not a form error.
+    }
+  }
+
   private async commitFormField() {
     const form = this.form
     if (!form) return
@@ -673,11 +757,13 @@ export class HomeLauncher {
         this.render()
         return
       }
-      // A validated branch is prefilled from the name — editable, no naming
-      // model call, no mutation (task 5.1).
+      // A validated branch is prefilled from the name — editable, no mutation.
+      // The deterministic slug is the immediate fallback; the model-backed
+      // suggestion (work-context delta, task 3.4) refines it below.
       if (!form.branch) form.branch = slugFromName(name)
       form.field = 1
       this.render()
+      void this.suggestBranchName(name)
       return
     }
     if (form.field === 1) {
@@ -708,7 +794,7 @@ export class HomeLauncher {
     }
     // Field 2 confirmed: resolve the destination with the documented worktree
     // conventions and hand the draft to the session loop for the reviewed
-    // creation — nothing has been mutated yet (task 5.1).
+    // creation — nothing has been mutated yet.
     const { resolveWorktreeDir } = await import("./worktree")
     try {
       const worktree = await resolveWorktreeDir(form.branch, this.targetDir)
@@ -843,7 +929,7 @@ export class HomeLauncher {
     const listInnerWidth = Math.max(8, (compact || immersed ? width : listWidth) - PANEL_GUTTER)
     const previewInnerWidth = Math.max(8, (immersed || compact ? width : previewWidth) - PANEL_GUTTER)
 
-    this.listBox.title = " work "
+    this.listBox.title = " worktrees "
     this.previewBox.title = this.previewTitle()
     this.listText.content = immersed ? "" : this.listContent(listInnerWidth)
     this.previewText.content = this.previewContent(previewInnerWidth)
@@ -851,7 +937,7 @@ export class HomeLauncher {
     this.renderer.requestRender()
   }
 
-  /** Masthead: identity, complete version, project path above the work list. */
+  /** Masthead: identity, complete version, project path above the worktree list. */
   private mastheadContent(width: number): StyledText {
     const project = shortPath(this.targetDir, Math.max(1, width - 9))
     if (this.wideMasthead()) {
@@ -884,31 +970,27 @@ export class HomeLauncher {
   }
 
   /**
-   * One list row, speaking the board's row vocabulary: a lifecycle-colored
-   * dot on work rows, and the selected title in bold text with the accent
+   * One list row, speaking the board's row vocabulary: an observation-colored
+   * dot on worktree rows, and the selected title in bold text with the accent
    * `▸` marker carrying the selection. Destinations sit under a faint rule
-   * instead of a shouted section header — the panel title already says work.
+   * instead of a shouted section header — the panel title already says
+   * worktrees.
    */
   private rowLine(row: ListRow, selected: boolean, width: number): StyledText {
     if (row.kind === "rule") {
       return new StyledText([fg(theme.faint)("─".repeat(Math.max(1, width)))])
     }
-    if (row.kind === "work") {
-      const feature = row.feature
-      const left: TextChunk[] = [selected ? fg(theme.accent)("▸ ") : raw("  "), fg(lifecycleColor(feature))("●"), raw(" ")]
-      const title = truncate(feature.displayName, Math.max(12, width - 18))
+    if (row.kind === "worktree") {
+      const worktree = row.worktree
+      const left: TextChunk[] = [selected ? fg(theme.accent)("▸ ") : raw("  "), fg(worktreeDotColor(worktree))("◇"), raw(" ")]
+      const title = truncate(worktreeDisplayNameOf(worktree), Math.max(12, width - 18))
       left.push(selected ? bold(fg(theme.text)(title)) : fg(theme.text)(title))
-      const state: TextChunk[] = [fg(lifecycleColor(feature))(feature.summary)]
-      const rest: string[] = []
-      if (feature.branch) rest.push(feature.branch)
-      if (feature.tasks && feature.tasks !== "unknown" && feature.tasks.total > 0) rest.push(`${feature.tasks.done}/${feature.tasks.total}`)
-      if (feature.liveRuns > 0) rest.push(`${feature.liveRuns} live`)
-      if (rest.length > 0) state.push(fg(theme.dim)(` · ${rest.join(" · ")}`))
+      const state: TextChunk[] = [fg(theme.dim)(worktreeSummary(worktree))]
       return padBetween(left, state, width)
     }
     if (row.kind === "new") {
       const left: TextChunk[] = [selected ? fg(theme.accent)("▸ ") : raw("  "), fg(theme.green)("+"), raw(" ")]
-      left.push(selected ? bold(fg(theme.text)("New feature")) : fg(theme.text)("New feature"))
+      left.push(selected ? bold(fg(theme.text)("New worktree")) : fg(theme.text)("New worktree"))
       return new StyledText(left)
     }
     const left: TextChunk[] = [selected ? fg(theme.accent)("▸ ") : raw("  "), fg(theme.teal)("◇"), raw(" ")]
@@ -918,8 +1000,7 @@ export class HomeLauncher {
   }
 
   private previewTitle(): string {
-    if (this.level === "form") return " new feature "
-    if (this.level === "conversations") return " conversations "
+    if (this.level === "form") return " new worktree "
     if (this.level === "detail") return " actions "
     const row = this.rows[this.selectedRow]
     if (row?.kind === "new") return " new "
@@ -929,42 +1010,38 @@ export class HomeLauncher {
 
   private previewContent(width: number): StyledText {
     if (this.level === "detail") return this.detailContent(width)
-    if (this.level === "conversations") return this.conversationsContent(width)
     if (this.level === "form") return this.formContent(width)
     const row = this.rows[this.selectedRow]
-    if (row?.kind === "work") return this.workPreview(row.feature, width)
+    if (row?.kind === "worktree") return this.worktreePreview(row.worktree, width)
     if (row?.kind === "new") return this.newPreview(width)
     if (row?.kind === "auxiliary") return this.destinationPreview(row, width)
     return new StyledText([raw("")])
   }
 
-  /** List-level preview: editorial, not a form dump. Enter still opens actions. */
-  private workPreview(feature: LifecycleFeatureRow, width: number): StyledText {
+  /** List-level preview: observed facts, not a lifecycle summary. Enter still opens actions. */
+  private worktreePreview(worktree: BoardWorktree, width: number): StyledText {
     const lines: StyledText[] = []
-    lines.push(new StyledText([bold(fg(theme.text)(truncate(feature.displayName, width)))]))
-    lines.push(new StyledText([fg(lifecycleColor(feature))("● "), fg(lifecycleColor(feature))(truncate(feature.summary, Math.max(8, width - 2)))]))
+    lines.push(new StyledText([bold(fg(theme.text)(truncate(worktreeDisplayNameOf(worktree), width)))]))
+    lines.push(new StyledText([fg(worktreeDotColor(worktree))("◇ "), fg(theme.dim)(truncate(worktreeSummary(worktree), Math.max(8, width - 2)))]))
     lines.push(new StyledText([raw("")]))
-    if (feature.branch) lines.push(new StyledText([fg(theme.dim)(truncate(feature.branch, width))]))
-    if (feature.checkoutPath) lines.push(new StyledText([fg(theme.faint)(truncate(shortPath(feature.checkoutPath, Math.max(8, width)), width))]))
+    lines.push(new StyledText([fg(theme.dim)(truncate(worktree.detached ? "detached HEAD" : (worktree.branch ?? "(no branch)"), width))]))
+    lines.push(new StyledText([fg(theme.faint)(truncate(shortPath(worktree.path, Math.max(8, width)), width))]))
     const meta: string[] = []
-    if (feature.contracts.length > 0) meta.push(feature.contracts.map((contract) => contract.changeId).join(" · "))
-    if (feature.tasks && feature.tasks !== "unknown" && feature.tasks.total > 0) meta.push(`${feature.tasks.done}/${feature.tasks.total} tasks`)
-    if (feature.liveRuns > 0) meta.push(`${feature.liveRuns} live`)
-    if (feature.conversations && feature.conversations.length > 0) {
-      meta.push(`${feature.conversations.length} conversation${feature.conversations.length === 1 ? "" : "s"}`)
-    }
+    if (worktree.dirt?.kind === "known") meta.push(worktree.dirt.value.dirty ? `${worktree.dirt.value.fileCount} uncommitted` : "clean")
+    if (worktree.activity?.kind === "known" && worktree.activity.value.total > 0) meta.push(`${worktree.activity.value.total} live`)
+    if (worktree.changes.length > 0) meta.push(`${worktree.changes.length} change${worktree.changes.length === 1 ? "" : "s"}`)
+    if (worktree.archiveCount) meta.push(`${worktree.archiveCount} archived`)
+    const prShort = shortPrFact(worktree.pr)
+    if (prShort) meta.push(prShort)
     if (meta.length > 0) {
       lines.push(new StyledText([raw("")]))
       for (const line of wrapLines([meta.join(" · ")], width)) lines.push(new StyledText([fg(theme.dim)(line)]))
     }
-    if (feature.contracts.length === 0) {
-      lines.push(new StyledText([raw("")]))
-      lines.push(new StyledText([fg(theme.dim)("no contracts yet — awaiting proposal")]))
+    for (const local of worktree.changes.slice(0, 3)) {
+      const title = local.title ? `${local.changeId} — ${local.title}` : local.changeId
+      lines.push(new StyledText([fg(theme.dim)(truncate(`◆ ${title}`, Math.max(8, width))) ]))
     }
-    for (const blocker of feature.blockers.slice(0, 3)) {
-      lines.push(new StyledText([fg(theme.yellow)(`! ${truncate(blocker, Math.max(8, width - 2))}`)]))
-    }
-    const next = this.actionsFor(feature).find((action) => action.enabled)
+    const next = this.actionsFor(worktree).find((action) => action.enabled)
     lines.push(new StyledText([raw("")]))
     if (next) {
       lines.push(new StyledText([fg(theme.accent)("enter  "), fg(theme.text)(truncate(next.label, Math.max(8, width - 7)))]))
@@ -976,16 +1053,16 @@ export class HomeLauncher {
 
   private newPreview(width: number): StyledText {
     const lines: StyledText[] = []
-    lines.push(new StyledText([bold(fg(theme.text)("New feature"))]))
+    lines.push(new StyledText([bold(fg(theme.text)("New worktree"))]))
     lines.push(new StyledText([fg(theme.accent)("Start here")]))
     lines.push(new StyledText([raw("")]))
     if (this.emptyWork) {
-      for (const line of wrapLines(["No work in this repository yet."], width)) {
+      for (const line of wrapLines(["No checkouts in this repository yet."], width)) {
         lines.push(new StyledText([fg(theme.dim)(line)]))
       }
       lines.push(new StyledText([raw("")]))
     }
-    for (const line of wrapLines(["An isolated checkout before any proposal — no commit, no pull request."], width)) {
+    for (const line of wrapLines(["An isolated checkout before any proposal — no commit, no pull request, no registration."], width)) {
       lines.push(new StyledText([fg(theme.dim)(line)]))
     }
     lines.push(new StyledText([raw("")]))
@@ -1008,24 +1085,38 @@ export class HomeLauncher {
 
   /** The detail pane's full line list plus the index of its first action row. */
   private detailLines(width: number): { lines: StyledText[]; actionStart: number } {
-    const feature = this.detailFeature
-    if (!feature) return { lines: [], actionStart: 0 }
+    const worktree = this.detailWorktree
+    if (!worktree) return { lines: [], actionStart: 0 }
     const lines: StyledText[] = []
     // The board's detail anatomy: bold title, dim identity line, then faint
-    // `label: ` rows with the status speaking the lifecycle color.
-    lines.push(new StyledText([bold(fg(theme.text)(truncate(feature.displayName, width)))]))
-    lines.push(new StyledText([fg(theme.dim)(`feature ${feature.featureId}`)]))
+    // `label: ` rows with observed facts.
+    lines.push(new StyledText([bold(fg(theme.text)(truncate(worktreeDisplayNameOf(worktree), width)))]))
+    lines.push(new StyledText([fg(theme.dim)(truncate(shortPath(worktree.path, width), width))]))
     lines.push(new StyledText([raw("")]))
     const add = (label: string, value: string, color = theme.text) => {
       lines.push(new StyledText([fg(theme.faint)(`${label}: `), fg(color)(truncate(value, Math.max(8, width - label.length - 2)))]))
     }
-    add("status", feature.summary, lifecycleColor(feature))
-    if (feature.branch) add("branch", feature.branch)
-    if (feature.checkoutPath) add("worktree", shortPath(feature.checkoutPath, Math.max(12, width - 10)))
-    for (const contract of feature.contracts) add("contract", `${contract.changeId} (${contract.state})`)
-    if (feature.contracts.length === 0) add("contracts", "none yet — awaiting proposal", theme.dim)
-    if (feature.conversations && feature.conversations.length > 0) add("conversations", `${feature.conversations.length}`)
-    for (const blocker of feature.blockers.slice(0, 4)) lines.push(new StyledText([fg(theme.yellow)(`! ${truncate(blocker, Math.max(8, width - 2))}`)]))
+    add("branch", worktree.detached ? "detached HEAD" : (worktree.branch ?? "(no branch)"))
+    if (worktree.dirt) {
+      add("dirt", worktree.dirt.kind === "known" ? (worktree.dirt.value.dirty ? `${worktree.dirt.value.fileCount} file(s) uncommitted` : "clean") : `unknown (${worktree.dirt.reason})`, worktree.dirt.kind === "known" && worktree.dirt.value.dirty ? theme.yellow : theme.text)
+    }
+    if (worktree.activity) {
+      add("activity", worktree.activity.kind === "known" ? `${worktree.activity.value.total} live run(s)` : `unknown (${worktree.activity.reason})`)
+    }
+    if (worktree.pr) {
+      // PR evidence keeps its availability: unknown is never rendered as
+      // "no PR" and a merged PR never reads as completed work.
+      add("pr", prObservationText(worktree.pr), worktree.pr.availability === "known" ? theme.text : theme.yellow)
+    }
+    if (worktree.changesUnknown) add("changes", `unknown (${worktree.changesUnknown})`, theme.yellow)
+    else add("changes", `${worktree.changes.length} active`)
+    for (const local of worktree.changes.slice(0, 4)) {
+      const title = local.title ? `${local.changeId} — ${local.title}` : local.changeId
+      add("change", title, theme.dim)
+    }
+    if (worktree.locked) add("lock", worktree.locked.reason ? `locked: ${worktree.locked.reason}` : "locked", theme.yellow)
+    if (worktree.prunable) add("prunable", worktree.prunable.reason ?? "stale registration", theme.yellow)
+    if (!worktree.accessible) add("state", "inaccessible — the registered path is missing (repair or `git worktree prune`)", theme.yellow)
     lines.push(new StyledText([raw("")]))
     lines.push(new StyledText([bold(fg(theme.accent)("actions"))]))
     const actionStart = lines.length
@@ -1042,13 +1133,13 @@ export class HomeLauncher {
   }
 
   private detailLineCount(): number {
-    if (!this.detailFeature) return 0
+    if (!this.detailWorktree) return 0
     return this.detailLines(Math.max(1, this.renderer.width) - PANEL_GUTTER).lines.length
   }
 
   private detailContent(width: number): StyledText {
-    const feature = this.detailFeature
-    if (!feature) return this.listContent(width)
+    const worktree = this.detailWorktree
+    if (!worktree) return this.listContent(width)
     const { lines, actionStart } = this.detailLines(width)
     const visible = this.detailVisible()
     // Action navigation follows the selection; explicit paging (pgup/pgdn)
@@ -1063,38 +1154,12 @@ export class HomeLauncher {
     return joinLines(lines.slice(this.detailScroll, this.detailScroll + visible))
   }
 
-  /**
-   * The authoring-conversation selector (capability work-conversations): one
-   * row per linked conversation — label or short session id, the default
-   * resume target marked — never run phase sessions, which live in run
-   * records rather than the feature's conversation associations.
-   */
-  private conversationsContent(width: number): StyledText {
-    const feature = this.detailFeature
-    if (!feature) return this.listContent(width)
-    const conversations = this.linkedConversations()
-    const lines: StyledText[] = []
-    lines.push(new StyledText([bold(fg(theme.text)(truncate(feature.displayName, width)))]))
-    lines.push(new StyledText([fg(theme.dim)("linked authoring conversations — enter resumes the selected one")]))
-    lines.push(new StyledText([raw("")]))
-    conversations.forEach((conversation, index) => {
-      const selected = index === this.conversationSelected
-      const marker = selected ? fg(theme.accent)("▸ ") : raw("  ")
-      const name = conversation.label ?? `${conversation.sessionId.slice(0, 14)}…`
-      const label = selected ? bold(fg(theme.text)(name)) : fg(theme.text)(name)
-      const chunks: TextChunk[] = [marker, label]
-      if (conversation.last) chunks.push(fg(theme.faint)("  (last selected)"))
-      lines.push(new StyledText(chunks))
-    })
-    return joinLines(lines)
-  }
-
   private formContent(width: number): StyledText {
     const form = this.form
     if (!form) return this.listContent(width)
     const lines: StyledText[] = []
-    lines.push(new StyledText([bold(fg(theme.text)("New feature"))]))
-    lines.push(new StyledText([fg(theme.dim)("creates an isolated checkout before any proposal — no commit, no pull request")]))
+    lines.push(new StyledText([bold(fg(theme.text)("New worktree"))]))
+    lines.push(new StyledText([fg(theme.dim)("creates an isolated checkout before any proposal — no commit, no pull request, no registration")]))
     lines.push(new StyledText([raw("")]))
     const field = (label: string, value: string, active: boolean, hint?: string) => {
       const shown = active ? `${value}▏` : value
@@ -1124,18 +1189,6 @@ export class HomeLauncher {
         { style: "spaced", overflow: moreHintsMarker },
       )
     }
-    if (this.level === "conversations") {
-      return hintsRow(
-        [
-          { keys: "↑/↓", label: "select", priority: 2 },
-          { keys: "enter", label: "resume", priority: 1 },
-          { keys: "esc", label: "back", priority: 0 },
-        ],
-        [],
-        width,
-        { style: "spaced", overflow: moreHintsMarker },
-      )
-    }
     if (this.level === "detail") {
       const hints: Hint[] = [
         { keys: "↑/↓", label: "select", priority: 3 },
@@ -1149,7 +1202,7 @@ export class HomeLauncher {
       [
         { keys: "↑/↓", label: "select", priority: 4 },
         { keys: "p/s/r/c", label: "go", priority: 3 },
-        { keys: "n", label: "new work", priority: 2 },
+        { keys: "n", label: "new worktree", priority: 2 },
         { keys: "enter", label: "open", priority: 1 },
         { keys: "q", label: "quit", priority: 0 },
       ],
@@ -1158,6 +1211,43 @@ export class HomeLauncher {
       { style: "spaced", overflow: moreHintsMarker },
     )
   }
+}
+
+/** The visible worktree name: the checkout folder basename (design D1). */
+function worktreeDisplayNameOf(worktree: BoardWorktree): string {
+  const base = worktree.path.split("/").filter(Boolean).pop() ?? worktree.path
+  return base
+}
+
+/** The row's right-column summary: independent facts, never a lifecycle stage. */
+function worktreeSummary(worktree: BoardWorktree): string {
+  const parts: string[] = []
+  parts.push(worktree.detached ? "detached" : (worktree.branch ?? "(no branch)"))
+  if (worktree.changes.length > 0) parts.push(`${worktree.changes.length} change${worktree.changes.length === 1 ? "" : "s"}`)
+  if (worktree.dirt?.kind === "known" && worktree.dirt.value.dirty) parts.push(`${worktree.dirt.value.fileCount} dirty`)
+  if (worktree.activity?.kind === "known" && worktree.activity.value.total > 0) parts.push(`${worktree.activity.value.total} live`)
+  if (!worktree.accessible) parts.push("inaccessible")
+  return parts.join(" · ")
+}
+
+/** Compact PR fact for the preview's meta line; unknown stays unknown. */
+function shortPrFact(pr: BoardWorktree["pr"]): string | undefined {
+  if (!pr) return undefined
+  if (pr.availability === "known") return pr.pr ? `PR #${pr.pr.number} ${pr.pr.state}` : "no PR"
+  if (pr.availability === "ambiguous") return `PR ambiguous (${pr.matches.length})`
+  return "PR unknown"
+}
+
+/** The detail pane's PR line: number/title/URL/state when known, availability otherwise. */
+function prObservationText(pr: NonNullable<BoardWorktree["pr"]>): string {
+  if (pr.availability === "known") {
+    if (!pr.pr) return "no pull request matches this branch and base"
+    return `#${pr.pr.number} ${pr.pr.state} — ${pr.pr.title} (${pr.pr.url})`
+  }
+  if (pr.availability === "ambiguous") {
+    return `ambiguous — ${pr.matches.length} matching pull requests (${pr.matches.map((match) => `#${match.number}`).join(", ")}): ${pr.reason}`
+  }
+  return `unknown (${pr.reason})`
 }
 
 /** A filesystem-safe slug from the operator's work name (allocation convention only). */

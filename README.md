@@ -172,57 +172,64 @@ convoy --change add-login -p implement
 convoy --change add-login -p review
 ```
 
-## The feature lifecycle: control, spin, close
+## Worktrees: control, spin, close
 
-A unit of work has a stable, repository-scoped identity that survives renames, archiving, and cleanup. Convoy keeps a small local registry in the repository's Git common directory (`<git-common-dir>/convoy/`) — a repository UUID, one record per feature (its change contracts, intended base, current branch/worktree, runs, and close attempts), and immutable per-attempt landing receipts. The registry remembers what the operator associated with a context; everything it *displays* — worktrees, branches, tasks, run liveness, integration eligibility — is still derived at render time from fresh evidence, so if a worktree is deleted outside Convoy, the next open simply shows it gone. Records are keyed by opaque ids, so branch renames and reused branch names never alias old work into new authority.
+A worktree is an ordinary Git checkout, not a registered entity. Convoy keeps no feature registry, contract set, association, or landing receipt: the Worktrees control center (`convoy worktrees`, with `convoy control` as its alias) enumerates every checkout registered in the repository's Git worktree inventory — main, external, detached, locked, inaccessible, and spec-less alike — and derives every displayed fact (branch, dirt, base/upstream divergence, pull-request observations, tasks, run liveness) from fresh evidence at render time. If a worktree is deleted outside Convoy, the next open simply shows it gone; there is no record to repair. Actions target an explicitly selected checkout and revalidate it immediately before any effect, so a moved or replaced checkout is refused instead of silently mutated.
 
-### Stable identities: `convoy feature`
+### The worktree control center: `convoy worktrees`
 
 ```bash
-convoy feature show                 # the feature for this context (or list discovery evidence)
-convoy feature show <id> --json     # machine-readable record, receipts, blockers
-convoy feature adopt --branch team/alice/release-42 --change add-widget --base main
-convoy feature bind <id> --branch feature/renamed --worktree <path>   # rebind after a rename/move
-convoy feature revise <id> --change one --change two --base main      # replace the contract set
-convoy feature recover --legacy --change add-widget                   # adopt a completed legacy landing
-convoy feature new-work --branch feat/one --worktree <path> --change next --base main
+convoy worktrees                                   # the inventory / control center
+convoy worktrees new <description>                 # describe, review, create a worktree
+convoy worktrees fetch --worktree <path> --remote <name>
+convoy worktrees sync --worktree <path> --base <ref>
+convoy worktrees push --worktree <path> [--remote <name> --ref <local>:<remote>]
+convoy worktrees pr --worktree <path> [--base <ref>] [--title <text> --body <text>] [--push]
+convoy worktrees archive --worktree <path> --change <id> [--change <id> ...]
+convoy worktrees run --worktree <path> [--change <id> ... | --manual]
+convoy worktrees squash --worktree <path> --base <local-branch>
+convoy worktrees close --worktree <path> --base <local-branch> [--change <id> ...]
+convoy worktrees remove --worktree <path>
+convoy worktrees delete-branch --branch <name>
+convoy worktrees recover --operation <id>
 ```
 
-Adoption and rebinding are explicit consent operations: they validate repository membership, the actual checked-out branch, worktree registration, and the selected sources, and they never rename a branch (any Git-valid name is accepted as-is). Adoption records intent — it never marks tasks, archives, or integration complete. A completed feature (verified landing receipt) releases its claim on its branch; starting new work on that branch is the explicit `new-work` decision, which mints a fresh identity and inherits nothing. Legacy close journals from before stable ids are readable evidence: `recover --legacy` imports one only after validating its embedded landing against current Git, refusing collisions with registered features.
+The retired `convoy feature` subcommands (`show`, `adopt`, `bind`, `revise`, `recover`, `new-work`) and feature-ID flags fail non-zero with worktree-selection guidance before any effect: checkouts are selected explicitly per action, never adopted, bound, or registered. Legacy registry files under `<git-common-dir>/convoy/` stay inert — they create no rows, no lifecycle, and no cleanup authority — and an explicit previewed cleanup can remove them only after proving no unresolved operation depends on them.
 
 ### Work-first Home: create work, talk, then run
 
-Interactive `convoy` opens the project's **work list** — every registered feature with its derived lifecycle summary — plus a `+ New feature` entry and the auxiliary destinations (pipelines, specs, runs, config). Work exists before specs do: `New feature` (or `convoy feature new-work` headless) reviews a display name, branch, base, and destination and creates the isolated worktree *before* any authoring agent starts; nothing is committed and no PR is created. A feature with no contracts yet shows as *awaiting proposal* — never as close-ready.
+Interactive `convoy` opens the **Worktrees list** — every Git-registered checkout with its independent observations — plus a `+ New worktree` entry and the auxiliary destinations (pipelines, specs, runs, config). Work exists before specs do: `New worktree` reviews a name, branch, base, and destination and creates the isolated worktree *before* any authoring agent starts; nothing is committed, no PR is created, and nothing is registered. A worktree with no changes yet is an ordinary peer row — never a lifecycle stage.
 
 Selecting a work item opens its detail with separate actions:
 
-- **Open conversation** (`v`) opens (or resumes the exactly linked) OpenCode authoring conversation in the work's verified checkout, foreground: Convoy hands the terminal over and returns to the same selected work when the client exits, with artifacts and assessment refreshed. Linked sessions survive Convoy restarts — the durable reference is the harness id + session id, so any server of the same repository reopens the exact conversation; an unavailable session is reported and replaced by an explicit new conversation, never silently.
+- **Open conversation** (`v`) opens (or resumes the exactly linked) OpenCode authoring conversation in the work's verified checkout, foreground: Convoy hands the terminal over and returns to the same selected work when the client exits, with artifacts and observations refreshed. Linked sessions survive Convoy restarts — the durable reference is the harness id + session id, stored as a non-authoritative navigation hint and re-verified against live Git and the harness before every resume, so any server of the same repository reopens the exact conversation; an unavailable session is reported and replaced by an explicit new conversation, never silently.
 - **Open in window** (`w`) is the explicit external presentation: it opens the same session in a Herdr/Zellij pane or a new terminal window. Pane creation and session availability are reported independently — a created pane whose session cannot be verified never reads as a running conversation, and because pane backends expose no child handle, Convoy cannot observe the pane's client: it asks you to confirm the conversation started there rather than claiming it.
-- **Propose** (`p`) runs the project's own authoring workflow (`opsx-propose` in this repo) inside the work's checkout through OpenCode's command API. If the project has no supported proposal command, Propose says so and ordinary conversation stays usable. Newly authored changes are surfaced for explicit association review on return — a differing change id never renames the work's branch.
-- **Execute pipeline** (`e`), **Open specs** (`s`), **Open runs** (`r`), **Close review** (`x`), and **Open history** (`h`) resolve the same verified work; pipeline launches reuse the worktree's own configuration, spec sources, and the feature's complete contract set, and close keeps its guarded base destination.
+- **Propose** (`p`) runs the project's own authoring workflow (`opsx-propose` in this repo) inside the work's checkout through OpenCode's command API. If the project has no supported proposal command, Propose says so and ordinary conversation stays usable. Newly authored changes appear under that checkout on return — review them in the Worktrees control center before archiving or running; a differing change id never renames the worktree's branch.
+- **Execute pipeline** (`e`), **Open specs** (`s`), **Open runs** (`r`), **Close review** (`x`), and **Open history** (`h`) resolve the same verified work; pipeline launches reuse the worktree's own configuration, spec sources, and explicitly selected local changes, and close keeps its guarded base destination.
 
-Before any managed writer (authoring conversation or pipeline) starts in a checkout, Convoy takes a writer claim scoped to the branch/checkout identity: a live conflicting writer is refused with attach-or-stop guidance, a provably stale claim is reconciled, and an uncertain one is never taken over silently. Authoring conversations run against the repository's own authoring server — discovered via a transient record in `<git-common-dir>/convoy/`, liveness-verified (PID plus URL) before reuse, and independent of run servers and dashboards: closing a run or a client view never stops it, and only an explicit stop with quiescence evidence does. Convoy remembers the last valid work selection per repository and restores it on reopen; a selection that no longer resolves is explained rather than silently replaced. Interrupted creation is recoverable: the creation intent preserves the worktree and draft across a failed registry write, and a retry reuses the validated result instead of creating a second worktree.
+Before any managed writer (authoring conversation or pipeline) starts in a checkout, Convoy takes a writer claim scoped to the branch/checkout identity: a live conflicting writer is refused with attach-or-stop guidance, a provably stale claim is reconciled, and an uncertain one is never taken over silently. Authoring conversations run against the repository's own authoring server — discovered via a transient record in `<git-common-dir>/convoy/`, liveness-verified (PID plus URL) before reuse, and independent of run servers and dashboards: closing a run or a client view never stops it, and only an explicit stop with quiescence evidence does. Convoy remembers the last selected checkout per repository as a non-authoritative navigation hint and restores it on reopen only when the live Git registration still verifies it; a selection that no longer resolves is explained rather than silently replaced. Interrupted creation is recoverable: the creation intent is journalled outside the checkout before any effect, and a retry reuses the validated result instead of creating a second worktree.
 
-### The specs board (`convoy specs`)
+### The specs reader (`convoy specs`)
 
 ```bash
-convoy specs     # "convoy control" remains as a compatibility alias
+convoy specs     # the artifact-focused reader entry
+convoy control   # opens the worktree control board instead
 ```
 
-One board for every feature and spec, in up to three peer sections (empty sections, including their titles, are omitted; a worktree-only board still opens):
+The artifact-focused reader over the same worktree-rooted inventory: without a selected checkout it shows the Worktrees list; with one selected it opens that checkout's local artifact sections (empty sections, including their titles, are omitted):
 
-- **Active Changes** — every active OpenSpec change with its derived state: stage (`stranded on main`, `proposing`, `implementing`, `ready to close`, `probably merged`), tasks done/total, linked runs with the live one marked, an uncommitted-proposal marker, and sync/merged-ness signals (`unsynced`, `probably merged` — patch equivalence can prove probability, never certainty).
-- **Worktrees without spec** — worktrees carrying runs but no OpenSpec change, linking the plain isolated-run flow back into the board.
-- **Canonical Specs** — the merged specs under `openspec/specs/`.
+- **Active Changes** — the selected checkout's own active OpenSpec changes with their local facts: tasks done/total (or unknown), artifact availability, and independent Git observations. Same-id copies in different checkouts stay independent; file presence is never ownership.
+- **Archives** — the checkout's local archived changes, collapsed or loaded on demand.
+- **Canonical Specs** — the merged specs under the selected checkout's `openspec/specs/`.
 
 The header names the normalized target project directory. Change and worktree rows retain their useful details preview; when a canonical spec is selected, that redundant preview disappears and the browse list fills the body in wide and compact layouts. Enter a change (or spec) to read it in a full-width pane under a tab strip: one tab per artifact group — Proposal, Design, Tasks, one merged Delta Specs tab (per-capability headings injected), Other when present — switched with `←`/`→` (`h`/`l`) or digits `1`–`9`, scrolled with `↑`/`↓`. Returning from a canonical reader restores the full-body root list. A subject with a single group hides the strip. Press `v` for the fullscreen reader (title bar with `c copy` and scroll position; `v`/`esc`/`q` to close, tabs still switch inside, `c` copies the active tab's markdown through the same clipboard pipeline as the run dashboard), `a` to apply the change in the launcher, `i` to open a standalone OpenCode session on the change's planning files, `q` to quit.
 
-Row actions move a feature along:
+Row actions act on the explicitly selected checkout-local change:
 
-- **`s` — spin out** a change stranded on main (same as `convoy spin`, below).
-- **`c` — continue** hands the feature to the launcher reusing its existing worktree and branch: no new worktree, no branch namer, the branch frozen into the plan. (When the launcher itself runs inside a worktree, enabling isolation stays default-off and shows an informational warning naming the fork point.)
-- **`x` — close** runs the full closing sequence (below).
-- **`m` — archive on main** remediates a probably-merged-but-unarchived change: archive in the main checkout, no sync/squash/merge, because there is nothing left to merge.
+- **`a` — apply** hands the change to the launcher with its checkout-local source preselected.
+- **`i` — iterate** opens (or resumes) an authoring conversation on the change's planning files in its checkout.
+- **archive** — archives the explicitly selected local change through OpenSpec (`convoy worktrees archive`); inherited or same-id copies elsewhere are never included.
+- **`x` — close review** opens the close confirmation for the containing worktree (below).
 
 ### Spinning a feature out (`convoy spin`)
 
@@ -240,43 +247,43 @@ branch: feat/add-login
 continue the same OpenCode conversation: run /move and pick the worktree above
 ```
 
-The operator's OpenCode session relocates with `/move` (OpenCode's own command — Convoy never forks or summarizes a session). If `/move`'s picker doesn't list the fresh worktree, open a session in the printed directory instead. A tree dirty outside `openspec/` refuses to spin; a change already committed on the base branch spins with nothing moved. A successful spin also **registers the feature**: the stable identity, the selected contract, and the created branch/worktree are durably associated before the handoff prints, so every later board, launcher, and close lookup resolves the same feature by identity rather than by branch spelling. If the registry write fails, spin refuses to claim success and prints the created worktree, transferred files, and recovery steps — nothing is committed or deleted.
+The operator's OpenCode session relocates with `/move` (OpenCode's own command — Convoy never forks or summarizes a session). If `/move`'s picker doesn't list the fresh worktree, open a session in the printed directory instead. A tree dirty outside `openspec/` refuses to spin; a change already committed on the base branch spins with nothing moved. Spin registers nothing: the created worktree appears through the Git worktree inventory like any other checkout, and no feature record, association, or adoption is involved. If the transfer stops partway, the pending transfer keeps its source/destination evidence until reconciled — moved versus remaining files are reported, and neither copy is overwritten.
 
 The global `/convoy-spin` OpenCode command is opt-in: run `convoy opencode install` once and the thin wrapper at `~/.config/opencode/commands/convoy-spin.md` tells the agent to run `convoy spin` and relay its output, touching no other command files (spin never writes into your global config).
 
-### Closing a feature (`convoy close`)
+### Closing a worktree (`convoy close`)
 
 ```bash
-convoy close                       # run inside the feature worktree
+convoy close --worktree <path> --base <local-branch>
 convoy close --branch feat/add-login
-convoy close --resume              # continue after a stopped sequence
+convoy close --change add-widget          # archive exactly this local change first
 ```
 
-One resumable sequence, each step checked before it runs:
+One reviewed composition of the independent worktree operations, each step checked before it runs:
 
-1. **Preflight** — clean tree (commit or stash), all tasks complete (naming the missing count), no live run attached (wait for or stop it).
-2. **Sync** — merge the base branch into the feature branch inside the worktree. Conflicts stop with the conflict listed; resolve, commit, and `close --resume`.
-3. **Archive** — through the OpenSpec CLI (`openspec archive`), never by hand: the change moves to the archive layout and the result is committed on the feature branch under your identity.
+1. **Review** — the explicit checkout, its actual branch, the selected base, and the explicitly selected archive set (zero is valid) are disclosed before any mutation; selecting changes controls what is archived, never the whole-branch squash scope.
+2. **Sync** — merge the base branch into the source branch inside the worktree when the base is not already contained. Conflicts stop with the conflict listed; resolve, commit, and re-run close.
+3. **Archive** — through the OpenSpec CLI (`openspec archive`), never by hand: each explicitly selected change moves to the archive layout and the verified output is committed on the source branch under your identity. Incomplete or unknown tasks block the ordinary archive.
 4. **Squash-merge** — the whole feature's final content (your commits, run-compaction commits, sync resolutions, and archive output alike) is folded by tree, not by author. Close builds a private detached integration worktree at the pinned base revision, stages the feature's post-archive tree there with `git merge --squash`, scans the staged files for secrets, and creates one operator-authored conventional commit — your identity, your signing, your hooks. The feature branch's own history is never rewritten; nothing about the landing depends on who wrote which commit. That commit's message is composed by a model-backed writer (with a deterministic fallback when no model answers): the scope is always the single touched capability, the subject is a readable imperative line, and the change id is named in the body. The checklist names each squash-merge sub-phase as it happens — composing the message, waiting for your review, creating the landing commit — and the running indicator keeps animating while the writer works, even when nothing new comes back. In a terminal you confirm, edit, or cancel the message before it lands; `--message` overrides it exactly and skips composition.
-5. **Land** — the base branch is advanced onto the one verified candidate from the main checkout (which must still sit clean on the exact captured base revision). The candidate has exactly one parent — the pinned base — so landing is a guarded fast-forward-only update that refuses when the base moved (rerun `convoy close` to re-sync against the new base), never an ordinary merge or force update, and the landing commit is named in the result. The landing receipt close records is what later authorizes cleanup.
+5. **Land** — the base branch is advanced onto the one verified candidate from the main checkout (which must still sit clean on the exact captured base revision). The candidate has exactly one parent — the pinned base — so landing is a guarded fast-forward-only update that refuses when the base moved (re-run `convoy close` to re-sync against the new base), never an ordinary merge or force update, and the landing commit is named in the result. Close records no permanent receipt: the operation journal is released once the requested steps are resolved, and a later cleanup is a fresh, explicitly reviewed action.
 
-In a terminal the whole sequence runs in a full-screen TUI: completed, skipped (with reason), and failed steps stay visible as they happen; the composed commit message is accepted, edited, or cancelled in the same interface; and push, worktree removal, and branch deletion remain explicit optional actions with their dependencies visible. The TUI stays open on a failure so its remediation can be read, and a `close --resume` shows the finished steps already checked. Headless runs print the same facts as a plain stdout summary and attempt nothing interactive.
+In a terminal the whole sequence runs in a full-screen TUI: completed, skipped (with reason), and failed steps stay visible as they happen; the composed commit message is accepted, edited, or cancelled in the same interface; and push, worktree removal, and branch deletion remain separate actions (`convoy worktrees push|remove|delete-branch`). The TUI stays open on a failure so its remediation can be read. Headless runs print the same facts as a plain stdout summary and attempt nothing interactive.
 
 The message review is a vertical Accept / Edit / Cancel list: `↑`/`↓` (or `j`/`k`) move the selection, `Enter` activates the highlighted choice, and the direct shortcuts `y` / `e` / `n` still work. **Edit opens an inline multiline editor inside the TUI** — no external `$EDITOR` round-trip. Type freely (`Enter` inserts a newline), press `Ctrl+S` to save and return to review, or `Esc` to discard the draft and keep the previously reviewed message. Nothing lands until you explicitly choose Accept, so saving an edit is not a confirmation.
 
-Push, worktree removal, and branch deletion are separate, deliberate offers — never automatic. Push uses the base branch's configured remote with an explicit refspec, and is unavailable (with the setup step printed instead) when the base branch has no upstream. Worktree removal must succeed before branch deletion is offered, because git refuses to delete a checked-out branch; and because a squash-landed branch has no merge ancestry, deletion is gated on close's verified landing receipt — the exact feature tip unchanged and the landing commit still reachable from the base — and executed as an **atomic expected-tip deletion** (`git update-ref -d refs/heads/<branch> <expected-tip>`): if the branch moved between the check and the deletion — for example because a new feature reused the name — the expected-old value refuses, so the wrong work is never deleted. Headless runs print the equivalent guarded commands in that same safe order.
+Push, worktree removal, and branch deletion are separate, deliberate actions — never automatic, and never performed by close. Push uses an explicit remote and non-force refspec, and asks for the destination when no upstream is configured. Worktree removal keeps its branch by default and refuses unsafe removals: the main checkout, the current process checkout, locked or prunable registrations, uncommitted tracked/untracked content, valuable ignored files, and submodules with local state each block with their reason — there is no force-removal shortcut. Branch deletion is its own action: the safe form uses Git's unmerged-refusal, and deleting unique history after a squash requires explicit destructive consent bound to the exact reviewed tip (`--force --expect <oid>`, executed as an atomic expected-tip deletion with `git update-ref -d refs/heads/<branch> <expected-tip>`): if the branch moved between review and deletion — for example because new work reused the name — the expected-old value refuses, so the wrong work is never deleted. Headless runs print the equivalent guarded commands in that same safe order.
 
-One cleanup nuance: when close was **launched from inside the feature worktree**, worktree removal and branch deletion are presented as *deferred cleanup* — an explanation plus the exact `git -C <main-checkout>` commands in dependency order — rather than as selectable actions. A process cannot remove the directory its own shell sits in, so no amount of navigation inside this session can make those actions runnable; leave the worktree in your terminal first and run the printed commands from outside. Push is unaffected: it is offered either way.
+One cleanup nuance: when close was **launched from inside the worktree it closes**, worktree removal and branch deletion are presented as *deferred guarded commands* — an explanation plus the exact commands in dependency order — rather than as runnable actions. A process cannot remove the directory its own shell sits in, so no amount of navigation inside this session can make those actions runnable; leave the worktree in your terminal first and run the printed commands from outside. Push is unaffected: it is available either way.
 
 ### What close's evidence means (and what it doesn't)
 
-Lifecycle facts are kept deliberately orthogonal — none implies another:
+Integration facts are kept deliberately orthogonal — none implies another:
 
-- **Tasks complete** is not "ready to close": a live run, an unverified context, or an unreadable source each blocks the close review with its reason, and the review stays reachable while blocked.
-- **Archived** is not "integrated": a change can be archived (including by hand, or by `m` archive-on-main) while its branch is unlanded. The board reports *Implementation complete · archive verified* and keeps the close review available.
-- **Probably merged** is not "merged": patch equivalence without a receipt stays probabilistic, forever.
-- **A verified landing receipt** is the only certain local integration: it names the exact feature tip and the landing commit, and counts only while that landing is still reachable from the base and the tip is unchanged. That is *integrated locally* — it says nothing about a remote, a PR, or a hosted merge.
-- **Landing is two recorded stages**: the base ref moves through an expected-old guarded ref transaction (after which the landing has happened, even if the process dies), and the base checkout is then materialized with a guarded update. A crash between them is reconciled on the next `close --resume` — the landing is recognized, the checkout is brought up to date, the receipt is written, and no second commit is ever created for the same closed tip.
+- **Tasks complete** is not "ready to close": a live managed writer, an unreadable source, or a dirty tree each blocks the close review with its reason, and the review stays reachable while blocked.
+- **Archived** is not "integrated": a change can be archived (including by hand) while its branch is unlanded. The board reports the archive as a local fact and keeps the close review available.
+- **A merged PR** is a fact about that PR, never about the current branch: a merged PR for an older head or a reused branch name does not make current work completed, and unavailable PR evidence is never reported as "no PR" or "merged".
+- **Equal trees** mean no content difference right now — not that a previous close happened, and never authorization to delete unique history.
+- **Landing is reconciled, not receipted**: the base ref moves through a guarded fast-forward and the operation journal records intent before each effect. A crash between steps is reconciled by `convoy worktrees recover --operation <id>` against actual Git state — the journal is released once resolved, and no second commit is ever created for the same landing.
 
 ## Goal mode
 
@@ -967,8 +974,8 @@ convoy/
 │   ├── advisor-report.ts  # executor/advisor token split read back from the attempt logs
 │   ├── attachments.ts   # FilePartInput for --file and internal attachments
 │   ├── git.ts           # diff, commit, and pre-commit secret scan
-│   ├── feature-close.ts  # close's sequence: preflight, sync, archive, and the guarded squash-merge landing
-│   ├── close-journal.ts  # close's landing journal/receipt and evidence refs in the git common dir
+│   ├── worktree-commands.ts  # the worktree control center's guarded CLI/TUI operations, incl. close
+│   ├── close-journal.ts  # legacy close journal/receipt reading and evidence refs in the git common dir
 │   ├── close-tui.ts      # close's full-screen checklist TUI
 │   ├── publish.ts        # the deliberate Create pull request action: normal push, then locate/create PR
 │   ├── finalization/    # guarded automatic run compaction: interval, lease, refs, executor

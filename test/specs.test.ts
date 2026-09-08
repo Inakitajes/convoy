@@ -11,7 +11,6 @@ import {
   classifySpecArtifact,
   groupChangeArtifacts,
   loadSpecsView,
-  mergeWorktreeChanges,
   printSpecsList,
   specArtifactLabel,
   specGroupSource,
@@ -22,6 +21,9 @@ import {
 
 let root: string
 let symlinkCreated = false
+
+/** Git reports physical paths; /var is a symlink to /private/var on macOS. */
+const phys = (path: string): string => (path.startsWith("/private/") ? path : `/private${path}`)
 
 beforeAll(async () => {
   root = await mkdtemp(join(tmpdir(), "convoy-specs-test-"))
@@ -101,13 +103,19 @@ describe("loadSpecsView", () => {
 
     const [login, empty] = view.changes
     expect(login!.title).toBe("Add login")
+    // Artifacts are absolute paths into the change's own checkout (design D3:
+    // files are local inputs keyed by (checkout, local path)). This fixture is
+    // not a git repo, so the degraded board serves the launch checkout's own
+    // reads with its recorded path.
     expect(login!.artifacts.map((artifact) => [artifact.section, artifact.capability, artifact.file])).toEqual([
-      ["proposal", undefined, join("openspec", "changes", "add-login", "proposal.md")],
-      ["design", undefined, join("openspec", "changes", "add-login", "design.md")],
-      ["tasks", undefined, join("openspec", "changes", "add-login", "tasks.md")],
-      ["delta", "cli", join("openspec", "changes", "add-login", "specs", "cli", "spec.md")],
-      ["other", undefined, join("openspec", "changes", "add-login", "notes.md")],
+      ["proposal", undefined, join(root, "openspec", "changes", "add-login", "proposal.md")],
+      ["design", undefined, join(root, "openspec", "changes", "add-login", "design.md")],
+      ["tasks", undefined, join(root, "openspec", "changes", "add-login", "tasks.md")],
+      ["delta", "cli", join(root, "openspec", "changes", "add-login", "specs", "cli", "spec.md")],
+      ["other", undefined, join(root, "openspec", "changes", "add-login", "notes.md")],
     ])
+    // The degraded board has no rows; the entry is keyed to the launch checkout.
+    expect(login!.checkout).toBe(root)
 
     expect(empty!.title).toBe("empty-change")
     expect(empty!.artifacts).toEqual([])
@@ -185,7 +193,7 @@ describe("printSpecsList", () => {
       return true
     }) as typeof process.stdout.write)
     try {
-      printSpecsList({ present: true, changes: [], specs: [] })
+      printSpecsList({ board: { worktrees: [] }, changes: [], specs: [] })
     } finally {
       spy.mockRestore()
     }
@@ -226,7 +234,7 @@ describe("browseSpecs outside a terminal", () => {
       } finally {
         spy.mockRestore()
       }
-      expect(writes.join("")).toContain("no specs found")
+      expect(writes.join("")).toContain("no worktrees or specs found")
     } finally {
       await rm(bare, { recursive: true, force: true })
     }
@@ -277,7 +285,7 @@ describe("buildIterateSessionInput", () => {
 
 describe("groupChangeArtifacts", () => {
   function change(artifacts: SpecsChangeEntry["artifacts"]): SpecsChangeEntry {
-    return { kind: "change", id: "multi", title: "Multi", artifacts }
+    return { kind: "change", id: "multi", checkout: "/c", title: "Multi", artifacts }
   }
 
   test("merges multi-capability deltas into one Delta Specs group in stable order", () => {
@@ -468,17 +476,22 @@ describe("worktree-backed changes read their artifacts from the worktree", () =>
 
       await withIsolatedHome(async () => {
         const view = await loadSpecsView(repo)
-        const entry = view.changes.find((change) => change.id === "add-gadget")
-        expect(entry).toBeDefined()
-        // Title and artifacts come from the worktree's proposal, not the husk.
-        expect(entry!.title).toBe("Add gadget")
-        expect(entry!.artifacts.length).toBe(4)
-        for (const artifact of entry!.artifacts) {
+        // Same-id copies are independent entries keyed to their checkout
+        // (design D3): the main husk lists by id with no artifacts, and the
+        // worktree copy carries its own title and files.
+        const copies = view.changes.filter((change) => change.id === "add-gadget")
+        expect(copies).toHaveLength(2)
+        const husk = copies.find((change) => change.checkout !== phys(wt))!
+        const entry = copies.find((change) => change.checkout === phys(wt))!
+        expect(husk.title).toBe("add-gadget")
+        expect(husk.artifacts).toEqual([])
+        // Title and artifacts come from the worktree's own proposal.
+        expect(entry.title).toBe("Add gadget")
+        expect(entry.artifacts.length).toBe(4)
+        for (const artifact of entry.artifacts) {
           expect(artifact.file).toContain(wt)
           await expect(readFile(artifact.file, "utf8")).resolves.toBeDefined()
         }
-        // The merge must never leave a zero-artifact entry behind.
-        expect(view.changes.every((change) => change.artifacts.length > 0)).toBe(true)
       })
     } finally {
       await cleanup()
@@ -502,14 +515,19 @@ describe("worktree-backed changes read their artifacts from the worktree", () =>
 
       await withIsolatedHome(async () => {
         const view = await loadSpecsView(repo)
-        const entry = view.changes.find((change) => change.id === "renamed-thing")
-        expect(entry).toBeDefined()
-        expect(entry!.title).toBe("Worktree proposal")
-        for (const artifact of entry!.artifacts) {
-          expect(artifact.file).toContain(wt)
+        // Diverging copies stay independent: each checkout's entry carries
+        // its own title and files, and neither borrows from the other.
+        const copies = view.changes.filter((change) => change.id === "renamed-thing")
+        expect(copies).toHaveLength(2)
+        const entry = copies.find((change) => change.checkout === phys(wt))!
+        expect(entry.title).toBe("Worktree proposal")
+        for (const artifact of entry.artifacts) {
+          expect(artifact.file).toContain(phys(wt))
         }
-        const proposal = entry!.artifacts.find((artifact) => artifact.section === "proposal")
+        const proposal = entry.artifacts.find((artifact) => artifact.section === "proposal")
         await expect(readFile(proposal!.file, "utf8")).resolves.toBe("# Worktree proposal\n")
+        const baseEntry = copies.find((change) => change.checkout !== wt)!
+        expect(baseEntry.title).toBe("Base proposal")
       })
     } finally {
       await cleanup()
@@ -534,48 +552,24 @@ describe("worktree-backed changes read their artifacts from the worktree", () =>
 
       await withIsolatedHome(async () => {
         const view = await loadSpecsView(repo)
-        const kept = view.changes.find((change) => change.id === "keep-main")
+        // Each checkout's copies are their own entries: the launch checkout's
+        // real files keep their absolute paths and title; the worktree's husk
+        // copies list by id with no artifacts and no borrowed facts.
+        const kept = view.changes.find((change) => change.id === "keep-main" && change.checkout !== phys(wt))
         expect(kept).toBeDefined()
-        // The launch checkout's entry stands: repo-relative paths, its own title.
         expect(kept!.title).toBe("Keep on main")
         expect(kept!.artifacts.map((artifact) => artifact.file)).toEqual([
-          join("openspec", "changes", "keep-main", "proposal.md"),
+          phys(join(repo, "openspec", "changes", "keep-main", "proposal.md")),
         ])
-        // An id the launch checkout never listed still appends (husk listing
-        // beats no listing) — the merge never drops a row.
         const ghost = view.changes.find((change) => change.id === "ghost-change")
         expect(ghost).toBeDefined()
+        expect(ghost!.checkout).toBe(phys(wt))
         expect(ghost!.title).toBe("ghost-change")
         expect(ghost!.artifacts).toEqual([])
       })
     } finally {
       await cleanup()
     }
-  })
-
-  test("a worktree row without a worktreeDir leaves the launch checkout's entry untouched", async () => {
-    const base: SpecsChangeEntry = {
-      kind: "change",
-      id: "solo",
-      title: "Solo",
-      artifacts: [{ section: "proposal", file: join("openspec", "changes", "solo", "proposal.md") }],
-    }
-    // Unreachable through assembleControlBoard (it always sets worktreeDir on
-    // worktree rows), so a synthetic row exercises the guard directly.
-    const rows = [
-      {
-        id: "solo",
-        location: "worktree",
-        runs: [],
-        liveRuns: 0,
-        uncommittedProposal: false,
-        probablyMerged: false,
-        stage: "proposing",
-      },
-    ] as const
-    const merged = await mergeWorktreeChanges([base], rows as unknown as Parameters<typeof mergeWorktreeChanges>[1])
-    expect(merged).toHaveLength(1)
-    expect(merged[0]).toBe(base)
   })
 
   test("a stranded change keeps repo-relative paths beside a worktree-backed one", async () => {
@@ -596,13 +590,14 @@ describe("worktree-backed changes read their artifacts from the worktree", () =>
         const view = await loadSpecsView(repo)
         const strandedEntry = view.changes.find((change) => change.id === "stranded-idea")
         expect(strandedEntry).toBeDefined()
+        expect(strandedEntry!.checkout).toBe(view.board.worktrees[0]!.path)
         expect(strandedEntry!.artifacts.map((artifact) => artifact.file)).toEqual([
-          join("openspec", "changes", "stranded-idea", "proposal.md"),
+          phys(join(repo, "openspec", "changes", "stranded-idea", "proposal.md")),
         ])
         const worktreeEntry = view.changes.find((change) => change.id === "add-gadget")
         expect(worktreeEntry).toBeDefined()
         expect(worktreeEntry!.artifacts.length).toBeGreaterThan(0)
-        expect(worktreeEntry!.artifacts.every((artifact) => artifact.file.includes(wt))).toBe(true)
+        expect(worktreeEntry!.artifacts.every((artifact) => artifact.file.includes(phys(wt)))).toBe(true)
       })
     } finally {
       await cleanup()
