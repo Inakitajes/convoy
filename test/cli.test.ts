@@ -72,6 +72,53 @@ describe("home navigation loop", () => {
 
     expect(homeOpens).toBe(1)
   })
+
+  test("an interrupted home context load exits without opening Home", async () => {
+    let homeOpens = 0
+
+    await runHomeNavigationLoop({
+      interrupted: () => false,
+      route: {} as never,
+      targetDir: ".",
+      // The transition-wrapped loader answers undefined when Ctrl+C lands
+      // while the loading transition is up.
+      loadHome: async () => undefined,
+      openHome: async () => {
+        homeOpens += 1
+        return undefined
+      },
+      openWork: async () => {},
+      createWork: async () => {},
+      openDestination: async () => {},
+    })
+
+    expect(homeOpens).toBe(0)
+  })
+
+  test("the injected home load refreshes on every return to Home", async () => {
+    let loads = 0
+    let homeOpens = 0
+
+    await runHomeNavigationLoop({
+      interrupted: () => false,
+      route: {} as never,
+      targetDir: ".",
+      loadHome: async () => {
+        loads += 1
+        return { worktrees: [] }
+      },
+      openHome: async () => {
+        homeOpens += 1
+        return homeOpens === 1 ? { type: "destination", destination: "specs" } : undefined
+      },
+      openWork: async () => {},
+      createWork: async () => {},
+      openDestination: async () => {},
+    })
+
+    expect(loads).toBe(2)
+    expect(homeOpens).toBe(2)
+  })
 })
 
 describe("parseArgs", () => {

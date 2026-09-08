@@ -304,6 +304,9 @@ async function runHomeSession(targetDir: string): Promise<void> {
       interrupted: () => interrupted,
       route,
       targetDir,
+      // Every Home open — the first launch and each return from a destination —
+      // covers a genuinely slow context load with the shared loading transition.
+      loadHome: () => loadHomeWithTransition(route, targetDir),
       openHome: (context) => launchHomeTui(targetDir, { route, kittyGraphics, ...context }),
       openWork: async (worktree, action) => {
         await dispatchWorkAction(targetDir, route, worktree, action)
@@ -323,6 +326,13 @@ async function runHomeSession(targetDir: string): Promise<void> {
   }
 }
 
+/** The resolved context Home opens with: the refreshed worktree inventory plus the navigation hint. */
+export type HomeContext = {
+  worktrees: import("./control-board").BoardWorktree[]
+  resumeWorktree?: string
+  resumeNotice?: string
+}
+
 /**
  * The resolved context Home opens with: the refreshed worktree inventory (task
  * 3.1) plus the last-selection navigation hint (task 3.3). The hint is
@@ -331,7 +341,7 @@ async function runHomeSession(targetDir: string): Promise<void> {
  * directory still verify continuity; otherwise Home opens the current
  * Worktrees list with an explanation, never a replacement selection.
  */
-async function homeWorkContext(targetDir: string): Promise<{ worktrees: import("./control-board").BoardWorktree[]; resumeWorktree?: string; resumeNotice?: string }> {
+async function homeWorkContext(targetDir: string): Promise<HomeContext> {
   const { assembleControlBoard } = await import("./control-board")
   const board = await assembleControlBoard(targetDir)
   const { repoCommonDir } = await import("./repo-store")
@@ -346,6 +356,30 @@ async function homeWorkContext(targetDir: string): Promise<{ worktrees: import("
   return {
     worktrees: board.worktrees,
     resumeNotice: `the last selected checkout is no longer verifiable (${verification.reason}) — select a worktree explicitly`,
+  }
+}
+
+/**
+ * The home session's context load wrapped in the shared loading transition —
+ * the same breathing-sea handoff the destinations use, so the first launch and
+ * every return to Home cover a genuinely slow control-board load instead of
+ * freezing on the previous frame. Fast loads and non-interactive paths never
+ * see it. A Ctrl+C during the transition has already flagged the session's
+ * interrupt; this loader answers undefined so the navigation loop exits
+ * quietly instead of opening Home.
+ */
+export async function loadHomeWithTransition(
+  route: TuiRoute,
+  targetDir: string,
+  load: () => Promise<HomeContext> = () => homeWorkContext(targetDir),
+  options: { thresholdMs?: number; reducedMotion?: boolean | (() => boolean | Promise<boolean>) } = {},
+): Promise<HomeContext | undefined> {
+  const { withLoadingTransition, isLoadingInterrupted } = await import("./loading-transition")
+  try {
+    return await withLoadingTransition(route, "home", load, { targetDir, ...options })
+  } catch (error) {
+    if (!isLoadingInterrupted(error)) throw error
+    return undefined
   }
 }
 
@@ -588,13 +622,21 @@ export async function runHomeNavigationLoop(options: {
   interrupted: () => boolean
   route: TuiRoute
   targetDir: string
-  openHome: (context: { worktrees: import("./control-board").BoardWorktree[]; resumeWorktree?: string; resumeNotice?: string }) => Promise<HomeResolution>
+  /**
+   * The Home context load; the home session injects the transition-wrapped
+   * loader (loadHomeWithTransition). An undefined answer means the load was
+   * interrupted (Ctrl+C while the transition was up) — the loop exits quietly
+   * instead of opening Home. The default runs the plain context load.
+   */
+  loadHome?: () => Promise<HomeContext | undefined>
+  openHome: (context: HomeContext) => Promise<HomeResolution>
   openWork: (worktree: string, action: HomeWorkAction) => Promise<void>
   createWork: (draft: { displayName: string; branch: string; base: string; worktree: string }) => Promise<void>
   openDestination: (selection: HomeDestination) => Promise<void>
 }): Promise<void> {
   while (!options.interrupted()) {
-    const context = await homeWorkContext(options.targetDir)
+    const context = options.loadHome ? await options.loadHome() : await homeWorkContext(options.targetDir)
+    if (!context) return
     const resolution = await options.openHome(context)
     if (!resolution || options.interrupted()) return
     if (resolution.type === "destination") {

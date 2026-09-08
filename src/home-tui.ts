@@ -72,19 +72,20 @@ export type HomeSelection = HomeDestination | undefined
 export const compactHomeMaxWidth = 72
 
 const CHROME_PADDING_COLS = 1
-const WORDMARK_GAP = "  "
+export const WORDMARK_GAP = "  "
 /** Rounded border + paddingX:1 on each side of a panel. */
 const PANEL_GUTTER = 4
 
-const CONVOY_WORDMARK: Readonly<Record<string, readonly [string, string, string]>> = {
+/** The CONVOY block letters, shared with the loading transition's centered card. */
+export const CONVOY_WORDMARK: Readonly<Record<string, readonly [string, string, string]>> = {
   C: ["████", "██  ", "████"],
   O: ["████", "█  █", "████"],
   N: ["█  █", "██ █", "█ ██"],
   V: ["█  █", "█  █", " ██ "],
   Y: ["█  █", " ██ ", " ██ "],
 }
-const CONVOY_LETTERS = [..."CONVOY"]
-const CONVOY_WORDMARK_WIDTH = CONVOY_LETTERS.reduce(
+export const CONVOY_LETTERS = [..."CONVOY"]
+export const CONVOY_WORDMARK_WIDTH = CONVOY_LETTERS.reduce(
   (width, letter, index) => width + CONVOY_WORDMARK[letter]![0].length + (index > 0 ? WORDMARK_GAP.length : 0),
   0,
 )
