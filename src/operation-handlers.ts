@@ -180,8 +180,11 @@ export async function reviewWorktreeRemoval(checkout: string): Promise<Operation
     const lines = status.split("\n").filter((line) => line.trim() !== "")
     if (lines.length > 0) {
       blockers.push({
+        // Content blocker: `remove --force` deletes these, so a deliberate
+        // force consent may bypass it (design D8).
+        content: true,
         reason: `the checkout has ${lines.length} uncommitted change(s) (tracked or untracked) that removal would delete`,
-        remediation: "commit, stash, or remove them explicitly first — removal never forces away local data",
+        remediation: "commit, stash, or remove them explicitly first, or force removal — which deletes these uncommitted changes",
       })
     }
     // Ignored content may hold valuable local state (env files, caches with
@@ -197,8 +200,11 @@ export async function reviewWorktreeRemoval(checkout: string): Promise<Operation
       const ignoredPaths = ignored.stdout.split("\n").filter((line) => line.startsWith("!!"))
       if (ignoredPaths.length > 0) {
         blockers.push({
+          // Content blocker: `remove --force` deletes these, so a deliberate
+          // force consent may bypass it (design D8).
+          content: true,
           reason: `the checkout contains ${ignoredPaths.length} ignored file(s)/director(ies) that removal would delete`,
-          remediation: "move or delete the ignored content explicitly first — ordinary removal has no force shortcut",
+          remediation: "move or delete the ignored content explicitly first, or force removal — which deletes these ignored files/directories",
         })
       }
     }
@@ -211,8 +217,11 @@ export async function reviewWorktreeRemoval(checkout: string): Promise<Operation
     const dirty = submodules.stdout.split("\n").filter((line) => line.trim() !== "" && !line.startsWith(" "))
     if (dirty.length > 0) {
       blockers.push({
+        // Content blocker: `remove --force` removes the checkout and the local
+        // submodule state with it, so a deliberate force consent may bypass it.
+        content: true,
         reason: `${dirty.length} submodule(s) have local state (changed commit, uninitialized, or conflicted): ${dirty.map((line) => line.slice(1).split(" ")[1] ?? line.slice(1)).join(", ")}`,
-        remediation: "resolve the submodule state (sync/commit/update) before removing the checkout",
+        remediation: "resolve the submodule state (sync/commit/update) before removing the checkout, or force removal — which deletes this submodule-local state",
       })
     }
   }
@@ -234,11 +243,19 @@ export async function reviewWorktreeRemoval(checkout: string): Promise<Operation
  * the writer claim, legacy conflicts, and the full removal contract (task
  * 7.4) — main/process-checkout refusals, locks, tracked/untracked/ignored
  * content, and submodule state; execution revalidates the exact checkout
- * before `git worktree remove` runs. There is no force-removal shortcut.
+ * before `git worktree remove` runs.
+ *
+ * `force` bypasses only *content* blockers (uncommitted/untracked/ignored
+ * content and submodule-local state). It never bypasses the main checkout,
+ * the process's own checkout, an unverified registration, a lock, writer
+ * conflicts, legacy unresolved operations, or unknown/unreadable state —
+ * those always block.
  */
 export async function removeRegisteredWorktree(input: {
   checkout: string
   commonDir: string
+  /** Bypass content blockers with a deliberate force consent. */
+  force?: boolean
   /** Injected effect for tests; defaults to the real `git worktree remove`. */
   effect?: (target: ObservedCheckoutTarget) => Promise<{ removedPath: string }>
   /** Injected removal review for tests; defaults to the real safety checks. */
@@ -246,7 +263,11 @@ export async function removeRegisteredWorktree(input: {
 }): Promise<WorktreeRemovalOutcome> {
   const safety = input.review ? await input.review(input.checkout) : await reviewWorktreeRemoval(input.checkout)
   const review = await reviewOperation({ action: "remove", checkout: input.checkout, commonDir: input.commonDir })
-  const blockers = [...safety, ...(review.ok ? [] : review.blockers)]
+  // Force consent removes content blockers but never the hard ones: main and
+  // process checkouts, unverified registrations, locks, writer conflicts, and
+  // legacy unresolved operations still refuse, as does unknown state.
+  const safetyBlockers = input.force ? safety.filter((blocker) => blocker.content !== true) : safety
+  const blockers = [...safetyBlockers, ...(review.ok ? [] : review.blockers)]
   if (blockers.length > 0 || !review.review.available) {
     return { ok: false, reason: "blocked", blockers, review: review.review }
   }
@@ -261,7 +282,7 @@ export async function removeRegisteredWorktree(input: {
         // `git worktree remove` refuses to delete the checkout it runs in, so
         // the command runs from the repository's main checkout.
         const main = (await mainWorktreeDir(target.checkoutPath)) ?? target.checkoutPath
-        await removeWorktree(target.checkoutPath, main)
+        await removeWorktree(target.checkoutPath, main, input.force === true)
         return { removedPath: target.checkoutPath }
       }),
   })

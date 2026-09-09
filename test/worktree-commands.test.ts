@@ -44,6 +44,13 @@ describe("convoy worktrees routing", () => {
     expect(parsed).toEqual({ kind: "sync", worktree: "/wt/x", base: "main" })
   })
 
+  test("remove parses an explicit --force and defaults to ordinary", async () => {
+    const plain = parseWorktreesArgs(["remove", "--worktree", "/wt/x"])
+    expect(plain).toEqual({ kind: "remove", worktree: "/wt/x", force: false })
+    const forced = parseWorktreesArgs(["remove", "--worktree", "/wt/x", "--force"])
+    expect(forced).toEqual({ kind: "remove", worktree: "/wt/x", force: true })
+  })
+
   test("the help text names the reviewed surface", () => {
     const help = worktreesHelp()
     for (const sub of ["fetch", "sync", "push", "archive", "squash", "close", "remove", "delete-branch", "recover"]) {
@@ -454,7 +461,7 @@ describe("remove and delete-branch", () => {
   test("removal keeps the branch and reports removal, not completion", async () => {
     const fixture = await createFixtureRepo({ worktrees: [{ name: "wt", branch: "feat/x" }] })
     fixtures.push(fixture)
-    await runWorktreesCommand({ kind: "remove", worktree: fixture.worktrees["wt"]! }, fixture.root)
+    await runWorktreesCommand({ kind: "remove", worktree: fixture.worktrees["wt"]!, force: false }, fixture.root)
     const branches = (await fixture.git(["branch", "--list", "feat/x"])).trim()
     expect(branches).toContain("feat/x")
     const listing = await renderInventory(fixture.root)
@@ -475,7 +482,7 @@ describe("remove and delete-branch", () => {
     await fixture.commitAll("feat: work", wt)
     await runWorktreesCommand({ kind: "close", worktree: wt, base: "main", changes: [] }, fixture.root)
     // Remove the worktree so the branch is deletable, then try the safe form.
-    await runWorktreesCommand({ kind: "remove", worktree: wt }, fixture.root)
+    await runWorktreesCommand({ kind: "remove", worktree: wt, force: false }, fixture.root)
     // `-d` refuses: the squashed branch's commits are not contained in main.
     await expect(runWorktreesCommand({ kind: "delete-branch", branch: "feat/x", force: false }, fixture.root)).rejects.toThrow(/--force/)
     expect((await fixture.git(["branch", "--list", "feat/x"])).trim()).toContain("feat/x")
@@ -498,7 +505,7 @@ describe("remove and delete-branch", () => {
     await fixture.write(wt, "feature.txt", "work\n")
     await fixture.commitAll("feat: work", wt)
     await runWorktreesCommand({ kind: "close", worktree: wt, base: "main", changes: [] }, fixture.root)
-    await runWorktreesCommand({ kind: "remove", worktree: wt }, fixture.root)
+    await runWorktreesCommand({ kind: "remove", worktree: wt, force: false }, fixture.root)
 
     // The operator reviews the tip…
     const reviewedTip = (await fixture.git(["rev-parse", "feat/x"])).trim()
@@ -664,7 +671,7 @@ describe("recover", () => {
     const wt = fixture.worktrees["wt"]!
     await fixture.write(wt, "feature.txt", "work\n")
     await fixture.commitAll("feat: work", wt)
-    await runWorktreesCommand({ kind: "remove", worktree: wt }, fixture.root)
+    await runWorktreesCommand({ kind: "remove", worktree: wt, force: false }, fixture.root)
     const tip = (await fixture.git(["rev-parse", "feat/x"])).trim()
     // A 8-char prefix of the real tip must not authorize the deletion.
     await expect(runWorktreesCommand({ kind: "delete-branch", branch: "feat/x", force: true, expect: tip.slice(0, 8) }, fixture.root)).rejects.toThrow(/full 40-character OID/)

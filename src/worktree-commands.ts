@@ -42,7 +42,7 @@ Usage:
   convoy worktrees archive --worktree <path> --change <id> [--change <id> ...]
   convoy worktrees squash --worktree <path> --base <local-branch> [--message <text>]
   convoy worktrees close --worktree <path> --base <local-branch> [--change <id> ...] [--message <text>]
-  convoy worktrees remove --worktree <path>
+  convoy worktrees remove --worktree <path> [--force]
   convoy worktrees delete-branch --branch <name> [--force --expect <oid>]
   convoy worktrees recover --operation <id> [--continue | --cancel]
   convoy worktrees cleanup-legacy [--confirm]
@@ -56,7 +56,11 @@ Squash lands the WHOLE reviewed branch as one commit on the base — selecting
 changes controls what close archives, never the squash scope. Close composes
 sync (as needed), archive of the explicitly selected changes, and that squash;
 push, worktree removal, and branch deletion remain separate actions. Worktree
-removal keeps its branch by default. Branch deletion is a separate action: the
+removal keeps its branch by default and is deliberately conservative: it blocks
+on uncommitted/untracked/ignored content, submodule-local state, locks, and the
+main/process checkout. --force bypasses only the content blockers (it never
+removes the main checkout, the current checkout, a locked or unverified
+registration, or unknown state). Branch deletion is a separate action: the
 safe form uses Git's own unmerged-refusal; --force is explicit destructive
 consent that must also name the exact reviewed tip with the full 40-character
 --expect <oid>, and the deletion is refused if the branch moved after review.`
@@ -73,7 +77,7 @@ export type WorktreesCommand =
   | { kind: "archive"; worktree: string; changes: string[] }
   | { kind: "squash"; worktree: string; base: string; message?: string }
   | { kind: "close"; worktree: string; base: string; changes: string[]; message?: string }
-  | { kind: "remove"; worktree: string }
+  | { kind: "remove"; worktree: string; force: boolean }
   | { kind: "delete-branch"; branch: string; force: boolean; expect?: string }
   | { kind: "recover"; operationId: string; consent: RecoveryConsent }
   | { kind: "cleanup-legacy"; confirm: boolean }
@@ -162,7 +166,7 @@ export function parseWorktreesArgs(argv: string[]): WorktreesCommand {
         ...(single("--message") ? { message: single("--message") } : {}),
       }
     case "remove":
-      return { kind: "remove", worktree: requireSingle("--worktree") }
+      return { kind: "remove", worktree: requireSingle("--worktree"), force: flags.has("--force") }
     case "delete-branch": {
       const force = (flags.get("--force") ?? []).length > 0
       return { kind: "delete-branch", branch: requireSingle("--branch"), force, ...(single("--expect") ? { expect: single("--expect") } : {}) }
@@ -1032,9 +1036,11 @@ function changedPaths(before: string, after: string): string[] {
 
 async function runRemove(command: Extract<WorktreesCommand, { kind: "remove" }>, cwd?: string): Promise<void> {
   const { commonDir } = await repoContext(cwd)
-  const outcome = await removeRegisteredWorktree({ checkout: command.worktree, commonDir })
+  const outcome = await removeRegisteredWorktree({ checkout: command.worktree, commonDir, force: command.force })
   if (!outcome.ok) return reportBlocked(outcome.blockers, outcome.reason)
-  process.stdout.write(`removed worktree ${outcome.value.removedPath} (its branch was retained; deletion is a separate action)\n`)
+  process.stdout.write(
+    `removed worktree ${outcome.value.removedPath} (its branch was retained; deletion is a separate action)\n`,
+  )
 }
 
 // ── delete-branch ────────────────────────────────────────────────────────

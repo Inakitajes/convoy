@@ -65,7 +65,7 @@ describe("removeRegisteredWorktree (guarded handler)", () => {
     expect(inventory.entries.some((entry) => entry.path.endsWith("kept"))).toBe(true)
   })
 
-  test("ignored content blocks ordinary removal — there is no force shortcut (task 7.4)", async () => {
+  test("ignored content blocks ordinary removal and points to the force path (task 7.4)", async () => {
     const fixture = await createFixtureRepo({ worktrees: [{ name: "doomed", branch: "feat/doomed" }] })
     fixtures.push(fixture)
     const doomed = fixture.worktrees["doomed"]!
@@ -78,12 +78,53 @@ describe("removeRegisteredWorktree (guarded handler)", () => {
     if (!outcome.ok) {
       const reasons = outcome.blockers.map((blocker) => `${blocker.reason} ${blocker.remediation}`).join("\n")
       expect(reasons).toContain("ignored file")
-      expect(reasons).toContain("no force shortcut")
+      expect(reasons).toContain("force removal")
     }
-    // The checkout and its ignored content survive.
+    // The checkout and its ignored content survive an ordinary removal.
     expect(await readFile(join(doomed, "cache", "valuable.local"), "utf8")).toContain("keep me")
     const inventory = await listWorktrees(fixture.root)
     expect(inventory.entries.some((entry) => entry.path.endsWith("doomed"))).toBe(true)
+  })
+
+  test("force bypasses content blockers and removes the checkout", async () => {
+    const fixture = await createFixtureRepo({ worktrees: [{ name: "doomed", branch: "feat/doomed" }] })
+    fixtures.push(fixture)
+    const doomed = fixture.worktrees["doomed"]!
+    await fixture.write(doomed, ".gitignore", "cache/\n")
+    await fixture.commitAll("chore: ignore cache", doomed)
+    await mkdir(join(doomed, "cache"), { recursive: true })
+    await writeFile(join(doomed, "cache", "valuable.local"), "keep me\n")
+    const outcome = await removeRegisteredWorktree({ checkout: doomed, commonDir: await commonDirOf(fixture), force: true })
+    expect(outcome.ok).toBe(true)
+    const inventory = await listWorktrees(fixture.root)
+    expect(inventory.entries.some((entry) => entry.path.endsWith("doomed"))).toBe(false)
+  })
+
+  test("force never bypasses a hard blocker: the repository's main checkout stays", async () => {
+    const fixture = await createFixtureRepo({ worktrees: [{ name: "wt", branch: "feat/wt" }] })
+    fixtures.push(fixture)
+    const outcome = await removeRegisteredWorktree({ checkout: fixture.root, commonDir: await commonDirOf(fixture), force: true })
+    expect(outcome.ok).toBe(false)
+    if (!outcome.ok) expect(outcome.blockers.map((blocker) => blocker.reason).join("\n")).toContain("main checkout")
+    const inventory = await listWorktrees(fixture.root)
+    expect(inventory.entries.length).toBe(2)
+  })
+
+  test("force never bypasses a lock — unlock is still the path", async () => {
+    const fixture = await createFixtureRepo({ worktrees: [{ name: "locked", branch: "feat/locked" }] })
+    fixtures.push(fixture)
+    const locked = fixture.worktrees["locked"]!
+    await execFile("git", ["worktree", "lock", "--reason", "held by operator", locked], { cwd: fixture.root, allowFailure: true })
+    const outcome = await removeRegisteredWorktree({ checkout: locked, commonDir: await commonDirOf(fixture), force: true })
+    expect(outcome.ok).toBe(false)
+    if (!outcome.ok) {
+      const reasons = outcome.blockers.map((blocker) => `${blocker.reason} ${blocker.remediation}`).join("\n")
+      expect(reasons).toContain("the worktree is locked")
+      expect(reasons).toContain("git worktree unlock")
+    }
+    const inventory = await listWorktrees(fixture.root)
+    const entry = inventory.entries.find((candidate) => candidate.path.endsWith("locked"))
+    expect(entry?.locked).toBeDefined()
   })
 
   test("the repository's main checkout is never removable", async () => {

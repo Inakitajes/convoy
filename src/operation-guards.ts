@@ -30,6 +30,14 @@ export type OperationAction =
 export type OperationBlocker = {
   reason: string
   remediation: string
+  /**
+   * A removal blocker that guards local content (uncommitted, untracked,
+   * ignored, or submodule-local state) which `remove --force` would delete.
+   * Only content blockers may be bypassed by an explicit force consent; the
+   * main checkout, the process's own checkout, an unverified registration, a
+   * lock, and unknown/unreadable state are never forcible.
+   */
+  content?: boolean
 }
 
 /** What the inspection observed, with unknown kept distinct from negative facts. */

@@ -471,8 +471,8 @@ export async function pushRefspec(remote: string, refspec: string, cwd: string) 
   if (exitCode !== 0) throw new Error(`git push exited with code ${exitCode}`)
 }
 
-export async function removeWorktree(dir: string, cwd: string) {
-  await execFile("git", ["worktree", "remove", "--", dir], { cwd })
+export async function removeWorktree(dir: string, cwd: string, force = false) {
+  await execFile("git", ["worktree", "remove", ...(force ? ["--force"] : []), "--", dir], { cwd })
 }
 
 /**

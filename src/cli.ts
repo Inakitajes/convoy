@@ -513,7 +513,7 @@ async function runWorktreeMenuOperation(targetDir: string, route: TuiRoute, work
       return
     }
     if (action === "remove") {
-      await runWorktreesCommand({ kind: "remove", worktree })
+      await removeWorktreeInteractive(targetDir, route, worktree)
       return
     }
     // delete-branch: the menu projects it as blocked while this worktree holds
@@ -525,6 +525,80 @@ async function runWorktreeMenuOperation(targetDir: string, route: TuiRoute, work
     await runWorktreesCommand({ kind: "delete-branch", branch, force: false })
   } catch (error) {
     await blocked(error instanceof Error ? error.message : String(error))
+  }
+}
+
+/** One blocked reason plus its remediation, indented for a dialog body. */
+function removalBlockersText(blockers: Array<{ reason: string; remediation: string }>): string {
+  return blockers.map((blocker) => `- ${blocker.reason}\n  ${blocker.remediation}`).join("\n")
+}
+
+/**
+ * The Home "remove worktree" action (delta spec worktree-operations): the
+ * guarded removal is confirmed at launch naming the checkout and its
+ * branch-retention outcome; a blocked removal shows every blocker with its
+ * remediation and offers an explicit force path only when the blockers are all
+ * content — main/process checkout, unverified registration, lock, writer
+ * conflict, and unknown/unreadable state never offer force. The headless
+ * `convoy worktrees remove [--force]` path keeps its stderr reporting.
+ */
+async function removeWorktreeInteractive(targetDir: string, route: TuiRoute, worktree: string): Promise<void> {
+  const { showNoticeTui } = await import("./notice-tui")
+  const { showRemovalConfirmTui } = await import("./removal-confirm-tui")
+  const { removeRegisteredWorktree, reviewOperation, reviewWorktreeRemoval } = await import("./operation-handlers")
+  const { repoCommonDir } = await import("./repo-store")
+  const commonDir = await repoCommonDir(targetDir)
+  if (!commonDir) {
+    await showNoticeTui(route, { title: "worktree action", message: "not a git repository — nothing was removed" })
+    return
+  }
+
+  // Review once for the dialog (read-only); the guarded handler re-reviews and
+  // revalidates before the actual removal, so the confirmation is a projection
+  // of the same checks rather than an independent decision.
+  const safety = await reviewWorktreeRemoval(worktree)
+  const op = await reviewOperation({ action: "remove", checkout: worktree, commonDir })
+  const blockers = [...safety, ...(op.ok ? [] : op.blockers)]
+
+  const report = async (outcome: Awaited<ReturnType<typeof removeRegisteredWorktree>>): Promise<void> => {
+    if (outcome.ok) {
+      await showNoticeTui(route, {
+        title: "worktree removed",
+        message: `removed ${worktree}\nIts branch was retained. Deleting the branch is a separate action.`,
+      })
+    } else {
+      await showNoticeTui(route, {
+        title: "worktree action",
+        message: `can't remove ${worktree}:\n${removalBlockersText(outcome.blockers)}`,
+      })
+    }
+  }
+
+  if (blockers.length === 0) {
+    // Safe checkout: launch-time confirmation before any effect.
+    const choice = await showRemovalConfirmTui(route, {
+      title: "remove worktree",
+      message: `Remove ${worktree}?\nIts branch is retained. Nothing else is deleted.`,
+      mode: "confirm",
+    })
+    if (choice === "cancel") return
+    await report(await removeRegisteredWorktree({ checkout: worktree, commonDir }))
+    return
+  }
+
+  // Blocked: show every blocker; force removal is offered only when the only
+  // thing in the way is local content that force would delete.
+  const forceAvailable = blockers.length > 0 && blockers.every((blocker) => blocker.content === true)
+  const choice = await showRemovalConfirmTui(route, {
+    title: "remove worktree",
+    message: `can't remove ${worktree}:\n${removalBlockersText(blockers)}`,
+    mode: "blocked",
+    forceAvailable,
+  })
+  if (choice === "cancel") return
+  if (choice === "force") {
+    await report(await removeRegisteredWorktree({ checkout: worktree, commonDir, force: true }))
+    return
   }
 }
 
