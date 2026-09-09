@@ -22,6 +22,9 @@ import { versionDetails } from "./version"
 import { homeRendererConfig, sceneForRoute, type TuiRoute, type TuiScene } from "./tui-session"
 
 import { observeWorktreePr, type BoardWorktree } from "./control-board"
+import { runStatusStyles } from "./runs-browser"
+import type { LocalActiveChange } from "./checkout-openspec"
+import type { RunStatusKind } from "./runs"
 
 import type { BoxOptions, CliRenderer, KeyEvent, PasteEvent, TextChunk } from "@opentui/core"
 import type { Hint, PaletteColor } from "./tui-theme"
@@ -56,8 +59,6 @@ export type HomeWorkAction =
   | "conversation-external"
   | "propose"
   | "pipeline"
-  | "specs"
-  | "runs"
   | "fetch"
   | "sync"
   | "push"
@@ -67,10 +68,30 @@ export type HomeWorkAction =
   | "delete-branch"
   | "close"
 
+/**
+ * The detail's action sections (capability home-launcher delta): work and
+ * conversation actions first, then the guarded Git/publication operations,
+ * then the destructive cluster — kept together so the dangerous entries are
+ * never scattered between the safe ones.
+ */
+export type DetailSection = "work" | "git" | "destructive"
+
+/** One recent run of this checkout, listed in the detail's observations. */
+export type DetailRun = {
+  runId: string
+  title: string
+  status: string
+  /** The run-list's own status kind: the same glyphs and colors everywhere a run is listed. */
+  statusKind: RunStatusKind
+  live: boolean
+}
+
 /** What a closed Home asks the surrounding session to do. */
 export type HomeResolution =
   | { type: "destination"; destination: HomeDestination }
   | { type: "work"; worktree: string; action: HomeWorkAction }
+  | { type: "work-run"; worktree: string; runId: string }
+  | { type: "work-change"; worktree: string; changeId: string }
   | { type: "new-work"; draft?: { displayName: string; branch: string; base: string; worktree: string } }
   | undefined
 
@@ -145,14 +166,25 @@ type ListRow =
   | { kind: "new" }
   | { kind: "auxiliary"; destination: HomeDestination; label: string; shortcut: string; kicker: string; description: string }
 
-/** The worktree detail's action rows: distinct labels per action. */
+/** The worktree detail's action rows: distinct labels per action, grouped by section. */
 type DetailAction = {
   id: HomeWorkAction
+  section: DetailSection
   key: string
   label: string
   enabled: boolean
   blocker?: string
 }
+
+/**
+ * One selectable detail row: an action, one of the checkout's recent runs,
+ * or one of its linked local changes. Actions mutate; runs and changes only
+ * navigate to their own focused view.
+ */
+type DetailEntry =
+  | { kind: "action"; action: DetailAction }
+  | { kind: "run"; run: DetailRun }
+  | { kind: "change"; change: LocalActiveChange }
 
 export async function launchHomeTui(
   targetDir: string,
@@ -238,6 +270,15 @@ export class HomeLauncher {
   private readonly prEvidence = new Map<string, PrObservation | "checking">()
   private readonly prInFlight = new Set<string>()
   private readonly observePr: (worktree: BoardWorktree) => Promise<PrObservation>
+  /**
+   * On-demand recent-run evidence per checkout path (capability home-launcher
+   * delta): `checking` while the listing runs, the recent runs once they
+   * land, a failed read as its error. Entering a detail is what requests it —
+   * the list never queries run history on the operator's behalf.
+   */
+  private readonly runsEvidence = new Map<string, DetailRun[] | "checking" | { error: string }>()
+  private readonly runsInFlight = new Set<string>()
+  private readonly listRunsForWorktree: (worktree: BoardWorktree) => Promise<DetailRun[]>
 
   private readonly mastheadText: TextRenderable
   private readonly mastheadBox: BoxRenderable
@@ -291,11 +332,14 @@ export class HomeLauncher {
       proposeBranchName?: (input: { prompt: string }) => Promise<{ branch: string }>
       /** The on-demand PR observation; injected so tests stay hermetic. */
       observePr?: (worktree: BoardWorktree) => Promise<PrObservation>
+      /** The checkout's recent runs; injected so tests stay hermetic. */
+      listRunsForWorktree?: (worktree: BoardWorktree) => Promise<DetailRun[]>
     } = {},
   ) {
     this.scene = options.scene
     this.proposeBranchName = options.proposeBranchName
     this.observePr = options.observePr ?? ((worktree) => observeWorktreePr({ targetDir: this.targetDir, worktree }))
+    this.listRunsForWorktree = options.listRunsForWorktree ?? ((worktree) => this.defaultListRunsForWorktree(worktree))
     this.emptyWork = (options.worktrees ?? []).length === 0
     this.result = new Promise((resolve) => {
       this.resolveResult = resolve
@@ -531,6 +575,44 @@ export class HomeLauncher {
       })
   }
 
+  /**
+   * The detail's default recent-runs source: the shared run history filtered
+   * to this checkout — by the recorded execution directory when the record
+   * carries one, else by its durable branch link (path absence is a fallback,
+   * never a rename). Most recent first, capped to a readable handful.
+   */
+  private async defaultListRunsForWorktree(worktree: BoardWorktree): Promise<DetailRun[]> {
+    const { listRuns } = await import("./runs")
+    const all = await listRuns()
+    const mine = all.filter(
+      (run) =>
+        run.targetDir === worktree.path ||
+        (!run.targetDir && worktree.branch !== undefined && run.feature?.branch === worktree.branch),
+    )
+    return mine.slice(0, 5).map((run) => ({ runId: run.runID, title: run.title, status: run.status, statusKind: run.statusKind, live: run.live }))
+  }
+
+  /** Fires the recent-runs listing once per checkout: cached, deduped, hermetic. */
+  private ensureRunsEvidence(worktree: BoardWorktree): void {
+    const path = worktree.path
+    if (this.runsInFlight.has(path) || this.runsEvidence.has(path)) return
+    this.runsInFlight.add(path)
+    this.runsEvidence.set(path, "checking")
+    void this.listRunsForWorktree(worktree)
+      .then((runs) => {
+        this.runsInFlight.delete(path)
+        if (this.finished || this.runsEvidence.get(path) !== "checking") return
+        this.runsEvidence.set(path, runs)
+        this.render()
+      })
+      .catch((error) => {
+        this.runsInFlight.delete(path)
+        if (this.finished || this.runsEvidence.get(path) !== "checking") return
+        this.runsEvidence.set(path, { error: error instanceof Error ? error.message : String(error) })
+        this.render()
+      })
+  }
+
   private activateSelected() {
     const row = this.rows[this.selectedRow]
     if (!this.isSelectable(row) || !row) return
@@ -540,6 +622,9 @@ export class HomeLauncher {
       this.detailScroll = 0
       this.detailFollow = true
       this.level = "detail"
+      // Entering the detail is what requests the checkout's recent runs —
+      // the same on-demand observation rhythm as the row's PR evidence.
+      this.ensureRunsEvidence(row.worktree)
       return
     }
     if (row.kind === "new") {
@@ -550,14 +635,12 @@ export class HomeLauncher {
     this.finish({ type: "destination", destination: row.destination })
   }
 
-  private detailActions(): DetailAction[] {
-    return this.detailWorktree ? this.actionsFor(this.detailWorktree) : []
-  }
-
   private actionsFor(worktree: BoardWorktree): DetailAction[] {
     // Shared per-action guards, projected as advisory enabled states: a
     // blocked action stays inspectable with its reason (design D4). The
-    // handlers revalidate the same guards before any effect.
+    // handlers revalidate the same guards before any effect. The actions ride
+    // three labeled sections — work, git, destructive — so the dangerous
+    // cluster is never scattered between the safe ones.
     const verified = worktree.accessible && !worktree.bare
     const writerBusy = worktree.activity?.kind === "known" && worktree.activity.value.total > 0
     const attached = worktree.branch !== undefined
@@ -565,8 +648,10 @@ export class HomeLauncher {
     const detached = "the checkout has a detached HEAD — this action needs an attached branch to name the source"
     const busy = "a managed writer is active in this checkout — inspect or stop it before mutating"
     return [
+      // ── work ──────────────────────────────────────────────────────────────
       {
         id: "conversation",
+        section: "work",
         key: "v",
         label: "Open conversation",
         enabled: verified,
@@ -574,6 +659,7 @@ export class HomeLauncher {
       },
       {
         id: "conversation-external",
+        section: "work",
         key: "w",
         label: "Open in window",
         enabled: verified,
@@ -581,6 +667,7 @@ export class HomeLauncher {
       },
       {
         id: "propose",
+        section: "work",
         key: "p",
         label: "Propose a change",
         enabled: verified,
@@ -588,15 +675,16 @@ export class HomeLauncher {
       },
       {
         id: "pipeline",
+        section: "work",
         key: "e",
         label: "Execute pipeline",
         enabled: verified,
         blocker: verified ? undefined : inaccessible,
       },
-      { id: "specs", key: "s", label: "Open specs", enabled: true },
-      { id: "runs", key: "r", label: "Open runs", enabled: true },
+      // ── git ───────────────────────────────────────────────────────────────
       {
         id: "fetch",
+        section: "git",
         key: "f",
         label: "Fetch remote",
         enabled: verified,
@@ -604,6 +692,7 @@ export class HomeLauncher {
       },
       {
         id: "sync",
+        section: "git",
         key: "y",
         label: "Sync with base",
         enabled: verified && attached && !writerBusy,
@@ -611,6 +700,7 @@ export class HomeLauncher {
       },
       {
         id: "push",
+        section: "git",
         key: "u",
         label: "Push branch",
         enabled: verified && attached && !writerBusy,
@@ -618,6 +708,7 @@ export class HomeLauncher {
       },
       {
         id: "pr",
+        section: "git",
         key: "g",
         label: "Compose pull request",
         enabled: verified && attached,
@@ -625,13 +716,26 @@ export class HomeLauncher {
       },
       {
         id: "squash",
+        section: "git",
         key: "m",
         label: "Squash to base",
         enabled: verified && attached && !writerBusy,
         blocker: !verified ? inaccessible : !attached ? detached : writerBusy ? busy : undefined,
       },
+      // ── destructive ───────────────────────────────────────────────────────
+      // The deliberate composition leads the dangerous cluster; removal and
+      // branch deletion follow it, in rising sharpness.
+      {
+        id: "close",
+        section: "destructive",
+        key: "x",
+        label: "Close review",
+        enabled: verified && attached && !writerBusy,
+        blocker: !verified ? inaccessible : !attached ? detached : writerBusy ? busy : undefined,
+      },
       {
         id: "remove",
+        section: "destructive",
         key: "d",
         label: "Remove worktree",
         enabled: verified && !worktree.main && !writerBusy,
@@ -645,6 +749,7 @@ export class HomeLauncher {
       },
       {
         id: "delete-branch",
+        section: "destructive",
         key: "z",
         label: "Delete branch",
         // The branch is checked out in this very worktree, so deletion is
@@ -655,22 +760,44 @@ export class HomeLauncher {
           ? "the checkout has no attached branch to delete"
           : `branch ${worktree.branch} is checked out in this worktree — remove the worktree (keeping the branch) before deleting it`,
       },
-      {
-        id: "close",
-        key: "x",
-        label: "Close review",
-        enabled: verified && attached && !writerBusy,
-        blocker: !verified ? inaccessible : !attached ? detached : writerBusy ? busy : undefined,
-      },
     ]
   }
 
+  /**
+   * The detail's selectable rows, in render order: the sectioned actions,
+   * then the checkout's recent runs, then its linked local changes. Runs and
+   * changes are observations, not mutations — selecting one only navigates
+   * to its own focused view.
+   */
+  private detailEntries(): DetailEntry[] {
+    const worktree = this.detailWorktree
+    if (!worktree) return []
+    const entries: DetailEntry[] = this.actionsFor(worktree).map((action) => ({ kind: "action", action }))
+    const runs = this.runsEvidence.get(worktree.path)
+    if (Array.isArray(runs)) {
+      for (const run of runs) entries.push({ kind: "run", run })
+    }
+    if (!worktree.changesUnknown) {
+      for (const change of worktree.changes) entries.push({ kind: "change", change })
+    }
+    return entries
+  }
+
+  /** Whether a detail entry can fire at all: only a blocked action cannot. */
+  private entryEnabled(entry: DetailEntry): boolean {
+    return entry.kind !== "action" || entry.action.enabled
+  }
+
   private handleDetailKey(key: KeyEvent) {
-    const actions = this.detailActions()
-    const direct = actions.find((action) => action.key === key.name)
-    if (direct) {
+    const entries = this.detailEntries()
+    this.detailSelected = Math.max(0, Math.min(this.detailSelected, entries.length - 1))
+    const selected = entries[this.detailSelected]
+    // Direct keys fire actions from anywhere in the detail: the conversation
+    // and Git shortcuts never depend on where the selection parks.
+    const direct = entries.find((entry) => entry.kind === "action" && entry.action.key === key.name)
+    if (direct?.kind === "action") {
       this.detailFollow = true
-      this.resolveDetail(direct)
+      this.resolveDetail(direct.action)
       return
     }
     switch (key.name) {
@@ -682,7 +809,7 @@ export class HomeLauncher {
       case "down":
       case "j":
         this.detailFollow = true
-        this.detailSelected = Math.min(actions.length - 1, this.detailSelected + 1)
+        this.detailSelected = Math.min(entries.length - 1, this.detailSelected + 1)
         break
       case "pageup":
       case "pagedown": {
@@ -696,13 +823,14 @@ export class HomeLauncher {
       }
       case "return":
       case "linefeed": {
-        const action = actions[this.detailSelected]
-        if (action) {
-          this.detailFollow = true
-          this.resolveDetail(action)
+        if (!selected) break
+        this.detailFollow = true
+        if (selected.kind === "action") {
+          this.resolveDetail(selected.action)
           return
         }
-        break
+        this.activateDetailEntry(selected)
+        return
       }
       case "escape":
       case "q":
@@ -714,20 +842,25 @@ export class HomeLauncher {
     this.render()
   }
 
+  /** A run or change entry resolves to its focused view — navigation, never mutation. */
+  private activateDetailEntry(entry: Exclude<DetailEntry, { kind: "action" }>) {
+    const worktree = this.detailWorktree
+    if (!worktree) return
+    if (entry.kind === "run") {
+      this.finish({ type: "work-run", worktree: worktree.path, runId: entry.run.runId })
+      return
+    }
+    // The change's own checkout keys the focused specs view — never the
+    // launch directory by fallback.
+    this.finish({ type: "work-change", worktree: entry.change.checkout, changeId: entry.change.changeId })
+  }
+
   private resolveDetail(action: DetailAction) {
     if (!this.detailWorktree) return
     if (!action.enabled) {
       // Blocked actions stay inspectable with their reason (shared guard
       // vocabulary) instead of disappearing or firing.
       this.render()
-      return
-    }
-    if (action.id === "specs") {
-      this.finish({ type: "destination", destination: "specs" })
-      return
-    }
-    if (action.id === "runs") {
-      this.finish({ type: "destination", destination: "runs" })
       return
     }
     this.finish({ type: "work", worktree: this.detailWorktree.path, action: action.id })
@@ -1528,13 +1661,16 @@ export class HomeLauncher {
   /**
    * The detail screen, speaking the list's section language: a divider rule
    * names the worktree, the observed facts ride the fold's label rhythm, and
-   * the actions follow under their own rule. The selected action is one
-   * full-width accent block hanging from an inverted navy marker — actions
-   * are actions, so they carry New's navy, not a state color.
+   * the selectable rows follow under labeled sections — the work actions,
+   * the guarded Git operations, the destructive cluster, then the checkout's
+   * recent runs and linked changes as focused observations. The selected row
+   * is one full-width accent block hanging from an inverted navy marker.
    */
-  private detailLines(width: number): { lines: StyledText[]; actionStart: number } {
+  private detailLines(width: number): { lines: StyledText[]; selectedLine: number } {
     const worktree = this.detailWorktree
-    if (!worktree) return { lines: [], actionStart: 0 }
+    if (!worktree) return { lines: [], selectedLine: 0 }
+    const entries = this.detailEntries()
+    this.detailSelected = Math.max(0, Math.min(this.detailSelected, entries.length - 1))
     const lines: StyledText[] = [
       ...this.headingLines(truncate(worktreeDisplayNameOf(worktree), Math.max(8, width - 12)), width),
       new StyledText([fg(theme.dim)(truncate(shortPath(worktree.path, width), width))]),
@@ -1562,35 +1698,107 @@ export class HomeLauncher {
     }
     if (worktree.changesUnknown) fact("changes", `unknown (${worktree.changesUnknown})`, theme.yellow)
     else fact("changes", `${worktree.changes.length} active`)
-    // The change list descends as a file-tree, the same faded connectors the
-    // inline fold uses.
-    const items = worktree.changes.slice(0, 4)
-    items.forEach((local, index) => {
-      const glyph = index === items.length - 1 ? "└─ " : "├─ "
-      const title = local.title ? `${local.changeId} — ${local.title}` : local.changeId
-      lines.push(new StyledText([raw(" ".repeat(9)), raw(" "), fg(theme.dim)(glyph), fg(theme.text)(truncate(title, Math.max(8, width - 14)))]))
-    })
     if (worktree.locked) fact("lock", worktree.locked.reason ? `locked: ${worktree.locked.reason}` : "locked", theme.yellow)
     if (worktree.prunable) fact("prunable", worktree.prunable.reason ?? "stale registration", theme.yellow)
     if (!worktree.accessible) fact("state", "inaccessible — the registered path is missing (repair or `git worktree prune`)", theme.yellow)
     lines.push(new StyledText([raw("")]))
-    lines.push(...this.headingLines("actions", width))
-    const actionStart = lines.length
-    this.detailActions().forEach((action, index) => {
-      const selected = index === this.detailSelected
-      // The marker inverts on selection: a dark glyph in a navy cell — the
-      // rail the block hangs from.
-      const marker = selected ? bg(theme.navy)(fg(theme.chipText)("▸")) : action.enabled ? fg(theme.faint)("▸") : fg(theme.dim)("▸")
-      const label = selected ? (action.enabled ? bold(fg(theme.chipText)(action.label)) : fg(theme.chipText)(action.label)) : action.enabled ? fg(theme.text)(action.label) : fg(theme.dim)(action.label)
-      const hint = action.enabled
-        ? selected
-          ? fg(theme.chipText)(`  [${action.key}]`)
-          : fg(theme.faint)(`  [${action.key}]`)
-        : fg(theme.yellow)(`  blocked: ${truncate(action.blocker ?? "", Math.max(0, width - displayWidth(action.label) - 14))}`)
-      const chunks: TextChunk[] = [marker, raw(" "), label, hint]
+    // Selectable rows under their labeled sections: the sectioned actions,
+    // then the checkout's observations. Every section breathes — one blank
+    // before each rule (the facts block already breathes before the first) —
+    // and an observation section always renders its heading with an honest
+    // status line: empty is a fact, never an omission.
+    let selectedLine = lines.length
+    let selectedIndex = 0
+    const entryRows = (section: DetailSection) => entries.filter((entry) => entry.kind === "action" && entry.action.section === section)
+    const pushEntry = (entry: DetailEntry) => {
+      const selected = selectedIndex === this.detailSelected
+      selectedIndex += 1
+      if (selected) selectedLine = lines.length
+      const label = selected ? bold(fg(theme.chipText)(this.entryLabel(entry, width))) : this.entryEnabled(entry) ? fg(theme.text)(this.entryLabel(entry, width)) : fg(theme.dim)(this.entryLabel(entry, width))
+      const hint = this.entryHint(entry, width, selected)
+      let chunks: TextChunk[]
+      if (entry.kind === "run") {
+        // The runs browser's own checkbox shape: the state glyph in its state
+        // color, one cell either side; selected, the block inverts on the
+        // state color while the rest of the row rides the accent fill — a
+        // run reads the same here as it does in the runs list.
+        const style = runStatusStyles[entry.run.statusKind]
+        const stateColor = entry.run.live ? theme.green : theme[style.color]
+        const glyph = entry.run.live ? "●" : style.icon
+        const marker: TextChunk[] = selected
+          ? [bg(stateColor)(" "), bg(stateColor)(fg(theme.chipText)(glyph)), bg(stateColor)(" ")]
+          : [raw(" "), fg(stateColor)(glyph), raw(" ")]
+        chunks = [...marker, raw(" "), label, hint]
+      } else if (entry.kind === "change") {
+        // The specs browser's own change-row shape: the diamond rides the
+        // containing worktree's state color, one cell of the same color on
+        // either side; selected, the block inverts on the marker color.
+        const markerColor = worktreeDotColor(worktree)
+        const marker: TextChunk[] = selected
+          ? [bg(markerColor)(" "), bg(markerColor)(fg(theme.chipText)("◆")), bg(markerColor)(" ")]
+          : [raw(" "), fg(markerColor)("◆"), raw(" ")]
+        chunks = [...marker, raw(" "), label, hint]
+      } else {
+        // Actions keep the section rail: the marker inverts on selection — a
+        // dark glyph in a navy cell, the block every action hangs from.
+        const marker = selected ? bg(theme.navy)(fg(theme.chipText)("▸")) : this.entryEnabled(entry) ? fg(theme.faint)("▸") : fg(theme.dim)("▸")
+        chunks = [marker, raw(" "), label, hint]
+      }
       lines.push(selected ? this.highlighted(chunks, width) : new StyledText(chunks))
-    })
-    return { lines, actionStart }
+    }
+    for (const section of ["work", "git", "destructive"] as const) {
+      lines.push(...this.headingLines(section, width))
+      for (const entry of entryRows(section)) pushEntry(entry)
+      lines.push(new StyledText([raw("")]))
+    }
+    lines.push(...this.headingLines("recent runs", width))
+    const runs = this.runsEvidence.get(worktree.path)
+    if (runs === "checking") {
+      lines.push(new StyledText([raw(" ".repeat(4)), fg(theme.dim)("checking…")]))
+    } else if (runs && "error" in runs) {
+      lines.push(new StyledText([raw(" ".repeat(4)), fg(theme.yellow)(`unknown — ${truncate(runs.error, Math.max(8, width - 8))}`)]))
+    } else if (runs && runs.length > 0) {
+      for (const run of runs) pushEntry({ kind: "run", run })
+    } else if (runs) {
+      lines.push(new StyledText([raw(" ".repeat(4)), fg(theme.dim)("no runs recorded for this checkout")]))
+    }
+    lines.push(new StyledText([raw("")]))
+    lines.push(...this.headingLines("linked specs", width))
+    if (worktree.changesUnknown) {
+      lines.push(new StyledText([raw(" ".repeat(4)), fg(theme.yellow)(`unknown — ${truncate(worktree.changesUnknown, Math.max(8, width - 8))}`)]))
+    } else if (worktree.changes.length > 0) {
+      for (const change of worktree.changes) pushEntry({ kind: "change", change })
+    } else {
+      lines.push(new StyledText([raw(" ".repeat(4)), fg(theme.dim)("no active changes in this checkout")]))
+    }
+    return { lines, selectedLine }
+  }
+
+  /** The main text of a detail row: the action label, the run's title, or the change's id + title. */
+  private entryLabel(entry: DetailEntry, width: number): string {
+    if (entry.kind === "action") return entry.action.label
+    if (entry.kind === "run") return entry.run.title ? `${entry.run.title} · ${entry.run.runId}` : entry.run.runId
+    return entry.change.title ? `${entry.change.changeId} — ${entry.change.title}` : entry.change.changeId
+  }
+
+  /** The trailing hint of a detail row: the action's key or blocker, a run's status, a change's task count. */
+  private entryHint(entry: DetailEntry, width: number, selected: boolean): TextChunk {
+    if (entry.kind === "action") {
+      const action = entry.action
+      if (action.enabled) return fg(selected ? theme.chipText : theme.faint)(`  [${action.key}]`)
+      return fg(theme.yellow)(`  blocked: ${truncate(action.blocker ?? "", Math.max(0, width - displayWidth(action.label) - 14))}`)
+    }
+    if (entry.kind === "run") {
+      // The status word rides its state color — the same reading as the
+      // runs list, where the label only repeats what the glyph already says.
+      const style = runStatusStyles[entry.run.statusKind]
+      const stateColor = entry.run.live ? theme.green : theme[style.color]
+      const status = entry.run.live ? "running" : entry.run.status
+      return fg(selected ? theme.chipText : stateColor)(`  ${truncate(status, Math.max(0, width - displayWidth(this.entryLabel(entry, width)) - 8))}`)
+    }
+    const tasks = entry.change.tasks
+    const note = tasks === undefined ? "" : tasks === "unknown" ? "  tasks unknown" : `  tasks ${tasks.done}/${tasks.total}`
+    return fg(selected ? theme.chipText : theme.dim)(truncate(note, Math.max(0, width - displayWidth(this.entryLabel(entry, width)) - 8)))
   }
 
   private detailLineCount(): number {
@@ -1601,13 +1809,12 @@ export class HomeLauncher {
   private detailContent(width: number): StyledText {
     const worktree = this.detailWorktree
     if (!worktree) return this.listContent(width)
-    const { lines, actionStart } = this.detailLines(width)
+    const { lines, selectedLine } = this.detailLines(width)
     const visible = this.detailVisible()
-    // Action navigation follows the selection; explicit paging (pgup/pgdn)
-    // reads the metadata above the actions instead. Both re-clamp to bounds,
+    // Selection navigation follows the selected row; explicit paging
+    // (pgup/pgdn) reads the metadata above instead. Both re-clamp to bounds,
     // so a resize never strands the pane past its content.
     if (this.detailFollow) {
-      const selectedLine = actionStart + this.detailSelected
       if (selectedLine < this.detailScroll) this.detailScroll = selectedLine
       if (selectedLine >= this.detailScroll + visible) this.detailScroll = selectedLine - visible + 1
     }
@@ -1717,7 +1924,7 @@ export class HomeLauncher {
     if (this.level === "detail") {
       const hints: Hint[] = [
         { keys: "↑/↓", label: "select", priority: 3 },
-        { keys: "enter", label: "run", priority: 1 },
+        { keys: "enter", label: "open", priority: 1 },
         { keys: "esc", label: "back", priority: 0 },
       ]
       if (this.detailLineCount() > this.detailVisible()) hints.splice(1, 0, { keys: "pgup/pgdn", label: "page", priority: 2 })

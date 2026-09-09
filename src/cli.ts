@@ -311,6 +311,16 @@ async function runHomeSession(targetDir: string): Promise<void> {
       openWork: async (worktree, action) => {
         await dispatchWorkAction(targetDir, route, worktree, action)
       },
+      openRun: async (worktree, runId) => {
+        // A run entry opens the runs browser on that run: the dashboard
+        // focuses it; history and retry stay one esc away.
+        await openRunsBrowser(runId, route)
+      },
+      openChange: async (worktree, changeId) => {
+        // A linked change opens the specs browser restored on that change's
+        // row — the identity-keyed resume, never a position guess.
+        await openSpecsBrowser(targetDir, route, { changeId, checkout: worktree })
+      },
       createWork: async (draft) => {
         await createWorkFromDraft(targetDir, route, draft)
       },
@@ -393,14 +403,6 @@ async function runWorktreeScopedRun(command: { worktree: string; changes: string
 
 /** Runs one worktree detail action from Home: every action targets the same validated checkout. */
 async function dispatchWorkAction(targetDir: string, route: TuiRoute, worktree: string, action: HomeWorkAction): Promise<void> {
-  if (action === "specs") {
-    await openSpecsBrowser(targetDir, route)
-    return
-  }
-  if (action === "runs") {
-    await openRunsBrowser(undefined, route)
-    return
-  }
   // Fresh target validation before any effect: the row was observed at view
   // load; the action re-observes so a moved/removed checkout reports instead
   // of executing against a replacement (capability work-context delta).
@@ -688,6 +690,10 @@ export async function runHomeNavigationLoop(options: {
   loadHome?: () => Promise<HomeContext | undefined>
   openHome: (context: HomeContext) => Promise<HomeResolution>
   openWork: (worktree: string, action: HomeWorkAction) => Promise<void>
+  /** Opens one of the checkout's recent runs, focused on that run. */
+  openRun: (worktree: string, runId: string) => Promise<void>
+  /** Opens the checkout's linked change in the focused specs view. */
+  openChange: (worktree: string, changeId: string) => Promise<void>
   createWork: (draft: { displayName: string; branch: string; base: string; worktree: string }) => Promise<void>
   openDestination: (selection: HomeDestination) => Promise<void>
 }): Promise<void> {
@@ -700,6 +706,10 @@ export async function runHomeNavigationLoop(options: {
       await options.openDestination(resolution.destination)
     } else if (resolution.type === "work") {
       await options.openWork(resolution.worktree, resolution.action)
+    } else if (resolution.type === "work-run") {
+      await options.openRun(resolution.worktree, resolution.runId)
+    } else if (resolution.type === "work-change") {
+      await options.openChange(resolution.worktree, resolution.changeId)
     } else if (resolution.type === "new-work" && resolution.draft) {
       await options.createWork(resolution.draft)
     }
@@ -1121,8 +1131,8 @@ async function openConfigEditor(targetDir: string, route?: TuiRoute) {
  * assessment after a cancelled launcher, a closed dashboard, or authoring
  * (tasks 1.2/1.4) — only an explicit exit ends the browser.
  */
-export async function openSpecsBrowser(targetDir: string, route?: TuiRoute): Promise<void> {
-  let resume: SpecsResumeSelection | undefined
+export async function openSpecsBrowser(targetDir: string, route?: TuiRoute, initialResume?: SpecsResumeSelection): Promise<void> {
+  let resume = initialResume
   for (;;) {
     const resolution = await browseSpecs(targetDir, route, resume)
     resume = await dispatchSpecsResolution(targetDir, resolution, route)

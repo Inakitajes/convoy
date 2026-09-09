@@ -38,8 +38,9 @@ function releaseEnsureFreeBranchName(branch: string, value: string): void {
 }
 
 import { HomeLauncher } from "../src/home-tui"
-import type { HomeResolution, HomeWorkAction } from "../src/home-tui"
+import type { DetailRun, HomeResolution, HomeWorkAction } from "../src/home-tui"
 import type { PrObservation } from "../src/pr-observations"
+import type { LocalActiveChange } from "../src/checkout-openspec"
 import { theme } from "../src/tui-theme"
 import { versionDetails } from "../src/version"
 import type { BoardWorktree } from "../src/control-board"
@@ -101,7 +102,7 @@ function viewDir(): string {
   return "/work/acme"
 }
 
-async function openHome(options: { worktrees?: BoardWorktree[]; width?: number; height?: number; targetDir?: string; proposeBranchName?: (input: { prompt: string }) => Promise<{ branch: string }>; observePr?: (worktree: BoardWorktree) => Promise<PrObservation> } = {}) {
+async function openHome(options: { worktrees?: BoardWorktree[]; width?: number; height?: number; targetDir?: string; proposeBranchName?: (input: { prompt: string }) => Promise<{ branch: string }>; observePr?: (worktree: BoardWorktree) => Promise<PrObservation>; listRunsForWorktree?: (worktree: BoardWorktree) => Promise<DetailRun[]> } = {}) {
   const testRenderer = await createTestRenderer({ width: options.width ?? 110, height: options.height ?? 30 })
   const instance = new HomeLauncher(testRenderer.renderer, options.targetDir ?? viewDir(), {
     scene: undefined,
@@ -109,6 +110,8 @@ async function openHome(options: { worktrees?: BoardWorktree[]; width?: number; 
     proposeBranchName: options.proposeBranchName,
     // Hermetic default: no test talks to `gh` unless it injects its own observer.
     observePr: options.observePr ?? (async () => ({ availability: "unknown", reason: "no PR observation requested by this test", observedAt: 0 })),
+    // Hermetic default: no test reads run history unless it injects its own source.
+    listRunsForWorktree: options.listRunsForWorktree ?? (async () => []),
   })
   await testRenderer.renderOnce()
   // Let any immediately-resolved on-demand observation settle its render
@@ -241,7 +244,7 @@ describe("worktrees-first home (capability home-launcher delta)", () => {
   })
 
   test("enter on a worktree row opens its detail with distinct action labels", async () => {
-    const session = await openHome()
+    const session = await openHome({ height: 48 })
     try {
       session.press("down") // New leads; two downs reach add-widget
       await session.renderOnce()
@@ -261,7 +264,7 @@ describe("worktrees-first home (capability home-launcher delta)", () => {
   })
 
   test("the detail exposes the independent Git and publication actions", async () => {
-    const session = await openHome()
+    const session = await openHome({ height: 48 })
     try {
       session.press("down") // New leads
       await session.renderOnce()
@@ -281,7 +284,7 @@ describe("worktrees-first home (capability home-launcher delta)", () => {
   })
 
   test("removal is blocked on the main checkout with its reason and never fires", async () => {
-    const session = await openHome()
+    const session = await openHome({ height: 48 })
     try {
       session.press("down") // onto the main checkout
       await session.renderOnce()
@@ -322,7 +325,7 @@ describe("worktrees-first home (capability home-launcher delta)", () => {
       branch: "feat/blocked",
       activity: { kind: "known", value: { liveRunIds: ["r1", "r2"], total: 2 }, collectedAt: 0 },
     })
-    const session = await openHome({ worktrees: [worktree({ path: mainPath, branch: "main", main: true }), busy] })
+    const session = await openHome({ height: 48, worktrees: [worktree({ path: mainPath, branch: "main", main: true }), busy] })
     try {
       session.press("down") // New leads
       await session.renderOnce()
@@ -490,6 +493,158 @@ describe("selection surface", () => {
       expect(sameColor(label.bg, accentBg())).toBe(true)
       const idle = frame.lines.find((line) => line.spans.some((span) => span.text.includes("Fetch remote")))!
       expect(idle.spans.every((span) => span.bg.a === 0)).toBe(true)
+    } finally {
+      await closeHome(session)
+    }
+  })
+})
+
+describe("worktree detail sections and observations", () => {
+  async function openDetail(session: Awaited<ReturnType<typeof openHome>>) {
+    session.press("down") // New leads
+    await session.renderOnce()
+    session.press("down") // the worktree row
+    await session.renderOnce()
+    session.press("return") // open its detail
+    await session.renderOnce()
+    // Let the on-demand runs listing settle its render before the capture —
+    // the same rhythm the PR evidence tests wait out.
+    await Bun.sleep(10)
+    await session.renderOnce()
+  }
+
+  test("the detail groups its actions into work, git, and destructive sections", async () => {
+    const session = await openHome({ height: 60 })
+    try {
+      await openDetail(session)
+      const frame = frameOf(session)
+      // Three labeled sections, in that order — the destructive cluster
+      // stays together at the end of the actions, never scattered between
+      // the safe ones.
+      const workAt = frame.indexOf("\u2500\u2500 work ")
+      const gitAt = frame.indexOf("\u2500\u2500 git ")
+      const destructiveAt = frame.indexOf("\u2500\u2500 destructive ")
+      expect(workAt).toBeGreaterThanOrEqual(0)
+      expect(gitAt).toBeGreaterThan(workAt)
+      expect(destructiveAt).toBeGreaterThan(gitAt)
+      const conversationAt = frame.indexOf("Open conversation")
+      const fetchAt = frame.indexOf("Fetch remote")
+      const closeAt = frame.indexOf("Close review")
+      const removeAt = frame.indexOf("Remove worktree")
+      expect(conversationAt).toBeGreaterThan(workAt)
+      expect(fetchAt).toBeGreaterThan(gitAt)
+      // The dangerous cluster leads with the deliberate composition; removal
+      // and branch deletion follow it.
+      expect(closeAt).toBeGreaterThan(destructiveAt)
+      expect(removeAt).toBeGreaterThan(closeAt)
+      // The observation sections follow, honest when empty: the hermetic
+      // default records no runs and the fixture carries no changes.
+      expect(frame).toContain("recent runs")
+      expect(frame).toContain("no runs recorded for this checkout")
+      expect(frame).toContain("linked specs")
+      expect(frame).toContain("no active changes in this checkout")
+    } finally {
+      await closeHome(session)
+    }
+  })
+
+  test("the detail lists the checkout's recent runs and opens the focused one", async () => {
+    const runs: DetailRun[] = [
+      { runId: "run-42", title: "Ship add-widget", status: "completed", statusKind: "completed", live: false },
+      { runId: "run-41", title: "Flaky pass", status: "failed", statusKind: "failed", live: false },
+    ]
+    let asked: string[] = []
+    const session = await openHome({
+      height: 60,
+      listRunsForWorktree: async (worktree) => {
+        asked.push(worktree.path)
+        return worktree.path === wtPath ? runs : []
+      },
+    })
+    try {
+      session.press("down")
+      await session.renderOnce()
+      session.press("down")
+      await session.renderOnce()
+      session.press("return") // open its detail: entering requests the runs
+      await session.renderOnce()
+      await Bun.sleep(10) // let the injected listing land its render
+      await session.renderOnce()
+      expect(asked).toEqual([wtPath])
+      const frame = frameOf(session)
+      expect(frame).toContain("recent runs")
+      // The rows speak the runs list's status vocabulary: the check and the
+      // cross, one per recorded run.
+      expect(frame).toContain("✓")
+      expect(frame).toContain("✗")
+      expect(frame).toContain("Ship add-widget")
+      expect(frame).toContain("run-42")
+      expect(frame).toContain("completed")
+      // The run rows are the entries right after the twelve actions.
+      for (let i = 0; i < 12; i++) {
+        session.press("down")
+        await session.renderOnce()
+      }
+      session.press("return")
+      const resolution = (await session.instance.result) as HomeResolution
+      expect(resolution).toEqual({ type: "work-run", worktree: wtPath, runId: "run-42" })
+    } catch (error) {
+      await closeHome(session)
+      throw error
+    }
+  })
+
+  test("the detail lists its linked changes and opens the focused one", async () => {
+    const change: LocalActiveChange = {
+      checkout: wtPath,
+      changeId: "add-login",
+      sourcePath: `${wtPath}/openspec/changes/add-login`,
+      hasMarkdown: true,
+      artifacts: { proposal: true, design: false, tasks: true, deltaSpecs: ["specs/auth/spec.md"], other: [] },
+      tasks: { done: 2, total: 5 },
+    }
+    const session = await openHome({
+      height: 60,
+      worktrees: [
+        worktree({ path: mainPath, branch: "main", main: true }),
+        worktree({ path: wtPath, branch: "feat/add-widget", changes: [change] }),
+      ],
+    })
+    try {
+      await openDetail(session)
+      const frame = frameOf(session)
+      expect(frame).toContain("linked specs")
+      // The row speaks the specs browser's vocabulary: the change diamond.
+      expect(frame).toContain("◆")
+      expect(frame).toContain("add-login")
+      expect(frame).toContain("tasks 2/5")
+      // The change row rides after the twelve actions (no runs recorded).
+      for (let i = 0; i < 12; i++) {
+        session.press("down")
+        await session.renderOnce()
+      }
+      session.press("return")
+      const resolution = (await session.instance.result) as HomeResolution
+      expect(resolution).toEqual({ type: "work-change", worktree: wtPath, changeId: "add-login" })
+    } catch {
+      await closeHome(session)
+      throw new Error("test failed")
+    }
+  })
+
+  test("an unreadable change list stays honest in the linked-specs section", async () => {
+    const session = await openHome({
+      height: 60,
+      worktrees: [
+        worktree({ path: mainPath, branch: "main", main: true }),
+        worktree({ path: wtPath, branch: "feat/add-widget", changesUnknown: "the openspec directory is unreadable" }),
+      ],
+    })
+    try {
+      await openDetail(session)
+      const frame = frameOf(session)
+      expect(frame).toContain("linked specs")
+      expect(frame).toContain("unknown — the openspec directory is unreadable")
     } finally {
       await closeHome(session)
     }
@@ -1012,7 +1167,23 @@ describe("small terminals (list and detail stay navigable)", () => {
 
 describe("typical action coverage (used by tests above)", () => {
   test("HomeWorkAction ids are exhaustive", () => {
-    const ids: HomeWorkAction[] = ["conversation", "conversation-external", "propose", "pipeline", "specs", "runs", "close"]
-    expect(ids).toHaveLength(7)
+    const ids: HomeWorkAction[] = [
+      // work
+      "conversation",
+      "conversation-external",
+      "propose",
+      "pipeline",
+      // git
+      "fetch",
+      "sync",
+      "push",
+      "pr",
+      "squash",
+      // destructive
+      "remove",
+      "delete-branch",
+      "close",
+    ]
+    expect(ids).toHaveLength(12)
   })
 })

@@ -38,7 +38,12 @@ import type { Hint, PaletteColor } from "./tui-theme"
  */
 const compactRunsMaxWidth = 84
 
-const runStatusStyles: Record<RunStatusKind, { icon: string; color: PaletteColor }> = {
+/**
+ * The run list's status vocabulary, shared with the home detail's recent-runs
+ * rows: the same glyphs, in the same state colors, so a run reads the same
+ * everywhere it is listed.
+ */
+export const runStatusStyles: Record<RunStatusKind, { icon: string; color: PaletteColor }> = {
   completed: { icon: "✓", color: "green" },
   failed: { icon: "✗", color: "red" },
   incomplete: { icon: "◐", color: "yellow" },

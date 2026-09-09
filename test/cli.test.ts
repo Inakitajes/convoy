@@ -41,6 +41,8 @@ describe("home navigation loop", () => {
         return opens++ === 0 ? { type: "destination", destination: "specs" } : undefined
       },
       openWork: async () => {},
+      openRun: async () => {},
+      openChange: async () => {},
       createWork: async () => {},
       openDestination: async (selection) => {
         destinations.push(selection)
@@ -64,6 +66,8 @@ describe("home navigation loop", () => {
         return { type: "destination", destination: "runs" }
       },
       openWork: async () => {},
+      openRun: async () => {},
+      openChange: async () => {},
       createWork: async () => {},
       openDestination: async () => {
         interrupted = true
@@ -88,6 +92,8 @@ describe("home navigation loop", () => {
         return undefined
       },
       openWork: async () => {},
+      openRun: async () => {},
+      openChange: async () => {},
       createWork: async () => {},
       openDestination: async () => {},
     })
@@ -112,6 +118,8 @@ describe("home navigation loop", () => {
         return homeOpens === 1 ? { type: "destination", destination: "specs" } : undefined
       },
       openWork: async () => {},
+      openRun: async () => {},
+      openChange: async () => {},
       createWork: async () => {},
       openDestination: async () => {},
     })
