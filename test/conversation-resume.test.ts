@@ -27,14 +27,20 @@ const realValidateAuthoringSession = actualConversations.validateAuthoringSessio
 const realCreateAuthoringConversation = actualConversations.createAuthoringConversation
 const realOpenConversationForeground = actualConversations.openConversationForeground
 const realSessionActivity = actualConversations.sessionActivity
+const realListAuthoringCommands = actualConversations.listAuthoringCommands
+const realInvokeAuthoringCommand = actualConversations.invokeAuthoringCommand
 const realEnsureConversationService = actualConversationService.ensureConversationService
 const realShowNoticeTui = actualNotice.showNoticeTui
 
 let capturing = false
 /** What validateAuthoringSession should answer for the stored reference. */
 let linkedValidation: { status: "available"; title?: string } | { status: "unavailable"; reason: string } = { status: "available" }
+/** What listAuthoringCommands should answer (a propose-phase flow's discovery). */
+let authoringCommands: string[] | "unknown" = ["opsx-propose"]
 /** Ordered record of what the flow did. */
 const events: string[] = []
+/** Records of authoring-command discovery/invocation (the propose phase). */
+const authoringCommandsEvents: string[] = []
 /** The reference the foreground client was handed. */
 const foregroundRefs: Array<{ harness: string; sessionId: string }> = []
 const notices: Array<{ title: string; message: string }> = []
@@ -64,6 +70,15 @@ mock.module("../src/conversations", () => ({
   sessionActivity: async (input: { checkout: string; ref: { sessionId: string } }) => {
     if (!capturing) return realSessionActivity(input as never)
     return "idle" as const
+  },
+  listAuthoringCommands: async (input: { checkout: string; server?: unknown }) => {
+    if (!capturing) return realListAuthoringCommands(input as never)
+    authoringCommandsEvents.push("listAuthoringCommands")
+    return authoringCommands
+  },
+  invokeAuthoringCommand: async (input: { ref: { sessionId: string }; command: string }) => {
+    if (!capturing) return realInvokeAuthoringCommand(input as never)
+    authoringCommandsEvents.push(`invoke:${input.command}`)
   },
 }))
 
@@ -125,7 +140,9 @@ async function makeFixture(): Promise<void> {
 function resetCapture(): void {
   capturing = true
   linkedValidation = { status: "available" }
+  authoringCommands = ["opsx-propose"]
   events.length = 0
+  authoringCommandsEvents.length = 0
   foregroundRefs.length = 0
   notices.length = 0
 }
@@ -186,5 +203,120 @@ describe("openCheckoutConversation resume (work-conversations SC-2)", () => {
     await openCheckoutConversation({ launchDir: main, route: fakeRoute, checkout: main, displayName: "main" })
     expect(events).toEqual(["validate:ses_new_minted", "foreground"])
     expect(foregroundRefs).toEqual([{ harness: "opencode", sessionId: "ses_new_minted" }])
+  })
+})
+
+/**
+ * Harness-qualified authoring session navigation (task 4.5): the session
+ * reference is navigation metadata validated against live Git continuity and
+ * the harness. These tests exercise the cli entry points that are exported
+ * (openCheckoutConversation); propose-in-checkout and external presentation
+ * are module-private in cli.ts, so their phase/command behavior is asserted
+ * from the conversation boundary (the ordinary conversation is what must stay
+ * usable and command-free).
+ */
+describe("task 4.5 harness-qualified authoring session navigation", () => {
+  const open = async (checkout: string, displayName: string) => {
+    const { openCheckoutConversation } = await import("../src/cli")
+    await openCheckoutConversation({ launchDir: main, route: fakeRoute, checkout, displayName })
+  }
+
+  test("rejects an unrelated recent session for a different checkout (no graft)", async () => {
+    await makeFixture()
+    resetCapture()
+    // A recent session belongs to `wt`; opening `main` must NOT resume it.
+    await seedLinkedRef("ses_linked_001")
+
+    await open(main, "main")
+
+    expect(events).toEqual(["create", "foreground"])
+    expect(foregroundRefs).toEqual([{ harness: "opencode", sessionId: "ses_new_minted" }])
+    expect(events).not.toContain("validate:ses_linked_001")
+  })
+
+  test("a reused path hosting a different incarnation is not treated as the old checkout", async () => {
+    await makeFixture()
+    // Seed a valid linked session, then reuse the SAME path with a different
+    // branch/registration: continuity with the prior target is unverifiable, so
+    // the stale session must not be resumed automatically.
+    await seedLinkedRef("ses_linked_001")
+    await git(main, "worktree", "remove", wt)
+    await git(main, "worktree", "add", "-q", "-b", "feature/reused", wt, "main")
+    resetCapture()
+
+    await open(wt, "Widget redesign")
+
+    expect(events).not.toContain("validate:ses_linked_001")
+    expect(events).toContain("create")
+    expect(foregroundRefs).toEqual([{ harness: "opencode", sessionId: "ses_new_minted" }])
+  })
+
+  test("a moved destination does not silently inherit the old checkout's session", async () => {
+    await makeFixture()
+    await seedLinkedRef("ses_linked_001")
+    await git(main, "worktree", "move", wt, `${wt}-moved`)
+    resetCapture()
+
+    await open(`${wt}-moved`, "Widget redesign")
+
+    expect(events).not.toContain("validate:ses_linked_001")
+    expect(events).toEqual(["create", "foreground"])
+    expect(foregroundRefs).toEqual([{ harness: "opencode", sessionId: "ses_new_minted" }])
+  })
+
+  test("phase-distinct: ordinary conversation navigation never fires an authoring command", async () => {
+    await makeFixture()
+    await seedLinkedRef("ses_linked_001")
+    resetCapture()
+    // A propose command IS discoverable, yet the ordinary conversation path
+    // must not query or invoke it: the two phases are distinguishable.
+    authoringCommands = ["opsx-propose", "help"]
+
+    await open(wt, "Widget redesign")
+
+    // The linked session is resumed exactly; no propose command is invoked,
+    // so a phase (conversation/revise) session is not confused with a propose
+    // flow that would mint + run a command.
+    expect(events).toEqual(["validate:ses_linked_001", "foreground"])
+    expect(foregroundRefs).toEqual([{ harness: "opencode", sessionId: "ses_linked_001" }])
+    expect(authoringCommandsEvents).toEqual([])
+  })
+
+  test("a conflicting managed writer blocks resume — permissions are preserved", async () => {
+    await makeFixture()
+    await seedLinkedRef("ses_linked_001")
+    // A live authoring claim already owns this checkout's branch (different
+    // owner), so the resume must NOT bypass the managed-writer guard.
+    const { repoCommonDir } = await import("../src/repo-store")
+    const { observeCheckoutTarget } = await import("../src/worktree-target")
+    const { acquireWriterClaim } = await import("../src/writer-claims")
+    const commonDir = (await repoCommonDir(main))!
+    const target = await observeCheckoutTarget(wt)
+    await acquireWriterClaim({ commonDir, branch: target.branch!, checkoutPath: target.checkoutPath, kind: "authoring", owner: "run-phased" })
+    resetCapture()
+
+    await open(wt, "Widget redesign")
+
+    expect(events).toEqual(["validate:ses_linked_001"])
+    expect(events).not.toContain("foreground")
+    expect(events).not.toContain("create")
+    expect(foregroundRefs).toEqual([])
+    expect(notices).toHaveLength(1)
+    expect(notices[0]!.message).toContain("a managed writer already owns")
+  })
+
+  test("conversation stays usable when project authoring commands are unavailable", async () => {
+    await makeFixture()
+    resetCapture()
+    authoringCommands = "unknown"
+
+    await open(wt, "Widget redesign")
+
+    // Even though authoring-command discovery reports "unknown" (the propose
+    // phase would refuse), an ordinary conversation still starts and opens.
+    expect(events).toEqual(["create", "foreground"])
+    expect(foregroundRefs).toEqual([{ harness: "opencode", sessionId: "ses_new_minted" }])
+    expect(authoringCommandsEvents).toEqual([])
+    expect(notices).toEqual([])
   })
 })

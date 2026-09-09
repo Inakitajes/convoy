@@ -578,6 +578,9 @@ describe("footer hints and the command palette", () => {
       async prepare() {
         return { ok: false, message: "no remote configured" }
       },
+      async compose() {
+        return { ok: true, title: "title", text: "body" }
+      },
       async apply() {
         throw new Error("apply should not run")
       },
@@ -1028,6 +1031,9 @@ describe("publish modal", () => {
     const seam: PublishSeam = {
       async prepare() {
         return { ok: true as const, plan: { branch: "convoy/run", remote: "origin", base: "main" } }
+      },
+      async compose() {
+        return { ok: true as const, title: "feat: add the run dashboard", text: "## Why\n\nbody" }
       },
       async apply(plan) {
         calls.apply++

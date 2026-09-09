@@ -244,6 +244,28 @@ describe("conversation-service discovery and reuse (task 4.3)", () => {
   })
 })
 
+describe("conversation-service explicit stop decisions (task 4.6)", () => {
+  test("an explicit stop with no discovery record is a no-op, never terminating an unrecorded server", async () => {
+    // An isolated common dir so the shared suite's seeded records cannot leak in.
+    const dir = await mkdtemp(join(tmpdir(), "convoy-stop-missing-"))
+    dirs.push(dir)
+    await mkdir(join(dir, "convoy"), { recursive: true })
+    let killed = 0
+    const stopped = await stopConversationService({
+      commonDir: dir,
+      activity: "idle",
+      probe: async () => "live",
+      kill: async () => {
+        killed += 1
+      },
+    })
+    // The service only stops on an explicit, evidence-backed decision; an
+    // unrecorded service is never fabricated into a kill target.
+    expect(stopped.status).toBe("missing")
+    expect(killed).toBe(0)
+  })
+})
+
 describe("conversation-service shutdown boundaries (task 4.3, real server)", () => {
   let realRepoDir: string
   let realCommonDir: string

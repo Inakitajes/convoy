@@ -1840,14 +1840,15 @@ describe("launch TUI preset changes (specs viewer / worktrees run handoff)", () 
     }
   })
 
-  test("an unknown preset id is ignored and the explicit-decision notice shows", async () => {
+  test("an unknown preset id is surfaced (not silently dropped) and nothing is selected (task 10.3)", async () => {
     const launcher = await createLauncher(110, 40, 1, specs, ["not-a-change"])
     try {
       await launcher.renderOnce()
       const view = launchView(launcher.picker)
       expect(view.selectedChangeIds).toEqual([])
       expect(view.manualNoChanges).toBe(false)
-      expect(launcher.captureCharFrame()).toContain("2 active changes · pick one (esc)")
+      const frame = launcher.captureCharFrame()
+      expect(frame).toContain("preset not-a-change is not active in this checkout")
     } finally {
       await closeLauncher(launcher)
     }

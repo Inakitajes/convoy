@@ -531,6 +531,12 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
       useExecutionPipeline: Boolean(options.resumeRunID && options.plan),
       // The reviewed feature link persists before any execution (task 4.2).
       ...(options.plan?.feature ? { feature: options.plan.feature } : {}),
+      // The accepted ordered local changes feed the run-title precedence
+      // (capability run-titles, task 10.3): proposal title → humanized branch
+      // → prompt line, resolved once at open and persisted.
+      ...(options.plan?.openspec?.changeIds && options.plan.openspec.changeIds.length > 0
+        ? { selectedChangeIds: options.plan.openspec.changeIds }
+        : {}),
       ...(runBranch ? { branch: runBranch } : {}),
     })
     const pipeline = metadata.pipeline

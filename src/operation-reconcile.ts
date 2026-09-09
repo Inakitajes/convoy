@@ -1,5 +1,5 @@
 import { isAncestor, resolveCommit, statusPorcelain } from "./git"
-import { readCheckoutActiveChanges } from "./checkout-openspec"
+import { readCheckoutActiveChanges, readCheckoutArchives } from "./checkout-openspec"
 import { openspecDirName } from "./openspec"
 import type { OperationRecord, OperationStep } from "./operation-journal"
 import type { ReconcileFinding } from "./operation-recovery"
@@ -34,6 +34,8 @@ type EffectIntent = {
   changeId?: unknown
   changes?: unknown
   checkout?: unknown
+  worktree?: unknown
+  branch?: unknown
   hostingRepo?: unknown
   headRepo?: unknown
   headBranch?: unknown
@@ -111,6 +113,22 @@ export async function reconcileStepReality(step: OperationStep, record: Operatio
     if (uncommitted.length > 0) {
       return { finding: "pending", reason: "the archive output is still uncommitted in the checkout — the commit step has not completed" }
     }
+    // Presence in an archive destination, not mere absence from the active set,
+    // proves the archive ran (design D7, task 6.2). A change that left the
+    // active set but appears in no dated archive destination was removed
+    // externally rather than archived; that is not a completed operation.
+    const archives = await readCheckoutArchives(intent.checkout)
+    if (archives.kind !== "known") {
+      return { finding: "pending", reason: `the checkout's archives could not be read: ${archives.reason}` }
+    }
+    const archivedIds = new Set(archives.value.map((entry) => entry.changeId))
+    const missingFromArchive = changes.filter((id) => !archivedIds.has(id))
+    if (missingFromArchive.length > 0) {
+      return {
+        finding: "unexplained",
+        reason: `${missingFromArchive.join(", ")} ${missingFromArchive.length === 1 ? "has" : "have"} left the active set but ${missingFromArchive.length === 1 ? "is" : "are"} not present in any archive destination — ${missingFromArchive.length === 1 ? "it appears" : "they appear"} to have been removed externally rather than archived; inspect before trusting the operation as complete`,
+      }
+    }
     return { finding: "verified", evidence: { checkout: intent.checkout, changes } }
   }
 
@@ -134,6 +152,20 @@ export async function reconcileStepReality(step: OperationStep, record: Operatio
       return { finding: "verified", evidence: { pr: existing.pr.number, url: existing.pr.url } }
     }
     return { finding: "pending", reason: existing.kind === "unknown" ? `the open-PR query is unavailable: ${existing.reason}` : `no open PR matches ${intent.headBranch} → ${intent.baseBranch} yet` }
+  }
+
+  // Creation (capability home-launcher, design D9, task 3.5): the effect is a
+  // registered worktree on the reviewed branch. Verified only when Git
+  // actually lists the destination as a checkout whose HEAD is the recorded
+  // branch — never a bare directory or an unverified path reuse.
+  if (record.kind === "worktree-create" && typeof intent.worktree === "string" && typeof intent.branch === "string") {
+    const { listWorktrees } = await import("./worktree-inventory")
+    const inventory = await listWorktrees(typeof intent.checkout === "string" ? intent.checkout : gitCwd).catch(() => ({ entries: [] as Array<{ path: string; branch?: string; detached?: boolean }> }))
+    const entry = inventory.entries.find((worktree) => worktree.path === intent.worktree)
+    if (entry && !entry.detached && entry.branch === intent.branch) {
+      return { finding: "verified", evidence: { worktree: intent.worktree, branch: intent.branch } }
+    }
+    return { finding: "pending", reason: `the destination ${intent.worktree} is not a registered checkout on ${intent.branch} — the creation step has not completed` }
   }
 
   return { finding: "pending", reason: "no re-observable effect was recorded for this step" }

@@ -28,6 +28,9 @@ export function renderRunPlan(plan: RunPlan, compact = false, options: RunPlanRe
     `  Worktree: ${plan.target.worktree ? `yes · branch ${plan.target.branch ? sanitizeInline(plan.target.branch) : "named at start"}` : "no"}`,
     ...prdHistoryPlanLines(plan),
     ...openspecPlanLines(plan),
+    ...(plan.target.worktree && plan.openspec && plan.openspec.changeIds.length > 0
+      ? ["Scope: the selected changes scope this run's diff and OpenSpec inputs — they never narrow whole-branch publication or squash scope; those act on the entire branch."]
+      : []),
     `Pipeline: ${sanitizeInline(plan.pipeline.name)} · ${plan.pipeline.steps.length} steps`,
     `Gateway: ${gatewayLabel(plan.modelRouting.gateway)}${plan.modelRouting.gateway === "nitro" ? " · every OpenRouter model routed by throughput (injected for this run only)" : ""}`,
     `Advisors: ${plan.pipeline.steps.filter((step) => step.type === "agent" && Boolean(plannedStepAdvisor(step))).length}/${plan.pipeline.steps.filter((step) => step.type === "agent").length} steps advised`,

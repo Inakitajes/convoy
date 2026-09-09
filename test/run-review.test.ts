@@ -218,6 +218,25 @@ describe("renderRunPlan", () => {
     expect(output).toContain("Worktree: yes · branch feat/login")
   })
 
+  test("a worktree run with a selected change discloses that selection never narrows whole-branch scope (task 10.5)", () => {
+    const plan = samplePlan()
+    plan.target.worktree = true
+    plan.target.branch = "feat/login"
+    plan.openspec = { changeIds: ["add-login"], specFiles: ["specs/cli/spec.md"] }
+    const output = renderRunPlan(plan, false)
+    expect(output).toContain("Scope: the selected changes scope this run's diff and OpenSpec inputs")
+    expect(output).toContain("they never narrow whole-branch publication or squash scope")
+  })
+
+  test("a non-worktree run or a run without a selected change omits the whole-branch scope line (task 10.5)", () => {
+    const plain = renderRunPlan(samplePlan(), false)
+    expect(plain).not.toContain("they never narrow whole-branch publication or squash scope")
+    const worktreeNoChange = samplePlan()
+    worktreeNoChange.target.worktree = true
+    worktreeNoChange.openspec = { changeIds: [], specFiles: [] }
+    expect(renderRunPlan(worktreeNoChange, false)).not.toContain("they never narrow whole-branch publication or squash scope")
+  })
+
   test("renders worktree directory when present", () => {
     const plan = samplePlan()
     plan.target.worktreeDir = "/tmp/convoy-worktree/feat-login"

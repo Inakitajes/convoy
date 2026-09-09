@@ -180,7 +180,7 @@ type CommandItem = Action & { label: string }
 type PublishModal =
   | { kind: "working"; message: string }
   | { kind: "blocked"; message: string }
-  | { kind: "confirm"; plan: PublishPlan }
+  | { kind: "review"; plan: PublishPlan; title: string; text: string; editing?: boolean; cursor?: number }
   | { kind: "done"; plan: PublishPlan; outcome: { pushed: boolean; url?: string }; note?: string }
 
 function clipboardStatusLabel(status?: ClipboardResult): string {
@@ -2163,9 +2163,14 @@ export class TuiProgress implements ProgressUI {
 
     try {
       const prepared = await seam.prepare()
-      this.publishModal = prepared.ok
-        ? { kind: "confirm", plan: prepared.plan }
-        : { kind: "blocked", message: prepared.message }
+      if (!prepared.ok) {
+        this.publishModal = { kind: "blocked", message: prepared.message }
+      } else {
+        const composed = await seam.compose(prepared.plan)
+        this.publishModal = composed.ok
+          ? { kind: "review", plan: prepared.plan, title: composed.title, text: composed.text, editing: false, cursor: composed.title.length }
+          : { kind: "blocked", message: composed.message }
+      }
     } catch (error) {
       this.publishModal = { kind: "blocked", message: error instanceof Error ? error.message : String(error) }
     }
@@ -2179,25 +2184,55 @@ export class TuiProgress implements ProgressUI {
     key.stopPropagation()
     // The push and the gh calls own the terminal while they run; input typed
     // here would otherwise land in whatever credential prompt they surfaced.
-    if (modal.kind === "working") return
-
-    if (modal.kind !== "confirm") {
-      // Blocked and done states are read-only: any key dismisses.
+    if (modal.kind === "working" || modal.kind === "blocked" || modal.kind === "done") {
+      // Working is read-only this frame; blocked/done states dismiss on any key.
       this.publishModal = undefined
       this.render()
       return
     }
-    // Enter is the deliberate publication act; every other key — including
-    // reflexive ones — cancels, same philosophy as the abort confirm.
+
+    // The review state shows the composed title/body and only publishes on an
+    // explicit Enter (accept). Typed characters go into the inline title editor
+    // when editing; otherwise every other key cancels, same philosophy as the
+    // abort confirm. This is the operator review step (task 10.4): nothing is
+    // pushed or created until the text is accepted.
+    if (modal.editing) {
+      if (key.name === "return" || key.name === "linefeed") {
+        this.publishModal = { ...modal, editing: false }
+      } else if (key.name === "escape") {
+        this.publishModal = { ...modal, editing: false, cursor: modal.title.length }
+      } else if (key.name === "left") {
+        this.publishModal = { ...modal, cursor: Math.max(0, (modal.cursor ?? 0) - 1) }
+      } else if (key.name === "right") {
+        this.publishModal = { ...modal, cursor: Math.min(modal.title.length, (modal.cursor ?? 0) + 1) }
+      } else if (key.name === "backspace") {
+        const cursor = modal.cursor ?? 0
+        this.publishModal = { ...modal, title: modal.title.slice(0, Math.max(0, cursor - 1)) + modal.title.slice(cursor), cursor: Math.max(0, cursor - 1) }
+      } else {
+        const ch = typedCharacter(key)
+        if (ch !== undefined) {
+          const cursor = modal.cursor ?? 0
+          this.publishModal = { ...modal, title: modal.title.slice(0, cursor) + ch + modal.title.slice(cursor), cursor: cursor + 1 }
+        }
+      }
+      this.render()
+      return
+    }
+
     if (key.name === "return" || key.name === "linefeed") {
-      void this.applyPublish(modal.plan)
+      void this.applyPublish(modal.plan, { title: modal.title, text: modal.text })
+      return
+    }
+    if (key.name === "e" || key.name === "edit") {
+      this.publishModal = { ...modal, editing: true, cursor: modal.title.length }
+      this.render()
       return
     }
     this.publishModal = undefined
     this.render()
   }
 
-  private async applyPublish(plan: PublishPlan) {
+  private async applyPublish(plan: PublishPlan, text: { title: string; text: string }) {
     const seam = this.hostControls.publish
     if (!seam || this.inSubshell) return
     this.publishModal = { kind: "working", message: `pushing ${plan.branch} to ${plan.remote} and opening a pull request…` }
@@ -2208,7 +2243,7 @@ export class TuiProgress implements ProgressUI {
     this.inSubshell = true
     this.suspend()
     try {
-      const result = await seam.apply(plan)
+      const result = await seam.apply(plan, text)
       if (result.ok) {
         const detail = result.outcome.url ? `pull request: ${result.outcome.url}` : "pull request opened"
         this.publishModal = { kind: "done", plan, outcome: result.outcome, note: detail }
@@ -3961,17 +3996,35 @@ export class TuiProgress implements ProgressUI {
       for (const line of wrapLines(modal.message.split("\n"), width)) lines.push(t`${fg(theme.yellow)(line)}`)
       lines.push(plain(""))
       lines.push(t`${fg(theme.faint)("press any key to dismiss")}`)
-    } else if (modal.kind === "confirm") {
-      lines.push(new StyledText([fg(theme.text)(`push ${modal.plan.branch} to ${modal.plan.remote}/${modal.plan.branch}`)]))
-      lines.push(t`${fg(theme.dim)(`normal push (never forced), then locate or create a pull request onto ${modal.plan.base}`)}`)
+    } else if (modal.kind === "review") {
+      lines.push(new StyledText([fg(theme.text)(`push ${modal.plan.branch} to ${modal.plan.remote}/${modal.plan.branch} and open a pull request onto ${modal.plan.base}`)]))
+      lines.push(t`${fg(theme.dim)("normal push (never forced). Review the title/body below before publishing.")}`)
+      lines.push(plain(""))
+      if (modal.editing) {
+        lines.push(t`${fg(theme.accent)("title │")}`)
+        lines.push(...textInput(modal.title, modal.cursor ?? modal.title.length, width))
+      } else {
+        lines.push(t`${fg(theme.accent)("title│")} ${fg(theme.text)(modal.title || "—")}`)
+      }
+      lines.push(plain(""))
+      for (const line of wrapLines(modal.text.split("\n"), width)) lines.push(t`${fg(theme.faint)(line)}`)
       lines.push(plain(""))
       lines.push(
-        new StyledText([
-          fg(theme.accent)("enter"),
-          fg(theme.dim)(" publish · "),
-          fg(theme.accent)("esc"),
-          fg(theme.dim)(" cancel"),
-        ]),
+        modal.editing
+          ? new StyledText([
+              fg(theme.accent)("enter"),
+              fg(theme.dim)(" accept title · "),
+              fg(theme.accent)("esc"),
+              fg(theme.dim)(" keep reviewed title"),
+            ])
+          : new StyledText([
+              fg(theme.accent)("enter"),
+              fg(theme.dim)(" publish · "),
+              fg(theme.accent)("e"),
+              fg(theme.dim)(" edit title · "),
+              fg(theme.accent)("esc"),
+              fg(theme.dim)(" cancel"),
+            ]),
       )
     } else {
       const { outcome } = modal

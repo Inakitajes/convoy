@@ -233,8 +233,10 @@ export type PublishOutcome = {
 export type PublishSeam = {
   /** Resolves and discloses the publication context, or explains why it is unavailable. */
   prepare(): Promise<{ ok: true; plan: PublishPlan } | { ok: false; message: string }>
-  /** Normal push to the disclosed destination, then locate/create the PR. Called with the TUI suspended. */
-  apply(plan: PublishPlan): Promise<{ ok: true; outcome: PublishOutcome } | { ok: false; message: string }>
+  /** Composes the reviewed title/body before any effect (capability run-finalization); deterministic and side-effect free. */
+  compose(plan: PublishPlan): Promise<{ ok: true; title: string; text: string } | { ok: false; message: string }>
+  /** Normal push to the disclosed destination, then locate/create the PR with the reviewed (possibly edited) text. Called with the TUI suspended. */
+  apply(plan: PublishPlan, accepted?: { title: string; text: string }): Promise<{ ok: true; outcome: PublishOutcome } | { ok: false; message: string }>
 }
 
 /** Host-local screen/idle sleep assertion, intentionally never persisted with a run. */

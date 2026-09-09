@@ -175,6 +175,18 @@ describe("publish apply pushes normally and locates before creating", () => {
     expect(calls.some((call) => call.command === "gh")).toBe(false)
   })
 
+  test("a failed open-PR lookup stops as unknown and never creates (task 10.4)", async () => {
+    const { seam, calls } = seamWith({ "gh pr list": fail("rate limit exceeded") })
+    const result = await seam.apply({ branch: "feat/widget", remote: "origin", base: "main" })
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.message).toContain("open-PR lookup failed")
+      expect(result.message).toContain("rate limit exceeded")
+      expect(result.message).toContain("stopping as unknown")
+    }
+    expect(calls.some((call) => call.command === "gh" && call.args.includes("pr") && call.args.includes("create"))).toBe(false)
+  })
+
   test("an existing open PR is returned instead of created twice", async () => {
     const { seam, calls } = seamWith({
       "gh pr list": ok('[{"url":"https://github.com/acme/repo/pull/3"}]'),

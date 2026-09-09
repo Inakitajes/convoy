@@ -125,7 +125,24 @@ export function createPublishSeam(input: CreatePublishSeamInput) {
      * landed push says exactly that, and the retry reuses the push because the
      * existing-PR check runs before creation.
      */
-    async apply(plan: { branch: string; remote: string; base: string }): Promise<{ ok: true; outcome: { pushed: boolean; url?: string } } | { ok: false; message: string }> {
+    /**
+     * The composed title/body for operator review (capability run-finalization,
+     * task 10.4): composition is deterministic from persisted state and changes
+     * nothing, so it is safe to surface before any push or PR creation. The
+     * operator reviews (and may edit) this text, then applies it.
+     */
+    async compose(plan: { branch: string; remote: string; base: string }): Promise<{ ok: true; title: string; text: string } | { ok: false; message: string }> {
+      return { ok: true, ...(await composePrText({ cwd, runDir: input.runDir, branch: plan.branch })) }
+    },
+
+    /**
+     * One normal push, then PR location/creation using the text the operator
+     * reviewed and accepted. A non-fast-forward rejection stops with the
+     * remote's message — never a force. A PR failure after a landed push says
+     * exactly that, and the retry reuses the push because the existing-PR
+     * check runs before creation.
+     */
+    async apply(plan: { branch: string; remote: string; base: string }, accepted?: { title: string; text: string }): Promise<{ ok: true; outcome: { pushed: boolean; url?: string } } | { ok: false; message: string }> {
       // Git push is independent of the GitHub CLI (delta run-finalization):
       // missing gh blocks only the PR action below, never this push.
       const push = await run("git", ["push", plan.remote, `${plan.branch}:${plan.branch}`], { allowFailure: true })
@@ -137,13 +154,23 @@ export function createPublishSeam(input: CreatePublishSeamInput) {
       const gh = await ghGuidance(run)
       if (!gh.ok) return { ok: true, outcome: { pushed: true } }
 
+      // Open-PR lookup must succeed before any creation (capability
+      // run-finalization, task 10.4): a failed lookup is an unknown state, not
+      // an absence, and never authorizes a create that could duplicate an
+      // existing PR. Only a successful lookup that returns no open PR is
+      // evidence enough to proceed.
       const existing = await run("gh", ["pr", "list", "--head", plan.branch, "--state", "open", "--json", "url", "--limit", "1"], { allowFailure: true })
-      if (existing.exitCode === 0) {
-        const url = parsePrListUrl(existing.stdout)
-        if (url) return { ok: true, outcome: { pushed: true, url } }
+      if (existing.exitCode !== 0) {
+        const detail = (existing.stderr || existing.stdout).trim()
+        return {
+          ok: false,
+          message: `the open-PR lookup failed${detail ? `: ${detail}` : "; unable to determine whether a pull request already exists"} — stopping as unknown rather than risking a duplicate. Retry to locate the existing PR, or create the pull request manually.`,
+        }
       }
+      const existingUrl = parsePrListUrl(existing.stdout)
+      if (existingUrl) return { ok: true, outcome: { pushed: true, url: existingUrl } }
 
-      const body = await composePrText({ cwd, runDir: input.runDir, branch: plan.branch })
+      const body = accepted ?? (await composePrText({ cwd, runDir: input.runDir, branch: plan.branch }))
       const created = await run(
         "gh",
         ["pr", "create", "--head", plan.branch, "--base", plan.base, "--title", body.title, "--body", body.text],
@@ -156,8 +183,8 @@ export function createPublishSeam(input: CreatePublishSeamInput) {
           message: `the branch was pushed to ${plan.remote}/${plan.branch}, but creating the pull request failed${detail ? `: ${detail}` : ""}; retry to locate or create it without pushing again unnecessarily`,
         }
       }
-      const url = parsePrUrl(created.stdout) ?? parsePrUrl(created.stderr)
-      return { ok: true, outcome: { pushed: true, ...(url ? { url } : {}) } }
+      const createdUrl = parsePrUrl(created.stdout) ?? parsePrUrl(created.stderr)
+      return { ok: true, outcome: { pushed: true, ...(createdUrl ? { url: createdUrl } : {}) } }
     },
   }
 }

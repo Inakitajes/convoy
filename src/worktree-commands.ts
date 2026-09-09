@@ -74,7 +74,7 @@ export type WorktreesCommand =
   | { kind: "push"; worktree: string; remote?: string; refspec?: string }
   | { kind: "pr"; worktree: string; base?: string; repo?: string; headRepo?: string; title?: string; body?: string; push: boolean }
   | { kind: "run"; worktree: string; changes: string[]; manual: boolean }
-  | { kind: "archive"; worktree: string; changes: string[] }
+  | { kind: "archive"; worktree: string; changes: string[]; allowIncomplete?: boolean }
   | { kind: "squash"; worktree: string; base: string; message?: string }
   | { kind: "close"; worktree: string; base: string; changes: string[]; message?: string }
   | { kind: "remove"; worktree: string; force: boolean }
@@ -153,7 +153,7 @@ export function parseWorktreesArgs(argv: string[]): WorktreesCommand {
     case "archive": {
       const changes = flags.get("--change") ?? []
       if (changes.length === 0) throw worktreesUsage("archive needs at least one --change <id> (an empty archive set is a close-review decision, not an archive command)")
-      return { kind: "archive", worktree: requireSingle("--worktree"), changes }
+      return { kind: "archive", worktree: requireSingle("--worktree"), changes, ...(flags.has("--allow-incomplete") ? { allowIncomplete: true } : {}) }
     }
     case "squash":
       return { kind: "squash", worktree: requireSingle("--worktree"), base: requireSingle("--base"), ...(single("--message") ? { message: single("--message") } : {}) }
@@ -182,7 +182,7 @@ export function parseWorktreesArgs(argv: string[]): WorktreesCommand {
   }
 }
 
-const knownFlags = new Set(["--worktree", "--remote", "--ref", "--base", "--change", "--branch", "--force", "--expect", "--operation", "--continue", "--cancel", "--message", "--repo", "--head-repo", "--title", "--body", "--push", "--manual", "--destination", "--confirm"])
+const knownFlags = new Set(["--worktree", "--remote", "--ref", "--base", "--change", "--branch", "--force", "--expect", "--operation", "--continue", "--cancel", "--message", "--repo", "--head-repo", "--title", "--body", "--push", "--manual", "--destination", "--confirm", "--allow-incomplete"])
 
 function worktreesUsage(reason: string): Error {
   return new Error(`${reason}\n\n${worktreesHelp()}`)
@@ -341,6 +341,12 @@ async function createReviewedWorktree(
   const { execFile } = await import("./git")
   const { createOperation, recordStepIntent, acknowledgeStep, resolveOperation, ensureOperationsRoot } = await import("./operation-journal")
   const commonDir = await repoCommonDir(dir)
+  // Recovery before fresh creation (task 3.5): a crash midway through an
+  // earlier creation of this branch/worktree leaves a journal. Reconcile it
+  // against reality first — a verified creation is reused (no duplicate), a
+  // not-yet-created one is released so this fresh creation can proceed cleanly,
+  // and unexplained state stops for inspection instead of re-creating.
+  await reconcilePendingCreateOperations(commonDir, draft, dir)
   let operationId: string | undefined
   if (commonDir) {
     await ensureOperationsRoot(commonDir).catch(() => {})
@@ -357,6 +363,16 @@ async function createReviewedWorktree(
   const { findWorktreeDirForBranch } = await import("./git")
   const existing = await findWorktreeDirForBranch(draft.branch, dir).catch(() => undefined)
   if (!existing) {
+    // Re-verify destination occupancy immediately before `git worktree add`
+    // (capability home-launcher, task 10.2): a path taken between review and
+    // creation is routed back to destination review instead of handing the
+    // occupied path to Git and failing inside it.
+    const destinationOccupied = await stat(draft.worktree).catch(() => undefined)
+    if (destinationOccupied) {
+      throw new Error(
+        `the destination ${draft.worktree} is already occupied by another checkout — choose a different destination and review it again${operationId ? `\nThe creation intent is retained — inspect or cancel it with \`convoy worktrees recover --operation ${operationId}\`.` : ""}`,
+      )
+    }
     const added = await execFile("git", ["worktree", "add", "-b", draft.branch, draft.worktree, draft.base], { cwd: dir, allowFailure: true })
     if (added.exitCode !== 0) {
       throw new Error(
@@ -367,6 +383,44 @@ async function createReviewedWorktree(
   if (commonDir && operationId) {
     await acknowledgeStep(commonDir, operationId, "create", { worktree: existing ?? draft.worktree }).catch(() => {})
     await resolveOperation({ commonDir, operationId, gitCwd: dir, outcome: "resolved" }).catch(() => {})
+  }
+}
+
+/**
+ * Reconciles a pending worktree-creation for this branch/worktree before a
+ * fresh creation (task 3.5, design D9): a verified creation (the destination is
+ * a registered checkout on the reviewed branch) is acknowledged and the journal
+ * released so the call reuses it instead of duplicating; a not-yet-created one
+ * is released so the fresh creation proceeds cleanly; unexplained reality
+ * blocks with recovery guidance rather than re-creating blindly.
+ */
+async function reconcilePendingCreateOperations(
+  commonDir: string | undefined,
+  draft: { branch: string; worktree: string },
+  dir: string,
+): Promise<void> {
+  if (!commonDir) return
+  const { listPendingOperations, readOperation } = await import("./operation-journal")
+  const { recoverOperation } = await import("./operation-recovery")
+  const { reconcileStepReality } = await import("./operation-reconcile")
+  const pending = await listPendingOperations(commonDir)
+  for (const operationId of pending) {
+    const read = await readOperation(commonDir, operationId)
+    if (read.status !== "found" || read.value.kind !== "worktree-create") continue
+    const intent = read.value.intent as { branch?: unknown; worktree?: unknown } | undefined
+    if (intent?.branch !== draft.branch || (typeof intent.worktree === "string" && resolve(intent.worktree) !== resolve(draft.worktree))) continue
+    const probe = (step: unknown, operation: unknown) => reconcileStepReality(step as never, operation as never, dir)
+    const outcome = await recoverOperation({ commonDir, operationId, gitCwd: dir, probe, consent: "continue" })
+    if (outcome.status === "blocked") {
+      throw new Error(`a pending worktree creation (${operationId}) could not be reconciled: ${outcome.reason} — inspect it with \`convoy worktrees recover --operation ${operationId}\``)
+    }
+    if (outcome.status === "needs-work") {
+      // The creation has not happened yet: release this stale intent so the
+      // fresh creation below can proceed without a duplicate pending journal.
+      await recoverOperation({ commonDir, operationId, gitCwd: dir, probe, consent: "cancel" }).catch(() => {})
+    }
+    // "reconciled" (verified creation) or "cancelled": the journal is released;
+    // a verified creation is reused through the branch/worktree lookup below.
   }
 }
 
@@ -487,20 +541,50 @@ async function runPush(command: Extract<WorktreesCommand, { kind: "push" }>, cwd
 // ── archive ──────────────────────────────────────────────────────────────
 
 /**
+ * Whether the installed OpenSpec CLI supports archiving a change whose tasks
+ * are not all complete (task 6.1, design D7). Convoy must not invent an
+ * incomplete-task override the installed CLI does not provide, so it queries
+ * `openspec archive --help` and recognizes the documented override flags; a CLI
+ * without one exposes no override and the ordinary requirement stands.
+ */
+async function archiveIncompleteOverrideSupported(): Promise<boolean> {
+  try {
+    const help = await execFile("openspec", ["archive", "--help"], { cwd: process.cwd(), allowFailure: true })
+    if (help.exitCode !== 0) return false
+    const text = help.stdout + help.stderr
+    return /--allow-incomplete|--incomplete|-[-a-z]*incomplete/i.test(text)
+  } catch {
+    return false
+  }
+}
+
+/**
  * The selected inputs must exist in this checkout with known complete tasks
  * before any mutation (task 6.1): unknown or incomplete tasks block the
- * ordinary archive, and unselected/inherited changes are never included.
+ * ordinary archive, and unselected/inherited changes are never included. An
+ * incomplete-task override is exposed only when the operator explicitly
+ * requests it AND the installed OpenSpec CLI supports it (`--allow-incomplete`);
+ * otherwise incomplete tasks still block, and a requested-but-unsupported
+ * override is refused rather than guessed around.
  */
-async function validateArchiveInputs(checkout: string, changes: string[]): Promise<void> {
+async function validateArchiveInputs(checkout: string, changes: string[], options: { allowIncomplete?: boolean } = {}): Promise<void> {
   const local = await readCheckoutActiveChanges(checkout)
   if (local.kind !== "known") throw new Error(`the selected checkout's active changes could not be read: ${local.reason}`)
   const byId = new Map(local.value.map((change) => [change.changeId, change]))
   for (const id of changes) {
     const change = byId.get(id)
     if (!change) throw new Error(`change "${id}" is not an active change of ${checkout} — select changes that exist in this checkout`)
-    if (change.tasks === undefined) throw new Error(`change "${id}" has no tasks file; its completeness is unknown and the ordinary archive refuses unknown tasks`)
-    if (change.tasks === "unknown") throw new Error(`change "${id}"'s task count could not be read; unknown tasks block the ordinary archive`)
+    if (change.tasks === undefined || change.tasks === "unknown") {
+      if (options.allowIncomplete) throw new Error(`change "${id}" has unknown tasks; an incomplete-task override does not apply to unknown task counts`)
+      throw new Error(`change "${id}" has no tasks file; its completeness is unknown and the ordinary archive refuses unknown tasks`)
+    }
     if (change.tasks.done < change.tasks.total) {
+      if (options.allowIncomplete) {
+        if (!(await archiveIncompleteOverrideSupported())) {
+          throw new Error(`change "${id}" has incomplete tasks and the installed OpenSpec does not support archiving incomplete changes — complete the tasks or archive without the override`)
+        }
+        continue
+      }
       throw new Error(`change "${id}" has ${change.tasks.done}/${change.tasks.total} tasks complete — incomplete tasks block the ordinary archive`)
     }
   }
@@ -559,6 +643,24 @@ async function archiveSelectedChanges(checkout: string, changes: string[], commo
   const outside = changed.filter((path) => !path.startsWith(`${openspecDirName}/`))
   if (outside.length > 0) {
     throw new Error(`archive touched paths outside ${openspecDirName}/ (${outside.join(", ")}) — nothing was committed; inspect and resolve before retrying`)
+  }
+  // Semantic proof (task 6.2): the composed output must validate with the real
+  // OpenSpec CLI, not merely sit under `openspec/` by position. Gated honestly —
+  // this guards a genuine archive output (paths actually changed) in a checkout
+  // that speaks canonical OpenSpec (has its own `openspec/specs/`). A checkout
+  // without canonical specs, or an environment where the CLI cannot run, is not
+  // an OpenSpec consumer: there, refraining from validation must not invent a
+  // failure, and a failed spawn is not evidence the output is invalid.
+  if (changed.length > 0 && (await checkoutHasCanonicalSpecs(checkout))) {
+    let validate
+    try {
+      validate = await execFile("openspec", ["validate", "--all"], { cwd: checkout, allowFailure: true })
+    } catch {
+      validate = undefined
+    }
+    if (validate && validate.exitCode !== 0) {
+      throw new Error(`the archived output failed OpenSpec validation: ${(validate.stderr || validate.stdout || "validation reported errors").trim()}`)
+    }
   }
   // Commit only the verified archive output, under the operator's identity.
   await execFile("git", ["add", "--", `${openspecDirName}/`], { cwd: checkout })
@@ -639,7 +741,7 @@ async function runArchive(command: Extract<WorktreesCommand, { kind: "archive" }
   await reconcilePendingArchiveOperations(commonDir, command.worktree)
   const review = await reviewOperation({ action: "archive", checkout: command.worktree, commonDir })
   if (!review.ok) return reportBlocked(review.blockers)
-  await validateArchiveInputs(command.worktree, command.changes)
+  await validateArchiveInputs(command.worktree, command.changes, { allowIncomplete: command.allowIncomplete })
 
   const result = await executeReviewed({
     action: "archive",
@@ -1015,6 +1117,18 @@ async function probeClosePullRequest(
   }
 }
 
+/**
+ * Whether the checkout speaks canonical OpenSpec: it carries at least one
+ * canonical `spec.md`. This is the conservative gate for the post-archive
+ * semantic validation (task 6.2) — a checkout without canonical specs is not
+ * an OpenSpec consumer, so refusing to validate there must not be read as a
+ * failure, and a test stub CLI in that state must not trip the guard.
+ */
+async function checkoutHasCanonicalSpecs(checkout: string): Promise<boolean> {
+  const specs = await readCheckoutCanonicalSpecs(checkout)
+  return specs.kind === "known" && specs.value.length > 0
+}
+
 /** Paths whose porcelain state changed between two `git status --porcelain` reads. */
 function changedPaths(before: string, after: string): string[] {
   const beforeSet = new Set(
@@ -1272,16 +1386,48 @@ export async function validateRunSelection(worktree: string, changes: string[]):
 
 // ── shared reporting ─────────────────────────────────────────────────────
 
-/** Prints blockers with their remediation and exits non-zero. */
-function reportBlocked(blockers: Array<{ reason: string; remediation: string }>, reason?: "stale-review" | "blocked"): void {
+/** The blocker/remediation text the shared seam renders for a blocked operation. */
+export function formatBlockers(blockers: Array<{ reason: string; remediation: string }>, reason?: "stale-review" | "blocked"): string {
   const lines: string[] = []
   if (reason === "stale-review") lines.push("the reviewed target changed before execution — nothing was mutated")
   for (const blocker of blockers) {
     lines.push(`blocked: ${blocker.reason}`)
     lines.push(`  remediation: ${blocker.remediation}`)
   }
-  process.stderr.write(`${lines.join("\n")}\n`)
+  return lines.join("\n")
+}
+
+/** The default headless blocked reporter: prints blockers to stderr and exits non-zero. */
+function writeBlockedStderr(blockers: Array<{ reason: string; remediation: string }>, reason?: "stale-review" | "blocked"): void {
+  process.stderr.write(`${formatBlockers(blockers, reason)}\n`)
   process.exitCode = 1
+}
+
+type BlockedReporter = (blockers: Array<{ reason: string; remediation: string }>, reason?: "stale-review" | "blocked") => void
+
+/** The active blocked reporter the shared seam routes every blocked outcome through. */
+let blockedSink: BlockedReporter = writeBlockedStderr
+
+/** The shared seam's blocker path (task 7.9): routes to the active reporter instead of swallowing. */
+export function reportBlocked(blockers: Array<{ reason: string; remediation: string }>, reason?: "stale-review" | "blocked"): void {
+  blockedSink(blockers, reason)
+}
+
+/**
+ * Runs `fn` with the blocked reporter overridden to a launching-surface sink
+ * (capability worktree-operations, task 7.9): a blocked menu action renders its
+ * blockers and remediations as a visible notice instead of writing to an
+ * unwritten stderr stream and silently returning to the menu. The sink is
+ * always restored (default headless stderr reporting) when `fn` settles.
+ */
+export async function withBlockedReporter<T>(sink: BlockedReporter, fn: () => Promise<T>): Promise<T> {
+  const previous = blockedSink
+  blockedSink = sink
+  try {
+    return await fn()
+  } finally {
+    blockedSink = previous
+  }
 }
 
 // ── `convoy close` (capability feature-close, design D4/D8/D11) ──────────

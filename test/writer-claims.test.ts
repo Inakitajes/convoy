@@ -12,6 +12,7 @@ import {
   writerClaimPath,
   type WriterClaim,
 } from "../src/writer-claims"
+import { writeJsonFile } from "../src/repo-store"
 
 /**
  * Managed writer claims (change `worktree-control-center`, task 2.1): the
@@ -121,5 +122,126 @@ describe("reownWriterClaim (propose-flow handoff)", () => {
   test("the claim path escapes separator-only branch keys into a flat name", () => {
     expect(writerClaimPath("/common", "feat/a/b")).toMatch(/writer-claims\/feat__a__b\.json$/)
     expect(writerClaimPath("/common", "branch-only")).toMatch(/writer-claims\/branch-only\.json$/)
+  })
+})
+
+describe("acquireWriterClaim (task 4.6 conflicting writers on resume)", () => {
+  test("refuses a live conflicting claim held by another owner/PID (no takeover), returning the existing claim", async () => {
+    const dir = await tempDir()
+    const now = Date.now()
+    await writeJsonFile(
+      writerClaimPath(dir, "feat/live"),
+      {
+        schemaVersion: 1,
+        branch: "feat/live",
+        checkoutPath: "/wt/live",
+        kind: "authoring",
+        owner: "other",
+        pid: process.pid,
+        startedAt: now - 1000,
+        heartbeatAt: now,
+      } satisfies WriterClaim,
+    )
+    const result = await acquireWriterClaim({
+      commonDir: dir,
+      branch: "feat/live",
+      checkoutPath: "/wt/live-2",
+      kind: "authoring",
+      owner: "mine",
+    })
+    expect(result.status).toBe("conflict")
+    if (result.status === "conflict") {
+      expect(result.existing.owner).toBe("other")
+      expect(result.existing.pid).toBe(process.pid)
+    }
+    // The live claim is left untouched — no takeover by a new PID.
+    const read = await readWriterClaim(dir, "feat/live")
+    expect(read.status).toBe("found")
+    if (read.status === "found") expect(read.value.owner).toBe("other")
+  })
+
+  test("an uncertain claim (alive PID, stale heartbeat) is refused, never taken over without reconciliation", async () => {
+    const dir = await tempDir()
+    const now = Date.now()
+    await writeJsonFile(
+      writerClaimPath(dir, "feat/uncertain"),
+      {
+        schemaVersion: 1,
+        branch: "feat/uncertain",
+        checkoutPath: "/wt/uncertain",
+        kind: "authoring",
+        owner: "other",
+        pid: process.pid,
+        startedAt: now - 20 * 60 * 1000,
+        heartbeatAt: now - 20 * 60 * 1000,
+      } satisfies WriterClaim,
+    )
+    const result = await acquireWriterClaim({
+      commonDir: dir,
+      branch: "feat/uncertain",
+      checkoutPath: "/wt/u",
+      kind: "authoring",
+      owner: "mine",
+    })
+    expect(result.status).toBe("uncertain")
+    if (result.status === "uncertain") expect(result.existing?.owner).toBe("other")
+  })
+
+  test("a stale claim (dead PID, stale heartbeat) is reconciled and replaced", async () => {
+    const dir = await tempDir()
+    const now = Date.now()
+    await writeJsonFile(
+      writerClaimPath(dir, "feat/stale"),
+      {
+        schemaVersion: 1,
+        branch: "feat/stale",
+        checkoutPath: "/wt/stale",
+        kind: "pipeline",
+        owner: "run-old",
+        pid: 999_999_999,
+        startedAt: now - 30 * 60 * 1000,
+        heartbeatAt: now - 30 * 60 * 1000,
+      } satisfies WriterClaim,
+    )
+    const result = await acquireWriterClaim({
+      commonDir: dir,
+      branch: "feat/stale",
+      checkoutPath: "/wt/stale",
+      kind: "pipeline",
+      owner: "run-new",
+      pid: process.pid,
+    })
+    expect(result.status).toBe("acquired")
+    if (result.status === "acquired") {
+      expect(result.claim.owner).toBe("run-new")
+      expect(result.claim.pid).toBe(process.pid)
+    }
+  })
+
+  test("a matching reconcileOwner may continue even over a live claim (same writer, not a takeover)", async () => {
+    const dir = await tempDir()
+    const now = Date.now()
+    await writeJsonFile(
+      writerClaimPath(dir, "feat/continue"),
+      {
+        schemaVersion: 1,
+        branch: "feat/continue",
+        checkoutPath: "/wt/continue",
+        kind: "authoring",
+        owner: "session-9",
+        pid: process.pid,
+        startedAt: now - 1000,
+        heartbeatAt: now,
+      } satisfies WriterClaim,
+    )
+    const result = await acquireWriterClaim({
+      commonDir: dir,
+      branch: "feat/continue",
+      checkoutPath: "/wt/continue",
+      kind: "authoring",
+      owner: "session-9",
+      reconcileOwner: "session-9",
+    })
+    expect(result.status).toBe("acquired")
   })
 })

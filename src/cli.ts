@@ -456,6 +456,11 @@ async function dispatchWorkAction(targetDir: string, route: TuiRoute, worktree: 
       await reportHandoffBlocker("no base could be detected for close — pass an explicit base with `convoy worktrees close --base <ref>`", [], route)
       return
     }
+    // Launch-time pre-mutation confirmation (task 10.1), same contract the
+    // specs browser shows: name source worktree/path/branch, selected base,
+    // the explicit archive set (empty allowed), whole-branch scope, and the
+    // source/base diff-stat (task 10.5) before any sync/archive/squash effect.
+    if (!(await confirmHomeClose({ route, worktree, branch: branch ?? "", base, targetDir }))) return
     await runWorktreeClose({ checkout: worktree, base, changes: [], route }, targetDir)
     return
   }
@@ -472,6 +477,54 @@ async function dispatchWorkAction(targetDir: string, route: TuiRoute, worktree: 
  * never bypasses the operation guards — it delegates to `runWorktreesCommand`,
  * so a blocked action reports the same reason the CLI would.
  */
+/**
+ * Runs one guarded menu operation with the blocked reporter routed to a visible
+  * TUI notice (capability worktree-operations, task 7.9): a blocked fetch/sync/
+  * push/pr/squash renders every blocker and remediation instead of writing to an
+  * unwritten stderr stream and silently returning to the menu. When no route
+  * (headless), the default stderr/exit reporting stands.
+  */
+async function runMenuGuarded(route: TuiRoute, fn: () => Promise<void>): Promise<void> {
+  const { withBlockedReporter, formatBlockers } = await import("./worktree-commands")
+  const { showNoticeTui } = await import("./notice-tui")
+  await withBlockedReporter(
+    (blockers, reason) => {
+      void showNoticeTui(route, { title: "worktree action", message: formatBlockers(blockers, reason) })
+    },
+    fn,
+  )
+}
+
+/**
+ * The Home launch-time close confirmation (capability feature-close, task
+ * 10.1): naming the source worktree/path/branch, selected base, the explicit
+ * archive set (empty allowed), whole-branch scope, and the source/base
+ * diff-stat (task 10.5) before any effect. Cancellation performs nothing.
+ */
+async function confirmHomeClose(input: { route: TuiRoute; worktree: string; branch: string; base: string; targetDir: string }): Promise<boolean> {
+  const { showRemovalConfirmTui } = await import("./removal-confirm-tui")
+  const { execFile } = await import("./git")
+  const displayName = input.worktree.split("/").pop() || input.worktree
+  const stat = await execFile("git", ["diff", "--stat", `${input.base}...HEAD`, "--", "."], { cwd: input.worktree, allowFailure: true })
+  const diffStat = stat.exitCode === 0 && stat.stdout.trim() ? stat.stdout.trim().split("\n").slice(0, 8).join("\n") : "unavailable"
+  const message = [
+    `Close ${displayName} (${input.worktree})?`,
+    "",
+    "Close runs sync → archive → squash: it archives the selected changes and lands ONE commit covering the WHOLE branch on the base — including edits outside the selected changes. Nothing is pushed, merged, or deleted; push and cleanup stay separate.",
+    "",
+    `branch   ${input.branch || "(no local branch)"}`,
+    `base     ${input.base}`,
+    `archive  none — zero selected changes`,
+    "scope    whole-branch (selecting changes never narrows publication or squash scope)",
+    "",
+    `diffstat ${diffStat}`,
+    "",
+    "Selection never narrows close's whole-branch squash; cancel safely.",
+  ].join("\n")
+  const choice = await showRemovalConfirmTui(input.route, { title: "close worktree", message, mode: "confirm" })
+  return choice === "confirm"
+}
+
 async function runWorktreeMenuOperation(targetDir: string, route: TuiRoute, worktree: string, action: "fetch" | "sync" | "push" | "pr" | "squash" | "remove"): Promise<void> {
   const { runWorktreesCommand } = await import("./worktree-commands")
   const { showNoticeTui } = await import("./notice-tui")
@@ -493,7 +546,7 @@ async function runWorktreeMenuOperation(targetDir: string, route: TuiRoute, work
         )
         return
       }
-      await runWorktreesCommand({ kind: "fetch", worktree, remote: names[0]! })
+      await runMenuGuarded(route, () => runWorktreesCommand({ kind: "fetch", worktree, remote: names[0]! }))
       return
     }
     if (action === "sync" || action === "squash") {
@@ -503,15 +556,15 @@ async function runWorktreeMenuOperation(targetDir: string, route: TuiRoute, work
         await blocked(`no base could be detected — pass an explicit base with \`convoy worktrees ${action} --worktree <path> --base <ref>\``)
         return
       }
-      await runWorktreesCommand(action === "sync" ? { kind: "sync", worktree, base: detected.ref } : { kind: "squash", worktree, base: detected.ref })
+      await runMenuGuarded(route, () => runWorktreesCommand(action === "sync" ? { kind: "sync", worktree, base: detected.ref } : { kind: "squash", worktree, base: detected.ref }))
       return
     }
     if (action === "push") {
-      await runWorktreesCommand({ kind: "push", worktree })
+      await runMenuGuarded(route, () => runWorktreesCommand({ kind: "push", worktree }))
       return
     }
     if (action === "pr") {
-      await runWorktreesCommand({ kind: "pr", worktree, push: false })
+      await runMenuGuarded(route, () => runWorktreesCommand({ kind: "pr", worktree, push: false }))
       return
     }
     if (action === "remove") {
@@ -582,7 +635,11 @@ async function removeWorktreeInteractive(targetDir: string, route: TuiRoute, wor
   }
 
   // Blocked: show every blocker; force removal is offered only when the only
-  // thing in the way is local content that force would delete.
+  // thing in the way is local content that force would delete. After the
+  // blockers are disclosed, choosing force opens a SECOND deliberate
+  // confirmation that names exactly what would be deleted (task 7.11); only an
+  // explicit confirm there proceeds — force never bypasses main/process,
+  // unverified, locked, or unknown-state blockers.
   const forceAvailable = blockers.length > 0 && blockers.every((blocker) => blocker.content === true)
   const choice = await showRemovalConfirmTui(route, {
     title: "remove worktree",
@@ -592,6 +649,13 @@ async function removeWorktreeInteractive(targetDir: string, route: TuiRoute, wor
   })
   if (choice === "cancel") return
   if (choice === "force") {
+    const deletionList = blockers.filter((blocker) => blocker.content === true).map((blocker) => `- ${blocker.reason}`).join("\n")
+    const consent = await showRemovalConfirmTui(route, {
+      title: "force remove worktree",
+      message: `Force removal of ${worktree} deletes the following local content:\n${deletionList}\n\nThe branch is retained. Force bypasses only content blockers; the main checkout, the process's own checkout, locks, and unknown state still refuse.\n\nContinue with force removal?`,
+      mode: "force",
+    })
+    if (consent !== "confirm") return
     await report(await removeRegisteredWorktree({ checkout: worktree, commonDir, force: true }))
     return
   }

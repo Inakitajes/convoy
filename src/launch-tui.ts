@@ -656,6 +656,8 @@ export class LaunchPicker {
   private selectedChangeIds: string[] = []
   /** True once the operator explicitly chose the no-change mode (Manual prompt or a manual preset). */
   private manualNoChanges = false
+  /** Preset change ids handed in but not active in this checkout (task 10.3); surfaced, never silently dropped. */
+  private missingPresetIds: string[] = []
 
   private optionIndex = 0
   private optionScroll = 0
@@ -865,6 +867,7 @@ export class LaunchPicker {
     // no-change mode (e.g. `worktrees run --manual`).
     if (presetChanges) {
       this.selectedChangeIds = presetChanges.filter((id) => specs.some((spec) => spec.id === id))
+      this.missingPresetIds = presetChanges.filter((id) => !specs.some((spec) => spec.id === id))
       this.manualNoChanges = presetChanges.length === 0
     } else if (presetFeature) {
       // A board handoff without an explicit selection: the operator still
@@ -2520,6 +2523,14 @@ this.detailBox.title = reviewing ? " review " : " run setup "
    * notice points at the decision, it never announces a silent attach.
    */
   private pushOpenSpecNotice(lines: StyledText[], width: number) {
+    // A preset change handed in that is not active in this checkout is a stale
+    // selection (task 10.3): surface it so the operator re-picks instead of
+    // silently running with the missing change dropped.
+    if (this.missingPresetIds.length > 0) {
+      const value = Math.max(8, width - 9)
+      lines.push(plain(""))
+      lines.push(new StyledText([fg(theme.faint)("openspec "), fg(theme.yellow)(truncate(`preset ${this.missingPresetIds.join(", ")} ${this.missingPresetIds.length === 1 ? "is" : "are"} not active in this checkout — re-select the change or continue without it`, value))]))
+    }
     if (this.specs.length === 0 || this.selectedChangeIds.length > 0 || this.manualNoChanges) return
     const value = Math.max(8, width - 9)
     lines.push(plain(""))

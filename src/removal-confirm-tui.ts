@@ -21,7 +21,7 @@ export function showRemovalConfirmTui(
   options: {
     title: string
     message: string
-    mode: "confirm" | "blocked"
+    mode: "confirm" | "blocked" | "force"
     /** Offer force removal in the blocked dialog (only content blockers). */
     forceAvailable?: boolean
   },
@@ -111,6 +111,26 @@ class RemovalConfirmTui {
         this.finish("confirm")
         return
       }
+    } else if (this.options.mode === "force") {
+      // The deliberate force confirmation (task 7.11): only an explicit
+      // confirm name (f / y / enter) proceeds; every other key — including a
+      // reflexive one — refuses (default-refusal) so a stray keystroke never
+      // deletes the disclosed content.
+      if (key.name === "f" || key.name === "y" || key.name === "return" || key.name === "linefeed") {
+        key.preventDefault()
+        key.stopPropagation()
+        this.finish("confirm")
+        return
+      }
+      if (key.name === "n" || key.name === "escape" || key.name === "q") {
+        key.preventDefault()
+        key.stopPropagation()
+        this.finish("cancel")
+        return
+      }
+      key.preventDefault()
+      key.stopPropagation()
+      return
     } else if (this.options.forceAvailable) {
       if (key.name === "f" || key.name === "return" || key.name === "linefeed") {
         key.preventDefault()
@@ -129,7 +149,7 @@ class RemovalConfirmTui {
   constructor(
     private readonly renderer: CliRenderer,
     private readonly scene: TuiScene,
-    private readonly options: { title: string; message: string; mode: "confirm" | "blocked"; forceAvailable?: boolean },
+    private readonly options: { title: string; message: string; mode: "confirm" | "blocked" | "force"; forceAvailable?: boolean },
   ) {
     this.result = new Promise((resolve) => {
       this.resolveResult = resolve
@@ -203,12 +223,17 @@ class RemovalConfirmTui {
             { keys: "y", label: "remove", priority: 2 },
             { keys: "n/esc", label: "cancel", priority: 1 },
           ]
-        : this.options.forceAvailable
+        : this.options.mode === "force"
           ? [
-              { keys: "f", label: "force remove", priority: 2 },
+              { keys: "f", label: "force delete", priority: 2 },
               { keys: "n/esc", label: "cancel", priority: 1 },
             ]
-          : [{ keys: "q", label: "back", priority: 1 }]
+          : this.options.forceAvailable
+            ? [
+                { keys: "f", label: "force remove", priority: 2 },
+                { keys: "n/esc", label: "cancel", priority: 1 },
+              ]
+            : [{ keys: "q", label: "back", priority: 1 }]
     this.footerText.content = hintsRow(hints, [], this.footerInnerWidth)
     this.renderer.requestRender()
   }

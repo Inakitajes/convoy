@@ -100,6 +100,47 @@ describe("removeRegisteredWorktree (guarded handler)", () => {
     expect(inventory.entries.some((entry) => entry.path.endsWith("doomed"))).toBe(false)
   })
 
+  test("submodule-local content blocks ordinary removal (task 9.1)", async () => {
+    const fixture = await createFixtureRepo({ worktrees: [{ name: "doomed", branch: "feat/doomed" }] })
+    fixtures.push(fixture)
+    const doomed = fixture.worktrees["doomed"]!
+    // A local repo (with a commit) serves as the submodule source; adding it
+    // and then advancing the submodule commit leaves local state Git reports
+    // as dirty. Normal non-bare source so `submodule add` can check it out.
+    const subParent = join(tmpdir(), `convoy-submodule-${Date.now()}`)
+    scratch.push(subParent)
+    await mkdir(subParent, { recursive: true })
+    const subSrc = join(subParent, "lib-src")
+    await mkdir(subSrc, { recursive: true })
+    await execFile("git", ["init", "-q", "-b", "main", subSrc], { cwd: subParent })
+    const subEnv = { GIT_AUTHOR_NAME: "fixture", GIT_AUTHOR_EMAIL: "fixture@local", GIT_COMMITTER_NAME: "fixture", GIT_COMMITTER_EMAIL: "fixture@local", GIT_CONFIG_GLOBAL: "/dev/null" }
+    await execFile("git", ["config", "user.email", "fixture@local"], { cwd: subSrc })
+    await execFile("git", ["config", "user.name", "fixture"], { cwd: subSrc })
+    await writeFile(join(subSrc, "base.txt"), "base\n")
+    await execFile("git", ["add", "base.txt"], { cwd: subSrc, env: subEnv })
+    await execFile("git", ["commit", "-m", "base", "--no-gpg-sign"], { cwd: subSrc, env: subEnv })
+    await execFile("git", ["-c", "protocol.file.allow=always", "submodule", "add", "-q", subSrc, "libs/foo"], { cwd: doomed, env: { GIT_CONFIG_GLOBAL: "/dev/null" } })
+    await fixture.commitAll("chore: add submodule", doomed)
+    const subWork = join(doomed, "libs/foo")
+    const env = subEnv
+    await execFile("git", ["config", "user.email", "fixture@local"], { cwd: subWork })
+    await execFile("git", ["config", "user.name", "fixture"], { cwd: subWork })
+    await writeFile(join(subWork, "local-only.txt"), "keep me\n")
+    await execFile("git", ["add", "local-only.txt"], { cwd: subWork, env })
+    await execFile("git", ["commit", "-m", "local change", "--no-gpg-sign"], { cwd: subWork, env })
+
+    const outcome = await removeRegisteredWorktree({ checkout: doomed, commonDir: await commonDirOf(fixture) })
+    expect(outcome.ok).toBe(false)
+    if (!outcome.ok) {
+      const reasons = outcome.blockers.map((blocker) => `${blocker.reason} ${blocker.remediation}`).join("\n")
+      expect(reasons).toContain("submodule")
+      expect(reasons).toContain("local state")
+      expect(reasons).toContain("force")
+    }
+    // The checkout and its submodule-local state survive an ordinary removal.
+    expect(await readFile(join(subWork, "local-only.txt"), "utf8")).toContain("keep me")
+  })
+
   test("force never bypasses a hard blocker: the repository's main checkout stays", async () => {
     const fixture = await createFixtureRepo({ worktrees: [{ name: "wt", branch: "feat/wt" }] })
     fixtures.push(fixture)
