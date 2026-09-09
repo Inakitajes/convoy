@@ -459,8 +459,8 @@ async function dispatchWorkAction(targetDir: string, route: TuiRoute, worktree: 
     await runWorktreeClose({ checkout: worktree, base, changes: [], route }, targetDir)
     return
   }
-  if (action === "fetch" || action === "sync" || action === "push" || action === "pr" || action === "squash" || action === "remove" || action === "delete-branch") {
-    await runWorktreeMenuOperation(targetDir, route, worktree, action, branch)
+  if (action === "fetch" || action === "sync" || action === "push" || action === "pr" || action === "squash" || action === "remove") {
+    await runWorktreeMenuOperation(targetDir, route, worktree, action)
     return
   }
 }
@@ -472,7 +472,7 @@ async function dispatchWorkAction(targetDir: string, route: TuiRoute, worktree: 
  * never bypasses the operation guards — it delegates to `runWorktreesCommand`,
  * so a blocked action reports the same reason the CLI would.
  */
-async function runWorktreeMenuOperation(targetDir: string, route: TuiRoute, worktree: string, action: "fetch" | "sync" | "push" | "pr" | "squash" | "remove" | "delete-branch", branch: string | undefined): Promise<void> {
+async function runWorktreeMenuOperation(targetDir: string, route: TuiRoute, worktree: string, action: "fetch" | "sync" | "push" | "pr" | "squash" | "remove"): Promise<void> {
   const { runWorktreesCommand } = await import("./worktree-commands")
   const { showNoticeTui } = await import("./notice-tui")
   const blocked = async (message: string): Promise<void> => {
@@ -518,13 +518,6 @@ async function runWorktreeMenuOperation(targetDir: string, route: TuiRoute, work
       await removeWorktreeInteractive(targetDir, route, worktree)
       return
     }
-    // delete-branch: the menu projects it as blocked while this worktree holds
-    // the branch; the guarded command below is the same one the CLI runs.
-    if (!branch) {
-      await blocked("the checkout has no attached branch to delete")
-      return
-    }
-    await runWorktreesCommand({ kind: "delete-branch", branch, force: false })
   } catch (error) {
     await blocked(error instanceof Error ? error.message : String(error))
   }

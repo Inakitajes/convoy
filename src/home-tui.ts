@@ -65,7 +65,6 @@ export type HomeWorkAction =
   | "pr"
   | "squash"
   | "remove"
-  | "delete-branch"
   | "close"
 
 /**
@@ -746,19 +745,6 @@ export class HomeLauncher {
             : writerBusy
               ? busy
               : undefined,
-      },
-      {
-        id: "delete-branch",
-        section: "destructive",
-        key: "z",
-        label: "Delete branch",
-        // The branch is checked out in this very worktree, so deletion is
-        // refused here by Git's own safety — the honest projection of the
-        // shared guard, not a hidden action.
-        enabled: false,
-        blocker: !attached
-          ? "the checkout has no attached branch to delete"
-          : `branch ${worktree.branch} is checked out in this worktree — remove the worktree (keeping the branch) before deleting it`,
       },
     ]
   }

@@ -275,7 +275,7 @@ describe("worktrees-first home (capability home-launcher delta)", () => {
       const frame = frameOf(session)
       // The contextual menu carries every independent operation (capability
       // home-launcher delta), each with its own guard — not just close.
-      for (const label of ["Fetch remote", "Sync with base", "Push branch", "Compose pull request", "Squash to base", "Remove worktree", "Delete branch", "Close review"]) {
+      for (const label of ["Fetch remote", "Sync with base", "Push branch", "Compose pull request", "Squash to base", "Remove worktree", "Close review"]) {
         expect(frame).toContain(label)
       }
     } finally {
@@ -580,8 +580,8 @@ describe("worktree detail sections and observations", () => {
       expect(frame).toContain("Ship add-widget")
       expect(frame).toContain("run-42")
       expect(frame).toContain("completed")
-      // The run rows are the entries right after the twelve actions.
-      for (let i = 0; i < 12; i++) {
+      // The run rows are the entries right after the eleven actions.
+      for (let i = 0; i < 11; i++) {
         session.press("down")
         await session.renderOnce()
       }
@@ -618,8 +618,8 @@ describe("worktree detail sections and observations", () => {
       expect(frame).toContain("◆")
       expect(frame).toContain("add-login")
       expect(frame).toContain("tasks 2/5")
-      // The change row rides after the twelve actions (no runs recorded).
-      for (let i = 0; i < 12; i++) {
+      // The change row rides after the eleven actions (no runs recorded).
+      for (let i = 0; i < 11; i++) {
         session.press("down")
         await session.renderOnce()
       }
@@ -1181,9 +1181,8 @@ describe("typical action coverage (used by tests above)", () => {
       "squash",
       // destructive
       "remove",
-      "delete-branch",
       "close",
     ]
-    expect(ids).toHaveLength(12)
+    expect(ids).toHaveLength(11)
   })
 })
