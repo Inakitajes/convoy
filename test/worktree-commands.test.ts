@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, mock, test } from "bun:test"
-import { chmod, mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -343,6 +343,32 @@ describe("sync", () => {
 })
 
 describe("squash and close", () => {
+  test("close lands locally when the GitHub CLI is absent from PATH", async () => {
+    const fixture = await createFixtureRepo({ worktrees: [{ name: "wt", branch: "feat/x" }] })
+    fixtures.push(fixture)
+    const wt = fixture.worktrees["wt"]!
+    await fixture.write(wt, "feature.txt", "local work\n")
+    await fixture.commitAll("feat: local work", wt)
+    const baseBefore = (await fixture.git(["rev-parse", "main"])).trim()
+    const sourceBefore = (await fixture.git(["rev-parse", "feat/x"])).trim()
+    const binDir = await mkdtemp(join(tmpdir(), "convoy-close-no-gh-"))
+    scratch.push(binDir)
+    await symlink(Bun.which("git")!, join(binDir, "git"))
+    const previousPath = process.env.PATH
+    try {
+      process.env.PATH = binDir
+      expect(Bun.which("gh", { PATH: binDir })).toBeNull()
+      await runWorktreesCommand({ kind: "close", worktree: wt, base: "main", changes: [], message: "feat: local work" }, fixture.root)
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH
+      else process.env.PATH = previousPath
+    }
+    expect((await fixture.git(["rev-parse", "main^"])).trim()).toBe(baseBefore)
+    expect((await fixture.git(["rev-parse", "main^{tree}"])).trim()).toBe((await fixture.git(["rev-parse", "feat/x^{tree}"])).trim())
+    expect((await fixture.git(["rev-parse", "feat/x"])).trim()).toBe(sourceBefore)
+    expect((await fixture.git(["log", "-1", "--format=%s", "main"])).trim()).toBe("feat: local work")
+  })
+
   test("close lands the whole branch as one commit on the base — without any feature record or receipt", async () => {
     const fixture = await createFixtureRepo({ worktrees: [{ name: "wt", branch: "feat/x" }] })
     fixtures.push(fixture)

@@ -1098,9 +1098,15 @@ async function probeClosePullRequest(
   branch: string,
   cwd: string,
 ): Promise<{ status: "found"; number: number; title?: string; url: string } | { status: "none" } | { status: "unavailable"; reason: string }> {
-  const gh = await execFile("gh", ["--version"], { cwd: process.cwd(), allowFailure: true })
-  if (gh.exitCode !== 0) return { status: "unavailable", reason: "the GitHub CLI is not installed or not usable" }
-  const result = await execFile("gh", ["pr", "list", "--head", branch, "--state", "open", "--json", "number,title,url", "--limit", "1"], { cwd, allowFailure: true })
+  let result
+  try {
+    const gh = await execFile("gh", ["--version"], { cwd: process.cwd(), allowFailure: true })
+    if (gh.exitCode !== 0) return { status: "unavailable", reason: "the GitHub CLI is not installed or not usable" }
+    result = await execFile("gh", ["pr", "list", "--head", branch, "--state", "open", "--json", "number,title,url", "--limit", "1"], { cwd, allowFailure: true })
+  } catch (error) {
+    // allowFailure handles exit codes, but a missing executable throws at spawn.
+    return { status: "unavailable", reason: `the GitHub CLI could not be run: ${error instanceof Error ? error.message : String(error)}` }
+  }
   if (result.exitCode !== 0) {
     return { status: "unavailable", reason: (result.stderr || result.stdout).trim().slice(0, 200) || "the pull-request query failed" }
   }
