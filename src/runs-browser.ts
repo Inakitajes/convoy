@@ -1,11 +1,13 @@
 import { stdout } from "node:process"
 
-import { BoxRenderable, StyledText, TextRenderable, bold, fg, t } from "@opentui/core"
+import { BoxRenderable, StyledText, TextRenderable, bg, bold, fg, t } from "@opentui/core"
 
 import { parseMarkdown, renderMarkdownDoc, type MarkdownDoc } from "./markdown-render"
-import { loadRunSummary, refreshRunWaiting } from "./runs"
+import { loadRunSummary, refreshRunWaiting, runRowTitle } from "./runs"
 import {
+  chunksLength,
   clipChunks,
+  displayWidth,
   formatElapsed,
   formatMoney,
   hintsRow,
@@ -60,7 +62,6 @@ export class RunsBrowser {
   // The run list is a snapshot; the selected live run's waiting state is the
   // one part worth keeping fresh while the browser is open.
   private readonly waitingTicker: ReturnType<typeof setInterval>
-  private readonly headerText: TextRenderable
   private readonly bodyBox: BoxRenderable
   private readonly listText: TextRenderable
   private readonly listBox: BoxRenderable
@@ -118,16 +119,6 @@ export class RunsBrowser {
       gap: 0,
     })
 
-    // Minimal chrome (one bare header row, like home): the runs label plus the
-    // history stats, no border box and no version title.
-    const header = new BoxRenderable(renderer, {
-      id: "convoy-runs-header",
-      height: 1,
-      backgroundColor: theme.bg,
-    })
-    const headerText = new TextRenderable(renderer, { content: "", fg: theme.text, width: "100%", wrapMode: "none" })
-    header.add(headerText)
-
     const body = new BoxRenderable(renderer, {
       id: "convoy-runs-body",
       width: "100%",
@@ -140,7 +131,9 @@ export class RunsBrowser {
       event.preventDefault()
       event.stopPropagation()
       if (this.summary) return
-      const row = this.scroll + event.y - this.listText.y
+      // The container's header rule rides above the rows: text line 0 is the
+      // section rule, the first run row is line 1.
+      const row = this.scroll + event.y - this.listText.y - 1
       if (row < 0 || row >= this.runs.length) return
       this.selected = row
       this.render()
@@ -155,14 +148,15 @@ export class RunsBrowser {
       this.moveSelection(Math.sign(delta))
     }
 
+    // The list's rows carry the section container, so the panel adds no
+    // padding of its own — the container reaches within the shell's 1-column
+    // margin on both edges.
     const list = this.panel({
       id: "convoy-runs-list",
       height: "100%",
       flexGrow: 1,
-      borderColor: theme.borderDim,
+      paddingX: 0,
       backgroundColor: theme.bg,
-      title: " runs ",
-      titleAlignment: "left",
       onMouseDown: selectFromList,
       onMouseScroll: wheelFromList,
     })
@@ -173,22 +167,19 @@ export class RunsBrowser {
       id: "convoy-runs-details",
       width: this.detailsWidth(),
       height: "100%",
-      borderColor: theme.borderDim,
+      paddingX: 0,
       backgroundColor: theme.bg,
-      title: " details ",
-      titleAlignment: "left",
       onMouseScroll: wheelFromList,
     })
     details.text.onMouseScroll = wheelFromList
 
     const footer = this.panel({
       id: "convoy-runs-footer",
-      height: 3,
-      borderColor: theme.borderDim,
+      height: 1,
+      paddingX: 0,
       backgroundColor: theme.bg,
     })
 
-    this.headerText = headerText
     this.bodyBox = body
     this.listText = list.text
     this.listBox = list.box
@@ -198,18 +189,24 @@ export class RunsBrowser {
 
     this.paletteTargets.push(
       { box: shell, background: "bg" },
-      { box: header, background: "bg" },
-      { box: list.box, background: "bg", border: "borderDim" },
-      { box: details.box, background: "bg", border: "borderDim" },
-      { box: footer.box, background: "bg", border: "borderDim" },
+      { box: list.box, background: "bg" },
+      { box: details.box, background: "bg" },
+      { box: footer.box, background: "bg" },
     )
 
     body.add(list.box)
     body.add(details.box)
-    shell.add(header)
     shell.add(body)
     shell.add(footer.box)
     mount.add(shell)
+
+    // Sections are containers drawn in text, not box borders — the same rule
+    // the specs board lives by. The border must go through the runtime
+    // setter: opentui's constructor path funnels `border: false` through
+    // initializeBorder(), which forces it back on.
+    list.box.border = false
+    details.box.border = false
+    footer.box.border = false
 
     this.overlay = new BoxRenderable(renderer, {
       id: "convoy-runs-summary-overlay",
@@ -471,6 +468,7 @@ export class RunsBrowser {
       fg: theme.text,
       width: "100%",
       height: "100%",
+      wrapMode: "none",
     })
     box.add(text)
     return { box, text }
@@ -481,19 +479,20 @@ export class RunsBrowser {
     return Math.max(30, Math.min(46, this.renderer.width - 64))
   }
 
-  // Header (1) + footer (3). The body holds the stacked or side-by-side panels.
+  // The board has no header row and no bordered footer: the history stats
+  // ride the runs container's header, the hints ride a bare one-row footer.
   private bodyHeight() {
-    return Math.max(8, this.renderer.height - 4)
+    return Math.max(8, this.renderer.height - 1)
   }
 
   private compactListHeight(bodyHeight: number) {
     return Math.max(5, Math.min(9, Math.floor(bodyHeight * 0.35)))
   }
 
+  /** Run rows visible: the container's header and closing rule spend two. */
   private listHeight() {
-    // Header (1) + footer (3) + list panel borders (2); compact stacks instead.
     if (this.renderer.width <= compactRunsMaxWidth) return Math.max(3, this.compactListHeight(this.bodyHeight()) - 2)
-    return Math.max(3, this.renderer.height - 6)
+    return Math.max(3, this.bodyHeight() - 2)
   }
 
   private summaryHeight() {
@@ -520,64 +519,113 @@ export class RunsBrowser {
   private render() {
     if (this.finished || this.renderer.isDestroyed || this.scene?.isClosed) return
     const now = Date.now()
-    const innerWidth = Math.max(40, this.renderer.width - 6)
+    // The shell's 1-column padding on each edge is the board's only margin.
+    const innerWidth = Math.max(40, this.renderer.width - 2)
     const compact = this.renderer.width <= compactRunsMaxWidth
-    const detailsWidth = this.detailsWidth()
-    const listWidth = Math.max(36, this.renderer.width - detailsWidth - 7)
     const bodyHeight = this.bodyHeight()
 
-    // Narrow terminals stack the panels: the list keeps its rows and the
+    // Narrow terminals stack the containers: the list keeps its rows and the
     // details pane gets whatever the body has left. Panels sit flush — the
     // 1-column gap of the side-by-side layout would overflow the stacked body
     // by the separator row and push the details' bottom border under the footer.
     this.bodyBox.flexDirection = compact ? "column" : "row"
     this.bodyBox.gap = compact ? 0 : 1
+    let detailsHeight: number
+    let detailsPaneWidth: number
+    let listPaneWidth: number
     if (compact) {
       const listHeight = this.compactListHeight(bodyHeight)
       this.listBox.width = "100%"
       this.listBox.height = listHeight
+      detailsHeight = Math.max(3, bodyHeight - listHeight)
       this.detailsBox.width = "100%"
-      this.detailsBox.height = Math.max(3, bodyHeight - listHeight)
+      this.detailsBox.height = detailsHeight
+      this.detailsBox.flexGrow = 0
+      detailsPaneWidth = innerWidth
+      listPaneWidth = innerWidth
     } else {
-      this.listBox.width = "auto"
+      // The list hugs its widest row — measured over every run, so scrolling
+      // never resizes the pane — capped so the details pane stays useful. A
+      // wide terminal can't stretch a dead void between the rows and their
+      // closing border; the details pane absorbs the slack instead, and its
+      // phases ride it with their costs at the right edge.
+      listPaneWidth = this.runsListWidth()
+      this.listBox.width = listPaneWidth
       this.listBox.height = "100%"
-      this.detailsBox.width = detailsWidth
+      detailsPaneWidth = Math.max(30, this.renderer.width - listPaneWidth - 3)
+      this.detailsBox.width = "auto"
+      this.detailsBox.flexGrow = 1
       this.detailsBox.height = "100%"
+      detailsHeight = bodyHeight
     }
 
-    this.headerText.content = this.headerContent(innerWidth)
-    this.listText.content = this.listContent(compact ? innerWidth : listWidth)
-    this.detailsText.content = this.detailsContent(now, (compact ? innerWidth : detailsWidth) - 4)
+    this.listText.content = this.listContent(listPaneWidth)
+    this.detailsText.content = this.detailsContent(now, detailsPaneWidth - 4, detailsHeight)
     this.footerText.content = this.footerContent(innerWidth)
     this.renderSummaryModal()
     this.renderer.requestRender()
   }
 
-  /** One bare header line: the runs label followed by the history stats (no data-root path). */
-  private headerContent(width: number) {
-    const completed = this.runs.filter((run) => run.statusKind === "completed").length
-    const failed = this.runs.filter((run) => run.statusKind === "failed").length
-    const cost = this.runs.reduce((sum, run) => sum + (run.cost ?? 0), 0)
-    const chunks: TextChunk[] = [
-      fg(theme.faint)("runs  "),
-      fg(theme.text)(`${this.runs.length} run${this.runs.length === 1 ? "" : "s"}`),
-      fg(theme.faint)("  ·  "),
-      fg(theme.green)(`✓ ${completed}`),
-      raw("  "),
-      fg(failed > 0 ? theme.red : theme.faint)(`✗ ${failed}`),
-      fg(theme.faint)("  ·  "),
-      fg(theme.green)(formatMoney(cost)),
-    ]
-    return new StyledText(clipChunks(chunks, width))
+  /** The pane width the run rows actually use — the widest row, clamped. */
+  private runsListWidth(): number {
+    const rowWidth = (run: RunEntry) => {
+      const statusLabel = run.live ? "running" : run.statusKind === "failed" || run.statusKind === "incomplete" ? run.status : ""
+      return 4 + 1 + 1 + dateColumnWidth + 2 + 7 + 2 + Math.min(displayWidth(runRowTitle(run)), 60) + (statusLabel ? 2 + displayWidth(statusLabel) : 0)
+    }
+    const widest = this.runs.reduce((max, run) => Math.max(max, rowWidth(run)), 0)
+    return Math.max(40, Math.min(90, widest + 4))
   }
 
+  /** The list: one runs container — header with stats, the run rows, closing rule. */
   private listContent(width: number) {
     const visible = this.listHeight()
     if (this.selected < this.scroll) this.scroll = this.selected
     if (this.selected >= this.scroll + visible) this.scroll = this.selected - visible + 1
 
     const slice = this.runs.slice(this.scroll, this.scroll + visible)
-    return joinLines(slice.map((run, offset) => this.runRow(run, this.scroll + offset === this.selected, width)))
+    const lines = [
+      this.runsSectionHeader(width),
+      ...slice.map((run, offset) => this.containerRow(this.runRow(run, this.scroll + offset === this.selected, width - 4), width - 4)),
+      this.sectionEndLine(width),
+    ]
+    // The container claims the pane's full height: blank rows inside it (fewer
+    // runs than rows) push the closing rule down to the pane's bottom edge.
+    while (lines.length < visible + 2) lines.splice(lines.length - 1, 0, this.containerRow(plain(""), width - 4))
+    return joinLines(lines)
+  }
+
+  /** The runs container's header: the section name plus the colored history stats. */
+  private runsSectionHeader(width: number): StyledText {
+    const completed = this.runs.filter((run) => run.statusKind === "completed").length
+    const failed = this.runs.filter((run) => run.statusKind === "failed").length
+    const cost = this.runs.reduce((sum, run) => sum + (run.cost ?? 0), 0)
+    const stats: TextChunk[] = [
+      fg(theme.dim)(` · ${this.runs.length} run${this.runs.length === 1 ? "" : "s"} · `),
+      fg(theme.green)(`✓ ${completed}`),
+      raw("  "),
+      fg(failed > 0 ? theme.red : theme.dim)(`✗ ${failed}`),
+      raw("  "),
+      fg(theme.dim)("· "),
+      fg(theme.green)(formatMoney(cost)),
+    ]
+    const fill = Math.max(1, width - displayWidth("runs") - chunksLength(stats) - 5)
+    return new StyledText([fg(theme.dim)("╭─ "), bold(fg(theme.accent)("runs")), ...stats, fg(theme.dim)(` ${"─".repeat(Math.max(1, fill))}╮`)])
+  }
+
+  /** A section's closing border. */
+  private sectionEndLine(width: number): StyledText {
+    return new StyledText([fg(theme.dim)(`╰${"─".repeat(Math.max(1, width - 2))}╯`)])
+  }
+
+  /**
+   * Wraps one row inside the section container: dim side borders, the content
+   * padded to the inner width so the right border stays aligned, and the
+   * selection fill (applied by the row itself) stopping short of the borders.
+   */
+  private containerRow(line: StyledText, innerWidth: number): StyledText {
+    const used = chunksLength(line.chunks)
+    const filler = used < innerWidth ? [raw(" ".repeat(innerWidth - used))] : []
+    return new StyledText([fg(theme.dim)("│ "), ...line.chunks, ...filler, fg(theme.dim)(" │")])
   }
 
   private runRow(run: RunEntry, selected: boolean, width: number) {
@@ -585,58 +633,91 @@ export class RunsBrowser {
     const cost = run.cost !== undefined ? formatMoney(run.cost) : "—"
     // A live run reads as "running" with a green ● regardless of how many
     // phases have finished so far, so it stands out as attachable.
-    const statusLabel = run.live ? "running" : run.status
-    const statusColor = run.live ? theme.green : theme[style.color]
+    const stateColor = run.live ? theme.green : theme[style.color]
+    // The checkbox reads as a block, not a lone glyph: the state color pads
+    // one cell on each side of the inverted marker — a chunky chip riding
+    // the accent fill, the way home's rail cells hang from their rows.
+    const glyph = run.live ? "●" : style.icon
+    const marker: TextChunk[] = selected
+      ? [bg(stateColor)(" "), bg(stateColor)(fg(theme.chipText)(glyph)), bg(stateColor)(" ")]
+      : [run.live ? fg(theme.green)(glyph) : fg(theme[style.color])(glyph)]
     const left: TextChunk[] = [
-      selected ? fg(theme.accent)("▸ ") : raw("  "),
-      run.live ? fg(theme.green)("●") : fg(theme[style.color])(style.icon),
       raw(" "),
-      fg(selected ? theme.text : theme.dim)(formatRunDate(run).padEnd(dateColumnWidth)),
+      ...marker,
+      raw(" "),
+      fg(selected ? theme.chipText : theme.dim)(formatRunDate(run).padEnd(dateColumnWidth)),
       raw("  "),
-      fg(theme.dim)(cost.padStart(7)),
+      fg(selected ? theme.chipText : theme.dim)(cost.padStart(7)),
       raw("  "),
     ]
-    const status = fg(statusColor)(statusLabel)
-    // marker (2) + icon (2) + date + cost (9) + gaps; status keeps its column.
-    const titleWidth = Math.max(12, width - dateColumnWidth - 16 - statusLabel.length)
-    const title = truncate(run.title, titleWidth)
-    left.push(selected ? bold(fg(theme.text)(title)) : fg(theme.text)(title))
-    return padBetween(left, [status], width)
+    // The headline is semantic: the pipeline that ran, joined to its
+    // worktree — never the prompt's first line.
+    const headline = runRowTitle(run)
+    // The icon already says the state; the status word rides along only when
+    // it adds information — a live run, or a failure with its quality — so a
+    // completed column never stretches a void to the right edge. The row is
+    // left-packed: date, cost, headline, optional status, no stretch.
+    const statusLabel = run.live ? "running" : run.statusKind === "failed" || run.statusKind === "incomplete" ? run.status : ""
+    const titleWidth = Math.max(12, width - 28 - (selected ? 3 : 1) - statusLabel.length)
+    const title = truncate(headline, titleWidth)
+    left.push(selected ? bold(fg(theme.chipText)(title)) : fg(theme.text)(title))
+    if (statusLabel) left.push(raw("  "), selected ? fg(theme.chipText)(statusLabel) : fg(stateColor)(statusLabel))
+    return selected ? this.highlighted(left, width) : new StyledText(left)
   }
 
-  private detailsContent(now: number, width: number) {
+  /**
+   * The selected row's full-width accent block: every chunk rides the fill
+   * unless it already carries its own background (the inverted marker cell),
+   * and the filler reaches the pane's right edge.
+   */
+  private highlighted(chunks: TextChunk[], width: number): StyledText {
+    const used = chunks.reduce((total, chunk) => total + displayWidth(typeof chunk === "string" ? chunk : (chunk as { text: string }).text), 0)
+    const filler = bg(theme.accent)(fg(theme.chipText)(" ".repeat(Math.max(0, width - used))))
+    const hasBg = (chunk: TextChunk) => typeof chunk !== "string" && (chunk as { bg?: unknown }).bg !== undefined
+    return new StyledText(chunks.map((chunk) => (hasBg(chunk) ? chunk : bg(theme.accent)(chunk))).concat(filler))
+  }
+
+  private detailsContent(now: number, width: number, height: number) {
     const run = this.selectedRun()
     const style = runStatusStyles[run.statusKind]
     const lines: StyledText[] = []
 
-    lines.push(t`${bold(fg(theme.text)(truncate(run.title, width)))}`)
-    lines.push(t`${fg(theme.dim)(run.runID)}`)
-    lines.push(plain(""))
-
+    // The subject: the pipeline-worktree headline over one quiet line with
+    // the start date — the semantic identity, not the prompt's first line.
     const date = runDate(run)
-    if (date) lines.push(new StyledText([fg(theme.faint)("started "), fg(theme.text)(formatRunDateLong(date))]))
-    if (run.targetDir) lines.push(new StyledText([fg(theme.faint)("target  "), fg(theme.text)(truncatePath(run.targetDir, width - 8))]))
-    lines.push(new StyledText([fg(theme.faint)("run dir "), fg(theme.text)(truncatePath(run.dir, width - 8))]))
+    lines.push(t`${bold(fg(theme.text)(truncate(runRowTitle(run), width)))}`)
+    lines.push(t`${fg(theme.dim)(date ? formatRunDateLong(date) : "")}`)
 
-    const statusChunks: TextChunk[] = [
-      fg(theme.faint)("status  "),
-      run.live ? fg(theme.green)("● running") : fg(theme[style.color])(`${style.icon} ${run.status}`),
-    ]
+    // The fold's fact rhythm: a nine-column label, one space, the value —
+    // every value clipped to its column, so no fact can wrap and break the
+    // container's border.
+    const valueW = Math.max(8, width - 10)
+    const fact = (label: string, value: TextChunk[]) => lines.push(new StyledText([fg(theme.dim)(label.padEnd(9)), raw(" "), ...clipChunks(value, valueW)]))
+    lines.push(plain(""))
+    fact("run id", [fg(theme.text)(truncate(run.runID, valueW))])
+    if (run.targetDir) fact("worktree", [fg(theme.text)(truncatePath(run.targetDir, valueW))])
+    fact("directory", [fg(theme.text)(truncatePath(run.dir, valueW))])
+    // The pipeline is the headline fact of this pane: what executed.
+    fact("pipeline", [fg(theme.text)(truncate(run.pipeline ?? "—", valueW))])
+    const statusChunks: TextChunk[] = [run.live ? fg(theme.green)("● running") : fg(theme[style.color])(`${style.icon} ${run.status}`)]
     if (run.cost !== undefined) {
-      statusChunks.push(fg(theme.faint)("  ·  "), fg(theme.green)(formatMoney(run.cost)))
-      if (run.advisorCost) statusChunks.push(fg(theme.faint)(` · executor ${formatMoney(run.executorCost ?? 0)} + advisor ${formatMoney(run.advisorCost)}`))
+      statusChunks.push(fg(theme.dim)(" · "), fg(theme.green)(formatMoney(run.cost)))
+      if (run.advisorCost) statusChunks.push(fg(theme.dim)(` (${formatMoney(run.executorCost ?? 0)} + ${formatMoney(run.advisorCost)} adv)`))
     }
-    lines.push(new StyledText(statusChunks))
+    fact("status", statusChunks)
     if (run.live) {
-      lines.push(new StyledText([fg(theme.faint)("        "), fg(theme.dim)("enter to attach live")]))
+      // Notes ride under the status value, where the facts' column starts.
+      const note = (chunks: TextChunk[]) => lines.push(new StyledText([fg(theme.dim)(" ".repeat(10)), ...clipChunks(chunks, valueW)]))
+      note([fg(theme.dim)("enter to attach live")])
       // A coordinated run parked on an unanswered gate says so — that is the
       // case where attaching is urgent, not just interesting.
-      if (run.waiting === "permission") lines.push(new StyledText([fg(theme.faint)("        "), fg(theme.yellow)("waiting for a permission")]))
-      else if (run.waiting === "review") lines.push(new StyledText([fg(theme.faint)("        "), fg(theme.yellow)("waiting for review")]))
+      if (run.waiting === "permission") note([fg(theme.yellow)("waiting for a permission")])
+      else if (run.waiting === "review") note([fg(theme.yellow)("waiting for review")])
     }
 
+    // Phases close the pane — one blank line, then the list. No rule of
+    // their own: the container is the pane's only chrome.
     lines.push(plain(""))
-    lines.push(t`${fg(theme.faint)("─".repeat(Math.max(1, width)))}`)
     if (run.phases.length === 0) {
       lines.push(t`${fg(theme.dim)("no phase metadata for this run")}`)
     } else {
@@ -649,7 +730,25 @@ export class RunsBrowser {
         lines.push(padBetween(left, right, width))
       }
     }
-    return joinLines(lines)
+    // The pane is its own rounded container, with one blank of breathing
+    // above its closing rule. Every line is clipped to the inner width: the
+    // closing rule is the pane's last line and the borders never break.
+    const inner = lines.slice(0, Math.max(1, height - 4)).map((line) => this.containerRow(this.clipLine(line, width), width))
+    while (inner.length < height - 4) inner.push(this.containerRow(plain(""), width))
+    const blank = this.containerRow(plain(""), width)
+    const paneWidth = width + 4
+    return joinLines([this.detailsSectionHeader(paneWidth), ...inner, blank, this.sectionEndLine(paneWidth)])
+  }
+
+  /** Hard-clip a rendered line to the container's inner width. */
+  private clipLine(line: StyledText, width: number): StyledText {
+    return chunksLength(line.chunks) <= width ? line : new StyledText(clipChunks(line.chunks, width))
+  }
+
+  /** The details container's header: the pane's label riding its own rule. */
+  private detailsSectionHeader(width: number): StyledText {
+    const fill = Math.max(1, width - 12)
+    return new StyledText([fg(theme.dim)("╭─ "), bold(fg(theme.accent)("details")), fg(theme.dim)(` ${"─".repeat(fill)}╮`)])
   }
 
   private footerContent(width: number) {
