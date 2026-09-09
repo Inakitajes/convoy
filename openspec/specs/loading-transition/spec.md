@@ -8,7 +8,7 @@ Defines the shared transition screen Convoy shows while a destination in the hom
 
 ### Requirement: Transition is shown only during a real load
 
-When an operator opens a destination from the home launcher, Convoy SHALL begin loading that destination and SHALL render the loading transition only while the load is genuinely in progress. If the load completes within a short threshold (nominally 150 ms), Convoy SHALL NOT flash the transition and SHALL move straight to the destination.
+When an operator opens Convoy's Home — at launch or on return from any home-session destination — or opens a destination from the home launcher, Convoy SHALL begin loading that screen and SHALL render the loading transition only while the load is genuinely in progress. If the load completes within a short threshold (nominally 150 ms), Convoy SHALL NOT flash the transition and SHALL move straight to the destination.
 
 #### Scenario: Fast load shows no transition
 
@@ -19,6 +19,11 @@ When an operator opens a destination from the home launcher, Convoy SHALL begin 
 
 - **WHEN** the operator opens a destination whose load exceeds the threshold
 - **THEN** the loading transition is rendered until the destination is ready, then the destination replaces it
+
+#### Scenario: Home opens are covered too
+
+- **WHEN** Convoy launches or returns to Home and the control-board load exceeds the threshold
+- **THEN** the loading transition covers the Home open exactly as it covers a destination open
 
 #### Scenario: Transition never extends the load
 
@@ -39,19 +44,19 @@ The loading transition SHALL render a field of characters whose brightness undul
 - **WHEN** the transition is visible for more than a single frame
 - **THEN** the character field changes over time as swells travel and the whole surface's brightness pulses in place, rather than remaining static, shuffling randomly, or expanding rings outward from points
 
-### Requirement: The status line is centered over the field
+### Requirement: The centered CONVOY card carries identity over the field
 
-While the transition is visible, the loading status line SHALL be centered horizontally and vertically over the animated field, and SHALL remain legible above it.
+While the transition is visible, Convoy SHALL render a solid rounded card centered horizontally and vertically over the animated field. The card SHALL carry the home masthead's CONVOY wordmark above the loading status text, remain legible against the field, and mask the field behind it so the animation does not bleed through the card's own spacing.
 
-#### Scenario: The status line sits at the center
+#### Scenario: The card sits at the center
 
 - **WHEN** the transition renders on any terminal size
-- **THEN** the status line is positioned at the horizontal and vertical center of the terminal, floating above the field
+- **THEN** a rounded card containing the CONVOY wordmark and the status line is positioned at the horizontal and vertical center of the terminal, above the field
 
-#### Scenario: The status line stays legible
+#### Scenario: The card stays legible
 
-- **WHEN** the animated field passes beneath the status line
-- **THEN** the field does not bleed through the status text's own spacing, so the message reads as continuous words
+- **WHEN** the animated field passes beneath the centered card
+- **THEN** the field does not bleed through the card's surface or the status text's spacing, so the message reads as continuous words
 
 ### Requirement: Handoff to the destination is atomic
 

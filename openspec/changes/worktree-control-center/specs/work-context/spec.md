@@ -19,7 +19,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: Work exists before a specification
-Convoy SHALL offer **New worktree**, ask what the operator wants to build, and propose a Git-valid conventional branch name and worktree destination using the repository's existing location convention. The proposal SHALL support model-backed naming with an editable deterministic fallback. Before creation the operator SHALL review and be able to edit the branch, base, and destination. Independent creation SHALL suggest the detected repository base, not silently derive from the selected feature branch; deliberate derived work SHALL disclose its source. Creating a worktree SHALL NOT create a feature record, spec, commit, PR, or authoring session. The new worktree SHALL be selectable before any change or run exists. Existing-branch checkout SHALL be an explicit creation choice rather than an inferred replacement.
+Convoy SHALL offer **New worktree**, ask what the operator wants to build, and propose a Git-valid conventional branch name and worktree destination using the repository's existing location convention. The proposal SHALL support model-backed naming with a deterministic fallback that is editable through the manual refine mode. Before creation the operator SHALL review the name, branch, base, and derived destination; the branch and base SHALL be editable, while the destination — derived from the branch — SHALL be shown for review in the accepted proposal rather than being directly editable. Independent creation SHALL suggest the detected repository base, not silently derive from the selected feature branch; deliberate derived work SHALL disclose its source. Creation SHALL always mint a free conventional branch: a deliberately typed existing branch name SHALL be suffixed by the collision policy rather than checked out in place, and existing branches SHALL be reached by selecting their already-registered checkouts in the inventory. Creating a worktree SHALL NOT create a feature record, spec, commit, PR, or authoring session. The new worktree SHALL be selectable before any change or run exists.
 
 #### Scenario: Proposal starts in isolation
 - **WHEN** an operator approves a new worktree from main and subsequently starts proposing
@@ -37,9 +37,10 @@ Convoy SHALL offer **New worktree**, ask what the operator wants to build, and p
 - **WHEN** model-backed naming fails or is unavailable
 - **THEN** Convoy offers an editable conventional fallback and does not execute Git until the destination is accepted
 
-#### Scenario: Existing branch is deliberately selected
-- **WHEN** the operator chooses an existing branch not checked out elsewhere and approves its location
-- **THEN** Convoy creates that checkout without minting a new branch or feature identity
+#### Scenario: An existing branch name is deliberately typed
+
+- **WHEN** the operator types an existing branch name into the manual refine form and approves creation
+- **THEN** the collision policy suffixed a free branch instead of checking out the existing one, and the reviewed proposal named that suffixed branch before any Git effect
 
 ### Requirement: Every action uses a validated destination
 Reading, conversation, proposal, pipeline preparation/execution, publication, archive, and close SHALL target the explicitly selected Git worktree. Configuration, relative attachments, canonical specs, and selected changes SHALL resolve within that checkout. Explicit selectors MUST agree; missing or replaced destinations SHALL require refreshed selection rather than a fallback to the launch directory. Operations SHALL validate repository membership, worktree registration, current branch/HEAD, and relevant reviewed refs immediately before effects. Base-checkout operations SHALL disclose and validate their separate destination. Selection SHALL NOT mutate a process-wide working directory or establish ownership. Session/navigation hints and historical run provenance SHALL NOT substitute for current validation.

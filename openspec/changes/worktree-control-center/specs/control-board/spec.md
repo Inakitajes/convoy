@@ -124,7 +124,7 @@ The board SHALL enumerate every Git-registered worktree, including externally cr
 
 ### Requirement: Worktree rows expose independent observations
 
-Each worktree SHALL expose independently observed Git dirt, ahead/behind relative to the explicitly selected base, ahead/behind relative to its upstream, pull request facts, and execution activity. Pull request observations SHALL disclose number, title, URL, and state when known, together with observation time and known, unknown, or stale availability; unavailable evidence SHALL NOT imply no PR or a merged PR. Base and upstream comparisons SHALL remain distinct, identify their comparison refs, and disclose unknown results when unavailable. Task counts SHALL report known done/total or unknown without inventing counts. Runs and conversations SHALL show actual activity separately from client attachment. These facts SHALL NOT collapse into lifecycle stages, ownership assertions, integrated/completed summaries, or task-count stage gates. Home, the board, and detail menus SHALL consume the same per-action guards and disclose blockers and remediation; handlers SHALL revalidate those guards before mutation.
+Each worktree SHALL expose independently observed Git dirt, ahead/behind relative to the explicitly selected base, ahead/behind relative to its upstream, and execution activity. Pull request facts SHALL be observed on demand when the operator's selection lands on a worktree row — cached, bounded, and refreshed on reselection — rather than eagerly for every row; rows not yet selected SHALL disclose no PR facts. PR observations SHALL disclose number, title, URL, and state when known, with known, unknown, or ambiguous availability; unavailable evidence SHALL NOT imply no PR or a merged PR. Base and upstream comparisons SHALL remain distinct, identify their comparison refs, and disclose unknown results when unavailable. Task counts SHALL report known done/total or unknown without inventing counts. Runs and conversations SHALL show actual activity separately from client attachment. These facts SHALL NOT collapse into lifecycle stages, ownership assertions, integrated/completed summaries, or task-count stage gates. Home, the board, and detail menus SHALL consume the same per-action guards and disclose blockers and remediation; handlers SHALL revalidate those guards before mutation.
 
 #### Scenario: Tasks are complete while execution remains active
 
@@ -139,7 +139,7 @@ Each worktree SHALL expose independently observed Git dirt, ahead/behind relativ
 #### Scenario: PR observation is unavailable
 
 - **WHEN** Git is readable but the PR provider cannot be queried
-- **THEN** Git facts remain available and PR facts are unknown or explicitly stale with their observation time, not reported as absent or merged
+- **THEN** Git facts remain available and PR facts are reported unknown with their reason, not as absent or merged
 
 ### Requirement: Local changes are children of their containing checkout
 

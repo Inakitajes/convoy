@@ -1,10 +1,4 @@
-# tui-header Specification
-
-## Purpose
-
-Defines the single-line header chrome shared by every destination screen of the home session — one bare content row that anchors the operator to the current context without any version or border chrome. The home launcher's own masthead is governed by the `home-launcher` capability.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Home-session destination screens draw one bare header row
 
@@ -57,15 +51,6 @@ When a screen's header row has a right-aligned segment, it SHALL carry only that
 
 - **WHEN** the specs browser or the runs browser renders
 - **THEN** no screen-level header segment exists to carry right-aligned content
-
-### Requirement: Headers carry no convoy version tag
-
-No destination screen reachable from the home launcher — run launcher, specs browser, runs browser, or config editor — SHALL render a convoy-and-version tag (`convoy vX`, `convoy specs vX`, `◆ convoy vX · config`, or similar) in its header chrome. The header row and its border area SHALL contain only the context elements defined above; the version SHALL NOT appear in any of these headers. The home launcher's masthead build line is governed by the `home-launcher` capability.
-
-#### Scenario: No version rides any header
-
-- **WHEN** any of the four home-session destination screens renders
-- **THEN** none of its header content, border titles, or header rows contain a convoy-plus-version string such as `convoy v`, `convoy specs v`, or `◆ convoy`
 
 ### Requirement: Fullscreen readers keep hiding the header
 

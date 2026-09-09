@@ -2,7 +2,7 @@
 
 ### Requirement: Specs command discovers OpenSpec state from the filesystem
 
-`convoy specs` SHALL discover checkouts from the current repository's complete Git worktree inventory and discover each checkout's OpenSpec artifacts only from that checkout's filesystem. Active changes SHALL be real directories in its `openspec/changes/` excluding `archive`, dotfiles, and stray non-directory files; canonical specs SHALL be Markdown files under its `openspec/specs/**`. Local archives SHALL be browsable collapsed or on demand. Read-only OpenSpec task queries SHALL be permitted with filesystem fallback when the CLI is unavailable; unreadable evidence SHALL remain unknown. Discovery, refresh, and browsing MUST NOT write domain state, adopt worktrees, or consult feature associations, contract registries, or landing receipts as authority. Absence of active changes or of the launch checkout's `openspec/` SHALL NOT suppress any Git-registered checkout, including external, main, detached, locked, inaccessible, missing-path, spec-less, or run-less worktrees. Git-stale registrations SHALL be shown as inaccessible while still registered; removed registrations SHALL disappear without tombstones.
+`convoy specs` SHALL discover checkouts from the current repository's complete Git worktree inventory and discover each checkout's OpenSpec artifacts only from that checkout's filesystem. Active changes SHALL be real directories in its `openspec/changes/` excluding `archive`, dotfiles, and stray non-directory files; canonical specs SHALL be Markdown files under its `openspec/specs/**`. Local archives SHALL surface as counts rather than browsable sections in the board. Read-only OpenSpec task queries SHALL be permitted with filesystem fallback when the CLI is unavailable; unreadable evidence SHALL remain unknown. Discovery, refresh, and browsing MUST NOT write domain state, adopt worktrees, or consult feature associations, contract registries, or landing receipts as authority. Absence of active changes or of the launch checkout's `openspec/` SHALL NOT suppress any Git-registered checkout, including external, main, detached, locked, inaccessible, missing-path, spec-less, or run-less worktrees. Git-stale registrations SHALL be shown as inaccessible while still registered; removed registrations SHALL disappear without tombstones.
 
 #### Scenario: Repo without openspec directory
 
@@ -12,12 +12,12 @@
 #### Scenario: Repo with openspec directory but no active changes
 
 - **WHEN** a selected checkout has `openspec/` but its changes directory holds only `archive`
-- **THEN** its active-change section is omitted while its local canonical specs and on-demand archives remain browsable
+- **THEN** its active-change section is omitted while its local canonical specs remain browsable and its archived changes surface only as a count
 
 #### Scenario: Archived work remains pending
 
 - **WHEN** a selected checkout contains only archived changes
-- **THEN** those local archives remain readable without a feature record, integration state, or lifecycle history, and their presence does not create a pending-feature entry
+- **THEN** those local archives surface as a count without a feature record, integration state, or lifecycle history, and their presence does not create a pending-feature entry
 
 ### Requirement: Worktree-backed changes read their artifacts from the worktree
 
@@ -50,12 +50,12 @@ The specs view SHALL load a selected change's title and artifact inventory using
 
 ### Requirement: Root view shows only non-empty sections
 
-The root SHALL present Worktrees from Git inventory rather than Features, Worktrees without spec, or Completed feature history. Each registered checkout SHALL have its own root entry regardless of repeated change ids or inherited artifacts. Within the selected checkout, non-empty artifact sections SHALL appear in the order Active Changes, Archives, and Canonical Specs, with Archives collapsed or loaded on demand. Section headers SHALL remain distinct and reachable while scrolling; empty sections and headers SHALL be omitted. Missing proposals SHALL not hide local changes, which SHALL use their local title when readable or their change id otherwise. Worktree names SHALL derive from folder basename, actual branch or detached status, and path without a display-name record. Selection SHALL identify the verified checkout and local artifact, not a global change id or mutable branch name alone. Actual global run history SHALL remain independently reachable without retaining removed worktrees as completed entries.
+The root SHALL present Worktrees from Git inventory rather than Features, Worktrees without spec, or Completed feature history. Each registered checkout SHALL have its own root entry regardless of repeated change ids or inherited artifacts. The board SHALL be a list-only browse surface whose non-empty sections appear in the order Active Changes and Canonical Specs; archived changes SHALL appear only as a per-checkout count. Section headers SHALL remain distinct and reachable while scrolling; empty sections and headers SHALL be omitted. Missing proposals SHALL not hide local changes, which SHALL use their local title when readable or their change id otherwise. Worktree names SHALL derive from folder basename, actual branch or detached status, and path without a display-name record. Selection SHALL identify the verified checkout and local artifact, not a global change id or mutable branch name alone. Actual global run history SHALL remain independently reachable without retaining removed worktrees as completed entries.
 
 #### Scenario: Sections appear in order
 
-- **WHEN** a selected checkout has active changes, archives, and canonical specs
-- **THEN** its distinct local sections appear in that order with archives collapsed or loaded on demand, beneath its worktree context
+- **WHEN** a selected checkout has active changes and canonical specs
+- **THEN** its distinct local sections appear in that order, beneath its worktree context
 
 #### Scenario: Empty root sections disappear
 
@@ -172,12 +172,12 @@ Iterate SHALL open or explicitly resume an authoring conversation in the verifie
 
 ### Requirement: Non-TTY invocations print a plain listing
 
-Non-TTY `convoy specs` SHALL print a plain worktree inventory rather than launching a TUI, including all Git-registered checkouts regardless of specs or runs, their independent observations, local active changes and artifact inventories, and applicable actions with disabled reasons and remediation. It SHALL provide explicit checkout-local archive and canonical browsing guidance without a global deduplicated change list or Completed feature history. Headless and interactive listings SHALL use the same discovery and per-action guards. Listing SHALL not mutate or silently adopt work, and unavailable evidence SHALL remain unknown or explicitly stale with observation time where applicable.
+Non-TTY `convoy specs` SHALL print a plain worktree inventory rather than launching a TUI, including all Git-registered checkouts regardless of specs or runs, their independent observations, applicable guard conditions with their reasons, and local active changes and artifact inventories. It SHALL provide explicit checkout-local archive and canonical browsing guidance without a global deduplicated change list or Completed feature history. Headless and interactive listings SHALL use the same discovery and per-action guards. Listing SHALL not mutate or silently adopt work, and unavailable evidence SHALL remain unknown rather than absent.
 
 #### Scenario: Piped output
 
 - **WHEN** `convoy specs` runs with stdout redirected in a repository containing worktrees
-- **THEN** it prints the shared worktree and local artifact facts and action reasons without terminal control sequences and exits successfully
+- **THEN** it prints the shared worktree and local artifact facts and guard-condition reasons without terminal control sequences and exits successfully
 
 #### Scenario: Empty state when piped
 
@@ -191,7 +191,7 @@ Non-TTY `convoy specs` SHALL print a plain worktree inventory rather than launch
 
 ### Requirement: Lifecycle actions are discoverable in root and detail
 
-Root and ordinary detail views SHALL expose the same contextual action menu and shared per-action guards for the selected checkout, without lifecycle-stage gates. Worktree context SHALL offer fetch, sync-with-selected-base, push, PR review/composition/creation, squash-to-base, worktree removal, branch deletion, optional close review, refresh, and run navigation as applicable. Change focus SHALL offer read, archive, and run for explicit checkout-local selections without making those selections the scope of whole-branch Git operations. Blocked actions SHALL remain inspectable with reasons and remediation rather than disappear. Footer truncation SHALL retain a discoverable action-menu entry so omitted hints do not remove access; handlers SHALL use and revalidate the same guards as menu availability. Fullscreen reader copy/close/tab keys SHALL remain unchanged; returning to detail SHALL restore contextual actions without losing the verified checkout-local subject. Browsing and fullscreen navigation SHALL NOT change action selections or mutate domain state. No menu SHALL offer adoption, binding, or Completed feature history.
+Root and ordinary detail views SHALL expose the same contextual action menu and shared per-action guards for the selected checkout, without lifecycle-stage gates. The browser's Actions menu SHALL offer close review and refresh; apply, iterate, continue, and exit are the keyboard-level resolutions, and the full worktree operation surface (fetch, sync, push, PR composition, squash, removal, branch deletion) remains available through the `convoy worktrees` CLI on the same guarded handlers. Blocked actions SHALL remain inspectable with reasons and remediation rather than disappear. Footer truncation SHALL retain a discoverable action-menu entry so omitted hints do not remove access; handlers SHALL use and revalidate the same guards as menu availability. Fullscreen reader copy/close/tab keys SHALL remain unchanged; returning to detail SHALL restore contextual actions without losing the verified checkout-local subject. Browsing and fullscreen navigation SHALL NOT change action selections or mutate domain state. No menu SHALL offer adoption, binding, or Completed feature history.
 
 #### Scenario: Narrow terminal hides the close shortcut hint
 
@@ -208,19 +208,14 @@ Root and ordinary detail views SHALL expose the same contextual action menu and 
 - **WHEN** the operator presses `c` in the fullscreen reader
 - **THEN** the active tab is copied as before and no mutation is triggered
 
-#### Scenario: Archive requires explicit local scope
-
-- **WHEN** an operator chooses archive while browsing a worktree containing several changes
-- **THEN** only explicitly selected local changes are reviewed for archiving, never every present or inherited change automatically
-
 ### Requirement: Close handoff from the browser is confirmed
 
-Pressing the close key (`x`) in the root list, or selecting close in the contextual Actions menu at any level, SHALL NOT emit the close resolution immediately. The browser SHALL first show a confirmation modal naming the selected source worktree and path, actual source branch, selected base, explicitly selected local archive set including an empty set, and reviewed operation sequence. The confirmation SHALL explicitly disclose that squash-to-base integrates the WHOLE reviewed branch scope, not only selected changes, and SHALL identify optional push, worktree removal, and branch deletion choices. Close SHALL be an optional convenience rather than an inferred lifecycle transition: when chosen it SHALL synchronize as needed, archive only explicitly selected active changes, and then squash, with push and cleanup separately optional. These operations SHALL also remain independently available. Only an explicit confirm (`y` or Enter on the confirm choice) SHALL emit the reviewed resolution; cancel (`n` or escape) SHALL dismiss the modal and leave the browser on the same subject with no mutation. Confirmation SHALL NOT bypass operation-time guard revalidation or dirty-tree protections, and non-TTY listing SHALL remain non-mutating without a modal.
+Pressing the close key (`x`) on a selected change whose containing checkout has an attached branch, or selecting close in the contextual Actions menu at any level, SHALL NOT emit the close resolution immediately. The browser SHALL first show a confirmation modal naming the selected source worktree and path, actual source branch, selected base, explicitly selected local archive set including an empty set, and reviewed operation sequence. The confirmation SHALL explicitly disclose that squash-to-base integrates the WHOLE reviewed branch scope, not only selected changes, and SHALL state that nothing is pushed, merged, or deleted by close itself while push, worktree removal, and branch deletion remain separate optional operations. Close SHALL be an optional convenience rather than an inferred lifecycle transition: when chosen it SHALL synchronize as needed, archive only explicitly selected active changes, and then squash, with push and cleanup separately optional. These operations SHALL also remain independently available. Only an explicit confirm (`y` or Enter on the confirm choice) SHALL emit the reviewed resolution; cancel (`n` or escape) SHALL dismiss the modal and leave the browser on the same subject with no mutation. Confirmation SHALL NOT bypass operation-time guard revalidation or dirty-tree protections, and non-TTY listing SHALL remain non-mutating without a modal.
 
 #### Scenario: The close key opens a confirmation
 
-- **WHEN** the user presses `x` on a worktree in the root list
-- **THEN** confirmation identifies source, base, explicit archive set, whole-branch scope, and chosen operations including optional push and cleanup, and no close resolution is emitted yet
+- **WHEN** the user presses `x` on a selected change whose containing checkout has an attached branch
+- **THEN** confirmation identifies source, base, explicit archive set, whole-branch scope, and the separate optional push and cleanup operations, and no close resolution is emitted yet
 
 #### Scenario: Confirm hands off to close
 

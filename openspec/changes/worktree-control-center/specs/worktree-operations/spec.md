@@ -5,7 +5,11 @@ Let operators perform independent, explicitly scoped Git, OpenSpec, and publicat
 ## ADDED Requirements
 
 ### Requirement: Operations expose specific prerequisites and explicit targets
-CLI and TUI SHALL use the same operation-specific prerequisite checks and report blocked reasons without a global ready/completed stage. Review SHALL disclose the selected checkout, actual source branch/HEAD, applicable local change selection, base, and remote destination. Effects SHALL revalidate those inputs and refuse changed or unreadable required evidence. Managed writer conflicts SHALL block incompatible operations, while unrelated worktrees remain usable. Unknown Git status SHALL NOT mean clean. Main and detached checkouts SHALL remain inspectable; operations requiring an attached branch or removable linked checkout SHALL explain their narrower prerequisites. No operation SHALL require feature registration or a landing receipt.
+CLI and TUI SHALL use the same operation-specific prerequisite checks and report blocked reasons without a global ready/completed stage. Review SHALL disclose the selected checkout, actual source branch/HEAD, applicable local change selection, base, and remote destination. Effects SHALL revalidate those inputs and refuse changed or unreadable required evidence. Managed writer conflicts SHALL block incompatible operations, while unrelated worktrees remain usable. Unknown Git status SHALL NOT mean clean. Main and detached checkouts SHALL remain inspectable; operations requiring an attached branch or removable linked checkout SHALL explain their narrower prerequisites. No operation SHALL require feature registration or a landing receipt. Blocked operations SHALL surface every blocker (reason and remediation) in the interface that launched the action: a TUI menu action SHALL present them as a visible notice and SHALL never silently return to the menu, and headless surfaces SHALL report them through their error channel.
+
+#### Scenario: A blocked menu action stays visible
+- **WHEN** a TUI menu operation is refused by a shared prerequisite check that does not throw
+- **THEN** the launching menu shows the blockers and their remediations before returning, instead of losing them to an unwritten process stream
 
 #### Scenario: A target is replaced after review
 - **WHEN** the checkout path now names another branch, repository, or unverifiable worktree incarnation
@@ -94,11 +98,19 @@ Squash-to-base SHALL review the entire source/base difference, require the pinne
 - **THEN** Convoy reports no content difference without claiming a previous landing or authorizing deletion of unique source history
 
 ### Requirement: Worktree removal and branch deletion are independent decisions
-Worktree removal SHALL explicitly review the Git-registered linked checkout, lock state, local changes including untracked/ignored files and relevant submodule state, and active writers. Unsafe or unreadable checks SHALL stop; ordinary removal SHALL not force away local data, remove the main checkout, or remove the process's own checkout. Branch retention SHALL be the default. Local branch deletion SHALL be a separate explicit action after verifying the branch is not checked out, rechecking the reviewed tip, and explaining whether its history remains reachable. Deleting unique history after squash SHALL require explicit destructive confirmation, not a receipt, PR badge, tree equality, or expected-tip comparison masquerading as proof of preservation. Conflicting changes SHALL abort; remote deletion SHALL not be automatic. Removal SHALL report removal, never completion.
+Worktree removal SHALL explicitly review the Git-registered linked checkout, lock state, local changes including untracked/ignored files and relevant submodule state, and active writers. Unsafe or unreadable checks SHALL stop; ordinary removal SHALL not force away local data, remove the main checkout, or remove the process's own checkout. Removal SHALL require explicit launch-time confirmation, like other destructive hard-to-revert actions, naming the checkout and stating that its branch is retained. When ordinary removal is blocked, the launching interface SHALL show every blocker with its remediation and MAY then offer an explicit force path: force consent SHALL be deliberate — a confirmation that names exactly what would be deleted (uncommitted, untracked, and ignored content) — SHALL bypass only content blockers, SHALL never bypass the main checkout, the process's own checkout, an unverified registration, or a lock (unlock remains the path for locks), and SHALL never treat unknown or unreadable state as clean. Stale-target revalidation SHALL apply identically to ordinary and forced removal. Branch retention SHALL be the default. Local branch deletion SHALL be a separate explicit action after verifying the branch is not checked out, rechecking the reviewed tip, and explaining whether its history remains reachable. Deleting unique history after squash SHALL require explicit destructive confirmation, not a receipt, PR badge, tree equality, or expected-tip comparison masquerading as proof of preservation. Conflicting changes SHALL abort; remote deletion SHALL not be automatic. Removal SHALL report removal, never completion.
 
 #### Scenario: Worktree is removed but branch is retained
 - **WHEN** the operator confirms removal of a safe linked checkout without branch deletion
 - **THEN** the checkout disappears from inventory, its branch remains, and no Completed record is created
+
+#### Scenario: Removal is confirmed at launch
+- **WHEN** the operator selects removal from a menu
+- **THEN** a confirmation naming the checkout and branch-retention outcome is accepted before the guarded removal runs, and cancelling it performs nothing
+
+#### Scenario: Blocked removal is disclosed with a force option
+- **WHEN** removal is blocked by ignored or uncommitted content
+- **THEN** the interface shows each blocker and its remediation and offers force removal only as a separate deliberate confirmation listing that content, while main, process, unregistered, and locked targets remain refused
 
 #### Scenario: Squash left unique source history
 - **WHEN** branch deletion is requested after a squash while source commits are not preserved by retained refs

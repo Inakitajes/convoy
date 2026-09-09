@@ -570,7 +570,10 @@ export class RunsBrowser {
   private runsListWidth(): number {
     const rowWidth = (run: RunEntry) => {
       const statusLabel = run.live ? "running" : run.statusKind === "failed" || run.statusKind === "incomplete" ? run.status : ""
-      return 4 + 1 + 1 + dateColumnWidth + 2 + 7 + 2 + Math.min(displayWidth(runRowTitle(run)), 60) + (statusLabel ? 2 + displayWidth(statusLabel) : 0)
+      // The selected row's 3-cell checkbox is the widest marker, one blank
+      // cell follows it; two cells of slack keep the hugging width honest
+      // across selection changes.
+      return 3 + 1 + dateColumnWidth + 2 + 7 + 2 + Math.min(displayWidth(runRowTitle(run)), 60) + (statusLabel ? 2 + displayWidth(statusLabel) : 0) + 2
     }
     const widest = this.runs.reduce((max, run) => Math.max(max, rowWidth(run)), 0)
     return Math.max(40, Math.min(90, widest + 4))
@@ -634,16 +637,19 @@ export class RunsBrowser {
     // A live run reads as "running" with a green ● regardless of how many
     // phases have finished so far, so it stands out as attachable.
     const stateColor = run.live ? theme.green : theme[style.color]
-    // The checkbox reads as a block, not a lone glyph: the state color pads
-    // one cell on each side of the inverted marker — a chunky chip riding
-    // the accent fill, the way home's rail cells hang from their rows.
     const glyph = run.live ? "●" : style.icon
+    // The checkbox is the selection: the glyph's 3-cell block — one cell
+    // either side — paints in the state color, flush against the container's
+    // inset (no accent cell before it). Selected, the accent banner fills the
+    // rest of the row and the facts ride the chip color; the block alone sits
+    // in its state color, and every row shares the same columns.
     const marker: TextChunk[] = selected
       ? [bg(stateColor)(" "), bg(stateColor)(fg(theme.chipText)(glyph)), bg(stateColor)(" ")]
-      : [run.live ? fg(theme.green)(glyph) : fg(theme[style.color])(glyph)]
+      : [raw(" "), fg(stateColor)(glyph), raw(" ")]
     const left: TextChunk[] = [
-      raw(" "),
       ...marker,
+      // One blank cell of breathing between the checkbox and the date — on
+      // the selected row it rides the accent fill.
       raw(" "),
       fg(selected ? theme.chipText : theme.dim)(formatRunDate(run).padEnd(dateColumnWidth)),
       raw("  "),
@@ -654,11 +660,9 @@ export class RunsBrowser {
     // worktree — never the prompt's first line.
     const headline = runRowTitle(run)
     // The icon already says the state; the status word rides along only when
-    // it adds information — a live run, or a failure with its quality — so a
-    // completed column never stretches a void to the right edge. The row is
-    // left-packed: date, cost, headline, optional status, no stretch.
+    // it adds information — a live run, or a failure with its quality.
     const statusLabel = run.live ? "running" : run.statusKind === "failed" || run.statusKind === "incomplete" ? run.status : ""
-    const titleWidth = Math.max(12, width - 28 - (selected ? 3 : 1) - statusLabel.length)
+    const titleWidth = Math.max(12, width - 27 - (statusLabel ? 2 + statusLabel.length : 0))
     const title = truncate(headline, titleWidth)
     left.push(selected ? bold(fg(theme.chipText)(title)) : fg(theme.text)(title))
     if (statusLabel) left.push(raw("  "), selected ? fg(theme.chipText)(statusLabel) : fg(stateColor)(statusLabel))
@@ -667,8 +671,8 @@ export class RunsBrowser {
 
   /**
    * The selected row's full-width accent block: every chunk rides the fill
-   * unless it already carries its own background (the inverted marker cell),
-   * and the filler reaches the pane's right edge.
+   * unless it already carries its own background (the checkbox's state-color
+   * cells), and the filler reaches the pane's right edge.
    */
   private highlighted(chunks: TextChunk[], width: number): StyledText {
     const used = chunks.reduce((total, chunk) => total + displayWidth(typeof chunk === "string" ? chunk : (chunk as { text: string }).text), 0)
