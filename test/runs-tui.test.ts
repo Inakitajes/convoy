@@ -223,6 +223,28 @@ test("compact screens stack the run list above the details panel", async () => {
   }
 })
 
+test("narrow screens just above the compact floor stack when the sidebar would overflow", async () => {
+  // At a width where the run list's hugging width leaves the details pane less
+  // than its minimum column, the side-by-side layout would draw the details
+  // content wider than its flex box and spill past the terminal edge — so the
+  // board stacks instead.
+  const testRenderer = await createTestRenderer({ width: 88, height: 30 })
+  const instance = new RunsBrowser(testRenderer.renderer, sampleRuns(), 0)
+  try {
+    await Bun.sleep(260)
+    const lines = testRenderer.captureCharFrame().split("\n")
+    const runsTitle = lines.findIndex((line) => line.trimStart().startsWith("╭─ runs"))
+    const detailsTitle = lines.findIndex((line) => line.trimStart().startsWith("╭─ deta"))
+    // Stacked: the details container's header sits below the runs container's,
+    // and neither container's rule is clipped at the terminal's right edge.
+    expect(runsTitle).toBeGreaterThanOrEqual(0)
+    expect(detailsTitle).toBeGreaterThan(runsTitle)
+    expect(testRenderer.captureCharFrame()).toContain("runs · 3 runs")
+  } finally {
+    testRenderer.mockInput.pressKey("c", { ctrl: true })
+  }
+})
+
 test("compact stacking keeps the containers flush and fully drawn", async () => {
   const testRenderer = await createTestRenderer({ width: 84, height: 40 })
   const instance = new RunsBrowser(testRenderer.renderer, sampleRuns(), 0)

@@ -329,6 +329,38 @@ test("up from the first change row stays on it instead of recursing onto the hea
   await close(session)
 })
 
+test("a selected change row's diamond is a padded block with a blue square before the title", async () => {
+  const session = await openBrowser()
+  try {
+    // The first change (add-login) is selected by default; inspect its row line.
+    const selectedLine = session
+      .captureSpans()
+      .lines.filter((line) => line.spans.some((span) => span.bg.a > 0))
+      .find((line) => line.spans.map((span) => span.text).join("").includes("add-login"))!
+    const spans = selectedLine.spans
+    const diamond = spans.findIndex((span) => span.text === "◆" && span.bg.a > 0)
+    expect(diamond).toBeGreaterThanOrEqual(1)
+    // The marker block: the diamond glyph plus one cell of the same color on
+    // each side (padding), never a lone inverted glyph in the accent fill.
+    const block = spans.slice(diamond - 1, diamond + 2)
+    expect(block.map((span) => span.text)).toEqual([" ", "◆", " "])
+    const markerColor = spans[diamond]!.bg
+    const same = (a: { r: number; g: number; b: number }, b: { r: number; g: number; b: number }) =>
+      a.r === b.r && a.g === b.g && a.b === b.b
+    expect(same(block[0]!.bg, markerColor)).toBe(true)
+    expect(same(block[2]!.bg, markerColor)).toBe(true)
+    // A blue (accent) square separates the marker block from the title — one
+    // blend of the marker color and the accent fill that rides behind the row.
+    const breathe = spans[diamond + 2]!
+    expect(breathe.text).toBe(" ")
+    const titleSpan = spans.find((span) => span.text === "add-login — Add login")!
+    expect(same(breathe.bg, titleSpan.bg)).toBe(true)
+    expect(same(breathe.bg, markerColor)).toBe(false)
+  } finally {
+    await close(session)
+  }
+})
+
 test("home and g land on the first selectable row, not the leading header", async () => {
   const session = await openBrowser()
 

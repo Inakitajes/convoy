@@ -29,7 +29,13 @@ import type { BoxOptions, CliRenderer, KeyEvent, TextChunk } from "@opentui/core
 import type { RunEntry, RunStatusKind, RunsResolution } from "./runs"
 import type { Hint, PaletteColor } from "./tui-theme"
 
-/** Below this width the run list and details stack vertically. */
+/**
+ * The compact floor: below this total width the run list and details always
+ * stack vertically. On wider terminals the board still stacks whenever the run
+ * list's hugging width would leave the details pane less than its minimum
+ * column (see {@link RunsBrowser.isCompact}) — a narrow sidebar would draw the
+ * details content wider than its flex box and spill past the terminal edge.
+ */
 const compactRunsMaxWidth = 84
 
 const runStatusStyles: Record<RunStatusKind, { icon: string; color: PaletteColor }> = {
@@ -489,9 +495,21 @@ export class RunsBrowser {
     return Math.max(5, Math.min(9, Math.floor(bodyHeight * 0.35)))
   }
 
+  /**
+   * True when the board stacks the run list above the details pane. The side-by-
+   * side layout only holds while the shell chrome (2 columns), the body gap (1),
+   * the list at its hugging width, and a minimum 30-column details pane all fit:
+   * `width - listWidth - 3 >= 30`. Below either the compact floor or that line
+   * the two-pane layout would overflow, so the board reflows to a column.
+   */
+  private isCompact(): boolean {
+    if (this.renderer.width <= compactRunsMaxWidth) return true
+    return this.renderer.width - this.runsListWidth() - 3 < 30
+  }
+
   /** Run rows visible: the container's header and closing rule spend two. */
   private listHeight() {
-    if (this.renderer.width <= compactRunsMaxWidth) return Math.max(3, this.compactListHeight(this.bodyHeight()) - 2)
+    if (this.isCompact()) return Math.max(3, this.compactListHeight(this.bodyHeight()) - 2)
     return Math.max(3, this.bodyHeight() - 2)
   }
 
@@ -521,7 +539,7 @@ export class RunsBrowser {
     const now = Date.now()
     // The shell's 1-column padding on each edge is the board's only margin.
     const innerWidth = Math.max(40, this.renderer.width - 2)
-    const compact = this.renderer.width <= compactRunsMaxWidth
+    const compact = this.isCompact()
     const bodyHeight = this.bodyHeight()
 
     // Narrow terminals stack the containers: the list keeps its rows and the

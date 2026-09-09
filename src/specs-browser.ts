@@ -1062,20 +1062,29 @@ export class SpecsBrowser {
     if (row.kind === "change") {
       const change = row.change
       // The marker rides the containing worktree's state color — the section
-      // color its children hang from. Selected, it inverts over the accent
-      // fill, exactly like a home row.
+      // color its children hang from. Selected, it reads as a padded block
+      // (glyph plus one cell either side), the home row's shape.
       const worktree = this.worktreeFor(change)
       const markerColor = worktree ? worktreeDotColor(worktree) : theme.accent
-      const marker = selected ? bg(markerColor)(fg(theme.chipText)("◆")) : fg(markerColor)("◆")
+      // The marker rides the containing worktree's state color, one cell of
+      // the same color on either side — so a selected row reads as a padded
+      // three-cell block, the run-list checkbox's shape, rather than a lone
+      // inverted diamond floating in the accent fill.
+      const marker: TextChunk[] = selected
+        ? [bg(markerColor)(" "), bg(markerColor)(fg(theme.chipText)("◆")), bg(markerColor)(" ")]
+        : [raw(" "), fg(markerColor)("◆"), raw(" ")]
       const heading = change.title === change.id ? change.id : `${change.id} — ${change.title}`
       const title = truncate(heading, Math.max(12, width - 18))
       const counts = artifactCounts(change)
       const countText = counts === "—" ? "" : `  ${truncate(counts, Math.max(0, width - displayWidth(heading) - 8))}`
-      // One column in from the container border, like every other child row.
+      // One column in from the container border, like every other child row;
+      // a blank breathing column then separates the marker block from the
+      // headline — on the selected row it rides the accent fill, so the block
+      // reads as a marker followed by a blue square before the title.
       if (selected) {
-        return this.highlighted([raw(" "), marker, raw(" "), bold(fg(theme.chipText)(title)), fg(theme.chipText)(countText)], width)
+        return this.highlighted([...marker, raw(" "), bold(fg(theme.chipText)(title)), fg(theme.chipText)(countText)], width)
       }
-      return padBetween([raw(" "), marker, raw(" "), fg(theme.text)(title)], [fg(theme.dim)(countText)], width)
+      return padBetween([...marker, raw(" "), fg(theme.text)(title)], [fg(theme.dim)(countText)], width)
     }
     if (row.kind === "sectionEnd") return this.sectionEndLine(width)
     // Canonical specs are stateless — already-integrated truth, not work in
