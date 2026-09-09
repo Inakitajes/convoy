@@ -197,13 +197,20 @@ export async function reviewWorktreeRemoval(checkout: string): Promise<Operation
         remediation: "resolve the Git failure; unknown ignored content is never treated as absent",
       })
     } else {
-      const ignoredPaths = ignored.stdout.split("\n").filter((line) => line.startsWith("!!"))
+      const ignoredPaths = ignored.stdout.split("\n").filter((line) => line.startsWith("!!")).map((line) => line.replace(/^!!\s*/, ""))
       if (ignoredPaths.length > 0) {
+        // Force consent must name exactly what it would delete (delta spec
+        // worktree-operations), so the blocker lists the ignored paths —
+        // capped so a huge cache cannot flood the dialog.
+        const listed =
+          ignoredPaths.length <= 8
+            ? ignoredPaths.join(", ")
+            : `${ignoredPaths.slice(0, 8).join(", ")}, and ${ignoredPaths.length - 8} more`
         blockers.push({
           // Content blocker: `remove --force` deletes these, so a deliberate
           // force consent may bypass it (design D8).
           content: true,
-          reason: `the checkout contains ${ignoredPaths.length} ignored file(s)/director(ies) that removal would delete`,
+          reason: `the checkout contains ${ignoredPaths.length} ignored file(s)/director(ies) that removal would delete: ${listed}`,
           remediation: "move or delete the ignored content explicitly first, or force removal — which deletes these ignored files/directories",
         })
       }
