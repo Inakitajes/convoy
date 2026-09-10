@@ -816,6 +816,13 @@ type CloseProgress = {
   onEvent?: (event: CloseEvent) => void
   /** The interactive message gate; absent in headless mode. */
   resolveMessage?: (proposal: CloseMessageProposal, notice?: string) => Promise<string | undefined>
+  /**
+   * Releases the alternate screen around mutations whose git output is
+   * inherited (the squash candidate's `commitAsUser`): the TUI must suspend
+   * first or git's summary paints over the live interface, and a diff-based
+   * renderer never repaints the stomped cells.
+   */
+  withTerminal?: <T>(action: () => Promise<T>) => Promise<T>
 }
 
 type CloseOutcome = {
@@ -918,7 +925,12 @@ async function driveClose(
         message = accepted
       }
       emit({ type: "squash-phase", phase: "creating-commit" })
-      const squash = await squashToBase({ checkout: target.checkoutPath, base: command.base, commonDir, message })
+      // The candidate commit inherits the terminal (signing, hooks), so an
+      // interactive close suspends its TUI across the whole guarded squash;
+      // headless mode runs with no renderer to suspend.
+      const squash = await (progress.withTerminal
+        ? progress.withTerminal(() => squashToBase({ checkout: target.checkoutPath, base: command.base, commonDir, message }))
+        : squashToBase({ checkout: target.checkoutPath, base: command.base, commonDir, message }))
       if (!squash.ok) throw new Error(squash.reason)
       if ("noDifference" in squash) {
         steps.push("no content difference — nothing landed")
@@ -946,6 +958,7 @@ async function runClose(command: Extract<WorktreesCommand, { kind: "close" }>, c
       const result = await driveClose(command, commonDir, review.review, {
         onEvent: (event) => tui.onEvent(event),
         resolveMessage: (proposal, notice) => tui.confirmMessage(proposal, notice),
+        withTerminal: (action) => tui.withTerminal(action),
       })
       if (!result.ok) {
         process.exitCode = 1
