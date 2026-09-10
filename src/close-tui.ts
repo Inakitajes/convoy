@@ -6,7 +6,7 @@ import {
   type CloseChecklistState,
   type CloseChecklistRowStatus,
 } from "./close-presentation"
-import type { CloseEvent, CloseMessageProposal } from "./feature-close"
+import type { CloseEvent, CloseMessageProposal } from "./close-events"
 import { stripControlBytes } from "./commit-text"
 import {
   hintsRow,

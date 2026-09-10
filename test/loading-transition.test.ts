@@ -2,15 +2,19 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { createTestRenderer } from "@opentui/core/testing"
 
 import { browseSpecs } from "../src/specs"
+import { loadHomeWithTransition, type HomeContext } from "../src/cli"
 import {
   breathAmplitude,
   breathPeriodMs,
   defaultReducedMotion,
+  dimmedSea,
   envReducedMotion,
   intensityCell,
   isLoadingInterrupted,
   LoadingInterruptedError,
   paintSpan,
+  seaCell,
+  seaDimFactor,
   seaIntensities,
   seaRow,
   transitionGrid,
@@ -267,7 +271,101 @@ describe("the specs browser routes through the transition", () => {
   })
 })
 
+describe("the home context load routes through the transition", () => {
+  test("a slow home load mounts the transition with the home label and hands off", async () => {
+    const { testRenderer, session, opened, scenes } = await recordedSession()
+    const route: TuiRoute = { session }
+    let resolveLoad!: (value: HomeContext) => void
+    const pending = loadHomeWithTransition(
+      route,
+      ".",
+      () => new Promise<HomeContext>((resolve) => (resolveLoad = resolve)),
+      { thresholdMs: 5, reducedMotion: () => false },
+    )
+
+    await Bun.sleep(50)
+    await testRenderer.renderOnce()
+    expect(opened).toEqual(["convoy-loading-scene"])
+    const frame = testRenderer.captureCharFrame()
+    // The centered card: the home masthead's block-letter wordmark over the
+    // loading status, inside its own rounded rectangle.
+    expect(frame).toContain("████")
+    expect(frame).toContain("loading home…")
+    expect(frame).toContain("╭")
+
+    // Settling yields the context; the scene stays painted until Home's own
+    // mount closes it (atomic handoff, same contract as the destinations).
+    resolveLoad({ worktrees: [] })
+    await expect(pending).resolves.toEqual({ worktrees: [] })
+    expect(scenes[0]!.isClosed).toBeFalse()
+    session.openScene("convoy-home-scene")
+    expect(scenes[0]!.isClosed).toBeTrue()
+    session.destroy()
+  })
+
+  test("Ctrl+C during the home transition resolves undefined and flags the route", async () => {
+    const { testRenderer, session, opened } = await recordedSession()
+    let interrupted = false
+    const route: TuiRoute = {
+      session,
+      onInterrupt: () => {
+        interrupted = true
+      },
+    }
+    const pending = loadHomeWithTransition(
+      route,
+      ".",
+      () => new Promise<HomeContext>(() => {}),
+      { thresholdMs: 5, reducedMotion: () => false },
+    )
+
+    await Bun.sleep(50)
+    expect(opened).toEqual(["convoy-loading-scene"])
+    testRenderer.renderer.keyInput.emit("keypress", keyEvent("c", { ctrl: true, raw: "\u0003" }))
+
+    // The quiet undefined answer is what lets the navigation loop exit
+    // instead of opening Home.
+    await expect(pending).resolves.toBeUndefined()
+    expect(interrupted).toBeTrue()
+    expect(testRenderer.renderer.isDestroyed).toBeFalse()
+    session.destroy()
+  })
+})
+
 describe("the breathing sea model", () => {
+  test("the painted sea keeps every tone one notch under the shared ramp", () => {
+    // The dimming is a mild, order-preserving pull: the shape survives, and
+    // the field still populates blank troughs, faint dots, dim dots, and
+    // colon crests — but nothing reaches the shared ramp's bright text tone.
+    const field = seaIntensities(41, 21, 1_000)
+    const dimmed = dimmedSea(field)
+    expect(dimmed.length).toBe(field.length)
+    for (let index = 0; index < field.length; index += 1) {
+      expect(dimmed[index]).toBeCloseTo(field[index]! * seaDimFactor, 10)
+    }
+    const tones = new Set(Array.from(dimmed, (value) => seaCell(value)?.color ?? "blank"))
+    expect(tones.has("text")).toBeFalse()
+    expect(tones).toContain("blank")
+    expect(tones).toContain("faint")
+    expect(tones).toContain("dim")
+    expect(dimmedSea(field, 1)).toEqual(field)
+  })
+
+  test("the transition's compressed ramp keeps the wave's tonal contrast", () => {
+    // The thresholds preserve the shared ramp's proportions (blank → faint →
+    // dim · → dim :) so swells still read through colon crests against dot
+    // bodies; the brightness ranking is the shared ramp's, minus its bright
+    // text tone.
+    expect(seaCell(0)).toBeUndefined()
+    expect(seaCell(0.04)).toBeUndefined()
+    expect(seaCell(0.05)).toEqual({ glyph: "·", color: "faint" })
+    expect(seaCell(0.24)).toEqual({ glyph: "·", color: "faint" })
+    expect(seaCell(0.25)).toEqual({ glyph: "·", color: "dim" })
+    expect(seaCell(0.49)).toEqual({ glyph: "·", color: "dim" })
+    expect(seaCell(0.5)).toEqual({ glyph: ":", color: "dim" })
+    expect(seaCell(1)).toEqual({ glyph: ":", color: "dim" })
+  })
+
   test("the breath envelope pulses between its floor and 1 over one period", () => {
     // The envelope is a full sine over the period: rest at the phase origin,
     // crest a quarter period later, back to rest at the trough.

@@ -5,13 +5,15 @@ import { join } from "node:path"
 import { createTestRenderer } from "@opentui/core/testing"
 
 import { SpecsBrowser } from "../src/specs-browser"
-import type { LifecycleFeatureRow, SpecsChangeEntry, SpecsView } from "../src/specs"
+import type { BoardWorktree, ControlBoard } from "../src/control-board"
+import type { SpecsChangeEntry, SpecsView } from "../src/specs"
 
 /**
- * The dispatchable Actions menu (task 6.4, SC-3): close review is reachable
- * from root and ordinary detail — including when the worktree is gone —
- * blocked actions stay inspectable with their reasons, and footer truncation
- * keeps the discoverable `! actions` entry.
+ * The dispatchable Actions menu (delta specs-viewer): close review is
+ * reachable from root and ordinary detail, blocked actions stay inspectable
+ * with their reasons, and footer truncation keeps the discoverable
+ * `! actions` entry. The close confirmation names the source worktree, base,
+ * explicit archive set, and the whole-branch squash scope.
  */
 
 function keyEvent(name: string, options: { ctrl?: boolean; shift?: boolean } = {}) {
@@ -48,38 +50,32 @@ afterAll(async () => {
   await rm(root, { recursive: true, force: true })
 })
 
-/** The change fixture and its registered feature row; `overrides` shapes the lifecycle facts per test. */
 function changeEntry(): SpecsChangeEntry {
   return {
     kind: "change",
     id: "add-widget",
+    checkout: root,
     title: "Add widget",
     artifacts: [{ section: "proposal", file: join(root, "openspec", "changes", "add-widget", "proposal.md") }],
   }
 }
 
-function featureRow(overrides: Partial<LifecycleFeatureRow> = {}): LifecycleFeatureRow {
+function worktree(overrides: Partial<BoardWorktree> = {}): BoardWorktree {
   return {
-    featureId: "11111111-2222-3333-4444-555555555555",
-    displayName: "add-widget",
+    path: root,
     branch: "feat/add-widget",
-    summary: "Ready to close",
-    blockers: [],
-    tasks: { done: 2, total: 2 },
-    liveRuns: 0,
-    integration: "pending",
-    contracts: [{ changeId: "add-widget", state: "active" }],
-    actions: [
-      { id: "close", label: "Close review", enabled: true, blockers: [] },
-      { id: "continue", label: "Continue implementation", enabled: true, blockers: [] },
-      { id: "history", label: "Open history", enabled: true, blockers: [] },
-    ],
+    detached: false,
+    main: true,
+    bare: false,
+    accessible: true,
+    changes: [],
     ...overrides,
   }
 }
 
-function viewWith(feature: LifecycleFeatureRow, width = 120): SpecsView {
-  return { targetDir: root, present: true, changes: [changeEntry()], specs: [], features: [feature], baseBranch: "main" }
+function viewWith(target: BoardWorktree, width = 120): SpecsView {
+  const board: ControlBoard = { commonDir: root, baseBranch: "main", worktrees: [target] }
+  return { targetDir: root, present: true, board, changes: [changeEntry()], specs: [], baseBranch: "main" }
 }
 
 async function openBrowser(view: SpecsView, width = 120, height = 40) {
@@ -100,53 +96,51 @@ async function close(session: Awaited<ReturnType<typeof openBrowser>>) {
   await session.instance.result.catch(() => {})
 }
 
-/** The first selectable row is the feature row (Features leads the board). */
-async function selectFeatureRow(session: Awaited<ReturnType<typeof openBrowser>>) {
-  // Rows start past headers; with one feature the cursor already sits on it.
+/** Moves the cursor to the change child row under the first worktree. */
+async function selectChangeRow(session: Awaited<ReturnType<typeof openBrowser>>) {
+  session.press("down")
+  await session.renderOnce()
 }
 
-test("! opens the Actions menu on a feature row and Enter opens the close confirmation", async () => {
-  const session = await openBrowser(viewWith(featureRow()))
-  await selectFeatureRow(session)
+test("! opens the Actions menu on the selected change and Enter opens the close confirmation", async () => {
+  const session = await openBrowser(viewWith(worktree()))
 
   session.press("!")
   await session.renderOnce()
   const frame = session.captureCharFrame()
-  expect(frame).toContain("Actions — add-widget")
+  expect(frame).toContain("Actions")
   expect(frame).toContain("Close review")
 
   // Enter arms the close confirmation instead of emitting the resolution.
   session.press("return")
   await session.renderOnce()
   const modal = session.captureCharFrame()
-  expect(modal).toContain("Close this feature?")
-  expect(modal).toContain("add-widget")
+  expect(modal).toContain("Close this worktree?")
   expect(modal).toContain("feat/add-widget")
   expect(modal).toContain("main")
-  expect(modal).toContain("sync → archive → squash-merge")
+  expect(modal).toContain("WHOLE")
 
-  // Only the explicit confirm emits the exact same resolution as before.
+  // Only the explicit confirm emits the reviewed resolution.
   session.press("y")
-  await expect(session.instance.result).resolves.toEqual({ type: "close-feature", featureId: "11111111-2222-3333-4444-555555555555" })
+  await expect(session.instance.result).resolves.toEqual({ type: "close-change", changeID: "add-widget", worktreeDir: root, branch: "feat/add-widget" })
 })
 
-test("x on a worktree-less feature row opens the close confirmation and confirms by identity", async () => {
-  // No checkoutPath: the old close-change handoff required it and no-oped.
-  const session = await openBrowser(viewWith(featureRow({ checkoutPath: undefined })))
-  await selectFeatureRow(session)
+test("x on a change row opens the close confirmation with that archive selection", async () => {
+  const session = await openBrowser(viewWith(worktree()))
+  await selectChangeRow(session)
 
   session.press("x")
   await session.renderOnce()
-  expect(session.captureCharFrame()).toContain("Close this feature?")
+  expect(session.captureCharFrame()).toContain("Close this worktree?")
   session.press("y")
-  await expect(session.instance.result).resolves.toEqual({ type: "close-feature", featureId: "11111111-2222-3333-4444-555555555555" })
+  await expect(session.instance.result).resolves.toEqual({ type: "close-change", changeID: "add-widget", worktreeDir: root, branch: "feat/add-widget" })
 })
 
 test("the ordinary detail view's menu offers the same close action as the root", async () => {
-  const session = await openBrowser(viewWith(featureRow()))
-  await selectFeatureRow(session)
+  const session = await openBrowser(viewWith(worktree()))
+  await selectChangeRow(session)
 
-  // Enter opens the feature's history view (the detail level).
+  // Enter opens the change's reading pane (the detail level).
   session.press("return")
   await session.renderOnce()
   session.press("!")
@@ -155,35 +149,26 @@ test("the ordinary detail view's menu offers the same close action as the root",
 
   session.press("return")
   await session.renderOnce()
-  expect(session.captureCharFrame()).toContain("Close this feature?")
+  expect(session.captureCharFrame()).toContain("Close this worktree?")
   session.press("y")
-  await expect(session.instance.result).resolves.toEqual({ type: "close-feature", featureId: "11111111-2222-3333-4444-555555555555" })
+  await expect(session.instance.result).resolves.toEqual({ type: "close-change", changeID: "add-widget", worktreeDir: root, branch: "feat/add-widget" })
 })
 
 test("a blocked close review stays inspectable with its blockers and never dispatches", async () => {
-  const blocked = featureRow({
-    summary: "Implementation complete · blocked",
-    actions: [
-      { id: "close", label: "Close review", enabled: false, blockers: ["2 live runs are attached to feat/add-widget — wait for or stop them first"], remediation: ["resolve: 2 live runs are attached to feat/add-widget — wait for or stop them first"] },
-      { id: "history", label: "Open history", enabled: true, blockers: [] },
-    ],
-  })
-  const session = await openBrowser(viewWith(blocked))
+  // A detached HEAD cannot name a close source: the menu entry is disabled
+  // with its reason, never hidden.
+  const session = await openBrowser(viewWith(worktree({ branch: undefined, detached: true })))
 
-  // The menu starts on the first enabled dispatchable entry (history); move
-  // up to the blocked Close review.
   session.press("!")
-  await session.renderOnce()
-  session.press("up")
   await session.renderOnce()
   const frame = session.captureCharFrame()
   expect(frame).toContain("Close review — blocked")
-  expect(frame).toContain("live runs")
+  expect(frame).toContain("detached HEAD")
 
   // Enter on the blocked entry must not dispatch anything: the menu stays open.
   session.press("return")
   await session.renderOnce()
-  expect(session.captureCharFrame()).toContain("Actions — add-widget")
+  expect(session.captureCharFrame()).toContain("Actions")
 
   // Escape closes the menu; q/q leave the subject and quit.
   session.press("escape")
@@ -195,15 +180,7 @@ test("a blocked close review stays inspectable with its blockers and never dispa
 })
 
 test("the pinned ! actions hint survives footer truncation in a narrow terminal", async () => {
-  const crowded = featureRow({
-    actions: [
-      { id: "close", label: "Close review", enabled: true, blockers: [] },
-      { id: "continue", label: "Continue implementation", enabled: true, blockers: [] },
-      { id: "history", label: "Open history", enabled: true, blockers: [] },
-      { id: "bind", label: "Rebind context", enabled: false, blockers: ["the worktree for \"feat/add-widget\" moved"], remediation: ["run `convoy feature bind <feature-id> --branch <name> --worktree <path>` from the surviving checkout"] },
-    ],
-  })
-  const session = await openBrowser(viewWith(crowded), 62, 40)
+  const session = await openBrowser(viewWith(worktree()), 62, 40)
 
   const frame = session.captureCharFrame()
   // Many hints compete for the narrow footer, but the menu entry is pinned.
@@ -215,14 +192,14 @@ test("the pinned ! actions hint survives footer truncation in a narrow terminal"
   await session.renderOnce()
   session.press("return")
   await session.renderOnce()
-  expect(session.captureCharFrame()).toContain("Close this feature?")
+  expect(session.captureCharFrame()).toContain("Close this worktree?")
   session.press("y")
-  await expect(session.instance.result).resolves.toEqual({ type: "close-feature", featureId: "11111111-2222-3333-4444-555555555555" })
+  await expect(session.instance.result).resolves.toEqual({ type: "close-change", changeID: "add-widget", worktreeDir: root, branch: "feat/add-widget" })
 })
 
 test("the fullscreen reader keeps its copy keys and never opens the menu", async () => {
-  const session = await openBrowser(viewWith(featureRow()))
-  await selectFeatureRow(session)
+  const session = await openBrowser(viewWith(worktree()))
+  await selectChangeRow(session)
 
   session.press("return")
   await session.renderOnce()
@@ -232,7 +209,7 @@ test("the fullscreen reader keeps its copy keys and never opens the menu", async
   await session.renderOnce()
   const frame = session.captureCharFrame()
   expect(frame).toContain("c copy")
-  expect(frame).not.toContain("Actions — add-widget")
+  expect(frame).not.toContain("Actions")
 
   session.press("escape")
   await session.renderOnce()
@@ -259,37 +236,38 @@ describe("the close confirmation modal", () => {
   }
 
   test("x arms the confirmation: nothing is emitted and the modal names the facts", async () => {
-    const session = await openBrowser(viewWith(featureRow()))
-    await selectFeatureRow(session)
+    const session = await openBrowser(viewWith(worktree()))
+    await selectChangeRow(session)
 
     session.press("x")
     await session.renderOnce()
     const modal = session.captureCharFrame()
-    expect(modal).toContain("Close this feature?")
-    expect(modal).toContain("sync → archive → squash-merge")
+    expect(modal).toContain("Close this worktree?")
+    expect(modal).toContain("WHOLE")
     expect(modal).toContain("add-widget")
     expect(modal).toContain("feat/add-widget")
     expect(modal).toContain("main")
-    // While the modal is up the footer only offers the two answers.
-    expect(modal).toContain("y close")
+    // While the modal is up the footer only offers the two answers (the
+    // narrow capture clips the labels; the modal body names them).
+    expect(modal).toContain("y confirm")
     expect(modal).toContain("n/esc cancel")
     expect(await alreadyResolved(session)).toBe(false)
 
     session.press("y")
-    await expect(session.instance.result).resolves.toEqual({ type: "close-feature", featureId: "11111111-2222-3333-4444-555555555555" })
+    await expect(session.instance.result).resolves.toEqual({ type: "close-change", changeID: "add-widget", worktreeDir: root, branch: "feat/add-widget" })
   })
 
   test("cancel keeps the browser on the same row with nothing emitted", async () => {
-    const session = await openBrowser(viewWith(featureRow()))
-    await selectFeatureRow(session)
+    const session = await openBrowser(viewWith(worktree()))
+    await selectChangeRow(session)
 
     session.press("x")
     await session.renderOnce()
     session.press("n")
     await session.renderOnce()
     const frame = session.captureCharFrame()
-    expect(frame).not.toContain("Close this feature?")
-    // The browser is alive and still on the feature row.
+    expect(frame).not.toContain("Close this worktree?")
+    // The browser is alive and still on the change row.
     expect(frame).toContain("add-widget")
     expect(await alreadyResolved(session)).toBe(false)
 
@@ -297,12 +275,12 @@ describe("the close confirmation modal", () => {
     session.press("x")
     await session.renderOnce()
     session.press("y")
-    await expect(session.instance.result).resolves.toEqual({ type: "close-feature", featureId: "11111111-2222-3333-4444-555555555555" })
+    await expect(session.instance.result).resolves.toEqual({ type: "close-change", changeID: "add-widget", worktreeDir: root, branch: "feat/add-widget" })
   })
 
   test("escape cancels and any other key is ignored while the modal is open", async () => {
-    const session = await openBrowser(viewWith(featureRow()))
-    await selectFeatureRow(session)
+    const session = await openBrowser(viewWith(worktree()))
+    await selectChangeRow(session)
 
     session.press("x")
     await session.renderOnce()
@@ -310,12 +288,12 @@ describe("the close confirmation modal", () => {
     session.press("j")
     session.press("x")
     await session.renderOnce()
-    expect(session.captureCharFrame()).toContain("Close this feature?")
+    expect(session.captureCharFrame()).toContain("Close this worktree?")
     expect(await alreadyResolved(session)).toBe(false)
 
     session.press("escape")
     await session.renderOnce()
-    expect(session.captureCharFrame()).not.toContain("Close this feature?")
+    expect(session.captureCharFrame()).not.toContain("Close this worktree?")
     expect(await alreadyResolved(session)).toBe(false)
 
     session.press("c", { ctrl: true })
@@ -323,12 +301,16 @@ describe("the close confirmation modal", () => {
   })
 
   test("the footer advertises the confirm step beside the x shortcut", async () => {
-    const session = await openBrowser(
-      viewWith(featureRow({ checkoutPath: "/wt/add-widget" })),
-    )
-    await selectFeatureRow(session)
+    const session = await openBrowser(viewWith(worktree()))
+    await selectChangeRow(session)
 
+    session.press("x")
+    await session.renderOnce()
     const frame = session.captureCharFrame()
-    expect(frame).toContain("x close · y/n")
+    expect(frame).toContain("y confirm")
+    expect(frame).toContain("n/esc cancel")
+
+    session.press("y")
+    await expect(session.instance.result).resolves.toEqual({ type: "close-change", changeID: "add-widget", worktreeDir: root, branch: "feat/add-widget" })
   })
 })

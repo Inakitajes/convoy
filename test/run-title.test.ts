@@ -5,9 +5,9 @@ import { join } from "node:path"
 
 import {
   conventionalTypeFromBranch,
+  firstSelectedChangeTitle,
   humanizeBranchSlug,
   readPersistedRunTitle,
-  resolveChangeTitle,
   resolveRunTitle,
   resolveRunTitleFor,
 } from "../src/run-title"
@@ -105,39 +105,57 @@ describe("resolveRunTitle precedence", () => {
   })
 })
 
-describe("resolveChangeTitle / resolveRunTitleFor", () => {
+describe("firstSelectedChangeTitle / resolveRunTitleFor", () => {
   test("a readable proposal resolves its heading title with frontmatter stripped", async () => {
     const dir = await changeTree(
       "add-attach-flow",
       "---\nto: draft\n---\n\n# Attachment flow for run reports\n\n## Why\n\nPRs read better.\n",
     )
-    expect(await resolveChangeTitle(dir, "feat/add-attach-flow")).toBe("Attachment flow for run reports")
+    expect(await firstSelectedChangeTitle(dir, ["add-attach-flow"])).toBe("Attachment flow for run reports")
   })
 
   test("a proposal without a heading falls back to its first line inside the reader", async () => {
     const dir = await changeTree("plain", "Plain first line\n")
-    expect(await resolveChangeTitle(dir, "feat/plain")).toBe("Plain first line")
+    expect(await firstSelectedChangeTitle(dir, ["plain"])).toBe("Plain first line")
   })
 
   test("a missing proposal, missing change, or unreadable proposal resolves undefined", async () => {
     const empty = await changeTree("no-proposal", undefined)
-    expect(await resolveChangeTitle(empty, "feat/no-proposal")).toBeUndefined()
-    // A different branch resolves no change at all.
-    expect(await resolveChangeTitle(empty, "feat/other")).toBeUndefined()
+    expect(await firstSelectedChangeTitle(empty, ["no-proposal"])).toBeUndefined()
     // A proposal.md that cannot be read (a directory in its place) is disclosed as absent, never invented.
     const unreadable = await changeTree("broken", "directory")
-    expect(await resolveChangeTitle(unreadable, "feat/broken")).toBeUndefined()
-    expect(await resolveChangeTitle(empty, undefined)).toBeUndefined()
+    expect(await firstSelectedChangeTitle(unreadable, ["broken"])).toBeUndefined()
+    expect(await firstSelectedChangeTitle(empty, [])).toBeUndefined()
   })
 
   test("the full resolution walks the precedence across real files", async () => {
     const dir = await changeTree("specs-viewer-tabbed-reading", "# Tabbed reading in the specs viewer\n")
-    expect(await resolveRunTitleFor({ targetDir: dir, branch: "feat/specs-viewer-tabbed-reading", prompt: "Implement the attach" })).toBe(
+    expect(await resolveRunTitleFor({ targetDir: dir, changeIds: ["specs-viewer-tabbed-reading"], branch: "feat/other", prompt: "Implement the attach" })).toBe(
       "Tabbed reading in the specs viewer",
     )
-    // No matching change → the branch slug; no branch → the prompt line.
-    expect(await resolveRunTitleFor({ targetDir: dir, branch: "feat/quiet-notifications", prompt: "Implement the attach" })).toBe("quiet notifications")
-    expect(await resolveRunTitleFor({ targetDir: dir, prompt: "# Refactor the retry loop" })).toBe("Refactor the retry loop")
+    // No selected change → the branch slug; no branch → the prompt line.
+    expect(await resolveRunTitleFor({ targetDir: dir, changeIds: [], branch: "feat/quiet-notifications", prompt: "Implement the attach" })).toBe("quiet notifications")
+    expect(await resolveRunTitleFor({ targetDir: dir, changeIds: [], prompt: "# Refactor the retry loop" })).toBe("Refactor the retry loop")
+  })
+
+  test("titles come only from the explicitly selected changes, never the branch spelling (CC-6)", async () => {
+    const dir = await changeTree("specs-viewer-tabbed-reading", "# Tabbed reading in the specs viewer\n")
+    // The branch name matches a change id, but that change was not selected:
+    // the branch slug titles the run and the unselected proposal is not read.
+    expect(
+      await resolveRunTitleFor({ targetDir: dir, changeIds: [], branch: "feat/specs-viewer-tabbed-reading", prompt: "Implement the attach" }),
+    ).toBe("specs viewer tabbed reading")
+  })
+
+  test("reviewed order decides among multiple selections; an id-titled proposal defers to the next", async () => {
+    const first = await changeTree("notification-controls", "# Notification controls\n")
+    // Reuse the same tree: add a second change whose proposal has no usable
+    // heading (its first line is the id itself).
+    await mkdir(join(first, "openspec", "changes", "report-history"), { recursive: true })
+    await writeFile(join(first, "openspec", "changes", "report-history", "proposal.md"), "report-history\n", "utf8")
+    expect(await resolveRunTitleFor({ targetDir: first, changeIds: ["notification-controls", "report-history"] })).toBe("Notification controls")
+    // The id-titled proposal first in order defers to the next selected one.
+    expect(await resolveRunTitleFor({ targetDir: first, changeIds: ["report-history", "notification-controls"] })).toBe("Notification controls")
   })
 })
 

@@ -531,6 +531,12 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
       useExecutionPipeline: Boolean(options.resumeRunID && options.plan),
       // The reviewed feature link persists before any execution (task 4.2).
       ...(options.plan?.feature ? { feature: options.plan.feature } : {}),
+      // The accepted ordered local changes feed the run-title precedence
+      // (capability run-titles, task 10.3): proposal title → humanized branch
+      // → prompt line, resolved once at open and persisted.
+      ...(options.plan?.openspec?.changeIds && options.plan.openspec.changeIds.length > 0
+        ? { selectedChangeIds: options.plan.openspec.changeIds }
+        : {}),
       ...(runBranch ? { branch: runBranch } : {}),
     })
     const pipeline = metadata.pipeline
@@ -1576,22 +1582,17 @@ async function openSpecBundleFileParts(options: RunOptions): Promise<FilePartInp
   const bundle = options.plan?.openspec
   if (!bundle || bundle.changeIds.length === 0) return []
   try {
-    // Prefer the run's checkout. An isolated worktree starts from the base
-    // ref, so a freshly proposed (uncommitted) change exists only in the
-    // launch checkout the plan was resolved against — fall back to it rather
-    // than silently dropping the contract the operator consented to.
+    // The run's checkout is the only artifact source (delta run-launcher:
+    // preparation and execution resolve inputs from the execution checkout;
+    // a missing selected source is disclosed, never borrowed from the launch
+    // directory or another checkout).
     const paths: string[] = []
     for (const file of bundle.specFiles) {
       const inRun = join(options.targetDir, file)
-      if (existsSync(inRun)) {
-        paths.push(inRun)
-        continue
-      }
-      const inLaunch = bundle.rootDir ? join(bundle.rootDir, file) : undefined
-      if (inLaunch && existsSync(inLaunch)) paths.push(inLaunch)
+      if (existsSync(inRun)) paths.push(inRun)
     }
     if (paths.length < bundle.specFiles.length) {
-      log.warn(`OpenSpec spec bundle: ${bundle.specFiles.length - paths.length} of ${bundle.specFiles.length} spec files resolved in neither the run's nor the launch checkout; skipped`)
+      log.warn(`OpenSpec spec bundle: ${bundle.specFiles.length - paths.length} of ${bundle.specFiles.length} spec files are missing from the run's checkout; skipped — no other checkout was consulted`)
     }
     return await fileParts(paths, options.targetDir, "skip")
   } catch (error) {

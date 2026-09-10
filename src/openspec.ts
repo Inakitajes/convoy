@@ -90,10 +90,14 @@ export function titleFromProposal(body: string, fallback: string): string {
   const heading = stripped.match(/^#\s+(.+)$/m)
   const fromHeading = heading?.[1]?.trim()
   if (fromHeading) return fromHeading
+  // Structural headings (`## Why`, the OpenSpec template's opener) are not
+  // titles: a proposal without a top-level `#` titles itself from its first
+  // prose line instead of leaking markup like "## Why" into board rows and
+  // reader headers. Display surfaces truncate long prose already.
   const line = stripped
     .split(/\r?\n/)
     .map((entry) => entry.trim())
-    .find((entry) => entry.length > 0)
+    .find((entry) => entry.length > 0 && !/^#{1,6}\s/.test(entry))
   return line || fallback
 }
 
@@ -160,42 +164,35 @@ export async function listChangeIds(changesDir: string): Promise<string[]> {
 }
 
 export type ResolveChangeInput = {
-  /** Rule 1: the explicit `--change <id>`; wins over every heuristic. */
-  explicitId?: string
+  /**
+   * The operator's explicit `--change <id>` selection, in review order
+   * (repeatable). Selection is explicit only: no singleton, branch-name, or
+   * diff heuristic may select or expand the list (run-launcher delta).
+   */
+  explicitIds?: readonly string[]
   /** Raw basename entries of `openspec/changes/` (including `archive/` and stray files). */
   changesDirEntries: readonly string[]
   /** Per-change context (touched files, spec files) keyed by change id. */
   changesById: ReadonlyMap<string, OpenSpecChange>
-  /** Current branch name, for rule 3. */
-  branch?: string
-  /** Files touched in the working-tree diff against the base, for rule 4. */
-  diffFiles: readonly string[]
 }
 
 /**
- * The selection order as a pure function. Returns the ids of the changes that
- * apply to the current directory, or an empty array when none does.
+ * The explicit selection as a pure function: the requested ids that name real
+ * active changes, in the requested order, deduplicated. Without an explicit
+ * selection this returns `[]` — never a guessed singleton or branch match.
+ * Requested ids that match nothing are dropped here; the caller refuses the
+ * run naming them, so a typo or an archived id surfaces before any effect.
  */
 export function resolveChange(input: ResolveChangeInput): readonly string[] {
   const changes = input.changesDirEntries.filter(isOpenSpecChangeId)
   if (changes.length === 0) return []
 
-  const explicit = input.explicitId?.trim()
-  if (explicit) return changes.includes(explicit) ? [explicit] : []
-
-  if (changes.length === 1) return changes
-
-  const branchId = branchIdFromBranch(input.branch)
-  if (branchId && changes.includes(branchId)) return [branchId]
-
-  // Rule 4: compose every change whose touched files appear in the diff. A
-  // change with no derived touched files can never match, and that is fine — the
-  // compose path is a heuristic, never the source of authority (--change is).
-  return changes.filter((id) => {
-    const touched = input.changesById.get(id)?.touchedFiles
-    if (!touched || touched.length === 0) return false
-    return touched.some((file) => input.diffFiles.includes(file))
-  })
+  const selected: string[] = []
+  for (const raw of input.explicitIds ?? []) {
+    const id = raw.trim()
+    if (id && changes.includes(id) && !selected.includes(id)) selected.push(id)
+  }
+  return selected
 }
 
 /**
@@ -203,14 +200,14 @@ export function resolveChange(input: ResolveChangeInput): readonly string[] {
  * `undefined` when the repository has no `openspec/` at all — that is the
  * brownfield signal that keeps today's `.convoy/prd-history` behavior intact
  * (the bundle must be additive on detection only). A bundle with empty
- * `changeIds` (openspec present, nothing selected) also keeps the historical
- * fallback: selection rule 5 explicitly falls back to today's review behavior.
+ * `changeIds` means nothing was explicitly selected; the caller decides
+ * whether that is the explicit no-change mode or a refusal (run-launcher
+ * delta: no heuristic ever fills the list in).
  */
 export async function loadOpenSpecBundle(input: {
   targetDir: string
-  explicitId?: string
-  branch?: string
-  diffFiles?: readonly string[]
+  /** The operator's explicit `--change` selection, in review order. */
+  explicitIds?: readonly string[]
 }): Promise<OpenSpecBundle | undefined> {
   const openspecRoot = join(input.targetDir, openspecDirName)
   if (!(await dirExists(openspecRoot))) return undefined
@@ -240,11 +237,9 @@ export async function loadOpenSpecBundle(input: {
   const currentSpecFiles = await collectDirRelativeMarkdown(join(openspecRoot, "specs"), join(openspecDirName, "specs"))
 
   const selected = resolveChange({
-    explicitId: input.explicitId,
+    explicitIds: input.explicitIds,
     changesDirEntries,
     changesById,
-    branch: input.branch,
-    diffFiles: input.diffFiles ?? [],
   })
 
   const changeSpecFiles = selected.flatMap((id) => changesById.get(id)?.specFiles ?? [])

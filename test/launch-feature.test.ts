@@ -39,13 +39,13 @@ afterAll(async () => {
 
 type PickerView = {
   toggleState: { worktree: boolean; [key: string]: unknown }
-  selectedChangeId?: string
+  selectedChangeIds: string[]
   runSelection(pipelineName: string, initializeGit?: boolean): {
     targetDir: string
     isolateWorktree: boolean
     branchName?: string
     worktreeDir?: string
-    change?: string
+    changes: string[]
   }
   optionsDetail(width: number): { chunks: Array<{ text: string }> }
 }
@@ -81,8 +81,7 @@ async function createPicker(options: { presetFeature?: typeof feature; insideWor
     } as never,
     { enabled: true, entries: [] },
     [{ id: feature.changeID, title: "Add foo" }],
-    [],
-    undefined,
+    options.presetFeature ? [feature.changeID] : undefined,
     options.presetFeature,
     options.insideWorktree,
   )
@@ -99,7 +98,7 @@ describe("the launcher's feature-row continue handoff", () => {
     const session = await createPicker({ presetFeature: feature, isolateDefault: true })
     const view = session.picker as unknown as PickerView
     expect(view.toggleState.worktree).toBe(false)
-    expect(view.selectedChangeId).toBe("add-foo")
+    expect(view.selectedChangeIds).toEqual(["add-foo"])
     await closePicker(session)
   })
 
@@ -111,7 +110,7 @@ describe("the launcher's feature-row continue handoff", () => {
     expect(selection.isolateWorktree).toBe(false)
     expect(selection.branchName).toBe("feat/add-foo")
     expect(selection.worktreeDir).toBe("/wt/feat-add-foo")
-    expect(selection.change).toBe("add-foo")
+    expect(selection.changes).toEqual(["add-foo"])
     await closePicker(session)
   })
 
@@ -133,6 +132,36 @@ describe("the launcher's feature-row continue handoff", () => {
     expect(plan.target.branch).toBe("feat/add-foo")
     expect(plan.target.worktreeDir).toBe(worktreeDir)
     expect(plan.target.worktree).toBe(false)
+  })
+})
+
+describe("the launcher's ordered change selection", () => {
+  test("a multi-change preset keeps the full ordered list: B then A stays B then A", async () => {
+    const testRenderer = await createTestRenderer({ width: 120, height: 40 })
+    const specs = [
+      { id: "add-b", title: "B" },
+      { id: "add-a", title: "A" },
+    ]
+    const picker = new LaunchPicker(
+      testRenderer.renderer,
+      "/repo",
+      launcherChoices(),
+      "configured",
+      { isolate: false, reason: "test" },
+      { readDirtyStatus: async () => "" } as never,
+      { enabled: true, entries: [] },
+      specs,
+      ["add-b", "add-a"],
+    )
+    const session = { ...testRenderer, picker }
+    try {
+      const view = session.picker as unknown as PickerView
+      expect(view.selectedChangeIds).toEqual(["add-b", "add-a"])
+      const selection = view.runSelection("implement")
+      expect(selection.changes).toEqual(["add-b", "add-a"])
+    } finally {
+      await closePicker(session)
+    }
   })
 })
 

@@ -471,8 +471,8 @@ export async function pushRefspec(remote: string, refspec: string, cwd: string) 
   if (exitCode !== 0) throw new Error(`git push exited with code ${exitCode}`)
 }
 
-export async function removeWorktree(dir: string, cwd: string) {
-  await execFile("git", ["worktree", "remove", "--", dir], { cwd })
+export async function removeWorktree(dir: string, cwd: string, force = false) {
+  await execFile("git", ["worktree", "remove", ...(force ? ["--force"] : []), "--", dir], { cwd })
 }
 
 /**
@@ -678,12 +678,27 @@ function unquotePorcelainPath(path: string) {
   })
 }
 
-async function realpathSafe(path: string) {
+/**
+ * Physical form of a path: the `realpath` when it resolves, the resolved
+ * absolute path otherwise (the path may not exist yet). Shared by the
+ * worktree inventory/target/observation layers so path comparison has one
+ * implementation (change `worktree-control-center`, task 1.4 consolidation).
+ */
+export async function realpathSafe(path: string): Promise<string> {
   try {
     return await realpath(path)
   } catch {
     return resolve(path)
   }
+}
+
+/**
+ * The tree OID of a ref, or undefined when the ref does not resolve to a
+ * commit. Shared by the observation layer and close's candidate verification.
+ */
+export async function treeOf(ref: string, cwd: string): Promise<string | undefined> {
+  const result = await execFile("git", ["rev-parse", "--verify", "--quiet", `${ref}^{tree}`], { cwd, allowFailure: true })
+  return result.exitCode === 0 ? result.stdout.trim() || undefined : undefined
 }
 
 async function requireRepoRoot(cwd: string) {

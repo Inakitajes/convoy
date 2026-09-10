@@ -1,17 +1,19 @@
-import { bg, BoxRenderable, StyledText, TextRenderable, fg } from "@opentui/core"
+import { BoxRenderable, StyledText, TextRenderable, bold, fg } from "@opentui/core"
 
 import { joinLines, paletteForTerminal, raw, setTheme, terminalBackgroundHex, theme } from "./tui-theme"
+import { CONVOY_LETTERS, CONVOY_WORDMARK, CONVOY_WORDMARK_WIDTH, WORDMARK_GAP } from "./home-tui"
 import { sceneForRoute, type TuiRoute, type TuiScene } from "./tui-session"
 
 import type { CliRenderer, KeyEvent, TextChunk } from "@opentui/core"
 
 /**
  * The shared loading transition of the home session: while a destination load
- * outlasts a short threshold, a scene of a breathing sea of characters replaces
- * the frozen home frame, and the destination's own scene mount paints over it
- * atomically (the same contract every home-session screen already uses —
- * scenes close only when the next one mounts). Rejected or interrupted loads
- * never leave a dead screen, and loads that finish quickly never flash it.
+ * outlasts a short threshold, a scene of a dimmed breathing sea of characters
+ * behind a centered CONVOY card replaces the frozen home frame, and the
+ * destination's own scene mount paints over it atomically (the same contract
+ * every home-session screen already uses — scenes close only when the next one
+ * mounts). Rejected or interrupted loads never leave a dead screen, and loads
+ * that finish quickly never flash it.
  *
  * OpenTUI is imported eagerly by this module, so it is only ever loaded on
  * interactive paths (specs.ts dynamic-imports it under `route`).
@@ -19,6 +21,15 @@ import type { CliRenderer, KeyEvent, TextChunk } from "@opentui/core"
 
 /** Quiet period before a slow load earns the transition (no flash on fast loads). */
 export const loadingThresholdMs = 150
+
+/**
+ * The transition's paint pull: the model field is dimmed by this factor
+ * before quantization, so every painted tone sits one notch under the shared
+ * ramp's brightness. Paired with {@linkcode seaCell}'s compressed thresholds
+ * it keeps the sea's full structure — blank troughs, dot bodies, colon crests
+ * — while nothing ever reaches the shared ramp's bright text tone.
+ */
+export const seaDimFactor = 0.85
 
 /** Animation cadence cap (~30 fps): bounds CPU and ANSI output over SSH. */
 const frameIntervalMs = 1000 / 30
@@ -259,6 +270,20 @@ export function seaIntensities(cols: number, rows: number, now: number): Float64
   return field
 }
 
+/**
+ * The painted sea's brightness: the model field scaled by
+ * {@linkcode seaDimFactor} and clamped — a mild, order-preserving pull that
+ * drops every tone one notch toward transparency without collapsing any of
+ * them away. Pure — a function of the field alone.
+ */
+export function dimmedSea(intensities: Float64Array, factor: number = seaDimFactor): Float64Array {
+  const dimmed = new Float64Array(intensities.length)
+  for (let index = 0; index < intensities.length; index += 1) {
+    dimmed[index] = Math.min(1, Math.max(0, intensities[index]! * factor))
+  }
+  return dimmed
+}
+
 export type RampTone = "faint" | "dim" | "text"
 
 /**
@@ -270,6 +295,21 @@ export function intensityCell(intensity: number): { glyph: string; color: RampTo
   if (intensity >= 0.55) return { glyph: ":", color: "dim" }
   if (intensity >= 0.28) return { glyph: "·", color: "dim" }
   if (intensity >= 0.08) return { glyph: "·", color: "faint" }
+  return undefined
+}
+
+/**
+ * The transition's own quantizer: the sea's full range stays spread across
+ * the quiet tones — blank troughs, faint dots, dim dots, and colon crests —
+ * so the traveling swells keep their contrast *pattern* (that is what reads
+ * as waves) while the tones themselves sit closer together and none ever
+ * reaches the shared ramp's bright text tone. Thresholds tuned so the painted
+ * distribution mirrors the shared ramp's, one notch more transparent.
+ */
+export function seaCell(intensity: number): { glyph: string; color: RampTone } | undefined {
+  if (intensity >= 0.5) return { glyph: ":", color: "dim" }
+  if (intensity >= 0.25) return { glyph: "·", color: "dim" }
+  if (intensity >= 0.05) return { glyph: "·", color: "faint" }
   return undefined
 }
 
@@ -306,16 +346,23 @@ type LoadingSceneOptions = {
 }
 
 /**
- * The mounted transition: a full-screen breathing sea with the status line
- * floating centered over it (both axes, like the repo's other overlays).
- * Follows the repo's screen lifecycle — the scene stays painted until the next
- * scene mounts; {@linkcode stop} only detaches listeners and timers.
+ * The mounted transition: a full-screen dimmed breathing sea with a solid,
+ * rounded card floating centered over it (both axes, like the repo's other
+ * overlays). The card carries the home masthead's CONVOY wordmark over the
+ * loading status — an empty, quiet rectangle with generous padding, so the
+ * waves stay texture and the text stays legible. Follows the repo's screen
+ * lifecycle — the scene stays painted until the next scene mounts;
+ * {@linkcode stop} only detaches listeners and timers.
  */
 class LoadingTransition {
   private finished = false
   private readonly t0 = performance.now()
   private readonly ticker: ReturnType<typeof setInterval> | undefined
   private readonly fieldText: TextRenderable
+  private readonly wordmarkText: TextRenderable
+  private readonly statusText: TextRenderable
+  private readonly card: BoxRenderable
+  private readonly wide: boolean
 
   constructor(
     private readonly renderer: CliRenderer,
@@ -332,10 +379,15 @@ class LoadingTransition {
     const fieldBox = new BoxRenderable(renderer, { id: "convoy-loading-field", width: "100%", height: "100%" })
     this.fieldText = new TextRenderable(renderer, { content: "", width: "100%", height: "100%" })
     fieldBox.add(this.fieldText)
-    // The status line floats over the sea, centered on both axes — the same
-    // centered-overlay pattern the config modal and notice screens use.
-    const labelOverlay = new BoxRenderable(renderer, {
-      id: "convoy-loading-label",
+    // The centered card: a quiet, solid rectangle over the dimmed sea. The
+    // same centered-overlay pattern the config modal and notice screens use.
+    this.wide = renderer.width >= CONVOY_WORDMARK_WIDTH + 8
+    // Padding shrinks before the content does; the card stays roomy on normal
+    // terminals and merely snug on small ones.
+    const paddingX = Math.max(2, Math.min(8, Math.floor((renderer.width - (this.wide ? CONVOY_WORDMARK_WIDTH : 8)) / 4)))
+    const paddingY = Math.max(1, Math.min(3, Math.floor((renderer.height - 9) / 4)))
+    const cardOverlay = new BoxRenderable(renderer, {
+      id: "convoy-loading-card-overlay",
       position: "absolute",
       left: 0,
       top: 0,
@@ -345,21 +397,56 @@ class LoadingTransition {
       alignItems: "center",
       justifyContent: "center",
     })
-    const labelText = new TextRenderable(renderer, { content: "" })
-    // A solid pill in the palette's overlay color — the one opaque backdrop
-    // the theme provides — so the sea doesn't bleed through the text's own
-    // spaces and the status reads as words, not run-together glyphs.
-    labelText.content = new StyledText([bg(theme.overlay)(fg(theme.dim)(`loading ${options.label ?? "destination"}…`))])
-    labelOverlay.add(labelText)
+    this.card = new BoxRenderable(renderer, {
+      id: "convoy-loading-card",
+      border: true,
+      borderStyle: "rounded",
+      borderColor: theme.border,
+      backgroundColor: theme.overlay,
+      paddingX,
+      paddingY,
+      alignItems: "center",
+      justifyContent: "center",
+      flexDirection: "column",
+    })
+    this.card.gap = 2
+    this.wordmarkText = new TextRenderable(renderer, { content: "" })
+    this.statusText = new TextRenderable(renderer, { content: "" })
+    this.card.add(this.wordmarkText)
+    this.card.add(this.statusText)
+    cardOverlay.add(this.card)
     shell.add(fieldBox)
-    shell.add(labelOverlay)
+    shell.add(cardOverlay)
     scene.root.add(shell)
+    this.applyChrome()
 
     renderer.keyInput.on("keypress", this.handleKeyPress)
     renderer.on("theme_mode", this.handleThemeMode)
     // Reduced motion renders one developed static frame — informative, no motion.
     if (!options.reducedMotion) this.ticker = setInterval(this.tick, frameIntervalMs)
     this.render(this.t0)
+  }
+
+  /** The card's chrome (border, backdrop, wordmark, status) follows the live theme. */
+  private applyChrome(): void {
+    this.card.borderColor = theme.border
+    this.card.backgroundColor = theme.overlay
+    this.wordmarkText.content = this.wordmarkContent()
+    this.statusText.content = new StyledText([fg(theme.dim)(`loading ${this.options.label ?? "destination"}…`)])
+  }
+
+  /** The home masthead's CONVOY wordmark, centered; the text form on narrow terminals. */
+  private wordmarkContent(): StyledText {
+    if (!this.wide) return new StyledText([bold(fg(theme.accent)("CONVOY"))])
+    const lines = [0, 1, 2].map((glyphRow) => {
+      const chunks: TextChunk[] = []
+      CONVOY_LETTERS.forEach((letter, index) => {
+        if (index > 0) chunks.push(raw(WORDMARK_GAP))
+        chunks.push(bold(fg(theme.accent)(CONVOY_WORDMARK[letter]![glyphRow]!)))
+      })
+      return new StyledText(chunks)
+    })
+    return joinLines(lines)
   }
 
   private readonly handleKeyPress = (key: KeyEvent) => {
@@ -377,6 +464,7 @@ class LoadingTransition {
   private readonly handleThemeMode = (mode: unknown) => {
     if (mode !== "dark" && mode !== "light") return
     setTheme(paletteForTerminal(mode, terminalBackgroundHex(this.renderer)))
+    this.applyChrome()
     this.render(performance.now())
   }
 
@@ -401,22 +489,26 @@ class LoadingTransition {
   private render(now: number): void {
     if (this.finished || this.scene.isClosed || this.renderer.isDestroyed) return
     const width = this.renderer.width
-    // The label floats as an overlay, so the sea fills the whole terminal.
+    // The card floats as an overlay, so the dimmed sea fills the whole terminal.
     const bodyHeight = Math.max(1, this.renderer.height)
     const { cols, rows } = transitionGrid(width, bodyHeight)
-    this.fieldText.content = joinLines(this.fieldRows(cols, rows, seaIntensities(cols, rows, now), width, bodyHeight))
+    this.fieldText.content = joinLines(
+      this.fieldRows(cols, rows, dimmedSea(seaIntensities(cols, rows, now)), width, bodyHeight),
+    )
     this.renderer.requestRender()
   }
 
   /**
    * One terminal row per body row: each sampled grid row paints every body row
    * its {@linkcode paintSpan} owns and each cell stretches across its column
-   * span, so the clamped grid still covers the screen edge to edge.
+   * span, so the clamped grid still covers the screen edge to edge. The sea is
+   * dimmed and quantized with the transition's own compressed ramp — the
+   * wave's structure intact, every tone one notch more transparent.
    */
   private fieldRows(cols: number, rows: number, intensities: Float64Array, width: number, bodyHeight: number): StyledText[] {
     const lines: StyledText[] = []
     for (let y = 0; y < rows; y++) {
-      const line = seaRow(cols, intensities, y * cols, width)
+      const line = seaRow(cols, intensities, y * cols, width, seaCell)
       const span = paintSpan(y, rows, bodyHeight)
       for (let r = 0; r < span; r++) lines.push(line)
     }
@@ -425,11 +517,18 @@ class LoadingTransition {
 }
 
 /**
- * One painted field row: the row's cells quantized onto the theme ramp, each
- * cell's glyph repeated across its proportional column span so the runs fill
- * exactly `width` columns. Pure and renderer-free, like the sea model.
+ * One painted field row: the row's cells quantized by `cell` (the shared ramp
+ * by default; the transition paints with {@linkcode seaCell}), each cell's
+ * glyph repeated across its proportional column span so the runs fill exactly
+ * `width` columns. Pure and renderer-free, like the sea model.
  */
-export function seaRow(cols: number, intensities: Float64Array, offset: number, width: number): StyledText {
+export function seaRow(
+  cols: number,
+  intensities: Float64Array,
+  offset: number,
+  width: number,
+  cell: (intensity: number) => { glyph: string; color: RampTone } | undefined = intensityCell,
+): StyledText {
   const chunks: TextChunk[] = []
   let run = ""
   let runColor: RampTone | undefined
@@ -439,9 +538,9 @@ export function seaRow(cols: number, intensities: Float64Array, offset: number, 
     run = ""
   }
   for (let x = 0; x < cols; x++) {
-    const cell = intensityCell(intensities[offset + x]!)
-    const color = cell?.color
-    const text = (cell?.glyph ?? " ").repeat(paintSpan(x, cols, width))
+    const painted = cell(intensities[offset + x]!)
+    const color = painted?.color
+    const text = (painted?.glyph ?? " ").repeat(paintSpan(x, cols, width))
     if (color === runColor) {
       run += text
       continue

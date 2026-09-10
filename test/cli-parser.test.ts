@@ -34,7 +34,7 @@ describe("resolveRunOptions", () => {
       promptFile: undefined,
       help: undefined,
       advisor: undefined,
-      change: undefined,
+      changes: [],
     }
 
     const options = await resolveRunOptions(parsed)
@@ -75,14 +75,16 @@ describe("resolveRunOptions", () => {
       prompt: undefined,
       promptFile: undefined,
       help: undefined,
-      change: "add-login",
+      changes: ["add-login"],
     })
-    expect(options.change).toBe("add-login")
+    expect(options.changes).toEqual(["add-login"])
   })
 
-  test("parseArgs turns --change add-foo into parsed.change", () => {
-    expect(parseArgs(["--change", "add-foo"]).change).toBe("add-foo")
-    expect(parseArgs(["--change=add-bar"]).change).toBe("add-bar")
+  test("parseArgs collects repeatable --change ids in order and --manual as a flag", () => {
+    expect(parseArgs(["--change", "add-b", "--change", "add-a"]).changes).toEqual(["add-b", "add-a"])
+    expect(parseArgs(["--change=add-bar"]).changes).toEqual(["add-bar"])
+    expect(parseArgs(["--manual"]).manual).toBe(true)
+    expect(parseArgs([]).changes).toEqual([])
   })
 
   test("parseCommand routes opencode install; unknown subcommands and extras are usage errors", async () => {
@@ -100,9 +102,17 @@ describe("resolveRunOptions", () => {
     await expect(parseCommand(["specs", "extra"])).rejects.toThrow("usage: convoy specs")
   })
 
-  test("parseCommand keeps control as a compatibility alias for specs", async () => {
-    expect(await parseCommand(["control"])).toEqual({ type: "specs", targetDir: process.cwd() })
+  test("parseCommand keeps control as the worktree control board alias", async () => {
+    expect(await parseCommand(["control"])).toEqual({ type: "worktrees", args: [] })
     await expect(parseCommand(["control", "extra"])).rejects.toThrow("usage: convoy control")
+  })
+
+  test("the retired --feature flag fails before any plan is built", () => {
+    // Feature-ID selectors are retired (capability feature-lifecycle): the
+    // refusal happens in the parser, before plan review or any side effect.
+    expect(() => parseArgs(["--feature", "f-1"])).toThrow(/retired flag: --feature/)
+    expect(() => parseArgs(["--feature=f-1"])).toThrow(/retired flag: --feature/)
+    expect(() => parseArgs(["--feature", "f-1", "prompt"])).toThrow(/convoy worktrees run/)
   })
 
   test("parseCommand parses spin flags into SpinOptions", async () => {

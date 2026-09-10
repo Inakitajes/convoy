@@ -76,6 +76,18 @@ export function createPublishSeam(input: CreatePublishSeamInput) {
         return { ok: false, message: "the working tree has uncommitted changes; commit or stash them before publishing" }
       }
 
+      // Target and provenance validation come before publication mechanics
+      // (capability run-finalization delta): the checkout must still be a
+      // valid Git checkout, and when publication acts through a run's
+      // context, the run's recorded boundary must still verify against the
+      // live checkout (same repository, path, branch, and start commit still
+      // reachable). A remove/recreate at the same path stops here for fresh
+      // target review — never disclosed as a publishable plan.
+      const target = await currentTargetGate(run)
+      if (!target.ok) return target
+      const provenance = await provenanceGate(run, input.runDir)
+      if (!provenance.ok) return provenance
+
       const remotes = (await run("git", ["remote"], { allowFailure: true })).stdout.split("\n").map((name) => name.trim()).filter(Boolean)
       if (remotes.length === 0) {
         return { ok: false, message: "the repository has no configured remote; add one (git remote add origin <url>) before publishing" }
@@ -101,19 +113,8 @@ export function createPublishSeam(input: CreatePublishSeamInput) {
       const remoteHead = (await run("git", ["symbolic-ref", "--quiet", "--short", `refs/remotes/${remote}/HEAD`], { allowFailure: true })).stdout.trim()
       const base = remoteHead.startsWith(`${remote}/`) ? remoteHead.slice(remote.length + 1) : "main"
 
-      const gh = await ghGuidance(run)
-      if (!gh.ok) return gh
-
       const recovery = await recoveryGate(input.runDir)
       if (!recovery.ok) return recovery
-
-      // Feature-backed publication revalidates the reviewed feature link
-      // immediately before the push (capability run-finalization, task 5.2):
-      // the run's durable feature link must still verify — the same feature,
-      // association revision, and branch. A historical run whose path was
-      // reused by another feature never publishes the replacement branch.
-      const featureGate = await featureLinkGate(input.runDir, cwd)
-      if (!featureGate.ok) return featureGate
 
       return { ok: true, plan: { branch, remote, base } }
     },
@@ -124,20 +125,52 @@ export function createPublishSeam(input: CreatePublishSeamInput) {
      * landed push says exactly that, and the retry reuses the push because the
      * existing-PR check runs before creation.
      */
-    async apply(plan: { branch: string; remote: string; base: string }): Promise<{ ok: true; outcome: { pushed: boolean; url?: string } } | { ok: false; message: string }> {
+    /**
+     * The composed title/body for operator review (capability run-finalization,
+     * task 10.4): composition is deterministic from persisted state and changes
+     * nothing, so it is safe to surface before any push or PR creation. The
+     * operator reviews (and may edit) this text, then applies it.
+     */
+    async compose(plan: { branch: string; remote: string; base: string }): Promise<{ ok: true; title: string; text: string } | { ok: false; message: string }> {
+      return { ok: true, ...(await composePrText({ cwd, runDir: input.runDir, branch: plan.branch })) }
+    },
+
+    /**
+     * One normal push, then PR location/creation using the text the operator
+     * reviewed and accepted. A non-fast-forward rejection stops with the
+     * remote's message — never a force. A PR failure after a landed push says
+     * exactly that, and the retry reuses the push because the existing-PR
+     * check runs before creation.
+     */
+    async apply(plan: { branch: string; remote: string; base: string }, accepted?: { title: string; text: string }): Promise<{ ok: true; outcome: { pushed: boolean; url?: string } } | { ok: false; message: string }> {
+      // Git push is independent of the GitHub CLI (delta run-finalization):
+      // missing gh blocks only the PR action below, never this push.
       const push = await run("git", ["push", plan.remote, `${plan.branch}:${plan.branch}`], { allowFailure: true })
       if (push.exitCode !== 0) {
         const detail = (push.stderr || push.stdout).trim()
         return { ok: false, message: `push to ${plan.remote}/${plan.branch} was rejected; nothing was published${detail ? `: ${detail}` : ""}` }
       }
 
-      const existing = await run("gh", ["pr", "list", "--head", plan.branch, "--state", "open", "--json", "url", "--limit", "1"], { allowFailure: true })
-      if (existing.exitCode === 0) {
-        const url = parsePrListUrl(existing.stdout)
-        if (url) return { ok: true, outcome: { pushed: true, url } }
-      }
+      const gh = await ghGuidance(run)
+      if (!gh.ok) return { ok: true, outcome: { pushed: true } }
 
-      const body = await composePrText({ cwd, runDir: input.runDir, branch: plan.branch })
+      // Open-PR lookup must succeed before any creation (capability
+      // run-finalization, task 10.4): a failed lookup is an unknown state, not
+      // an absence, and never authorizes a create that could duplicate an
+      // existing PR. Only a successful lookup that returns no open PR is
+      // evidence enough to proceed.
+      const existing = await run("gh", ["pr", "list", "--head", plan.branch, "--state", "open", "--json", "url", "--limit", "1"], { allowFailure: true })
+      if (existing.exitCode !== 0) {
+        const detail = (existing.stderr || existing.stdout).trim()
+        return {
+          ok: false,
+          message: `the open-PR lookup failed${detail ? `: ${detail}` : "; unable to determine whether a pull request already exists"} — stopping as unknown rather than risking a duplicate. Retry to locate the existing PR, or create the pull request manually.`,
+        }
+      }
+      const existingUrl = parsePrListUrl(existing.stdout)
+      if (existingUrl) return { ok: true, outcome: { pushed: true, url: existingUrl } }
+
+      const body = accepted ?? (await composePrText({ cwd, runDir: input.runDir, branch: plan.branch }))
       const created = await run(
         "gh",
         ["pr", "create", "--head", plan.branch, "--base", plan.base, "--title", body.title, "--body", body.text],
@@ -150,8 +183,8 @@ export function createPublishSeam(input: CreatePublishSeamInput) {
           message: `the branch was pushed to ${plan.remote}/${plan.branch}, but creating the pull request failed${detail ? `: ${detail}` : ""}; retry to locate or create it without pushing again unnecessarily`,
         }
       }
-      const url = parsePrUrl(created.stdout) ?? parsePrUrl(created.stderr)
-      return { ok: true, outcome: { pushed: true, ...(url ? { url } : {}) } }
+      const createdUrl = parsePrUrl(created.stdout) ?? parsePrUrl(created.stderr)
+      return { ok: true, outcome: { pushed: true, ...(createdUrl ? { url: createdUrl } : {}) } }
     },
   }
 }
@@ -191,31 +224,106 @@ async function recoveryGate(runDir: string | undefined): Promise<{ ok: true } | 
 }
 
 /**
- * The feature-link gate (task 5.2): a feature-backed run's durable link is
- * revalidated against the live repository right before publication. The
- * resolution is lazy so no-spec runs never touch the lifecycle module.
+ * The current-target gate (capability run-finalization delta, task 5.6):
+ * publication validates the checkout as a live Git checkout of this
+ * repository immediately before effects — observed facts, never a feature
+ * registry consult or a historical path's authority.
  */
-async function featureLinkGate(runDir: string | undefined, cwd: string): Promise<{ ok: true } | { ok: false; message: string }> {
+async function currentTargetGate(run: PublishRunner): Promise<{ ok: true } | { ok: false; message: string }> {
+  const result = await run("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { allowFailure: true })
+  if (result.exitCode !== 0) {
+    const detail = (result.stderr || result.stdout).trim()
+    return {
+      ok: false,
+      message: `publication refuses: the checkout is not a valid current target — ${detail || "not a git repository"}. Publication never pushes through a reused historical path.`,
+    }
+  }
+  return { ok: true }
+}
+
+/** The run-start provenance a boundary records (schema v5); read tolerantly. */
+type BoundaryProvenance = {
+  worktreeDir?: unknown
+  branch?: unknown
+  startHead?: unknown
+  commonDir?: unknown
+}
+
+/** Physical-path equality: Git reports /private-prefixed paths where /var is a symlink (macOS). */
+function samePhysicalPath(a: string, b: string): boolean {
+  const strip = (path: string) => (path.startsWith("/private/") ? path.slice("/private".length) : path)
+  return a === b || strip(a) === strip(b)
+}
+
+/**
+ * The frozen-provenance gate (capability run-finalization delta: "A historical
+ * path or branch spelling SHALL NOT authorize publication or redirect an old
+ * run to a replacement checkout"). A run's durable boundary records where the
+ * run executed — checkout path, branch, start HEAD, repository common dir —
+ * and publication through the run's context must re-prove that continuity
+ * against the live checkout: same repository, same checkout path, same branch,
+ * and the run's start commit still reachable from HEAD. A checkout removed and
+ * recreated at the same path — even on the same branch spelling — fails the
+ * reachability proof, so publication stops for explicit fresh target review
+ * instead of pushing the replacement. A readable run record without a boundary
+ * carries no provable provenance at all and is refused the same way; a run
+ * viewed without its records is not a historical claim, so the current
+ * worktree guards alone apply.
+ */
+async function provenanceGate(run: PublishRunner, runDir: string | undefined): Promise<{ ok: true } | { ok: false; message: string }> {
   if (!runDir || runDir === "/") return { ok: true }
-  let metadata: { feature?: { featureId: string; associationRevision: number; branch: string; baseRef: string; contracts: readonly string[]; repositoryId: string; worktreeDir?: string } }
+  let metadata: { boundary?: BoundaryProvenance }
   try {
     metadata = JSON.parse(await readFile(join(runDir, "metadata.json"), "utf8"))
   } catch {
     return { ok: true }
   }
-  const link = metadata.feature
-  if (!link) return { ok: true }
-  const { revalidateFeatureLink } = await import("./feature-lifecycle/launch")
-  try {
-    await revalidateFeatureLink({ cwd, link })
-    return { ok: true }
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error)
+  const boundary: BoundaryProvenance | undefined = metadata.boundary
+  const worktreeDir = typeof boundary?.worktreeDir === "string" ? boundary.worktreeDir : undefined
+  const startHead = typeof boundary?.startHead === "string" ? boundary.startHead : undefined
+  if (!worktreeDir || !startHead) {
     return {
       ok: false,
-      message: `publication refuses: the run's reviewed feature context no longer verifies — ${detail}. Publication never pushes the branch now occupying the historical path.`,
+      message:
+        "publication requires explicit fresh target review: this run's records carry no run-start provenance proving the checkout's continuity — publish as a current worktree action instead (`convoy worktrees push --worktree <path>` or `convoy worktrees pr --worktree <path>`)",
     }
   }
+  const refuse = (detail: string): { ok: false; message: string } => ({
+    ok: false,
+    message: `publication refuses: the run's recorded checkout provenance no longer verifies — ${detail}. Publication never pushes a replacement checkout through a historical run path; review the current target explicitly (\`convoy worktrees push --worktree <path>\`).`,
+  })
+
+  const common = await run("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { allowFailure: true })
+  if (common.exitCode !== 0) return refuse("the checkout is not a readable Git repository")
+  const commonDir = common.stdout.trim()
+  if (typeof boundary?.commonDir === "string" && boundary.commonDir && !samePhysicalPath(commonDir, boundary.commonDir)) {
+    return refuse(`the checkout now belongs to a different repository (${commonDir}, was ${boundary.commonDir})`)
+  }
+
+  const toplevel = await run("git", ["rev-parse", "--show-toplevel"], { allowFailure: true })
+  const checkoutPath = toplevel.exitCode === 0 ? toplevel.stdout.trim() : ""
+  if (!checkoutPath || !samePhysicalPath(checkoutPath, worktreeDir)) {
+    return refuse(`the run's recorded checkout path (${worktreeDir}) does not match the current checkout (${checkoutPath || "unresolvable"})`)
+  }
+
+  const recordedBranch = typeof boundary?.branch === "string" ? boundary.branch : undefined
+  if (recordedBranch) {
+    const branch = await run("git", ["symbolic-ref", "--quiet", "--short", "HEAD"], { allowFailure: true })
+    const currentBranch = branch.exitCode === 0 ? branch.stdout.trim() : undefined
+    if (currentBranch !== recordedBranch) {
+      return refuse(`the checkout has ${currentBranch ?? "a detached HEAD"} checked out, not the recorded branch ${recordedBranch}`)
+    }
+  }
+
+  // The continuity proof: the run's start commit must still be reachable from
+  // the current HEAD. The run's own work may have advanced HEAD since — that
+  // is continuity — but a replacement checkout sharing only the path and
+  // branch spelling does not contain the recorded start.
+  const ancestry = await run("git", ["merge-base", "--is-ancestor", startHead, "HEAD"], { allowFailure: true })
+  if (ancestry.exitCode !== 0) {
+    return refuse(`the run's start commit ${startHead.slice(0, 8)} is not reachable from the current HEAD — the path was likely removed and recreated as a different checkout`)
+  }
+  return { ok: true }
 }
 
 /** `gh` availability and authentication, each with concrete remediation (D5). */

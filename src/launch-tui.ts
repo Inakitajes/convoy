@@ -15,7 +15,7 @@ import { stepRunnerFor } from "./step-runners"
 import { gatewayHint, gatewayLabel, modelGateways, type ModelGateway } from "./model-routing"
 import { consensusStep } from "./quality-score"
 import { prdHistoryFile, prdHistoryPreviewCopy, readPrdHistoryIndex, resolvePrdHistoryPreview, type PrdHistoryEntry, type PrdHistoryPreview } from "./prd-history"
-import { listOpenSpecChanges, loadOpenSpecBundle, openSpecPromptFor, type OpenSpecChangeSummary } from "./openspec"
+import { listOpenSpecChanges, openSpecPromptFor, type OpenSpecChangeSummary } from "./openspec"
 import { runReviewLines } from "./review-tui"
 import { chunksLength, clipChunks, displayWidth, fmtCountdown, formatMoney, hintsRow, joinLines, moreHintsMarker, padBetween, paletteForTerminal, plain, progressBar, raw, sectionLabel, setTheme, shortPath, spinnerFrame, terminalBackgroundHex, theme, truncate } from "./tui-theme"
 import { sceneForRoute, type TuiRoute, type TuiScene } from "./tui-session"
@@ -46,28 +46,27 @@ export type LaunchRunSelection = {
   worktreeDir?: string
   /** Empty repositories are initialized only after the review is confirmed. */
   initializeGit?: boolean
-  /** OpenSpec change id picked in the prompt step; becomes `--change`. */
-  change?: string
-  /** A feature-scoped handoff: the plan's feature link resolves by this stable identity (work-context, D1/D2). */
-  featureId?: string
+  /** The operator-selected ordered local OpenSpec changes; each pick is an explicit acceptance. */
+  changes: string[]
+  /** True when the operator explicitly chose the no-change mode (the Manual-prompt row or a manual preset). */
+  manualNoChanges?: boolean
   /** The feature's recorded intended base; set so base resolution uses the recorded base, not re-detection. */
   baseRef?: string
 }
 
 /**
- * A feature-scoped handoff (continue/apply) from the board or specs browser:
- * the pinned change plus the verified implementation context. When `featureId`
- * is present, the plan resolves its feature link by stable identity — never by
- * branch spelling — and freezes the association revision for execution-time
- * revalidation (run-launcher, task 4.4). The launcher loads its resources
- * (config, pipelines, history, specs, dirty state) from `worktreeDir` so a
- * feature checkout's configuration and contracts drive the review.
+ * A worktree-scoped handoff (continue/apply) from the board or specs browser:
+ * the pinned change plus the verified execution context. The launcher loads
+ * its resources (config, pipelines, history, specs, dirty state) from
+ * `worktreeDir` so that checkout's configuration and local changes drive the
+ * review; the run reuses the existing worktree and branch — no new worktree
+ * is created and the branch namer is never invoked (D7).
  */
 export type LaunchFeaturePreset = {
-  changeID: string
+  /** The pinned change for a single-change handoff; absent when the operator selects in the launcher. */
+  changeID?: string
   worktreeDir: string
   branch: string
-  featureId?: string
   associationRevision?: number
   contracts?: readonly string[]
   baseRef?: string
@@ -122,11 +121,12 @@ export type LaunchRunTuiResult = LaunchReviewedRun | LaunchNavigationSelection |
 export type LaunchRunTuiOptions = {
   targetDir: string
   /**
-   * A change id handed in pre-selected (the specs viewer's "apply this spec"
-   * handoff). Pins that spec row from the start and suppresses the silent
-   * auto-detect notice, exactly as if the operator had picked the row.
+   * The operator's explicit change selection handed in pre-selected (the
+   * specs viewer's "apply this spec" handoff, or `worktrees run --change`),
+   * in review order. Pins those rows from the start, exactly as if the
+   * operator had picked them; an empty list is the explicit no-change mode.
    */
-  presetChange?: string
+  presetChanges?: readonly string[]
   /**
    * A feature-row "continue" or identity-carrying "apply" handoff: the change
    * is pinned and the run reuses the feature's existing worktree and branch —
@@ -440,18 +440,17 @@ export type LauncherResources = {
   worktree: { isolate: boolean; reason: string }
   history: LaunchHistoryContext
   specs: OpenSpecChangeSummary[]
-  autoSpecIds: string[]
   insideWorktree?: InsideWorktree
 }
 
 /**
  * Resolves the launcher's resources before the picker opens (capability
  * run-launcher, task 1.3): work-scoped preparation loads configuration,
- * pipeline choices, prompt history, specs, and the auto-attach contract list
- * from the execution checkout — the feature worktree for a feature handoff,
- * the launch checkout otherwise — so review reflects the checkout the run
- * will execute in. The nested-isolation probe still watches the launcher's
- * own checkout, which is a property of where Convoy runs, not of the handoff.
+ * pipeline choices, prompt history, and the checkout-local spec list from the
+ * execution checkout — the feature worktree for a feature handoff, the launch
+ * checkout otherwise — so review reflects the checkout the run will execute
+ * in. The nested-isolation probe still watches the launcher's own checkout,
+ * which is a property of where Convoy runs, not of the handoff.
  */
 export async function loadLauncherResources(options: LaunchRunTuiOptions): Promise<LauncherResources> {
   const resourceDir = options.presetFeature?.worktreeDir ?? options.targetDir
@@ -466,20 +465,8 @@ export async function loadLauncherResources(options: LaunchRunTuiOptions): Promi
       : { isolate: config.defaults.worktree, reason: "set by defaults.worktree" }
   const history = await loadLaunchHistory(resourceDir, config?.defaults.prdHistory ?? true)
   const specs = await listOpenSpecChanges(resourceDir)
-  // The change the run would attach without being asked: same selection order
-  // the frozen plan applies (single change, branch match), minus the
-  // diff-composed rule that needs the run's base ref. That is exactly the
-  // information the notice owes the operator — which contract is about to
-  // attach silently — while nothing here is authoritative: `--change` (a pick)
-  // and the real resolution at launch both re-resolve against the full inputs.
-  const autoSpecIds =
-    specs.length > 0
-      ? await loadOpenSpecBundle({ targetDir: resourceDir, branch: history.branch })
-          .then((bundle) => (bundle ? [...bundle.changeIds] : []))
-          .catch(() => [] as string[])
-      : []
   const insideWorktree = await detectInsideWorktree(options.targetDir)
-  return { config, choices, worktree, history, specs, autoSpecIds, ...(insideWorktree ? { insideWorktree } : {}) }
+  return { config, choices, worktree, history, specs, ...(insideWorktree ? { insideWorktree } : {}) }
 }
 
 export async function launchRunTui(options: LaunchRunTuiOptions, route?: TuiRoute): Promise<LaunchRunTuiResult> {
@@ -487,11 +474,11 @@ export async function launchRunTui(options: LaunchRunTuiOptions, route?: TuiRout
     throw new Error("convoy needs an interactive terminal to open the launcher")
   }
 
-  const { config, choices, worktree, history, specs, autoSpecIds, insideWorktree } = await loadLauncherResources(options)
+  const { config, choices, worktree, history, specs, insideWorktree } = await loadLauncherResources(options)
 
   if (route) {
     const scene = sceneForRoute(route, "convoy-launch-scene")!
-    return new LaunchPicker(route.session.renderer, options.targetDir, choices, config?.modelRouting?.gateway ?? "configured", worktree, options, history, specs, autoSpecIds, options.presetChange, options.presetFeature, insideWorktree, scene).result
+    return new LaunchPicker(route.session.renderer, options.targetDir, choices, config?.modelRouting?.gateway ?? "configured", worktree, options, history, specs, options.presetChanges, options.presetFeature, insideWorktree, scene).result
   }
 
   // No backgroundColor yet: the palette is only chosen after the terminal
@@ -501,7 +488,7 @@ export async function launchRunTui(options: LaunchRunTuiOptions, route?: TuiRout
   const renderer = await createCliRenderer({ screenMode: "alternate-screen", consoleMode: "console-overlay", exitOnCtrlC: false })
   const mode = await renderer.waitForThemeMode(1_000).catch(() => null)
   setTheme(paletteForTerminal(mode, terminalBackgroundHex(renderer)))
-  return new LaunchPicker(renderer, options.targetDir, choices, config?.modelRouting?.gateway ?? "configured", worktree, options, history, specs, autoSpecIds, options.presetChange, options.presetFeature, insideWorktree).result
+  return new LaunchPicker(renderer, options.targetDir, choices, config?.modelRouting?.gateway ?? "configured", worktree, options, history, specs, options.presetChanges, options.presetFeature, insideWorktree).result
 }
 
 /** Where the launcher is running inside a feature worktree, for the nested-isolation warning. */
@@ -665,8 +652,12 @@ export class LaunchPicker {
   /** 0 = Manual prompt; 1..n = specs[index - 1]. */
   private specIndex = 0
   private specScroll = 0
-  /** The OpenSpec change id chosen as the contract; cleared on Manual prompt. */
-  private selectedChangeId?: string
+  /** The operator-selected ordered local changes; every entry is an explicit acceptance. */
+  private selectedChangeIds: string[] = []
+  /** True once the operator explicitly chose the no-change mode (Manual prompt or a manual preset). */
+  private manualNoChanges = false
+  /** Preset change ids handed in but not active in this checkout (task 10.3); surfaced, never silently dropped. */
+  private missingPresetIds: string[] = []
 
   private optionIndex = 0
   private optionScroll = 0
@@ -861,10 +852,8 @@ export class LaunchPicker {
     private readonly callbacks: Pick<LaunchRunTuiOptions, "prepareRun" | "proposeBranchName" | "checkBranchName" | "readDirtyStatus">,
     private readonly history: LaunchHistoryContext = { enabled: true, entries: [] },
     private readonly specs: readonly OpenSpecChangeSummary[] = [],
-    /** Active change ids the run would attach without an explicit pick; see launchRunTui. */
-    private readonly autoSpecIds: readonly string[] = [],
-    /** A change handed in pre-selected; applied before the first render. */
-    presetChange?: string,
+    /** The operator's explicit change selection handed in pre-selected, in review order. */
+    presetChanges?: readonly string[],
     /** A feature-row continue handoff: reuses the feature's worktree and branch (D7). */
     private readonly presetFeature?: LaunchFeaturePreset,
     /** Set when the launcher itself runs inside a worktree; drives the nested-isolation warning. */
@@ -872,17 +861,24 @@ export class LaunchPicker {
     private readonly scene?: TuiScene,
   ) {
     this.toggleState.worktree = worktreeDefault.isolate
-    // The preset pins the contract before anything renders, so the prompt step
-    // opens with that row highlighted and the auto-detect notice stays quiet.
-    // An unknown id is ignored — the launcher falls back to its normal flow.
-    if (presetChange && specs.some((spec) => spec.id === presetChange)) {
-      this.selectedChangeId = presetChange
+    // The preset pins the selection before anything renders, exactly as if the
+    // operator had picked those rows. An unknown id is ignored — the launcher
+    // falls back to its normal flow; an empty preset is the explicit
+    // no-change mode (e.g. `worktrees run --manual`).
+    if (presetChanges) {
+      this.selectedChangeIds = presetChanges.filter((id) => specs.some((spec) => spec.id === id))
+      this.missingPresetIds = presetChanges.filter((id) => !specs.some((spec) => spec.id === id))
+      this.manualNoChanges = presetChanges.length === 0
+    } else if (presetFeature) {
+      // A board handoff without an explicit selection: the operator still
+      // picks in the contract step — nothing is attached for them.
+      this.selectedChangeIds = presetFeature.changeID ? [presetFeature.changeID] : []
+      this.manualNoChanges = false
     }
     // Continue reuses the feature's existing worktree and branch: isolation of
-    // a NEW worktree is off (the run executes in the existing one), the branch
-    // is frozen without asking the namer, and the pinned change rides along.
+    // a NEW worktree is off (the run executes in the existing one), and the
+    // branch is frozen without asking the namer.
     if (presetFeature) {
-      this.selectedChangeId = presetFeature.changeID
       this.toggleState.worktree = false
     }
     const defaultIndex = choices.findIndex((choice) => choice.isDefault)
@@ -1260,12 +1256,14 @@ export class LaunchPicker {
   }
 
   /**
-   * Manual prompt (index 0) opens the editor. A spec row pins `change=<id>`
-   * and injects a short canned prompt — the spec files are the contract.
+   * Manual prompt (index 0) is the explicit no-change decision and opens the
+   * editor. A spec row pins `change=<id>` — an explicit acceptance of that
+   * suggestion; nothing is ever attached without one.
    */
   private acceptContract() {
     if (this.specIndex === 0) {
-      this.selectedChangeId = undefined
+      this.selectedChangeIds = []
+      this.manualNoChanges = true
       this.promptChoosing = false
       if (this.promptFromDefault) {
         this.applyPromptFieldState(emptyPromptField())
@@ -1277,7 +1275,8 @@ export class LaunchPicker {
     }
     const spec = this.specs[this.specIndex - 1]
     if (!spec) return
-    this.selectedChangeId = spec.id
+    this.selectedChangeIds = [spec.id]
+    this.manualNoChanges = false
     this.applyPromptFieldState(cleanPromptField(openSpecPromptFor(this.currentChoice().name)))
     this.cursor = this.prompt.length
     this.promptError = ""
@@ -1349,8 +1348,9 @@ export class LaunchPicker {
         this.mode = "prompt"
         if (this.specs.length > 0) {
           this.promptChoosing = true
-          if (this.selectedChangeId) {
-            const index = this.specs.findIndex((spec) => spec.id === this.selectedChangeId)
+          const first = this.selectedChangeIds[0]
+          if (first) {
+            const index = this.specs.findIndex((spec) => spec.id === first)
             this.specIndex = index >= 0 ? index + 1 : 0
           } else {
             this.specIndex = 0
@@ -1533,8 +1533,9 @@ export class LaunchPicker {
     this.promptScroll = 0
     if (this.specs.length > 0) {
       this.promptChoosing = true
-      if (this.selectedChangeId) {
-        const index = this.specs.findIndex((spec) => spec.id === this.selectedChangeId)
+      const first = this.selectedChangeIds[0]
+      if (first) {
+        const index = this.specs.findIndex((spec) => spec.id === first)
         this.specIndex = index >= 0 ? index + 1 : 0
       } else {
         this.specIndex = 0
@@ -1762,14 +1763,12 @@ export class LaunchPicker {
       gateway: this.gateway,
       isolateWorktree: this.toggleState.worktree,
       ...(frozenBranch ?? {}),
-      // A feature-scoped handoff rides its stable identity and recorded base:
-      // the plan's feature link resolves by identity (never branch spelling)
-      // and base resolution uses the recorded intended base rather than
-      // re-detecting one (work-context, D1/D2; the advisor's identity rule).
-      ...(this.presetFeature?.featureId ? { featureId: this.presetFeature.featureId } : {}),
+      // A worktree-scoped handoff rides its recorded base: base resolution
+      // uses the recorded base rather than re-detecting one (work-context D5).
       ...(this.presetFeature?.baseRef ? { baseRef: this.presetFeature.baseRef } : {}),
       ...(initializeGit ? { initializeGit: true } : {}),
-      ...(this.selectedChangeId ? { change: this.selectedChangeId } : {}),
+      changes: [...this.selectedChangeIds],
+      ...(this.manualNoChanges && this.selectedChangeIds.length === 0 ? { manualNoChanges: true } : {}),
     }
   }
 
@@ -1812,7 +1811,7 @@ export class LaunchPicker {
     this.selected = newIndex
     const newChoice = this.currentChoice()
 
-    if (this.selectedChangeId) {
+    if (this.selectedChangeIds.length > 0) {
       this.applyPromptFieldState(cleanPromptField(openSpecPromptFor(newChoice.name)))
     } else {
       // Swap the default prompt cleanly when the field is empty or still holds
@@ -2286,7 +2285,8 @@ this.detailBox.title = reviewing ? " review " : " run setup "
   }
 
   private selectedSpec(): OpenSpecChangeSummary | undefined {
-    return this.selectedChangeId ? this.specs.find((spec) => spec.id === this.selectedChangeId) : undefined
+    const first = this.selectedChangeIds[0]
+    return first ? this.specs.find((spec) => spec.id === first) : undefined
   }
 
   private optionsDetail(width: number) {
@@ -2516,27 +2516,25 @@ this.detailBox.title = reviewing ? " review " : " run setup "
   }
 
   /**
-   * The OpenSpec counterpart of the history notice: which active change the run
-   * will attach without being asked. Quiet when the checkout has no active
-   * change, and when a pick exists the picked row already says it — the notice
-   * exists for the silent path, which is exactly where an operator needs to be
-   * told what is about to happen. Titles ride a detail line because the ids
-   * alone must survive a narrow detail pane.
+   * The OpenSpec counterpart of the history notice: the checkout's active
+   * local changes, one of which the operator may pick as the contract. Quiet
+   * when the checkout has no active change, and when a pick exists the picked
+   * row already says it. Nothing attaches without an explicit pick — the
+   * notice points at the decision, it never announces a silent attach.
    */
   private pushOpenSpecNotice(lines: StyledText[], width: number) {
-    if (this.specs.length === 0 || this.selectedChangeId) return
-    const value = Math.max(8, width - 9)
-    const auto = this.specs.filter((spec) => this.autoSpecIds.includes(spec.id))
-    lines.push(plain(""))
-    if (auto.length > 0) {
-      const titled = auto.filter((spec) => spec.title !== spec.id)
-      lines.push(new StyledText([sectionLabel("openspec "), fg(theme.teal)(truncate(`${auto.map((spec) => spec.id).join(", ")} · bundle attaches to every step`, value))]))
-      if (titled.length > 0) {
-        lines.push(new StyledText([raw("         "), fg(theme.dim)(truncate(titled.map((spec) => spec.title).join(" · "), value))]))
-      }
-      return
+    // A preset change handed in that is not active in this checkout is a stale
+    // selection (task 10.3): surface it so the operator re-picks instead of
+    // silently running with the missing change dropped.
+    if (this.missingPresetIds.length > 0) {
+      const value = Math.max(8, width - 9)
+      lines.push(plain(""))
+      lines.push(new StyledText([fg(theme.faint)("openspec "), fg(theme.yellow)(truncate(`preset ${this.missingPresetIds.join(", ")} ${this.missingPresetIds.length === 1 ? "is" : "are"} not active in this checkout — re-select the change or continue without it`, value))]))
     }
-    lines.push(new StyledText([sectionLabel("openspec "), fg(theme.dim)(truncate(`${this.specs.length} active changes · pick one when writing the prompt`, value))]))
+    if (this.specs.length === 0 || this.selectedChangeIds.length > 0 || this.manualNoChanges) return
+    const value = Math.max(8, width - 9)
+    lines.push(plain(""))
+    lines.push(new StyledText([sectionLabel("openspec "), fg(theme.dim)(truncate(`${this.specs.length} active changes · pick one (esc), or Manual prompt for a no-change run`, value))]))
   }
 
   /**
@@ -2565,7 +2563,8 @@ this.detailBox.title = reviewing ? " review " : " run setup "
     if (!this.toggleState.keepRunDir) flags.push("--no-keep-run-dir")
     flags.push(this.toggleState.tui ? "--tui" : "--no-tui")
     flags.push(this.toggleState.worktree ? "--worktree" : "--no-worktree")
-    if (this.selectedChangeId) flags.push(`--change ${this.selectedChangeId}`)
+    for (const id of this.selectedChangeIds) flags.push(`--change ${id}`)
+    if (this.manualNoChanges && this.selectedChangeIds.length === 0) flags.push("--manual")
     return flags
   }
 

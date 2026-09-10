@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises"
 import { join } from "node:path"
 
 import { firstMeaningfulLine, stripControlBytes } from "./commit-text"
-import { branchIdFromBranch, isOpenSpecChangeId, openspecDirName, titleFromProposal } from "./openspec"
+import { isOpenSpecChangeId, openspecDirName, titleFromProposal } from "./openspec"
 
 /**
  * One dependency-light title-resolution module for every human title a run
@@ -10,13 +10,16 @@ import { branchIdFromBranch, isOpenSpecChangeId, openspecDirName, titleFromPropo
  * cleanup-surviving history entry, and the metadata field persisted at run
  * start all resolve through the same precedence —
  *
- *   change proposal title → humanized branch slug → prompt's first line
+ *   first titled explicitly selected local proposal → humanized branch slug →
+ *   prompt's first line
  *
  * so a run launched from a spec pointer is never titled by the pointer
- * prompt's first line. The module imports nothing heavier than
- * `commit-text.ts`-level helpers plus the OpenSpec filesystem readers, does no
- * model calls, and owns no truncation: display caps (the 60-column runs list)
- * stay a consumer concern.
+ * prompt's first line. The selected-change list comes only from the accepted
+ * run plan — never branch-to-change inference, feature associations, or
+ * same-id artifacts in another checkout (delta run-titles). The module
+ * imports nothing heavier than `commit-text.ts`-level helpers plus the
+ * OpenSpec filesystem readers, does no model calls, and owns no truncation:
+ * display caps (the 60-column runs list) stay a consumer concern.
  */
 
 /**
@@ -84,25 +87,39 @@ export async function readChangeTitle(targetDir: string, changeId: string): Prom
 }
 
 /**
- * The change-title lookup the title precedence starts from: the shared
- * branch↔change rule (`branchIdFromBranch`) resolves the change id, the
- * proposal title is read against `targetDir` exactly as the control board
- * reads it. `undefined` when the branch carries no change id or the proposal
- * is absent/unreadable.
+ * The change-title lookup the title precedence starts from: the explicitly
+ * selected local changes of the accepted run plan, read against `targetDir`
+ * (the execution checkout) in reviewed order. A readable proposal without a
+ * usable title (its heading is just the change id) allows the next selected
+ * proposal; a missing or unreadable one is skipped the same way — the title
+ * is display metadata, and input availability is enforced at launch
+ * validation, not here. `undefined` when no selected proposal supplies a
+ * usable title.
  */
-export async function resolveChangeTitle(targetDir: string, branch: string | undefined): Promise<string | undefined> {
-  const changeId = branchIdFromBranch(branch)
-  if (!changeId) return undefined
-  return readChangeTitle(targetDir, changeId)
+export async function firstSelectedChangeTitle(targetDir: string, changeIds: readonly string[] | undefined): Promise<string | undefined> {
+  for (const changeId of changeIds ?? []) {
+    if (!isOpenSpecChangeId(changeId)) continue
+    let title: string | undefined
+    try {
+      const body = await readFile(join(targetDir, openspecDirName, "changes", changeId, "proposal.md"), "utf8")
+      title = titleFromProposal(body, changeId)
+    } catch {
+      continue
+    }
+    if (title && title !== changeId) return title
+  }
+  return undefined
 }
 
 /**
  * The full async resolution `openRunMetadata` performs once at run start:
- * change proposal → humanized branch slug → prompt first line, with every
- * filesystem read optional so an absent source degrades to the next one.
+ * first titled explicitly selected local proposal → humanized branch slug →
+ * prompt first line, with every filesystem read optional so an absent source
+ * degrades to the next one. The selected ids come only from the accepted run
+ * plan — never from the branch spelling.
  */
-export async function resolveRunTitleFor(input: { targetDir: string; branch?: string; prompt?: string }): Promise<string | undefined> {
-  const changeTitle = await resolveChangeTitle(input.targetDir, input.branch)
+export async function resolveRunTitleFor(input: { targetDir: string; changeIds?: readonly string[]; branch?: string; prompt?: string }): Promise<string | undefined> {
+  const changeTitle = await firstSelectedChangeTitle(input.targetDir, input.changeIds)
   return resolveRunTitle({ changeTitle, branch: input.branch, prompt: input.prompt })
 }
 

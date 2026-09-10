@@ -1,7 +1,10 @@
 import { join } from "node:path"
 
 import { bootOpencodeServerFrom } from "./opencode"
-import { lifecycleSchemaVersion, readJsonFile, removePath, withFeatureLock, writeJsonFile, type StoreRead } from "./feature-lifecycle/store"
+import { readJsonFile, removePath, withExclusiveLock, writeJsonFile, type StoreRead } from "./repo-store"
+
+/** The discovery record's schema version; bumped only for a wire-format change. */
+const schemaVersion = 1
 
 /**
  * The authoring conversation service (capability work-conversations, design
@@ -42,7 +45,7 @@ export type ConversationServiceRecord = {
 export function validateConversationServiceRecord(value: unknown): ConversationServiceRecord | undefined {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined
   const record = value as Record<string, unknown>
-  if (record.schemaVersion !== lifecycleSchemaVersion) return undefined
+  if (record.schemaVersion !== schemaVersion) return undefined
   // The authoring server always binds to loopback (bootOpencodeServerFrom uses
   // 127.0.0.1), so a valid discovery URL must be a loopback http URL. A record
   // pointing elsewhere is not evidence of this repository's server and would
@@ -52,7 +55,7 @@ export function validateConversationServiceRecord(value: unknown): ConversationS
   if (typeof record.bootCheckout !== "string" || record.bootCheckout === "") return undefined
   if (typeof record.startedAt !== "number") return undefined
   return {
-    schemaVersion: lifecycleSchemaVersion,
+    schemaVersion: schemaVersion,
     url: record.url,
     pid: record.pid,
     bootCheckout: record.bootCheckout,
@@ -87,7 +90,7 @@ function discoveryPath(commonDir: string): string {
 /** Reads the transient discovery record; a missing record is simply "none". */
 export async function readConversationServiceDiscovery(commonDir: string): Promise<StoreRead<ConversationServiceRecord>> {
   return readJsonFile(discoveryPath(commonDir), validateConversationServiceRecord, {
-    unsupported: (value) => typeof value.schemaVersion === "number" && value.schemaVersion > lifecycleSchemaVersion,
+    unsupported: (value) => typeof value.schemaVersion === "number" && value.schemaVersion > schemaVersion,
   })
 }
 
@@ -152,7 +155,7 @@ export async function ensureConversationService(input: {
   const boot = input.boot ?? ((checkout: string, timeoutMs?: number) => bootOpencodeServerFrom(checkout, timeoutMs ?? 30_000))
   const probe = input.probe ?? probeConversationService
   let outcome: ConversationServiceOutcome = { status: "uncertain", reason: "the authoring service lock was lost" }
-  await withFeatureLock(join(input.commonDir, "convoy", "authoring-service"), async () => {
+  await withExclusiveLock(join(input.commonDir, "convoy", "authoring-service"), async () => {
     const read = await readConversationServiceDiscovery(input.commonDir)
     if (read.status === "found") {
       const liveness = await probe(read.value)
@@ -184,7 +187,7 @@ export async function ensureConversationService(input: {
       return
     }
     const record: ConversationServiceRecord = {
-      schemaVersion: lifecycleSchemaVersion,
+      schemaVersion: schemaVersion,
       url: booted.url,
       pid: booted.pid,
       bootCheckout: input.checkout,

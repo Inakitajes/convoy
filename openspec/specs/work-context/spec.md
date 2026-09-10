@@ -9,123 +9,62 @@ Work denotes the existing repository-scoped feature identity in the work-first U
 ## Requirements
 
 ### Requirement: Work exists before a specification
-
-Convoy SHALL allow an operator to create a work item from a short title or identifier, review its branch, base, and destination, and create its isolated checkout before launching an authoring agent. Independent work SHALL default to the detected base; starting from existing work SHALL require a deliberate choice. Work SHALL remain discoverable without a specification or run. Creating work SHALL NOT create a commit or pull request.
+Convoy SHALL offer **New worktree**, ask what the operator wants to build, and propose a Git-valid conventional branch name and worktree destination using the repository's existing location convention. The proposal SHALL support model-backed naming with a deterministic fallback that is editable through the manual refine mode. Before creation the operator SHALL review the name, branch, base, and derived destination; the branch and base SHALL be editable, while the destination — derived from the branch — SHALL be shown for review in the accepted proposal rather than being directly editable. Independent creation SHALL suggest the detected repository base, not silently derive from the selected feature branch; deliberate derived work SHALL disclose its source. Creation SHALL always mint a free conventional branch: a deliberately typed existing branch name SHALL be suffixed by the collision policy rather than checked out in place, and existing branches SHALL be reached by selecting their already-registered checkouts in the inventory. Creating a worktree SHALL NOT create a feature record, spec, commit, PR, or authoring session. The new worktree SHALL be selectable before any change or run exists.
 
 #### Scenario: Proposal starts in isolation
-
-- **WHEN** an operator creates work from main and starts proposing
-- **THEN** the agent starts in the reviewed worktree and its new proposal artifacts belong to that checkout, with none created in main by this flow
+- **WHEN** an operator approves a new worktree from main and subsequently starts proposing
+- **THEN** creation first establishes the reviewed checkout and the authoring agent later writes there, not in main
 
 #### Scenario: Creation is cancelled
-
-- **WHEN** the operator cancels before accepting the destination
-- **THEN** no worktree, branch, session, or work association is created
+- **WHEN** the operator cancels the naming or destination review
+- **THEN** no worktree, branch, session, or domain association is created
 
 #### Scenario: Authoring has not begun
+- **WHEN** a worktree exists without any change or run
+- **THEN** it remains selectable with conversation, propose, and applicable pipeline actions
 
-- **WHEN** a worktree has been created but no spec or run exists
-- **THEN** the work remains selectable and offers conversation and proposal actions
+#### Scenario: Naming service unavailable
+- **WHEN** model-backed naming fails or is unavailable
+- **THEN** Convoy offers an editable conventional fallback and does not execute Git until the destination is accepted
 
-### Requirement: Work identity survives changing associations
+#### Scenario: An existing branch name is deliberately typed
 
-Convoy SHALL reuse the existing feature identity for created or adopted work, independent of display name, arbitrary Git-valid branch names, change IDs, and session IDs. Work SHALL retain the complete explicitly reviewed contract set, permit an empty set before proposal, and add multiple conversation references without replacing the existing feature record, association revision, repository identity, run links, or close evidence. Persisted associations SHALL survive reopening Convoy from any checkout of the same repository and SHALL be validated against current repository state. Git, OpenSpec, live run control, and verified close evidence SHALL remain authoritative for operational status.
-
-#### Scenario: Branch association is repaired
-
-- **WHEN** a linked branch is renamed outside Convoy and the operator reconciles the association
-- **THEN** the work retains its identity and linked history while showing the newly validated branch
-
-#### Scenario: Two windows update one work item
-
-- **WHEN** separate Convoy instances add conversation associations concurrently
-- **THEN** both associations are preserved or a visible retryable conflict is returned, with no silent lost update
+- **WHEN** the operator types an existing branch name into the manual refine form and approves creation
+- **THEN** the collision policy suffixed a free branch instead of checking out the existing one, and the reviewed proposal named that suffixed branch before any Git effect
 
 ### Requirement: Every action uses a validated destination
-
-Reading, conversation, proposal, pipeline preparation and execution, and close SHALL use the selected feature's validated checkout, complete reviewed contract set, and focused contract source when applicable. Convoy SHALL revalidate destination identity before effects and SHALL NOT fall back to the launch directory when that destination is missing, reused, or ambiguous. Base-checkout operations SHALL retain their explicit base target. Selecting work SHALL NOT change another action's process-wide working directory.
+Reading, conversation, proposal, pipeline preparation/execution, publication, archive, and close SHALL target the explicitly selected Git worktree. Configuration, relative attachments, canonical specs, and selected changes SHALL resolve within that checkout. Explicit selectors MUST agree; missing or replaced destinations SHALL require refreshed selection rather than a fallback to the launch directory. Operations SHALL validate repository membership, worktree registration, current branch/HEAD, and relevant reviewed refs immediately before effects. Base-checkout operations SHALL disclose and validate their separate destination. Selection SHALL NOT mutate a process-wide working directory or establish ownership. Session/navigation hints and historical run provenance SHALL NOT substitute for current validation.
 
 #### Scenario: Work selected from another checkout
-
-- **WHEN** Convoy starts in main and an operator acts on work in a feature worktree
-- **THEN** its configuration, relative attachments, specs, and execution resolve within that feature worktree without requiring a shell directory switch
+- **WHEN** Convoy starts in main and the operator acts on another worktree
+- **THEN** that worktree supplies all checkout-relative resources and receives the requested effects without a parent-shell directory switch
 
 #### Scenario: Destination changes during review
-
-- **WHEN** the reviewed worktree is removed or its branch changes before an action starts
-- **THEN** the action reports the stale destination and requires refreshed selection rather than executing in main or accepting the replacement silently
+- **WHEN** the reviewed worktree is removed, replaced, or changes branches before execution
+- **THEN** the action refuses the stale review rather than accepting a replacement or executing in main
 
 #### Scenario: Independent work runs concurrently
-
-- **WHEN** actions execute on two distinct work items
-- **THEN** each keeps its own checkout, selected change, and session references regardless of navigation in the other work
-
-### Requirement: Existing work is adopted without guessing ownership
-
-Convoy SHALL discover existing worktrees and changes without requiring an existing work record. Adoption SHALL link a validated checkout without creating another worktree. Multiple plausible owners or change candidates SHALL be presented for explicit selection. Distinct registered work items SHALL NOT be collapsed solely because their change IDs match. Changes stranded on the base checkout SHALL use the spin adoption flow before work-scoped authoring or execution.
-
-#### Scenario: Several changes exist in adopted work
-
-- **WHEN** adoption finds multiple eligible change IDs
-- **THEN** the operator explicitly reviews the contract set before association and chooses reader focus independently
-
-#### Scenario: Duplicate change ID
-
-- **WHEN** two work items contain a change with the same ID
-- **THEN** each remains addressable by work identity and actions use the selected work's copy
+- **WHEN** operations run in two distinct worktrees
+- **THEN** navigation in either view does not alter the other operation's target, local inputs, or session
 
 ### Requirement: Interrupted creation is recoverable
-
-Convoy SHALL report partial creation results and preserve an existing worktree when association persistence or session startup fails. Retrying SHALL reconcile and reuse a validated matching result rather than create another branch or delete possible authored content.
+Convoy SHALL preserve partial creation results and explain precisely which branch and checkout exist. Retrying SHALL reconcile an unresolved creation intent against actual Git state before reusing a matching result; it SHALL NOT overwrite a directory, delete possible authored content, or create duplicate worktrees. Required temporary recovery data SHALL be stored outside the destination and removed when resolved. Session startup is a separate action whose failure SHALL NOT invalidate successful worktree creation.
 
 #### Scenario: Session startup fails after checkout creation
+- **WHEN** creation succeeded but a subsequently requested authoring session fails
+- **THEN** the worktree remains usable and the operator can retry only the session
 
-- **WHEN** a worktree is created successfully but its session fails to start
-- **THEN** Convoy reports the session failure, preserves the worktree, and permits retrying the session on that same work
+#### Scenario: Acknowledgement of creation was lost
+- **WHEN** Git created the reviewed checkout but the process stopped before reporting success
+- **THEN** retry verifies the pending operation's target and reuses it or reports a conflict without creating another branch
 
 ### Requirement: Propose uses the project's authoring workflow
-
-Propose SHALL invoke an available project OpenSpec authoring workflow in the selected work's checkout. If none is available, Convoy SHALL explain the unavailable action before launching it and keep ordinary conversation available without silently installing global commands. Newly produced contracts SHALL be presented for explicit association review, even if a single candidate can be suggested; a differing change ID SHALL NOT automatically rename the work's branch.
+Propose SHALL invoke the available project OpenSpec authoring workflow in the selected checkout. If unavailable, Convoy SHALL explain the condition and keep ordinary conversation usable without silently installing global commands. On return it SHALL refresh that checkout's local changes; new artifacts SHALL be usable without association review or registry writes. A differing change ID SHALL NOT rename the branch. Later pipeline/archive inputs SHALL still require explicit selection.
 
 #### Scenario: Propose produces a differently named change
-
-- **WHEN** the project's workflow produces one eligible change whose ID differs from the work title
-- **THEN** Convoy proposes the contract for explicit association review and, on acceptance, links it without renaming the branch or requiring session relocation
+- **WHEN** authoring produces a change whose ID differs from the worktree or branch name
+- **THEN** the change appears under that checkout without rebinding, registration, or renaming
 
 #### Scenario: Authoring workflow unavailable
-
-- **WHEN** the selected project has no supported proposal workflow
-- **THEN** Propose reports that condition, offers ordinary conversation, and does not claim a proposal workflow ran
-
-### Requirement: Historical run association uses recorded work identity
-
-Work-scoped launches SHALL reuse the existing feature plan link and durable lifecycle run records, preserving repository/feature identity, association revision, full contract set, checkout, actual branch, and intended base. No parallel work ID or historical-run store SHALL be created. History SHALL prefer this recorded association over the current branch at a reused path. Legacy runs SHALL remain readable and resumable under existing execution constraints without requiring new identity fields.
-
-#### Scenario: Worktree disappears after a run
-
-- **WHEN** a worktree is removed after a work-scoped run finishes
-- **THEN** its history remains associated with the original work while execution actions report the missing checkout
-
-#### Scenario: Legacy run has no work identity
-
-- **WHEN** an operator opens a run created before this change
-- **THEN** its history remains readable and existing resume validation applies without forcing metadata conversion
-
-### Requirement: Pre-proposal state uses shared lifecycle assessment
-
-The feature list, Home, detail, and action handlers SHALL consume the same lifecycle assessment. A feature with a verified checkout, no contracts, and no execution SHALL offer conversation and proposal without claiming implementation completion or close readiness. Contract assignment SHALL use the existing explicit association-revision workflow. Verified archive evidence for a change SHALL remain authoritative over an unarchived copy of the same change ID that exists only on a branch behind the work's recorded base; the assessment SHALL disclose that stale-copy discrepancy instead of presenting the stale copy as current state. Archived contracts, local integration, publication, and cleanup SHALL retain their separate existing evidence requirements.
-
-#### Scenario: Empty contract set is awaiting proposal
-
-- **WHEN** a newly created feature has no selected contracts or execution
-- **THEN** Home and the board identify it as awaiting proposal and close remains unavailable with a concrete explanation
-
-#### Scenario: Several contracts share one feature
-
-- **WHEN** two contracts are explicitly associated with one checkout and the reader focuses one
-- **THEN** pipeline review preserves both contracts and close remains an operation on the entire feature, not a partial branch landing
-
-#### Scenario: Stale branch copy defers to verified archive evidence
-
-- **WHEN** an active copy of an associated change exists only on the feature branch behind its recorded base while verified archive evidence for that change ID exists in the base state
-- **THEN** the shared assessment reports the archived state with the stale-copy discrepancy disclosed, and neither Home nor the board presents the stale copy as awaiting proposal or implementation
+- **WHEN** the project has no supported proposal workflow
+- **THEN** Convoy reports that condition, offers conversation, and does not claim a proposal ran

@@ -30,10 +30,10 @@ export type RunOptions = {
   prompt: string
   /** Whether this run persists and attaches the project's git-ignored PRD history. */
   prdHistory: boolean
-  /** Explicit OpenSpec change id (`--change <id>`); resolves the spec bundle contract. */
-  change?: string
-  /** Explicit feature id (`--feature <id>`); resolves the feature/contract/context link. */
-  featureId?: string
+  /** Explicit OpenSpec change ids (`--change <id>`, repeatable), in review order; selection is explicit only. */
+  changes?: string[]
+  /** The explicit no-change run mode (`--manual`); zero selected changes is valid only through it. */
+  manual?: boolean
   files: string[]
   onlySteps: string[]
   skipSteps: string[]

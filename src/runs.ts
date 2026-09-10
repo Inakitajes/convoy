@@ -25,6 +25,8 @@ export type RunEntry = {
   runID: string
   dir: string
   title: string
+  /** The frozen pipeline's name, from the run's metadata. Undefined for legacy or cleaned workspaces. */
+  pipeline?: string
   targetDir?: string
   status: string
   statusKind: RunStatusKind
@@ -274,6 +276,19 @@ function mergeRunRecords(workspaceRuns: RunEntry[], indexRecords: RunIndexRecord
   return [...workspaceRuns, ...indexedOnly].sort((a, b) => b.runID.localeCompare(a.runID))
 }
 
+/**
+ * The row's headline: the pipeline that executed, joined with the worktree it
+ * executed in — the two facts an operator scans history for. The prompt-derived
+ * title is the fallback for runs without a pipeline name (legacy or cleaned
+ * workspaces), never the other way around.
+ */
+export function runRowTitle(run: RunEntry): string {
+  const worktree = run.targetDir ? (run.targetDir.split("/").filter(Boolean).pop() ?? run.targetDir) : undefined
+  if (run.pipeline && worktree) return `${run.pipeline} - ${worktree}`
+  if (run.pipeline) return run.pipeline
+  return run.title
+}
+
 /** A run known only through its run-record index entry: metadata is gone, evidence is not. */
 function runEntryFromIndexRecord(record: RunIndexRecord, root: string): RunEntry {
   const failed = record.state === "failed"
@@ -406,6 +421,7 @@ async function loadRunEntry(root: string, runID: string): Promise<RunEntry> {
     runID,
     dir,
     title: truncate(storedTitle || (await runTitle(dir)), 60),
+    pipeline: metadata?.pipeline?.name,
     targetDir: metadata?.targetDir,
     status: summary.label,
     statusKind: summary.kind,

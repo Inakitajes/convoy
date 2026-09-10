@@ -193,6 +193,8 @@ export class ConfigEditor {
   private readonly listText: TextRenderable
   private readonly detailText: TextRenderable
   private readonly detailBox: BoxRenderable
+  private readonly bodyBox: BoxRenderable
+  private readonly listBox: BoxRenderable
   private readonly footerText: TextRenderable
   private readonly overlay: BoxRenderable
   private readonly modalBox: BoxRenderable
@@ -269,15 +271,17 @@ export class ConfigEditor {
       height: "100%",
       borderColor: theme.borderDim,
       backgroundColor: theme.bg,
-      title: " field ",
+      title: " help ",
       titleAlignment: "left",
     })
     const footer = this.panel({ id: "convoy-config-footer", height: 3, borderColor: theme.borderDim, backgroundColor: theme.bg })
 
     this.headerText = headerText
     this.listText = list.text
+    this.listBox = list.box
     this.detailText = detail.text
     this.detailBox = detail.box
+    this.bodyBox = body
     this.footerText = footer.text
 
     this.paletteTargets.push(
@@ -1414,14 +1418,34 @@ export class ConfigEditor {
 
   // ---- rendering ----------------------------------------------------------
 
+  /** Below this width the detail pane docks under the list as a bounded footer. */
+  private static readonly STACK_BELOW_WIDTH = 100
+  /** The docked detail pane never grows past this, whatever its content says. */
+  private static readonly STACKED_DETAIL_MAX_ROWS = 12
+
+  private stacked(): boolean {
+    return this.renderer.width < ConfigEditor.STACK_BELOW_WIDTH
+  }
+
   private detailWidth() {
     return Math.max(30, Math.min(48, this.renderer.width - 60))
   }
 
-  private listHeight() {
-    // Header (1) + footer (3) + list panel borders (2).
-    return Math.max(3, this.renderer.height - 6)
+  /** The list panel's box height: the body's full share when side by side, the body minus the docked detail when stacked. */
+  private listBoxHeight(): number {
+    // Header (1) + footer (3) plus the docked detail's rows — the stack must
+    // fill the body exactly, or a dead blank row slips between the panels.
+    if (this.stacked()) return Math.max(3, this.renderer.height - 4 - this.stackedDetailRows)
+    return Math.max(3, this.renderer.height - 4)
   }
+
+  private listHeight() {
+    // The panel's inner rows: the box minus its own borders.
+    return Math.max(1, this.listBoxHeight() - 2)
+  }
+
+  /** The docked detail's row share, recomputed each render (0 when side by side). */
+  private stackedDetailRows = 0
 
   private render() {
     if (this.finished || this.renderer.isDestroyed || this.scene?.isClosed) return
@@ -1431,10 +1455,44 @@ export class ConfigEditor {
     if (!this.rows[this.selected]?.meta) this.selected = this.firstSelectable()
 
     const innerWidth = Math.max(40, this.renderer.width - 6)
+
+    if (this.stacked()) {
+      // Narrow terminal: the two columns become a stack — the configuration
+      // list on top, the field pane docked below as a bounded footer sized
+      // to its content (never past the cap), so nothing scrolls off.
+      const detailWidth = Math.max(30, this.renderer.width - 2)
+      const detailRows = this.detailLines(Math.max(20, detailWidth - 4)).length
+      this.stackedDetailRows = Math.min(ConfigEditor.STACKED_DETAIL_MAX_ROWS, detailRows + 2)
+      this.bodyBox.flexDirection = "column"
+      // The columns' inter-panel gap would leave a dead blank row in the
+      // stack; the panels breathe through their own borders here.
+      this.bodyBox.gap = 0
+      this.listBox.width = "100%"
+      this.listBox.height = this.listBoxHeight()
+      this.listBox.flexGrow = 0
+      this.listBox.flexShrink = 0
+      this.detailBox.width = detailWidth
+      this.detailBox.height = this.stackedDetailRows
+      this.headerText.content = this.headerContent(innerWidth)
+      this.listText.content = this.listContent(Math.max(30, detailWidth - 4))
+      this.detailText.content = this.detailContent(Math.max(20, detailWidth - 4))
+      this.footerText.content = this.footerContent(innerWidth)
+      this.renderModal()
+      this.renderer.requestRender()
+      return
+    }
+
+    this.stackedDetailRows = 0
+    this.bodyBox.flexDirection = "row"
+    this.bodyBox.gap = 1
     const detailWidth = this.detailWidth()
     const listWidth = Math.max(30, this.renderer.width - detailWidth - 7)
 
     this.detailBox.width = detailWidth
+    this.listBox.width = "auto"
+    this.listBox.height = "100%"
+    this.listBox.flexGrow = 1
+    this.listBox.flexShrink = 1
     this.headerText.content = this.headerContent(innerWidth)
     this.listText.content = this.listContent(listWidth)
     this.detailText.content = this.detailContent(detailWidth - 4)
@@ -1468,14 +1526,14 @@ export class ConfigEditor {
     return joinLines(lines)
   }
 
-  private detailContent(width: number) {
+  private detailLines(width: number): StyledText[] {
     const meta = this.rows[this.selected]?.meta
     const lines: StyledText[] = []
     const push = (chunks: TextChunk[]) => lines.push(new StyledText(chunks))
 
     if (!meta) {
       push([fg(theme.dim)("—")])
-      return joinLines(lines)
+      return lines
     }
     switch (meta.t) {
       case "initialize":
@@ -1590,7 +1648,11 @@ export class ConfigEditor {
         break
       }
     }
-    return joinLines(lines)
+    return lines
+  }
+
+  private detailContent(width: number) {
+    return joinLines(this.detailLines(width))
   }
 
   private footerContent(width: number) {

@@ -1,10 +1,13 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
-import { mkdtemp, readFile, rm } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { execFile } from "../src/git"
-import { ensureRepositoryRecord, isFound, lifecycleCommonDir, lifecycleSchemaVersion } from "../src/feature-lifecycle/store"
+import { repoCommonDir, writeJsonFile } from "../src/repo-store"
+
+/** The discovery record's schema version (matches conversation-service.ts). */
+const schemaVersion = 1
 import {
   ensureConversationService,
   probeConversationService,
@@ -41,9 +44,8 @@ beforeAll(async () => {
   await git(repoDir, ["init", "-q", "-b", "main"])
   await git(repoDir, ["add", "."])
   await git(repoDir, ["-c", "user.email=t@x", "-c", "user.name=T", "commit", "-q", "-m", "init"])
-  commonDir = (await lifecycleCommonDir(repoDir))!
-  const repoRecord = await ensureRepositoryRecord(commonDir)
-  if (!isFound(repoRecord)) throw new Error("no repository record")
+  commonDir = (await repoCommonDir(repoDir))!
+  await mkdir(join(commonDir, "convoy"), { recursive: true })
 })
 
 afterAll(async () => {
@@ -58,7 +60,7 @@ describe("conversation-service discovery and reuse (task 4.3)", () => {
       return { url: "http://127.0.0.1:51001", close() {}, pid: 123_456 }
     }
     const live: ConversationServiceRecord = {
-      schemaVersion: lifecycleSchemaVersion,
+      schemaVersion: schemaVersion,
       url: "http://127.0.0.1:51001",
       pid: 123_456,
       bootCheckout: repoDir,
@@ -107,13 +109,13 @@ describe("conversation-service discovery and reuse (task 4.3)", () => {
       return { url: "http://127.0.0.1:51003", close() {}, pid: 123_458 }
     }
     const seeded: ConversationServiceRecord = {
-      schemaVersion: lifecycleSchemaVersion,
+      schemaVersion: schemaVersion,
       url: "http://127.0.0.1:51004",
       pid: process.pid,
       bootCheckout: repoDir,
       startedAt: Date.now(),
     }
-    const { writeJsonFile } = await import("../src/feature-lifecycle/store")
+    const { writeJsonFile } = await import("../src/repo-store")
     await writeJsonFile(join(commonDir, "convoy", "authoring-server.json"), seeded)
     const outcome = await ensureConversationService({ commonDir, checkout: repoDir, boot, probe: async () => "uncertain" })
     expect(outcome.status).toBe("uncertain")
@@ -136,7 +138,7 @@ describe("conversation-service discovery and reuse (task 4.3)", () => {
       "http://127.0.0.1:8080@evil.com",
     ]) {
       const tampered: ConversationServiceRecord = {
-        schemaVersion: lifecycleSchemaVersion,
+        schemaVersion: schemaVersion,
         url,
         pid: 123_458,
         bootCheckout: repoDir,
@@ -148,7 +150,7 @@ describe("conversation-service discovery and reuse (task 4.3)", () => {
     // record is treated as not-found instead of being reused or booted over.
     let boots = 0
     const offLoopback: ConversationServiceRecord = {
-      schemaVersion: lifecycleSchemaVersion,
+      schemaVersion: schemaVersion,
       url: "http://example.com:8080",
       pid: 123_458,
       bootCheckout: repoDir,
@@ -181,13 +183,13 @@ describe("conversation-service discovery and reuse (task 4.3)", () => {
 
   test("explicit stop requires quiescence evidence and re-verifies the recorded identity", async () => {
     const seeded: ConversationServiceRecord = {
-      schemaVersion: lifecycleSchemaVersion,
+      schemaVersion: schemaVersion,
       url: "http://127.0.0.1:51006",
       pid: 123_460,
       bootCheckout: repoDir,
       startedAt: Date.now(),
     }
-    const { writeJsonFile } = await import("../src/feature-lifecycle/store")
+    const { writeJsonFile } = await import("../src/repo-store")
     await writeJsonFile(join(commonDir, "convoy", "authoring-server.json"), seeded)
     const probe = async () => "live" as const
     // Busy and unknown evidence keep the service alive — the shutdown
@@ -218,13 +220,13 @@ describe("conversation-service discovery and reuse (task 4.3)", () => {
 
   test("an uncertain probe during stop keeps both the process and its record", async () => {
     const seeded: ConversationServiceRecord = {
-      schemaVersion: lifecycleSchemaVersion,
+      schemaVersion: schemaVersion,
       url: "http://127.0.0.1:51007",
       pid: process.pid,
       bootCheckout: repoDir,
       startedAt: Date.now(),
     }
-    const { writeJsonFile } = await import("../src/feature-lifecycle/store")
+    const { writeJsonFile } = await import("../src/repo-store")
     await writeJsonFile(join(commonDir, "convoy", "authoring-server.json"), seeded)
     let killed = 0
     const stopped = await stopConversationService({
@@ -242,6 +244,28 @@ describe("conversation-service discovery and reuse (task 4.3)", () => {
   })
 })
 
+describe("conversation-service explicit stop decisions (task 4.6)", () => {
+  test("an explicit stop with no discovery record is a no-op, never terminating an unrecorded server", async () => {
+    // An isolated common dir so the shared suite's seeded records cannot leak in.
+    const dir = await mkdtemp(join(tmpdir(), "convoy-stop-missing-"))
+    dirs.push(dir)
+    await mkdir(join(dir, "convoy"), { recursive: true })
+    let killed = 0
+    const stopped = await stopConversationService({
+      commonDir: dir,
+      activity: "idle",
+      probe: async () => "live",
+      kill: async () => {
+        killed += 1
+      },
+    })
+    // The service only stops on an explicit, evidence-backed decision; an
+    // unrecorded service is never fabricated into a kill target.
+    expect(stopped.status).toBe("missing")
+    expect(killed).toBe(0)
+  })
+})
+
 describe("conversation-service shutdown boundaries (task 4.3, real server)", () => {
   let realRepoDir: string
   let realCommonDir: string
@@ -255,9 +279,8 @@ describe("conversation-service shutdown boundaries (task 4.3, real server)", () 
     await git(realRepoDir, ["init", "-q", "-b", "main"])
     await git(realRepoDir, ["add", "."])
     await git(realRepoDir, ["-c", "user.email=t@x", "-c", "user.name=T", "commit", "-q", "-m", "init"])
-    realCommonDir = (await lifecycleCommonDir(realRepoDir))!
-    const repoRecord = await ensureRepositoryRecord(realCommonDir)
-    if (!isFound(repoRecord)) throw new Error("no repository record")
+    realCommonDir = (await repoCommonDir(realRepoDir))!
+    await mkdir(join(realCommonDir, "convoy"), { recursive: true })
   })
 
   test("a run server closing does not stop the authoring service or its sessions", async () => {

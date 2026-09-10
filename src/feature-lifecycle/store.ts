@@ -1,12 +1,11 @@
-import { mkdir, open, readFile, rename, rm, stat } from "node:fs/promises"
-import { dirname, join } from "node:path"
-
-import { execFile } from "../git"
-
 /**
- * The lifecycle store (capability `feature-lifecycle`, design D1): a
- * versioned, repository-local record set under the canonical Git common
- * directory, shared by every worktree of one repository.
+ * The lifecycle store (capability `feature-lifecycle`) is now a compatibility
+ * layer over the generic repository storage (`src/repo-store.ts`), extracted
+ * in change `worktree-control-center` task 2.1 so the worktree control center
+ * can share atomic writes, typed reads, and mutation locks without importing
+ * the feature domain. This module keeps the original names and layout
+ * (`<git-common-dir>/convoy/…`, repository UUID, feature records) for every
+ * existing consumer until the feature domain itself is retired (task 8.4).
  *
  * Layout:
  *
@@ -17,34 +16,29 @@ import { execFile } from "../git"
  *     features/<feature-id>/receipts/<attempt-id>.json
  *
  * Identities are opaque UUIDs — branch/change spellings are never encoded into
- * filenames, so renames and reused names cannot alias records. Reads are
- * strictly read-only: nothing in this module creates the repository UUID,
- * locks, or any other file as a side effect of inspection (design D1: reads do
- * not create).
+ * filenames. Reads are strictly read-only: nothing here creates the repository
+ * UUID, locks, or any other file as a side effect of inspection.
  */
+
+import { join } from "node:path"
+
+import {
+  isFound,
+  isSafePathSegment,
+  isUuid,
+  pathExists,
+  readJsonFile,
+  removePath,
+  repoCommonDir,
+  withExclusiveLock,
+  writeJsonFile,
+  type StoreRead,
+  type StoreReadError,
+} from "../repo-store"
 
 export const lifecycleSchemaVersion = 1
-
-/**
- * Every read returns a typed result (task 1.1): missing, corrupt
- * (parseable-but-invalid), unsupported (a newer schema we must not
- * interpret), and unreadable (I/O or permission failure) are distinct —
- * they are never collapsed into absence, because several safety decisions
- * (fail-closed preflights, "unknown ≠ empty") depend on the difference.
- */
-export type StoreRead<T> =
-  | { status: "found"; value: T }
-  | { status: "missing" }
-  | { status: "corrupt"; reason: string }
-  | { status: "unsupported"; schemaVersion: unknown }
-  | { status: "unreadable"; reason: string }
-
-export type StoreReadError = Extract<StoreRead<never>, { status: "corrupt" | "unsupported" | "unreadable" }>
-
-/** True when a read proves the record exists and validated; false otherwise. */
-export function isFound<T>(read: StoreRead<T>): read is { status: "found"; value: T } {
-  return read.status === "found"
-}
+export { isFound, isSafePathSegment, isUuid, pathExists, readJsonFile, removePath, writeJsonFile }
+export type { StoreRead, StoreReadError }
 
 /** The repository UUID record (D1): membership proof for everything under `convoy/`. */
 export type RepositoryRecord = {
@@ -54,91 +48,9 @@ export type RepositoryRecord = {
   createdAt: number
 }
 
-/** Whether `path` exists (file or directory). */
-export async function pathExists(path: string): Promise<boolean> {
-  try {
-    await stat(path)
-    return true
-  } catch {
-    return false
-  }
-}
-
-/**
- * Parses one JSON document against a validator. `unsupported` is decided by
- * the caller's schema gate — usually a `schemaVersion` comparison — while
- * malformed JSON is `corrupt` and I/O failure is `unreadable`.
- */
-export async function readJsonFile<T>(
-  path: string,
-  validate: (value: unknown) => T | undefined,
-  options: { unsupported?: (value: Record<string, unknown>) => boolean } = {},
-): Promise<StoreRead<T>> {
-  let raw: string
-  try {
-    raw = await readFile(path, "utf8")
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException | undefined)?.code
-    if (code === "ENOENT") return { status: "missing" }
-    return { status: "unreadable", reason: error instanceof Error ? error.message : String(error) }
-  }
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(raw)
-  } catch (error) {
-    return { status: "corrupt", reason: error instanceof Error ? error.message : String(error) }
-  }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    return { status: "corrupt", reason: "record is not a JSON object" }
-  }
-  if (options.unsupported?.(parsed as Record<string, unknown>)) {
-    return { status: "unsupported", schemaVersion: (parsed as Record<string, unknown>).schemaVersion }
-  }
-  const value = validate(parsed)
-  if (value === undefined) return { status: "corrupt", reason: "record failed validation" }
-  return { status: "found", value }
-}
-
-/**
- * Writes a JSON document atomically: content lands at `<path>.<uuid>.tmp`
- * first and is renamed into place, so a crash mid-write never exposes a torn
- * record. The caller is responsible for conflict detection (see
- * `withFeatureLock`) and for refusing to write when required evidence
- * cannot be persisted (design D1: required persistence failures stop before
- * the corresponding mutation).
- */
-export async function writeJsonFile(path: string, value: unknown): Promise<void> {
-  await mkdir(dirname(path), { recursive: true })
-  const tmp = `${path}.${crypto.randomUUID()}.tmp`
-  try {
-    await Bun.write(tmp, JSON.stringify(value, null, 2) + "\n")
-    await rename(tmp, path)
-  } catch (error) {
-    await rm(tmp, { force: true }).catch(() => {})
-    throw error
-  }
-}
-
-/**
- * Removes a file best-effort (force: true, errors swallowed): used only for
- * superseded scratch state, never for receipts or journals (ordinary cleanup
- * MUST NOT delete recovery evidence — capability feature-lifecycle).
- */
-export async function removePath(path: string): Promise<void> {
-  await rm(path, { force: true, recursive: true }).catch(() => {})
-}
-
-/**
- * The repository's Git common dir, or undefined outside a repository. Every
- * worktree of one repository shares it, which is what makes the record set
- * common (capability feature-lifecycle: worktrees sharing a Git common
- * directory share the records).
- */
+/** The repository's Git common dir, or undefined outside a repository. */
 export async function lifecycleCommonDir(cwd: string): Promise<string | undefined> {
-  return execFile("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd, allowFailure: true }).then(
-    (result) => (result.exitCode === 0 ? result.stdout.trim() || undefined : undefined),
-    () => undefined,
-  )
+  return repoCommonDir(cwd)
 }
 
 /** `<commonDir>/convoy` — the record set root. */
@@ -191,44 +103,15 @@ export async function ensureRepositoryRecord(commonDir: string): Promise<StoreRe
   return { status: "found", value: record }
 }
 
-/** Opaque UUID form used for repository/feature/attempt identities. */
-export function isUuid(value: string): boolean {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
-}
-
-/**
- * True when `value` is a single, safe path segment: non-empty, not `.`/`..`,
- * not absolute (POSIX or Windows drive), and containing no path separator.
- * Used to validate persisted change ids and capability names on every load —
- * a corrupt or malicious record must never escape the planning root when a
- * read joins it onto a checkout path (design D1/D7: validate relative paths
- * on every load).
- */
-export function isSafePathSegment(value: string): boolean {
-  if (value === "" || value === "." || value === "..") return false
-  if (value.startsWith("/") || value.startsWith("\\")) return false
-  if (/^[A-Za-z]:/.test(value)) return false
-  return !value.includes("/") && !value.includes("\\")
-}
-
-/**
- * True when `value` is a repo-relative path that stays within its root: not
- * absolute (POSIX or Windows drive), and containing no `..` segment. A
- * persisted source path must never escape when joined onto a checkout (design
- * D7: never interpolate unchecked paths; validate relative paths on load).
- */
+/** True when `value` is a repo-relative path that stays within its root. */
 export function isSafeRelativePath(value: string): boolean {
   if (value === "" || value.startsWith("/") || value.startsWith("\\")) return false
   if (/^[A-Za-z]:/.test(value)) return false
   return !value.split(/[\\/]/).some((segment) => segment === "..")
 }
 
-// ── association conflict detection ───────────────────────────────────────
-
 /**
- * Serializes read-modify-write cycles on one feature record (capability
- * feature-lifecycle: concurrent association edits — only one update
- * succeeds, the other requests refreshed inspection). The lock is an
+ * Serializes read-modify-write cycles on one feature record. The lock is an
  * exclusive-create sidecar next to the record; it is held only for the
  * duration of the callback and always released, including on throw. A stale
  * lock from a crashed writer is stolen after `staleMs` so recovery is always
@@ -239,35 +122,5 @@ export async function withFeatureLock<T>(
   fn: () => Promise<T>,
   options: { staleMs?: number } = {},
 ): Promise<T> {
-  const lockPath = join(featureDir, ".lock")
-  await mkdir(featureDir, { recursive: true })
-  const staleMs = options.staleMs ?? 30_000
-  let handle
-  for (;;) {
-    try {
-      handle = await open(lockPath, "wx")
-      break
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException | undefined)?.code
-      if (code !== "EEXIST") throw error
-      let age = 0
-      try {
-        age = Date.now() - (await stat(lockPath)).mtimeMs
-      } catch {
-        continue
-      }
-      if (age <= staleMs) {
-        await new Promise((resolveSleep) => setTimeout(resolveSleep, 25))
-        continue
-      }
-      await rm(lockPath, { force: true }).catch(() => {})
-    }
-  }
-  try {
-    await handle!.write(`${process.pid}\n`)
-    return await fn()
-  } finally {
-    await handle!.close().catch(() => {})
-    await rm(lockPath, { force: true }).catch(() => {})
-  }
+  return withExclusiveLock(featureDir, fn, options)
 }

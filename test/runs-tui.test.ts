@@ -30,6 +30,7 @@ function sampleRuns(): RunEntry[] {
       dir: "/tmp/runs/20250809-100000",
       targetDir: "/repo/first",
       title: "feat: add login",
+      pipeline: "convoy",
       status: "completed",
       statusKind: "completed",
       live: false,
@@ -44,6 +45,7 @@ function sampleRuns(): RunEntry[] {
       dir: "/tmp/runs/20250809-110000",
       targetDir: "/repo/second",
       title: "fix: resolve timeout",
+      pipeline: "convoy",
       status: "failed",
       statusKind: "failed",
       live: false,
@@ -55,6 +57,7 @@ function sampleRuns(): RunEntry[] {
       dir: "/tmp/runs/20250809-120000",
       targetDir: "/repo/live",
       title: "feat: onboarding wizard",
+      pipeline: "convoy",
       status: "running",
       statusKind: "incomplete",
       live: true,
@@ -181,20 +184,23 @@ test("wide screens keep the run list and details side by side", async () => {
   try {
     await Bun.sleep(260)
     const lines = testRenderer.captureCharFrame().split("\n")
-    // The header is one bare row: the runs label plus the history stats, with
-    // no version tag, no "run history" caption, and no runs-root path.
-    expect(lines.join("\n")).toContain("runs  3 runs")
-    expect(lines.join("\n")).toContain("✓ 1")
-    expect(lines.join("\n")).toContain("✗ 1")
-    expect(lines.join("\n")).toContain("$0.28")
-    expect(lines.join("\n")).not.toContain("run history")
-    expect(lines.join("\n")).not.toContain(shortVersion())
-    expect(lines.join("\n")).not.toContain("OpenRouter")
-    expect(lines.join("\n")).not.toContain("OpenAI")
-    // Side by side: both panel titles share the same horizontal band.
+    // The history stats ride inside the runs container's header rule — no
+    // bare header row, no version tag, no runs-root path.
+    const joined = lines.join("\n")
+    expect(joined).toContain("runs · 3 runs")
+    // The headline is semantic: pipeline - worktree, not the prompt's first line.
+    expect(joined).toContain("convoy - first")
+    expect(joined).toContain("✓ 1")
+    expect(joined).toContain("✗ 1")
+    expect(joined).toContain("$0.28")
+    expect(joined).not.toContain("run history")
+    expect(joined).not.toContain(shortVersion())
+    expect(joined).not.toContain("OpenRouter")
+    expect(joined).not.toContain("OpenAI")
+    // Side by side: both container headers share the same horizontal band.
     const runsTitle = lines.findIndex((line) => line.trimStart().startsWith("╭─ runs"))
     expect(runsTitle).toBeGreaterThanOrEqual(0)
-    // The stock title starts the line; the details border follows on the same row.
+    // The runs container's header starts the line; the details container follows on the same row.
     expect(lines[runsTitle]).toContain("╭─ deta")
   } finally {
     testRenderer.mockInput.pressKey("c", { ctrl: true })
@@ -209,7 +215,7 @@ test("compact screens stack the run list above the details panel", async () => {
     const lines = testRenderer.captureCharFrame().split("\n")
     const runsTitle = lines.findIndex((line) => line.trimStart().startsWith("╭─ runs"))
     const detailsTitle = lines.findIndex((line) => line.trimStart().startsWith("╭─ deta"))
-    // Stacked: the details panel's title sits below the runs panel's.
+    // Stacked: the details container's header sits below the runs container's.
     expect(runsTitle).toBeGreaterThanOrEqual(0)
     expect(detailsTitle).toBeGreaterThan(runsTitle)
   } finally {
@@ -217,22 +223,44 @@ test("compact screens stack the run list above the details panel", async () => {
   }
 })
 
-test("compact stacking keeps the panels flush and fully bordered", async () => {
+test("narrow screens just above the compact floor stack when the sidebar would overflow", async () => {
+  // At a width where the run list's hugging width leaves the details pane less
+  // than its minimum column, the side-by-side layout would draw the details
+  // content wider than its flex box and spill past the terminal edge — so the
+  // board stacks instead.
+  const testRenderer = await createTestRenderer({ width: 88, height: 30 })
+  const instance = new RunsBrowser(testRenderer.renderer, sampleRuns(), 0)
+  try {
+    await Bun.sleep(260)
+    const lines = testRenderer.captureCharFrame().split("\n")
+    const runsTitle = lines.findIndex((line) => line.trimStart().startsWith("╭─ runs"))
+    const detailsTitle = lines.findIndex((line) => line.trimStart().startsWith("╭─ deta"))
+    // Stacked: the details container's header sits below the runs container's,
+    // and neither container's rule is clipped at the terminal's right edge.
+    expect(runsTitle).toBeGreaterThanOrEqual(0)
+    expect(detailsTitle).toBeGreaterThan(runsTitle)
+    expect(testRenderer.captureCharFrame()).toContain("runs · 3 runs")
+  } finally {
+    testRenderer.mockInput.pressKey("c", { ctrl: true })
+  }
+})
+
+test("compact stacking keeps the containers flush and fully drawn", async () => {
   const testRenderer = await createTestRenderer({ width: 84, height: 40 })
   const instance = new RunsBrowser(testRenderer.renderer, sampleRuns(), 0)
   try {
     await Bun.sleep(260)
     const frame = testRenderer.captureCharFrame()
-    // The bare header row rides above the panels.
-    expect(frame).toContain("runs  3 runs")
+    // The stats ride the runs container's header.
+    expect(frame).toContain("runs · 3 runs")
     const lines = frame.split("\n")
     const tops = lines.flatMap((line, index) => (line.trimStart().startsWith("╭") ? [index] : []))
     const bottoms = lines.flatMap((line, index) => (line.trimStart().startsWith("╰") ? [index] : []))
-    // Runs, details, footer: all three bordered panels fully drawn, with the
-    // details panel's bottom border above the footer's top border, and no
-    // blank separator row between stacked panels.
-    expect(tops).toHaveLength(3)
-    expect(bottoms).toHaveLength(3)
+    // Runs and details: both text containers fully drawn, the details
+    // container's closing rule directly above the bare footer row — no
+    // bordered chrome of its own anywhere.
+    expect(tops).toHaveLength(2)
+    expect(bottoms).toHaveLength(2)
     for (let index = 1; index < tops.length; index++) expect(tops[index]).toBe(bottoms[index - 1]! + 1)
   } finally {
     testRenderer.mockInput.pressKey("c", { ctrl: true })

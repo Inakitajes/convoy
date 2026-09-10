@@ -160,6 +160,13 @@ export type OpenRunMetadataOptions = {
   /** The reviewed feature link, persisted at open — before any execution (task 4.2/5.1). */
   feature?: FeaturePlanLink
   /**
+   * The accepted ordered local changes of the run plan (capability
+   * run-titles): the only change-title sources, read against the execution
+   * checkout. Falls back to the reviewed feature link's contracts when the
+   * caller has not supplied the explicit selection.
+   */
+  selectedChangeIds?: readonly string[]
+  /**
    * The run's branch as the caller knows it (the confirmed worktree branch, or
    * whatever the execution tree has checked out). Title resolution prefers a
    * resumed record's durable boundary branch, then this value, then the
@@ -193,7 +200,12 @@ export async function openRunMetadata(
   if (!data.title) {
     const prompt = await readPromptDocument(workspace.dir)
     const branch = data.boundary?.branch ?? options.branch ?? options.feature?.branch
-    data.title = (await resolveRunTitleFor({ targetDir, branch, prompt })) || undefined
+    // The title's change sources are the accepted ordered local changes of
+    // the run plan (capability run-titles delta): the reviewed selection when
+    // supplied, otherwise the reviewed contract set — never branch-to-change
+    // inference.
+    const changeIds = options.selectedChangeIds ?? options.feature?.contracts ?? []
+    data.title = (await resolveRunTitleFor({ targetDir, changeIds, branch, prompt })) || undefined
   }
   // Opening metadata means a new coordinator owns the run. It resumes from the
   // next pending batch; pausing/running crashes still use normal phase recovery.

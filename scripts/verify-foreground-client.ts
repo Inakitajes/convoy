@@ -104,9 +104,9 @@ record("real-client-foreground", {
 })
 
 // ── 2. Two-work concurrency: claims are scoped per checkout branch ─────────
-const { acquireWriterClaim } = await import("../src/feature-lifecycle/writer-claims")
-const { lifecycleCommonDir } = await import("../src/feature-lifecycle/store")
-const commonDir = (await lifecycleCommonDir(main))!
+const { acquireWriterClaim } = await import("../src/writer-claims")
+const { repoCommonDir } = await import("../src/repo-store")
+const commonDir = (await repoCommonDir(main))!
 git(["worktree", "add", "-q", "-b", "feat/second-probe", join(root, "wt2")])
 const first = await acquireWriterClaim({ commonDir, branch: "feat/fg-probe", checkoutPath: wt, kind: "authoring", owner: sessionId })
 const second = await acquireWriterClaim({ commonDir, branch: "feat/second-probe", checkoutPath: join(root, "wt2"), kind: "authoring", owner: "ses_other" })

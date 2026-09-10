@@ -49,23 +49,19 @@ Spin SHALL move the uncommitted `openspec/changes/<id>/` files from the base che
 - **THEN** spin creates the worktree (the files arrive via the base ref) and reports that nothing was moved, leaving the base branch's history and change directory untouched
 
 ### Requirement: Spin hands the session over via /move
-
-On successful standalone `convoy spin`, Convoy SHALL print the worktree path, branch, moved-change state, and instruction to run OpenCode's `/move` to continue an existing external conversation. Spin SHALL NOT fork, copy, summarize, or relocate that external session itself. When spin is invoked as adoption within Convoy, Convoy SHALL select the stable feature already registered by spin, preserve its complete association and recovery evidence, and offer its managed conversation action without requiring a shell directory switch. This action SHALL NOT claim to have preserved an external conversation unless the operator explicitly relocated or linked that session through a supported mechanism.
+On successful standalone `convoy spin`, Convoy SHALL print the worktree path, branch, transferred-file outcome, and instruction to run OpenCode's `/move` to continue an external conversation. Spin SHALL NOT fork, copy, summarize, or relocate that session, nor register a feature. Within Convoy the new checkout SHALL become selectable through Git inventory, with managed conversation available independently. The primary creation flow SHALL be New worktree; retained spin SHALL remain an explicit legacy proposal-transfer operation, not adoption or ownership inference.
 
 #### Scenario: Output tells the operator exactly what to do next
-
 - **WHEN** standalone spin completes
-- **THEN** its output names the directory, branch, and moved files and explains the `/move` handoff for continuing the external conversation
+- **THEN** output names the directory, branch, moved files, and external `/move` handoff without a feature ID
 
 #### Scenario: Adoption from the work browser
-
-- **WHEN** the operator adopts a stranded proposal through Convoy and spin succeeds
-- **THEN** the feature identity returned by spin is selected without creating a second record and can open a managed conversation in its worktree without a manual `cd`
+- **WHEN** an operator explicitly requests the retained proposal-transfer flow from the browser
+- **THEN** the resulting worktree is selected without creating an association or requiring adoption
 
 #### Scenario: External history has not moved
-
-- **WHEN** adoption creates work but an earlier conversation still belongs to the source checkout
-- **THEN** Convoy distinguishes opening a new managed conversation from relocating the external conversation and does not claim its history moved
+- **WHEN** the proposal was transferred but an external conversation still belongs to the source checkout
+- **THEN** Convoy distinguishes opening a managed conversation from relocating the existing one and does not claim its history moved
 
 ### Requirement: The global /convoy-spin OpenCode command is opt-in
 
@@ -91,21 +87,9 @@ On successful standalone `convoy spin`, Convoy SHALL print the worktree path, br
 - **WHEN** `/convoy-spin` runs in an OpenCode session
 - **THEN** the agent runs `convoy spin` via the shell and reports its output verbatim instead of performing git operations or naming branches itself
 
-### Requirement: Successful spin registers an explicit feature association
+### Requirement: Legacy transfer has operation-scoped recovery only
+The retained spin flow SHALL preserve existing explicit change/prefix selection, deterministic allocation, untracked-file transfer, empty-directory pruning boundaries, and opt-in wrapper behavior. Partial transfer SHALL retain source/destination evidence only until resolved, report moved versus remaining files, and refuse overwriting either copy. No spin result SHALL require registry persistence, receipt creation, or a later bind operation.
 
-Spin SHALL durably register a stable feature identity linking the selected change, resolved base, actual created branch, and registered worktree before reporting success. Conventional initial naming and documented worktree allocation SHALL remain unchanged; the name SHALL not become identity authority for subsequent operations. Spin SHALL continue to transfer proposal files without committing them or modifying OpenCode sessions. Record persistence failure SHALL prevent a success handoff and expose any created context and transferred files with recovery guidance, preserving operator work. Retrying or adopting that partial result SHALL not create a duplicate feature/context. Read-only preview and refusal before creation SHALL not persist a feature.
-
-#### Scenario: Spin establishes ownership
-
-- **WHEN** spin successfully creates a worktree for `add-widget`
-- **THEN** its output identifies the stable feature, selected contract, actual branch/worktree, and existing `/move` handoff, and all repository worktrees resolve that same association
-
-#### Scenario: Association persistence fails
-
-- **WHEN** the worktree and proposal transfer succeed but association persistence fails
-- **THEN** spin reports the partial operation and exact recovery context without claiming successful registration, committing files, or deleting the transferred proposal
-
-#### Scenario: Rename after spin
-
-- **WHEN** the operator renames a spun-out branch and explicitly rebinds its verified context
-- **THEN** the original feature, contract, and history remain associated without requiring restoration of the conventional branch name
+#### Scenario: Transfer stops partway through
+- **WHEN** some selected untracked artifacts have moved before a failure
+- **THEN** Convoy names both locations, preserves all surviving files, and retries by reconciling the pending transfer rather than repeating or registering it blindly

@@ -4,7 +4,14 @@ import { dirname, join } from "node:path"
 import { execFile, isAncestor, resolveCommit } from "./git"
 import { createRefIfAbsent, gitCommonDir, refExists } from "./finalization/refs"
 
-import type { RequiredEffect } from "./feature-lifecycle/records"
+/** One delta-spec requirement effect the archive must verify (shared with the archive verifier). */
+export type RequiredEffect = {
+  kind: "present" | "absent"
+  capability: string
+  name: string
+  scenarios: string[]
+}
+
 
 /**
  * The close journal and landing receipt (capability feature-close, design D6
@@ -73,7 +80,7 @@ export type CloseJournal = {
 }
 
 /** Path-encoding for the journal filename: branch names are bounded, but be safe anyway. */
-function journalSlug(value: string): string {
+export function journalSlug(value: string): string {
   return value.replace(/[^A-Za-z0-9._-]+/g, "_")
 }
 

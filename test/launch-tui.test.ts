@@ -64,8 +64,7 @@ async function createLauncher(
   height = 30,
   choiceCount = 1,
   specs: readonly OpenSpecChangeSummary[] = [],
-  autoSpecIds: readonly string[] = [],
-  presetChange?: string,
+  presetChanges?: readonly string[],
   callbacks: Partial<Pick<LaunchRunTuiOptions, "readDirtyStatus" | "prepareRun">> = {},
 ) {
   const testRenderer = await createTestRenderer({ width, height })
@@ -83,8 +82,7 @@ async function createLauncher(
     } as never,
     { enabled: true, entries: [] },
     specs,
-    autoSpecIds,
-    presetChange,
+    presetChanges,
   )
   return { ...testRenderer, picker }
 }
@@ -104,7 +102,8 @@ type LaunchPickerView = {
   toggleState: { worktree: boolean; includeDirty: boolean; [key: string]: unknown }
   promptChoosing: boolean
   specIndex: number
-  selectedChangeId?: string
+  selectedChangeIds: string[]
+  manualNoChanges: boolean
   prepared?: {
     selection: { includeDirty: boolean; yolo: boolean; smart: boolean }
     dirt: { files: number; matters: boolean; blocked: boolean; preview: string }
@@ -1699,10 +1698,10 @@ describe("launch TUI OpenSpec contract picker", () => {
       await launcher.renderOnce()
       const view = launchView(launcher.picker)
       expect(view.mode).toBe("options")
-      expect(view.selectedChangeId).toBe("add-login")
+      expect(view.selectedChangeIds).toEqual(["add-login"])
       expect(view.prompt).toBe("Implement the attached OpenSpec change.")
       const selection = view.runSelection("pipeline-1")
-      expect(selection.change).toBe("add-login")
+      expect(selection.changes).toEqual(["add-login"])
       expect(selection.prompt).toBe("Implement the attached OpenSpec change.")
       const frame = launcher.captureCharFrame()
       expect(frame).toContain("openspec")
@@ -1721,7 +1720,8 @@ describe("launch TUI OpenSpec contract picker", () => {
       const view = launchView(launcher.picker)
       expect(view.mode).toBe("prompt")
       expect(view.promptChoosing).toBe(false)
-      expect(view.selectedChangeId).toBeUndefined()
+      expect(view.selectedChangeIds).toEqual([])
+      expect(view.manualNoChanges).toBe(true)
       expect(launcher.captureCharFrame()).toContain("Add onboarding, fix bug")
     } finally {
       await closeLauncher(launcher)
@@ -1735,47 +1735,19 @@ describe("launch TUI OpenSpec notice", () => {
     { id: "add-logout", title: "Add Logout" },
   ]
 
-  test("picker shows the auto-resolved change that will attach without a pick", async () => {
-    const launcher = await createLauncher(100, 40, 1, specs, ["add-login"])
+  test("with no pick, the notice points at the explicit decision (never a silent attach)", async () => {
+    const launcher = await createLauncher(110, 40, 1, specs)
     try {
       await launcher.renderOnce()
       const frame = launcher.captureCharFrame()
-      expect(frame).toContain("add-login · bundle attaches to every step")
-      expect(frame).toContain("Add Login")
+      expect(frame).toContain("2 active changes · pick one (esc)")
+      expect(frame).not.toContain("attaches to every step")
     } finally {
       await closeLauncher(launcher)
     }
   })
 
-  test("options shows the auto-resolved change when nothing was picked", async () => {
-    const launcher = await createLauncher(100, 40, 1, specs, ["add-login"])
-    try {
-      launcher.mockInput.pressEnter() // open the contract list
-      launcher.mockInput.pressEnter() // Manual prompt -> editor
-      for (const ch of "ship it") launcher.mockInput.pressKey(ch)
-      launcher.mockInput.pressEnter() // submit -> options
-      await launcher.renderOnce()
-      const view = launchView(launcher.picker)
-      expect(view.mode).toBe("options")
-      const frame = launcher.captureCharFrame()
-      expect(frame).toContain("add-login · bundle attaches to every step")
-    } finally {
-      await closeLauncher(launcher)
-    }
-  })
-
-  test("no auto-selection says so and points at the picker", async () => {
-    const launcher = await createLauncher(110, 40, 1, specs, [])
-    try {
-      await launcher.renderOnce()
-      const frame = launcher.captureCharFrame()
-      expect(frame).toContain("2 active changes · pick one when writing the prompt")
-    } finally {
-      await closeLauncher(launcher)
-    }
-  })
-
-  test("a manual pick owns the notice instead of the auto-resolved id", async () => {
+  test("the notice stays quiet once a change is explicitly picked", async () => {
     const launcher = await createLauncher(100, 40, 1, specs, ["add-login"])
     try {
       launcher.mockInput.pressEnter() // contract list
@@ -1785,10 +1757,28 @@ describe("launch TUI OpenSpec notice", () => {
       await launcher.renderOnce()
       const view = launchView(launcher.picker)
       expect(view.mode).toBe("options")
-      expect(view.selectedChangeId).toBe("add-logout")
+      expect(view.selectedChangeIds).toEqual(["add-logout"])
       const frame = launcher.captureCharFrame()
       expect(frame).toContain("add-logout · Add Logout")
-      expect(frame).not.toContain("bundle attaches to every step")
+      expect(frame).not.toContain("pick one (esc)")
+    } finally {
+      await closeLauncher(launcher)
+    }
+  })
+
+  test("the notice stays quiet once the operator explicitly chose the no-change mode", async () => {
+    const launcher = await createLauncher(100, 40, 1, specs, [])
+    try {
+      launcher.mockInput.pressEnter() // contract list
+      launcher.mockInput.pressEnter() // Manual prompt -> editor
+      for (const ch of "ship it") launcher.mockInput.pressKey(ch)
+      launcher.mockInput.pressEnter() // submit -> options
+      await launcher.renderOnce()
+      const view = launchView(launcher.picker)
+      expect(view.mode).toBe("options")
+      expect(view.manualNoChanges).toBe(true)
+      const frame = launcher.captureCharFrame()
+      expect(frame).not.toContain("pick one (esc)")
     } finally {
       await closeLauncher(launcher)
     }
@@ -1799,29 +1789,28 @@ describe("launch TUI OpenSpec notice", () => {
     try {
       await launcher.renderOnce()
       const frame = launcher.captureCharFrame()
-      expect(frame).not.toContain("bundle attaches to every step")
-      expect(frame).not.toContain("active changes · pick one")
+      expect(frame).not.toContain("pick one (esc)")
+      expect(frame).not.toContain("active changes")
     } finally {
       await closeLauncher(launcher)
     }
   })
 })
 
-
-describe("launch TUI preset change (specs viewer handoff)", () => {
+describe("launch TUI preset changes (specs viewer / worktrees run handoff)", () => {
   const specs: OpenSpecChangeSummary[] = [
     { id: "add-login", title: "Add Login" },
     { id: "add-logout", title: "Add Logout" },
   ]
 
-  test("pins the preset change before the first render and skips auto-detect notice", async () => {
-    const launcher = await createLauncher(180, 40, 1, specs, ["add-login"], "add-login")
+  test("pins the preset selection before the first render and keeps the notice quiet", async () => {
+    const launcher = await createLauncher(180, 40, 1, specs, ["add-login"])
     try {
       await launcher.renderOnce()
       const view = launchView(launcher.picker)
-      expect(view.selectedChangeId).toBe("add-login")
-      // The silent auto-detect notice stays quiet when a contract is pinned.
-      expect(launcher.captureCharFrame()).not.toContain("bundle attaches to every step")
+      expect(view.selectedChangeIds).toEqual(["add-login"])
+      // Nothing attaches silently, so there is no auto-attach notice to suppress.
+      expect(launcher.captureCharFrame()).not.toContain("pick one (esc)")
       // The flags preview already names the pinned contract.
       const flags = view.optionsDetail(180).chunks.map((chunk) => chunk.text).join("")
       expect(flags).toContain("--change add-login")
@@ -1831,7 +1820,7 @@ describe("launch TUI preset change (specs viewer handoff)", () => {
   })
 
   test("the prompt step opens with the preset row highlighted and enter confirms it", async () => {
-    const launcher = await createLauncher(100, 30, 1, specs, [], "add-logout")
+    const launcher = await createLauncher(100, 30, 1, specs, ["add-logout"])
     try {
       launcher.mockInput.pressEnter() // pipelines -> prompt (contract list)
       await launcher.renderOnce()
@@ -1844,32 +1833,49 @@ describe("launch TUI preset change (specs viewer handoff)", () => {
       await launcher.renderOnce()
       const accepted = launchView(launcher.picker)
       expect(accepted.mode).toBe("options")
-      expect(accepted.selectedChangeId).toBe("add-logout")
-      expect(accepted.runSelection("pipeline-1").change).toBe("add-logout")
+      expect(accepted.selectedChangeIds).toEqual(["add-logout"])
+      expect(accepted.runSelection("pipeline-1").changes).toEqual(["add-logout"])
     } finally {
       await closeLauncher(launcher)
     }
   })
 
-  test("an unknown preset id is ignored and normal auto-detection still applies", async () => {
-    const launcher = await createLauncher(100, 40, 1, specs, ["add-login"], "not-a-change")
+  test("an unknown preset id is surfaced (not silently dropped) and nothing is selected (task 10.3)", async () => {
+    const launcher = await createLauncher(110, 40, 1, specs, ["not-a-change"])
     try {
       await launcher.renderOnce()
       const view = launchView(launcher.picker)
-      expect(view.selectedChangeId).toBeUndefined()
-      expect(launcher.captureCharFrame()).toContain("add-login · bundle attaches to every step")
+      expect(view.selectedChangeIds).toEqual([])
+      expect(view.manualNoChanges).toBe(false)
+      const frame = launcher.captureCharFrame()
+      expect(frame).toContain("preset not-a-change is not active in this checkout")
     } finally {
       await closeLauncher(launcher)
     }
   })
 
-  test("zero-argument launch behavior is unchanged (no pin)", async () => {
-    const launcher = await createLauncher(130, 40, 1, specs, [])
+  test("a manual preset is the explicit no-change mode and rides --manual in the flags", async () => {
+    const launcher = await createLauncher(180, 40, 1, specs, [])
     try {
       await launcher.renderOnce()
       const view = launchView(launcher.picker)
-      expect(view.selectedChangeId).toBeUndefined()
-      expect(launcher.captureCharFrame()).toContain("2 active changes · pick one when writing the prompt")
+      expect(view.selectedChangeIds).toEqual([])
+      expect(view.manualNoChanges).toBe(true)
+      const flags = view.optionsDetail(180).chunks.map((chunk) => chunk.text).join("")
+      expect(flags).toContain("--manual")
+    } finally {
+      await closeLauncher(launcher)
+    }
+  })
+
+  test("zero-argument launch behavior is unchanged (no pin, explicit decision pending)", async () => {
+    const launcher = await createLauncher(130, 40, 1, specs)
+    try {
+      await launcher.renderOnce()
+      const view = launchView(launcher.picker)
+      expect(view.selectedChangeIds).toEqual([])
+      expect(view.manualNoChanges).toBe(false)
+      expect(launcher.captureCharFrame()).toContain("2 active changes · pick one (esc)")
     } finally {
       await closeLauncher(launcher)
     }
@@ -1993,7 +1999,7 @@ describe("dirtReading parity with the execution-time gate", () => {
 
 describe("launch TUI dirty-tree preflight (options step)", () => {
   test("a dirty plain run shows the notice and the counted toggle label", async () => {
-    const launcher = await createLauncher(100, 40, 1, [], [], undefined, { readDirtyStatus: async () => dirtySeven })
+    const launcher = await createLauncher(100, 40, 1, [], [], { readDirtyStatus: async () => dirtySeven })
     try {
       const view = launchView(launcher.picker)
       view.mode = "options"
@@ -2009,7 +2015,7 @@ describe("launch TUI dirty-tree preflight (options step)", () => {
   })
 
   test("a clean tree stays quiet and the toggle keeps its standard label", async () => {
-    const launcher = await createLauncher(100, 40, 1, [], [], undefined, { readDirtyStatus: async () => "" })
+    const launcher = await createLauncher(100, 40, 1, [], [], { readDirtyStatus: async () => "" })
     try {
       const view = launchView(launcher.picker)
       view.mode = "options"
@@ -2024,7 +2030,7 @@ describe("launch TUI dirty-tree preflight (options step)", () => {
   })
 
   test("worktree isolation makes source dirt irrelevant", async () => {
-    const launcher = await createLauncher(100, 40, 1, [], [], undefined, { readDirtyStatus: async () => dirtySeven })
+    const launcher = await createLauncher(100, 40, 1, [], [], { readDirtyStatus: async () => dirtySeven })
     try {
       const view = launchView(launcher.picker)
       view.mode = "options"
@@ -2039,7 +2045,7 @@ describe("launch TUI dirty-tree preflight (options step)", () => {
   })
 
   test("the notice and count disappear once the toggle covers the dirt", async () => {
-    const launcher = await createLauncher(100, 40, 1, [], [], undefined, { readDirtyStatus: async () => dirtySeven })
+    const launcher = await createLauncher(100, 40, 1, [], [], { readDirtyStatus: async () => dirtySeven })
     try {
       const view = launchView(launcher.picker)
       view.mode = "options"
@@ -2058,7 +2064,7 @@ describe("launch TUI dirty-tree preflight (options step)", () => {
     const reads = ["", dirtySeven]
     const dirs: string[] = []
     let calls = 0
-    const launcher = await createLauncher(100, 40, 1, [], [], undefined, {
+    const launcher = await createLauncher(100, 40, 1, [], [], {
       readDirtyStatus: async (dir) => {
         calls += 1
         dirs.push(dir)
@@ -2091,7 +2097,7 @@ describe("launch TUI dirty-tree preflight (options step)", () => {
 
 describe("launch TUI dirty-tree review warning and accept-time choice", () => {
   function reviewLauncher(reader: () => Promise<string>) {
-    return createLauncher(100, 40, 1, [], [], undefined, {
+    return createLauncher(100, 40, 1, [], [], {
       readDirtyStatus: reader,
       prepareRun: async () => ({ options: {} as never, plan: fakePlan() }),
     })

@@ -1,5 +1,5 @@
 import { stripControlBytes } from "./commit-text"
-import type { CloseEvent, CloseResult, CloseStep, CloseSquashPhase } from "./feature-close"
+import type { CloseEvent, CloseResult, CloseStep, CloseSquashPhase } from "./close-events"
 
 /** Renderer-neutral state shared by the interactive close TUI and pure tests. */
 export type CloseChecklistRowStatus = "pending" | "running" | "completed" | "skipped" | "failed"

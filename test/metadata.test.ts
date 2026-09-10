@@ -768,11 +768,13 @@ describe("openRunMetadata", () => {
 
     const { dir, ws, cleanup } = await withDir("title")
     await writeFile(join(dir, "prd.md"), "# Implement the attach\n")
-    const store = await openRunMetadata(ws, target, validPipeline([validAgentStep("design")]), { branch: "feat/add-attach-flow" })
+    // The title's change sources are the accepted ordered local changes of
+    // the run plan (capability run-titles delta) — never the branch spelling.
+    const store = await openRunMetadata(ws, target, validPipeline([validAgentStep("design")]), { branch: "feat/add-attach-flow", selectedChangeIds: ["add-attach-flow"] })
     try {
       await store.flush()
       const raw = await readRunMetadata(`${dir}/metadata.json`)
-      // The proposal title wins over the branch slug and the prompt line.
+      // The selected proposal title wins over the branch slug and the prompt line.
       expect(raw!.title).toBe("Attachment flow for run reports")
     } finally {
       await cleanup()

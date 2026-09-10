@@ -5,9 +5,10 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import { goalModeFor, parseArgs, parseCommand, resolveRunOptions, runHomeNavigationLoop, shouldLaunchHome } from "../src/cli"
+import { describeHomeCloseArchiveSet, goalModeFor, parseArgs, parseCommand, resolveRunOptions, runHomeNavigationLoop, shouldLaunchHome } from "../src/cli"
 import { modelGateways } from "../src/model-routing"
 import { builtInAgents, builtInPipelines, resolvePipeline } from "../src/pipeline"
+import type { LocalActiveChange } from "../src/checkout-openspec"
 import type { Pipeline, RunPlan } from "../src/types"
 
 const validRunID = "20240101-120000-abcd"
@@ -26,6 +27,29 @@ describe("home launcher gate", () => {
   })
 })
 
+describe("home close archive disclosure", () => {
+  const activeChange = (over: Partial<LocalActiveChange>): LocalActiveChange => ({
+    checkout: "/wt",
+    changeId: "feat-x",
+    sourcePath: "/wt/openspec/changes/feat-x",
+    hasMarkdown: true,
+    artifacts: { proposal: true, design: false, tasks: true, deltaSpecs: [], other: [] },
+    ...over,
+  })
+
+  test("discloses the checkout's own active changes with their task state", () => {
+    expect(describeHomeCloseArchiveSet({ kind: "known", value: [] })).toBe("none — no active changes in this checkout")
+    expect(describeHomeCloseArchiveSet({ kind: "known", value: [activeChange({ tasks: { done: 4, total: 4 } })] })).toBe("feat-x (4/4 tasks)")
+    expect(
+      describeHomeCloseArchiveSet({
+        kind: "known",
+        value: [activeChange({ tasks: { done: 3, total: 4 } }), activeChange({ changeId: "feat-y", tasks: undefined })],
+      }),
+    ).toBe("feat-x (3/4 tasks), feat-y (no tasks file)")
+    expect(describeHomeCloseArchiveSet({ kind: "unknown", reason: "permission denied" })).toBe("unknown (permission denied) — nothing will be archived")
+  })
+})
+
 describe("home navigation loop", () => {
   test("a destination close returns to Home with that destination still selected", async () => {
     const contexts: Array<string | undefined> = []
@@ -36,11 +60,13 @@ describe("home navigation loop", () => {
       interrupted: () => false,
       route: {} as never,
       targetDir: ".",
-      openHome: async (context) => {
-        contexts.push(context.resumeNotice === undefined ? "ok" : "notice")
+      openHome: async () => {
+        contexts.push("ok")
         return opens++ === 0 ? { type: "destination", destination: "specs" } : undefined
       },
       openWork: async () => {},
+      openRun: async () => {},
+      openChange: async () => {},
       createWork: async () => {},
       openDestination: async (selection) => {
         destinations.push(selection)
@@ -64,6 +90,8 @@ describe("home navigation loop", () => {
         return { type: "destination", destination: "runs" }
       },
       openWork: async () => {},
+      openRun: async () => {},
+      openChange: async () => {},
       createWork: async () => {},
       openDestination: async () => {
         interrupted = true
@@ -71,6 +99,57 @@ describe("home navigation loop", () => {
     })
 
     expect(homeOpens).toBe(1)
+  })
+
+  test("an interrupted home context load exits without opening Home", async () => {
+    let homeOpens = 0
+
+    await runHomeNavigationLoop({
+      interrupted: () => false,
+      route: {} as never,
+      targetDir: ".",
+      // The transition-wrapped loader answers undefined when Ctrl+C lands
+      // while the loading transition is up.
+      loadHome: async () => undefined,
+      openHome: async () => {
+        homeOpens += 1
+        return undefined
+      },
+      openWork: async () => {},
+      openRun: async () => {},
+      openChange: async () => {},
+      createWork: async () => {},
+      openDestination: async () => {},
+    })
+
+    expect(homeOpens).toBe(0)
+  })
+
+  test("the injected home load refreshes on every return to Home", async () => {
+    let loads = 0
+    let homeOpens = 0
+
+    await runHomeNavigationLoop({
+      interrupted: () => false,
+      route: {} as never,
+      targetDir: ".",
+      loadHome: async () => {
+        loads += 1
+        return { worktrees: [] }
+      },
+      openHome: async () => {
+        homeOpens += 1
+        return homeOpens === 1 ? { type: "destination", destination: "specs" } : undefined
+      },
+      openWork: async () => {},
+      openRun: async () => {},
+      openChange: async () => {},
+      createWork: async () => {},
+      openDestination: async () => {},
+    })
+
+    expect(loads).toBe(2)
+    expect(homeOpens).toBe(2)
   })
 })
 
@@ -572,7 +651,7 @@ describe("parseCommand default prompt fallback", () => {
   })
 
   test("uses the pipeline's defaultPrompt when no prompt is given", async () => {
-    const cmd = await parseCommand(["-p", "review"])
+    const cmd = await parseCommand(["-p", "review", "--manual"])
     expect(cmd.type).toBe("run")
     if (cmd.type === "run") {
       expect(cmd.options.prompt).toBe(
@@ -601,7 +680,7 @@ describe("parseCommand default prompt fallback", () => {
     expect(implement.type).toBe("run")
     if (implement.type === "run") {
       expect(implement.options.prompt).toBe("Implement the attached OpenSpec change.")
-      expect(implement.options.change).toBe("add-login")
+      expect(implement.options.changes).toEqual(["add-login"])
       expect(implement.options.plan?.openspec?.changeIds).toEqual(["add-login"])
     }
 
@@ -613,7 +692,7 @@ describe("parseCommand default prompt fallback", () => {
   })
 
   test("a positional prompt beats the defaultPrompt", async () => {
-    const cmd = await parseCommand(["-p", "review", "my own prompt"])
+    const cmd = await parseCommand(["-p", "review", "--manual", "my own prompt"])
     expect(cmd.type).toBe("run")
     if (cmd.type === "run") {
       expect(cmd.options.prompt).toBe("my own prompt")
@@ -630,7 +709,7 @@ describe("parseCommand default prompt fallback", () => {
     dirs.push(dir)
     const promptFile = join(dir, "prd.md")
     await writeFile(promptFile, "from file")
-    const cmd = await parseCommand(["-p", "review", "--prompt-file", promptFile])
+    const cmd = await parseCommand(["-p", "review", "--manual", "--prompt-file", promptFile])
     expect(cmd.type).toBe("run")
     if (cmd.type === "run") {
       expect(cmd.options.prompt).toBe("from file")
@@ -670,7 +749,7 @@ describe("parseCommand default prompt fallback", () => {
         "      - implementer",
       ].join("\n"),
     )
-    const cmd = await parseCommand([])
+    const cmd = await parseCommand(["--manual"])
     expect(cmd.type).toBe("run")
     if (cmd.type === "run") {
       expect(cmd.options.prompt).toBe("Triage the incoming reports and summarize.")
