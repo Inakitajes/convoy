@@ -1,5 +1,5 @@
 import { resolveCommit, branchUpstream, execFile, commitAsUser, statusPorcelain, findWorktreeDirForBranch, currentBranch, detectBaseRef } from "./git"
-import { observeBaseDivergence } from "./worktree-observations"
+import { observeBaseDivergence, observeTreeEquality } from "./worktree-observations"
 import { listWorktrees, type WorktreeInventoryEntry } from "./worktree-inventory"
 import { readCheckoutActiveChanges, readCheckoutArchives, readCheckoutCanonicalSpecs } from "./checkout-openspec"
 import { repoCommonDir } from "./repo-store"
@@ -7,6 +7,7 @@ import { requireAgreeingSelectors } from "./worktree-target"
 import { reviewOperation, executeReviewed, removeRegisteredWorktree, pushCommittedRevision, assertNonForceRefspec, type ExecutionOutcome } from "./operation-handlers"
 import type { OperationInspection } from "./operation-guards"
 import { squashToBase } from "./worktree-squash"
+import { landViaGitHub, isHostedCloseOperation, hostedOperationInputs, reconcilePendingHostedCloses } from "./close-hosted"
 import { readOperation, listPendingOperations, type OperationRecord } from "./operation-journal"
 import { recoverOperation, type ReconcileProbe, type RecoveryConsent } from "./operation-recovery"
 import { reconcileStepReality } from "./operation-reconcile"
@@ -15,7 +16,8 @@ import { resolve, join } from "node:path"
 import { readFile, readdir, stat } from "node:fs/promises"
 import { stripControlBytes } from "./commit-text"
 import type { TuiRoute } from "./tui-session"
-import type { CloseEvent, CloseMessageProposal } from "./close-events"
+import type { CloseTui } from "./close-tui"
+import type { CloseEvent, CloseLandingDecision, CloseMessageProposal, HostedMergeFacts } from "./close-events"
 
 /**
  * The `convoy worktrees` command surface (change `worktree-control-center`,
@@ -41,7 +43,8 @@ Usage:
   convoy worktrees run --worktree <path> [--change <id> ... | --manual]
   convoy worktrees archive --worktree <path> --change <id> [--change <id> ...]
   convoy worktrees squash --worktree <path> --base <local-branch> [--message <text>]
-  convoy worktrees close --worktree <path> --base <local-branch> [--change <id> ...] [--message <text>]
+  convoy worktrees close --worktree <path> --base <local-branch> [--change <id> ...]
+                         [--message <text>] [--local-landing]
   convoy worktrees remove --worktree <path> [--force]
   convoy worktrees delete-branch --branch <name> [--force --expect <oid>]
   convoy worktrees recover --operation <id> [--continue | --cancel]
@@ -54,16 +57,23 @@ against the reviewed base; accepted text is frozen before any effect and a
 retry reconciles uncertain pushes or creations instead of duplicating them.
 Squash lands the WHOLE reviewed branch as one commit on the base — selecting
 changes controls what close archives, never the squash scope. Close composes
-sync (as needed), archive of the explicitly selected changes, and that squash;
-push, worktree removal, and branch deletion remain separate actions. Worktree
-removal keeps its branch by default and is deliberately conservative: it blocks
-on uncommitted/untracked/ignored content, submodule-local state, locks, and the
-main/process checkout. --force bypasses only the content blockers (it never
-removes the main checkout, the current checkout, a locked or unverified
-registration, or unknown state). Branch deletion is a separate action: the
-safe form uses Git's own unmerged-refusal; --force is explicit destructive
-consent that must also name the exact reviewed tip with the full 40-character
---expect <oid>, and the deletion is refused if the branch moved after review.`
+sync (as needed), archive of the explicitly selected changes, and that landing.
+Without a linked open pull request, nothing is pushed or merged on a hosting
+service: the landing is a local squash and push, worktree removal, and branch
+deletion stay separate actions. When close detects exactly one open PR for the
+branch through usable GitHub evidence, the landing is hosted instead: close
+pushes the branch (non-force), asks GitHub to squash-merge that PR with the
+reviewed message, and fast-forwards the local base to GitHub's squash commit —
+the remote steps are disclosed before any effect, and --local-landing keeps
+the whole landing local. Worktree removal keeps its branch by default and is
+deliberately conservative: it blocks on uncommitted/untracked/ignored content,
+submodule-local state, locks, and the main/process checkout. --force bypasses
+only the content blockers (it never removes the main checkout, the current
+checkout, a locked or unverified registration, or unknown state). Branch
+deletion is a separate action: the safe form uses Git's own unmerged-refusal;
+--force is explicit destructive consent that must also name the exact reviewed
+tip with the full 40-character --expect <oid>, and the deletion is refused if
+the branch moved after review.`
 }
 
 export type WorktreesCommand =
@@ -76,7 +86,7 @@ export type WorktreesCommand =
   | { kind: "run"; worktree: string; changes: string[]; manual: boolean }
   | { kind: "archive"; worktree: string; changes: string[]; allowIncomplete?: boolean }
   | { kind: "squash"; worktree: string; base: string; message?: string }
-  | { kind: "close"; worktree: string; base: string; changes: string[]; message?: string }
+  | { kind: "close"; worktree: string; base: string; changes: string[]; message?: string; localLanding?: boolean }
   | { kind: "remove"; worktree: string; force: boolean }
   | { kind: "delete-branch"; branch: string; force: boolean; expect?: string }
   | { kind: "recover"; operationId: string; consent: RecoveryConsent }
@@ -164,6 +174,7 @@ export function parseWorktreesArgs(argv: string[]): WorktreesCommand {
         base: requireSingle("--base"),
         changes: flags.get("--change") ?? [],
         ...(single("--message") ? { message: single("--message") } : {}),
+        ...(flags.has("--local-landing") ? { localLanding: true } : {}),
       }
     case "remove":
       return { kind: "remove", worktree: requireSingle("--worktree"), force: flags.has("--force") }
@@ -182,7 +193,7 @@ export function parseWorktreesArgs(argv: string[]): WorktreesCommand {
   }
 }
 
-const knownFlags = new Set(["--worktree", "--remote", "--ref", "--base", "--change", "--branch", "--force", "--expect", "--operation", "--continue", "--cancel", "--message", "--repo", "--head-repo", "--title", "--body", "--push", "--manual", "--destination", "--confirm", "--allow-incomplete"])
+const knownFlags = new Set(["--worktree", "--remote", "--ref", "--base", "--change", "--branch", "--force", "--expect", "--operation", "--continue", "--cancel", "--message", "--repo", "--head-repo", "--title", "--body", "--push", "--manual", "--destination", "--confirm", "--allow-incomplete", "--local-landing"])
 
 function worktreesUsage(reason: string): Error {
   return new Error(`${reason}\n\n${worktreesHelp()}`)
@@ -598,7 +609,13 @@ async function validateArchiveInputs(checkout: string, changes: string[], option
  * its commit is recoverable through `convoy worktrees recover` — the journal
  * lives outside the checkout and reconciles against reality.
  */
-async function archiveSelectedChanges(checkout: string, changes: string[], commonDir: string): Promise<{ archived: string[] }> {
+async function archiveSelectedChanges(
+  checkout: string,
+  changes: string[],
+  commonDir: string,
+  /** Releases the alternate screen around the inherited-terminal archive commit (interactive close). */
+  withTerminal?: <T>(action: () => Promise<T>) => Promise<T>,
+): Promise<{ archived: string[] }> {
   const { createOperation, recordStepIntent, acknowledgeStep, resolveOperation } = await import("./operation-journal")
   // Intent before effect: one journaled step per selected change plus the
   // commit. A journal that cannot be persisted blocks the mutation — an
@@ -664,7 +681,11 @@ async function archiveSelectedChanges(checkout: string, changes: string[], commo
   }
   // Commit only the verified archive output, under the operator's identity.
   await execFile("git", ["add", "--", `${openspecDirName}/`], { cwd: checkout })
-  await commitAsUser(`chore: archive ${archived.join(", ")}`, checkout)
+  // `commitAsUser` inherits the terminal (signing, hooks), so an interactive
+  // close suspends its alternate screen around it: otherwise git's summary
+  // paints over the live interface and the diff renderer never repaints.
+  const commit = () => commitAsUser(`chore: archive ${archived.join(", ")}`, checkout)
+  await (withTerminal ? withTerminal(commit) : commit())
   const commitAck = await acknowledgeStep(commonDir, operationId, "commit", { changes: archived })
   if (!commitAck.ok) {
     throw new Error(`the archive commit succeeded but its journal acknowledgement failed: ${commitAck.reason} — inspect with \`convoy worktrees recover --operation ${operationId}\``)
@@ -681,7 +702,12 @@ async function archiveSelectedChanges(checkout: string, changes: string[], commo
  * OpenSpec paths, exactly that output is committed and the operation resolved.
  * Anything unexplained blocks with recovery guidance instead of guessing.
  */
-async function reconcilePendingArchiveOperations(commonDir: string, checkout: string): Promise<void> {
+async function reconcilePendingArchiveOperations(
+  commonDir: string,
+  checkout: string,
+  /** Releases the alternate screen around the reconcile commit when one is needed (interactive close). */
+  withTerminal?: <T>(action: () => Promise<T>) => Promise<T>,
+): Promise<void> {
   const pending = await listPendingOperations(commonDir)
   for (const operationId of pending) {
     const read = await readOperation(commonDir, operationId)
@@ -695,7 +721,7 @@ async function reconcilePendingArchiveOperations(commonDir: string, checkout: st
     }
     if (outcome.status === "needs-work") {
       if (outcome.remaining.length === 1 && outcome.remaining[0] === "commit") {
-        await completeInterruptedArchiveCommit(commonDir, operationId, checkout)
+        await completeInterruptedArchiveCommit(commonDir, operationId, checkout, withTerminal)
         continue
       }
       throw new Error(`a pending archive operation (${operationId}) still has unresolved steps (${outcome.remaining.join(", ")}) — inspect it with \`convoy worktrees recover --operation ${operationId}\` before archiving here`)
@@ -710,7 +736,13 @@ async function reconcilePendingArchiveOperations(commonDir: string, checkout: st
  * identity; a clean tree means the commit already happened and is only
  * acknowledged. The journal is then resolved and released.
  */
-async function completeInterruptedArchiveCommit(commonDir: string, operationId: string, checkout: string): Promise<void> {
+async function completeInterruptedArchiveCommit(
+  commonDir: string,
+  operationId: string,
+  checkout: string,
+  /** Releases the alternate screen around the inherited-terminal reconcile commit (interactive close). */
+  withTerminal?: <T>(action: () => Promise<T>) => Promise<T>,
+): Promise<void> {
   const { acknowledgeStep, resolveOperation, readOperation } = await import("./operation-journal")
   const read = await readOperation(commonDir, operationId)
   const intent = read.status === "found" ? (read.value.intent as { changes?: unknown } | undefined) : undefined
@@ -723,7 +755,8 @@ async function completeInterruptedArchiveCommit(commonDir: string, operationId: 
   }
   if (lines.length > 0) {
     await execFile("git", ["add", "--", `${openspecDirName}/`], { cwd: checkout })
-    await commitAsUser(`chore: archive ${changes.join(", ")}`, checkout)
+    const commit = () => commitAsUser(`chore: archive ${changes.join(", ")}`, checkout)
+    await (withTerminal ? withTerminal(commit) : commit())
   }
   const ack = await acknowledgeStep(commonDir, operationId, "commit", { completed: true, ...(lines.length === 0 ? { alreadyCommitted: true } : {}) })
   if (!ack.ok) {
@@ -732,7 +765,7 @@ async function completeInterruptedArchiveCommit(commonDir: string, operationId: 
   await resolveOperation({ commonDir, operationId, gitCwd: checkout, outcome: "resolved" }).catch(() => {})
 }
 
-async function runArchive(command: Extract<WorktreesCommand, { kind: "archive" }>, cwd?: string): Promise<void> {
+async function runArchive(command: Extract<WorktreesCommand, { kind: "archive" }>, cwd?: string, route?: TuiRoute): Promise<void> {
   const { commonDir } = await repoContext(cwd)
   // Recovery before fresh preflight (design D9): an interrupted archive of
   // this checkout is reconciled against reality before anything new runs —
@@ -751,7 +784,29 @@ async function runArchive(command: Extract<WorktreesCommand, { kind: "archive" }
     effect: async (target) => archiveSelectedChanges(target.checkoutPath, command.changes, commonDir),
   })
   if (!result.ok) return reportBlocked(result.blockers, result.reason)
-  process.stdout.write(`archived and committed: ${result.value.archived.join(", ")}\n`)
+  const summary = `archived and committed: ${result.value.archived.join(", ")}`
+  if (route) {
+    const { showNoticeTui } = await import("./notice-tui")
+    await showNoticeTui(route, { title: "archive complete", message: summary })
+  } else {
+    process.stdout.write(`${summary}\n`)
+  }
+}
+
+/**
+ * The Home archive action: an explicit change selection archived through the
+ * same guarded operation, with the outcome shown in a TUI notice instead of
+ * raw stdout over the alternate screen.
+ */
+export async function runWorktreeArchive(
+  input: { worktree: string; changes: string[]; allowIncomplete?: boolean; route?: TuiRoute },
+  cwd?: string,
+): Promise<void> {
+  await runArchive(
+    { kind: "archive", worktree: input.worktree, changes: input.changes, ...(input.allowIncomplete ? { allowIncomplete: true } : {}) },
+    cwd,
+    input.route,
+  )
 }
 
 // ── squash ───────────────────────────────────────────────────────────────
@@ -796,6 +851,8 @@ export type WorktreeCloseInput = {
   base: string
   changes: string[]
   message?: string
+  /** Keep the landing local even when a linked open PR offers the hosted path (design D5). */
+  localLanding?: boolean
   /** The home-session route, when close was opened from a TUI menu. */
   route?: TuiRoute
 }
@@ -808,6 +865,7 @@ export async function runWorktreeClose(input: WorktreeCloseInput, cwd?: string):
     base: input.base,
     changes: input.changes,
     ...(input.message !== undefined ? { message: input.message } : {}),
+    ...(input.localLanding ? { localLanding: true } : {}),
   }
   await runClose(command, cwd, input.route)
 }
@@ -817,10 +875,17 @@ type CloseProgress = {
   /** The interactive message gate; absent in headless mode. */
   resolveMessage?: (proposal: CloseMessageProposal, notice?: string) => Promise<string | undefined>
   /**
+   * The interactive landing gate offered when a linked open PR enables the
+   * hosted path (change `close-lands-via-github-pr`, design D5): the reviewed
+   * message plus the hosted/local landing choice in one gate.
+   */
+  resolveLanding?: (proposal: CloseMessageProposal, notice?: string) => Promise<CloseLandingDecision>
+  /**
    * Releases the alternate screen around mutations whose git output is
-   * inherited (the squash candidate's `commitAsUser`): the TUI must suspend
-   * first or git's summary paints over the live interface, and a diff-based
-   * renderer never repaints the stomped cells.
+   * inherited (the archive commits, the squash candidate's `commitAsUser`, and
+   * the remote branch push): the TUI must suspend first or git's summary paints
+   * over the live interface, and a diff-based renderer never repaints the
+   * stomped cells.
    */
   withTerminal?: <T>(action: () => Promise<T>) => Promise<T>
 }
@@ -829,16 +894,19 @@ type CloseOutcome = {
   steps: string[]
   cancelled?: boolean
   pullRequest?: { number: number; title?: string; url: string }
+  /** Observed hosted-landing facts; present only when GitHub's merge was observed. */
+  hostedMerge?: HostedMergeFacts
 }
 
 /**
  * The close effect driver (capability feature-close delta): sync as needed,
- * archive the explicitly selected changes, then squash the whole branch with a
+ * archive the explicitly selected changes, then land the whole branch with a
  * composed conventional message. Progress travels through typed events so the
  * interactive checklist and the headless summary narrate the same facts; the
- * message context is captured before archive moves the proposals.
+ * message context is captured before archive moves the proposals. Exported
+ * for tests: the landing gates (hosted/local/cancel) are driven directly.
  */
-async function driveClose(
+export async function driveClose(
   command: Extract<WorktreesCommand, { kind: "close" }>,
   commonDir: string,
   review: OperationInspection,
@@ -855,6 +923,15 @@ async function driveClose(
       const steps: string[] = []
       const branch = target.branch ?? ""
       emit({ type: "preflight", summary: `${branch} → ${command.base}` })
+      // Pending hosted landing first (change `close-lands-via-github-pr`,
+      // design D9): a previously interrupted remote transaction is reconciled
+      // by receipt BEFORE any close mutation — before the sync merge, before
+      // the archive — so neither step can build on a base or checkout whose
+      // state a pending effect still owns. Verified effects are recognized by
+      // receipt; undecided steps require explicit recovery continuation
+      // (`convoy worktrees recover --operation <id> --continue|--cancel`)
+      // before this close may mutate anything.
+      await reconcilePendingHostedCloses(commonDir, target.checkoutPath, branch, target.checkoutPath)
       // The squash message's context is captured before archive relocates the
       // proposals (design D7): commit subjects, diff shape, proposal excerpts,
       // and the capabilities the selected changes touch.
@@ -881,15 +958,15 @@ async function driveClose(
       // 2. Archive the explicitly selected local changes (zero supported).
       if (command.changes.length > 0) {
         emit({ type: "step-started", step: "archive" })
-        await reconcilePendingArchiveOperations(commonDir, target.checkoutPath)
-        const archived = await archiveSelectedChanges(target.checkoutPath, command.changes, commonDir)
+        await reconcilePendingArchiveOperations(commonDir, target.checkoutPath, progress.withTerminal)
+        const archived = await archiveSelectedChanges(target.checkoutPath, command.changes, commonDir, progress.withTerminal)
         steps.push(`archived ${archived.archived.join(", ")}`)
         emit({ type: "step-completed", step: "archive", detail: archived.archived.join(", ") })
       } else {
         emit({ type: "step-skipped", step: "archive", reason: "no changes selected — zero-archive close" })
       }
 
-      // 3. Squash the whole branch result onto the base, through message review.
+      // 3. Land the whole branch result on the base, through message review.
       emit({ type: "step-started", step: "squash-merge" })
       emit({ type: "squash-phase", phase: "composing-message" })
       const pr = await probeClosePullRequest(branch, target.checkoutPath)
@@ -906,24 +983,88 @@ async function driveClose(
       })
       emit({ type: "squash-phase", phase: "awaiting-message-review" })
       let message = command.message ?? composed.message
-      if (command.message === undefined && progress.resolveMessage) {
+      // Landing routing (change `close-lands-via-github-pr`, design D1): a
+      // linked open PR with usable evidence selects the hosted path; no PR,
+      // unavailable evidence, an ambiguous match, `--local-landing`, or an
+      // operator decline select the unchanged local path with disclosure.
+      let hosted = pr.status === "found" && !command.localLanding
+      const proposal = { message: composed.message, source: composed.source, ...(composed.error ? { error: composed.error } : {}) }
+      if (command.message === undefined && (progress.resolveMessage || progress.resolveLanding)) {
         const notice =
           pr.status === "found"
-            ? `open pull request detected: #${pr.number}${pr.title ? ` ${pr.title}` : ""} — ${pr.url}\nIts number rides the reviewed subject as a reference; it is not a claim that the PR merged.`
-            : pr.status === "unavailable"
-              ? `pull-request evidence is unavailable: ${pr.reason} — close proceeds without asserting any PR state.`
-              : undefined
-        const accepted = await progress.resolveMessage(
-          { message: composed.message, source: composed.source, ...(composed.error ? { error: composed.error } : {}) },
-          notice,
-        )
-        if (accepted === undefined) {
-          // Cancellation preserves the completed preparation; nothing lands.
-          emit({ type: "step-skipped", step: "squash-merge", reason: "message review cancelled — nothing landed" })
-          return { steps, cancelled: true }
+            ? command.localLanding
+              ? `open pull request detected: #${pr.number}${pr.title ? ` ${pr.title}` : ""} — ${pr.url}\n--local-landing keeps the landing local; the PR number rides the reviewed subject as a reference, not a claim that the PR merged.`
+              : `open pull request detected: #${pr.number}${pr.title ? ` ${pr.title}` : ""} — ${pr.url}\nHosted landing plan: push ${branch} to its remote, ask GitHub to squash-merge PR #${pr.number} with the reviewed message, then fast-forward ${command.base} to GitHub's squash commit. Choose "Land locally instead" to keep every step local.`
+            : pr.status === "ambiguous"
+              ? `${pr.count} open pull requests match ${branch} — none is treated as the linked PR, so the landing stays local.`
+              : pr.status === "unavailable"
+                ? `pull-request evidence is unavailable: ${pr.reason} — close proceeds without asserting any PR state.`
+                : undefined
+        if (pr.status === "found" && progress.resolveLanding && !command.localLanding) {
+          const decision = await progress.resolveLanding(proposal, notice)
+          if (decision.kind === "cancel") {
+            // Cancellation preserves the completed preparation; nothing lands.
+            emit({ type: "step-skipped", step: "squash-merge", reason: "message review cancelled — nothing landed" })
+            return { steps, cancelled: true }
+          }
+          message = decision.message
+          hosted = decision.kind === "hosted"
+        } else if (progress.resolveMessage) {
+          const accepted = await progress.resolveMessage(proposal, notice)
+          if (accepted === undefined) {
+            emit({ type: "step-skipped", step: "squash-merge", reason: "message review cancelled — nothing landed" })
+            return { steps, cancelled: true }
+          }
+          message = accepted
         }
-        message = accepted
       }
+
+      // Equal trees land nothing on either path: a hosted merge of an empty
+      // difference would be refused by GitHub, and the local path reports it
+      // honestly (capability worktree-operations).
+      const sourceTip = await resolveCommit("HEAD", target.checkoutPath)
+      const baseSha = await resolveCommit(command.base, target.checkoutPath)
+      if (sourceTip && baseSha) {
+        const equality = await observeTreeEquality(sourceTip, baseSha, target.checkoutPath)
+        if (equality.kind === "known" && equality.value.equalTrees) {
+          steps.push("no content difference — nothing landed")
+          emit({ type: "step-skipped", step: "squash-merge", reason: "the source and the base hold identical trees" })
+          return withPullRequestOutcome({ steps }, pr)
+        }
+      }
+
+      if (hosted && pr.status === "found") {
+        // The hosted landing (change `close-lands-via-github-pr`): publish the
+        // branch, request GitHub's squash-merge with the reviewed message, then
+        // fast-forward the local base. Interrupted steps were already
+        // reconciled by receipt above, before sync/archive.
+        const landed = await (progress.withTerminal
+          ? progress.withTerminal(() =>
+              landViaGitHub({
+                checkout: target.checkoutPath,
+                branch,
+                base: command.base,
+                commonDir,
+                prNumber: pr.number,
+                message,
+                onEvent: emit,
+              }),
+            )
+          : landViaGitHub({
+              checkout: target.checkoutPath,
+              branch,
+              base: command.base,
+              commonDir,
+              prNumber: pr.number,
+              message,
+              onEvent: emit,
+            }))
+        if (!landed.ok) throw new Error(landed.reason)
+        steps.push(...landed.narration)
+        emit({ type: "step-completed", step: "squash-merge", detail: `PR #${pr.number} merged${landed.facts.mergeSha ? ` as ${landed.facts.mergeSha.slice(0, 8)}` : ""}` })
+        return { steps, pullRequest: { number: pr.number, ...(pr.title !== undefined ? { title: pr.title } : {}), url: pr.url }, hostedMerge: landed.facts }
+      }
+
       emit({ type: "squash-phase", phase: "creating-commit" })
       // The candidate commit inherits the terminal (signing, hooks), so an
       // interactive close suspends its TUI across the whole guarded squash;
@@ -939,9 +1080,28 @@ async function driveClose(
         steps.push(`landed ${squash.landedSha.slice(0, 8)} on ${command.base}`)
         emit({ type: "step-completed", step: "squash-merge", detail: `${squash.landedSha.slice(0, 8)} on ${command.base}` })
       }
-      return { steps, ...(pr.status === "found" ? { pullRequest: { number: pr.number, ...(pr.title !== undefined ? { title: pr.title } : {}), url: pr.url } } : {}) }
+      return withPullRequestOutcome({ steps }, pr)
     },
   })
+}
+
+/** The outcome's PR disclosure, present only for a found open PR. */
+function withPullRequestOutcome(outcome: { steps: string[] }, pr: ClosePullRequestProbe): CloseOutcome {
+  return { ...outcome, ...(pr.status === "found" ? { pullRequest: { number: pr.number, ...(pr.title !== undefined ? { title: pr.title } : {}), url: pr.url } } : {}) }
+}
+
+/**
+ * The shared-session close handoff (capability feature-close): the close
+ * screen's progress mode consumes every key (`stopPropagation`), so it must
+ * release its keyboard handling before the completion notice mounts — otherwise
+ * the notice never receives `q`/Escape/Enter/Ctrl+C and stays frozen. `destroy`
+ * is idempotent and leaves a shared renderer alive; `openScene` then closes the
+ * close tree as the notice mounts. Exported for the lifecycle regression test.
+ */
+export async function showCloseOutcome(route: TuiRoute, tui: CloseTui, outcome: CloseOutcome): Promise<void> {
+  tui.destroy()
+  const { showNoticeTui } = await import("./notice-tui")
+  await showNoticeTui(route, { title: outcome.cancelled ? "close cancelled" : "close complete", message: closeSummaryLines(outcome).join("\n") })
 }
 
 async function runClose(command: Extract<WorktreesCommand, { kind: "close" }>, cwd?: string, route?: TuiRoute): Promise<void> {
@@ -958,6 +1118,7 @@ async function runClose(command: Extract<WorktreesCommand, { kind: "close" }>, c
       const result = await driveClose(command, commonDir, review.review, {
         onEvent: (event) => tui.onEvent(event),
         resolveMessage: (proposal, notice) => tui.confirmMessage(proposal, notice),
+        resolveLanding: (proposal, notice) => tui.confirmMessageWithLanding(proposal, notice),
         withTerminal: (action) => tui.withTerminal(action),
       })
       if (!result.ok) {
@@ -967,8 +1128,9 @@ async function runClose(command: Extract<WorktreesCommand, { kind: "close" }>, c
       }
       const summary = closeSummaryLines(result.value)
       if (route) {
-        const { showNoticeTui } = await import("./notice-tui")
-        await showNoticeTui(route, { title: result.value.cancelled ? "close cancelled" : "close complete", message: summary.join("\n") })
+        // Release the close screen's input before the notice mounts (the
+        // frozen-notice fix); the finally below stays as a safety net.
+        await showCloseOutcome(route, tui, result.value)
       } else {
         process.stdout.write(`${summary.join("\n")}\n`)
       }
@@ -983,6 +1145,18 @@ async function runClose(command: Extract<WorktreesCommand, { kind: "close" }>, c
     return
   }
 
+  // The headless reviewed plan (change `close-lands-via-github-pr`, task 3.2):
+  // when a linked open PR enables the hosted path and --local-landing did not
+  // decline it, the remote steps are disclosed before any effect runs.
+  if (!command.localLanding) {
+    const branch = await currentBranch(command.worktree).catch(() => undefined)
+    if (branch) {
+      const pr = await probeClosePullRequest(branch, command.worktree)
+      if (pr.status === "found") {
+        process.stdout.write(`close plan: review → sync (as needed) → archive ${command.changes.length > 0 ? command.changes.join(", ") : "(no changes selected)"} → hosted landing via PR #${pr.number}: push ${branch} to its remote, GitHub squash-merge with the reviewed message, fast-forward ${command.base}\n`)
+      }
+    }
+  }
   const result = await driveClose(command, commonDir, review.review)
   if (!result.ok) return reportBlocked(result.blockers, result.reason)
   const lines = closeSummaryLines(result.value)
@@ -990,11 +1164,21 @@ async function runClose(command: Extract<WorktreesCommand, { kind: "close" }>, c
   process.stdout.write(`${lines.join("\n")}\n`)
 }
 
-/** The shared close summary: the operation facts plus the PR disclosure, never a merge claim. */
+/**
+ * The shared close summary: the operation facts, the hosted merge when it was
+ * observed (change `close-lands-via-github-pr`), and the PR reference
+ * otherwise — never a merge claim without the observation.
+ */
 function closeSummaryLines(outcome: CloseOutcome): string[] {
   const lines = [outcome.cancelled ? "close cancelled:" : "close complete:"]
   for (const step of outcome.steps) lines.push(`  - ${step}`)
-  if (outcome.pullRequest) {
+  if (outcome.hostedMerge) {
+    const facts = outcome.hostedMerge
+    lines.push(`PR #${facts.prNumber} was merged by GitHub${facts.mergeSha ? ` as ${facts.mergeSha.slice(0, 8)}` : ""}`)
+    if (facts.mergeSha) {
+      lines.push(facts.baseAdvanced ? `  the local ${facts.base} was fast-forwarded to GitHub's squash commit` : `  the local ${facts.base} already contained GitHub's squash commit`)
+    }
+  } else if (outcome.pullRequest) {
     lines.push(`open pull request on this branch: #${outcome.pullRequest.number}${outcome.pullRequest.title ? ` ${outcome.pullRequest.title}` : ""} — ${outcome.pullRequest.url}`)
     lines.push("  (a detected PR number is a reference, not a claim that GitHub merged it)")
   }
@@ -1103,19 +1287,28 @@ function withPullRequestReference(message: string, pullRequest?: { number: numbe
 }
 
 /**
- * The tolerant open-PR probe for the close branch: found, none, or
+ * The tolerant open-PR probe for the close branch: found, none, ambiguous, or
  * unavailable — a failed lookup is unavailable evidence, never "no PR" and
- * never a hosted-merge claim (capability feature-close delta).
+ * never a hosted-merge claim (capability feature-close delta). The count is
+ * the routing criterion (change `close-lands-via-github-pr`, design D1):
+ * exactly one open PR selects the hosted path; an ambiguous match selects the
+ * local path without asserting hosted coverage.
  */
+export type ClosePullRequestProbe =
+  | { status: "found"; number: number; title?: string; url: string }
+  | { status: "none" }
+  | { status: "ambiguous"; count: number }
+  | { status: "unavailable"; reason: string }
+
 async function probeClosePullRequest(
   branch: string,
   cwd: string,
-): Promise<{ status: "found"; number: number; title?: string; url: string } | { status: "none" } | { status: "unavailable"; reason: string }> {
+): Promise<ClosePullRequestProbe> {
   let result
   try {
     const gh = await execFile("gh", ["--version"], { cwd: process.cwd(), allowFailure: true })
     if (gh.exitCode !== 0) return { status: "unavailable", reason: "the GitHub CLI is not installed or not usable" }
-    result = await execFile("gh", ["pr", "list", "--head", branch, "--state", "open", "--json", "number,title,url", "--limit", "1"], { cwd, allowFailure: true })
+    result = await execFile("gh", ["pr", "list", "--head", branch, "--state", "open", "--json", "number,title,url"], { cwd, allowFailure: true })
   } catch (error) {
     // allowFailure handles exit codes, but a missing executable throws at spawn.
     return { status: "unavailable", reason: `the GitHub CLI could not be run: ${error instanceof Error ? error.message : String(error)}` }
@@ -1125,11 +1318,14 @@ async function probeClosePullRequest(
   }
   try {
     const rows = JSON.parse(result.stdout) as Array<{ number?: unknown; title?: unknown; url?: unknown }>
-    for (const row of rows) {
-      if (typeof row.number === "number" && Number.isFinite(row.number) && typeof row.url === "string" && row.url) {
-        return { status: "found", number: row.number, ...(typeof row.title === "string" && row.title ? { title: row.title } : {}), url: row.url }
-      }
+    const found = rows.filter(
+      (row) => typeof row.number === "number" && Number.isFinite(row.number) && typeof row.url === "string" && row.url,
+    )
+    if (found.length === 1) {
+      const row = found[0]!
+      return { status: "found", number: row.number as number, ...(typeof row.title === "string" && row.title ? { title: row.title } : {}), url: row.url as string }
     }
+    if (found.length > 1) return { status: "ambiguous", count: found.length }
     return { status: "none" }
   } catch (error) {
     return { status: "unavailable", reason: `the pull-request query returned unreadable output: ${error instanceof Error ? error.message : String(error)}` }
@@ -1370,10 +1566,32 @@ async function runRecover(command: Extract<WorktreesCommand, { kind: "recover" }
       process.stdout.write(`${lines.join("\n")}\n`)
       process.exitCode = 1
       return
-    case "needs-work":
+    case "needs-work": {
+      // A hosted close's remaining remote steps replay here — the operator's
+      // `--continue` is the explicit acceptance the delta spec requires
+      // (change `close-lands-via-github-pr`): the already-pushed branch is
+      // recognized rather than re-pushed and a merged PR rather than
+      // re-merged, by receipt.
+      if (isHostedCloseOperation(record)) {
+        const inputs = await hostedOperationInputs(context.commonDir, command.operationId)
+        if (!inputs) throw new Error(`operation ${command.operationId} is a hosted close whose recorded inputs could not be read — inspect it by hand before retrying`)
+        const resumed = await landViaGitHub(inputs)
+        if (!resumed.ok) {
+          lines.push(`blocked: ${resumed.reason}`)
+          process.stdout.write(`${lines.join("\n")}\n`)
+          process.exitCode = 1
+          return
+        }
+        lines.push("hosted landing resumed and completed:")
+        for (const line of resumed.narration) lines.push(`  - ${line}`)
+        lines.push("reconciled — the journal and its protective refs were released")
+        process.stdout.write(`${lines.join("\n")}\n`)
+        return
+      }
       lines.push(`remaining steps stay pending for a fresh preflight: ${outcome.remaining.join(", ")}`)
       process.stdout.write(`${lines.join("\n")}\n`)
       return
+    }
     case "reconciled":
       lines.push("reconciled — the journal and its protective refs were released")
       process.stdout.write(`${lines.join("\n")}\n`)
@@ -1455,15 +1673,20 @@ export function closeCommandHelp(): string {
   return `convoy close — the optional composition of the worktree operations
 
 Close reviews an explicit checkout and base, syncs as needed, archives the
-explicitly selected local changes (zero is valid), then squash-lands the WHOLE
+explicitly selected local changes (zero is valid), then lands the WHOLE
 reviewed branch as one commit on the base. Selecting changes controls what is
-archived, never the squash scope. Push, worktree removal, and branch deletion
-remain separate actions (\`convoy worktrees push|remove|delete-branch\`) — close
-never performs them, and nothing is pushed or merged on any hosting service.
+archived, never the landing scope. Without a linked open pull request the
+landing is a local squash and nothing is pushed or merged on a hosting service;
+push, worktree removal, and branch deletion remain separate actions
+(\`convoy worktrees push|remove|delete-branch\`). When close detects exactly one
+open PR for the branch through usable GitHub evidence, the landing is hosted
+instead: the branch is pushed (non-force), GitHub squash-merges that PR with
+the reviewed message, and the local base is fast-forwarded to GitHub's squash
+commit — the remote steps are disclosed before any effect.
 
 Usage:
   convoy close [--worktree <path> | --branch <name>] [--base <local-branch>]
-               [--change <id> ...] [--message <text>] [--dry-run]
+               [--change <id> ...] [--message <text>] [--local-landing] [--dry-run]
 
 Target selection:
   --worktree <path>  Close this registered checkout explicitly.
@@ -1473,13 +1696,15 @@ Target selection:
                      any other target, never a hidden fallback.
 
 Options:
-  --base <ref>       The local base branch to integrate onto (default: the
-                     repository's detected base, disclosed before mutation).
-  --change <id>      Archive this explicitly selected local active change;
-                     repeat for an ordered batch. Incomplete or unknown tasks
-                     block the ordinary archive.
-  --message <text>   Exact message for the squash commit; skips composition.
-  --dry-run          Print the reviewed sequence without touching anything.
+  --base <ref>         The local base branch to integrate onto (default: the
+                       repository's detected base, disclosed before mutation).
+  --change <id>        Archive this explicitly selected local active change;
+                       repeat for an ordered batch. Incomplete or unknown tasks
+                       block the ordinary archive.
+  --message <text>     Exact message for the squash commit; skips composition.
+  --local-landing      Keep the landing local even when a linked open PR
+                       enables the hosted path.
+  --dry-run            Print the reviewed sequence without touching anything.
 
 Retired spellings (exit non-zero before any effect):
   --feature <id>     Feature identity is retired — select a worktree instead.
@@ -1496,6 +1721,7 @@ export type CloseCommandOptions = {
   base?: string
   changes: string[]
   message?: string
+  localLanding?: boolean
   dryRun: boolean
   /** Retired spellings, recognized only to fail with guidance. */
   feature?: string
@@ -1519,6 +1745,7 @@ export function parseCloseCommandArgs(argv: string[]): CloseCommandOptions {
     else if (arg === "--base" || arg.startsWith("--base=")) options.base = arg === "--base" ? value() : arg.slice("--base=".length)
     else if (arg === "--change" || arg.startsWith("--change=")) options.changes.push(arg === "--change" ? value() : arg.slice("--change=".length))
     else if (arg === "--message" || arg.startsWith("--message=")) options.message = arg === "--message" ? value() : arg.slice("--message=".length)
+    else if (arg === "--local-landing") options.localLanding = true
     else if (arg === "--dry-run") options.dryRun = true
     else if (arg === "--feature" || arg.startsWith("--feature=")) options.feature = arg === "--feature" ? value() : arg.slice("--feature=".length)
     else if (arg === "--cleanup" || arg.startsWith("--cleanup=")) options.cleanup = arg === "--cleanup" ? value() : arg.slice("--cleanup=".length)
@@ -1552,9 +1779,13 @@ export async function runCloseCommandFromArgs(options: CloseCommandOptions, cwd?
   }
   if (options.dryRun) {
     const target = options.worktree ?? options.branch ?? dir
-    process.stdout.write(`close would run: review → sync (as needed) → archive ${options.changes.length > 0 ? options.changes.join(", ") : "(no changes selected)"} → whole-branch squash onto ${options.base ?? "the detected base"}\n`)
+    process.stdout.write(`close would run: review → sync (as needed) → archive ${options.changes.length > 0 ? options.changes.join(", ") : "(no changes selected)"} → ${options.localLanding ? "whole-branch squash" : "whole-branch landing (hosted via the linked PR when one is detected, otherwise a local squash)"} onto ${options.base ?? "the detected base"}\n`)
     process.stdout.write(`target: ${target}\n`)
-    process.stdout.write("push, worktree removal, and branch deletion stay separate actions; nothing is pushed or merged on a hosting service.\n")
+    if (options.localLanding) {
+      process.stdout.write("push, worktree removal, and branch deletion stay separate actions; nothing is pushed or merged on a hosting service.\n")
+    } else {
+      process.stdout.write("without a linked open pull request nothing is pushed or merged; when one is detected, the disclosed hosted landing pushes the branch and asks GitHub to squash-merge that PR.\n")
+    }
     return
   }
 
@@ -1582,5 +1813,14 @@ export async function runCloseCommandFromArgs(options: CloseCommandOptions, cwd?
     throw new Error("no base could be detected — pass --base <local-branch> naming the branch to integrate onto")
   }
 
-  await runWorktreeClose({ checkout, base, changes: options.changes, ...(options.message !== undefined ? { message: options.message } : {}) }, dir)
+  await runWorktreeClose(
+    {
+      checkout,
+      base,
+      changes: options.changes,
+      ...(options.message !== undefined ? { message: options.message } : {}),
+      ...(options.localLanding ? { localLanding: true } : {}),
+    },
+    dir,
+  )
 }

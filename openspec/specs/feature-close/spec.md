@@ -6,7 +6,7 @@ Close a feature in one orchestrated sequence — sync, archive, squash, merge, o
 ## Requirements
 
 ### Requirement: Close composes explicitly reviewed worktree operations
-`convoy close` and the Worktrees close action SHALL use the same optional composite operation for an explicitly selected checkout and base: review, sync as needed, archive the explicitly selected local active changes in reviewed order, then squash the entire branch result. Zero selected changes SHALL be supported; no tasks from unselected inherited changes SHALL become a close prerequisite. Selected archive inputs SHALL satisfy the ordinary archive task/cleanliness rules. Already archived local artifacts SHALL be readable context but SHALL NOT imply prior integration or require a new feature incarnation. The operator SHALL see the source/base difference as a diff-stat summary (or fuller diff) before effects, together with the fact that selecting changes controls archive inputs, not squash scope. Initial source/base and all requested steps SHALL be reviewed before effects. Push, worktree removal, and local branch deletion SHALL remain optional separately accepted actions; there SHALL be no automatic hosted PR merge, PR closure, or remote branch deletion.
+`convoy close` and the Worktrees close action SHALL use the same optional composite operation for an explicitly selected checkout and base: review, sync as needed, archive the explicitly selected local active changes in reviewed order, then squash the entire branch result. Zero selected changes SHALL be supported; no tasks from unselected inherited changes SHALL become a close prerequisite. Selected archive inputs SHALL satisfy the ordinary archive task/cleanliness rules. Already archived local artifacts SHALL be readable context but SHALL NOT imply prior integration or require a new feature incarnation. The operator SHALL see the source/base difference as a diff-stat summary (or fuller diff) before effects, together with the fact that selecting changes controls archive inputs, not squash scope. Initial source/base and all requested steps SHALL be reviewed before effects. Push, worktree removal, and local branch deletion SHALL remain optional separately accepted actions. When a linked open PR for the branch is detected through usable hosting evidence, the landing step SHALL be the hosted path (publish the branch, request the PR's squash-merge with the reviewed message, fast-forward the local base to GitHub's squash commit) and its remote effects SHALL be disclosed as part of the reviewed plan; without a linked PR, unavailable evidence, or an operator decline of the hosted path, close SHALL land locally and there SHALL be no automatic hosted PR merge, PR closure, or remote branch deletion.
 
 #### Scenario: Close without OpenSpec
 - **WHEN** an operator closes a clean worktree without selected changes
@@ -28,8 +28,18 @@ Close a feature in one orchestrated sequence — sync, archive, squash, merge, o
 - **WHEN** squash succeeds and the operator does not select removal
 - **THEN** the worktree and branch remain usable without a Completed record, receipt, or mandatory new-work transition
 
+#### Scenario: Linked PR discloses the hosted landing in review
+- **WHEN** close review detects one open PR for the branch with usable hosting evidence
+- **THEN** the reviewed plan names the branch push, the GitHub squash-merge of that PR with the reviewed message, and the local base fast-forward as the landing steps before any effect runs
+
+#### Scenario: Operator declines the hosted landing
+- **WHEN** a linked PR is detected and the operator chooses the local landing during review
+- **THEN** close performs the unchanged local squash path and neither pushes nor touches the PR
+
 ### Requirement: Close preserves message review and truthful operation progress
 Interactive close SHALL show each selected operation's progress, verified success, skip reason, or failure, with responsive activity during asynchronous composition. The squash message SHALL describe the whole branch range using selected local proposals, capability names, and commit/diff context; an unavailable writer SHALL use an honest deterministic conventional fallback. A single selected touched capability SHALL be the composed scope; zero or multiple SHALL omit scope. Selected change IDs SHALL be included in the body when present, with no invented change for spec-less work. Context needed across archive SHALL be retained only for the unresolved operation. A detected PR number SHALL be a reviewed reference, not a guarantee of hosted merge, and an operator edit removing it SHALL be respected. Explicit `--message` SHALL win verbatim. Without that override, interactive landing SHALL require Accept/Edit/Cancel review with inline multiline editing; saving an edit SHALL not itself accept. Failed operations SHALL remain readable, terminal state SHALL be restored, and headless execution SHALL print the same facts with explicit-input/acceptance requirements rather than invoke an editor or guess a destination.
+
+On the hosted path, the accepted message SHALL become the hosted squash commit's subject and body, and progress SHALL narrate each remote step with truthful hosting facts: the published branch revision, GitHub's squash commit and PR merged state once observed, and a skip reason when the local base was already current. After the hosted merge is observed, the summary MAY state the merge as a fact tied to the observed PR and commit; without that observation, narration SHALL NOT claim a hosted merge. Headless hosted close SHALL compose and use the explicit `--message` (or the deterministic fallback) without opening an editor.
 
 #### Scenario: Edited message is not yet accepted
 - **WHEN** the operator saves a multiline message edit
@@ -47,6 +57,14 @@ Interactive close SHALL show each selected operation's progress, verified succes
 - **WHEN** close lands from a process running inside that worktree
 - **THEN** removal remains deferred with commands invoking the same guarded operations after leaving the checkout, without unconditional force-deletion recipes
 
+#### Scenario: Hosted landing narrates the merge it observed
+- **WHEN** a close with a linked PR observes the hosted squash-merge completing
+- **THEN** the progress and summary name GitHub's squash commit and the PR's merged state, instead of the reference-only PR disclosure
+
+#### Scenario: Hosted merge request fails
+- **WHEN** GitHub rejects or cannot perform the squash-merge for the linked PR
+- **THEN** close stops with the blocker and remediation, the local branch, worktree, and PR remain unchanged, and retry reconciles by receipt rather than duplicating effects
+
 ### Requirement: Close recovery ends with the operation rather than a receipt
 Close SHALL follow the temporary recovery contract in worktree-operations. Recovery SHALL reconcile pending effects before ordinary fresh-operation preflight when those effects themselves changed checkout/index state. Candidate, source, base, selected archive output, accepted message, and requested follow-ups SHALL be retained only while unresolved. A candidate observed in the base during recovery SHALL be checked against recorded preparation before being acknowledged. Archive completion without its commit acknowledgement SHALL be verified against actual output and unrelated dirt before committing. Resolved steps SHALL not be blindly repeated; unexplained differences SHALL stop with guidance. Resolved close SHALL delete temporary journals/refs and SHALL NOT persist feature records, receipts, or an idempotency guarantee for unrelated future invocations. Subsequent content equality SHALL be reported as no difference, not proof that an earlier close happened.
 
@@ -61,3 +79,41 @@ Close SHALL follow the temporary recovery contract in worktree-operations. Recov
 #### Scenario: Later close after resolved operation
 - **WHEN** the earlier journal was removed after success and the operator invokes close again
 - **THEN** current Git/content/PR facts drive a fresh review, without requiring or manufacturing a permanent landing receipt
+
+### Requirement: Close keeps its interface coherent across terminal-owned git effects
+
+Interactive close SHALL suspend its alternate-screen interface around every operation whose git process inherits the terminal (the archive commit, the interrupted-archive reconcile commit, the squash candidate commit, and the hosted branch push) so that no git output is painted over the live interface, and SHALL resume with a full repaint before showing further progress or gates. The suspension SHALL cover the mutation itself, not just the commit message. Headless close SHALL be unaffected.
+
+#### Scenario: Archive commit output does not corrupt the review
+
+- **WHEN** interactive close archives selected changes and the archive commit inherits the terminal
+- **THEN** the archive commit's output is isolated from the close interface, and the commit-message review that follows renders without git's commit subject or rename summary entangled with it
+
+#### Scenario: Interrupted-archive reconcile commit stays isolated
+
+- **WHEN** close reconciles an interrupted archive whose remaining step is the commit and that commit inherits the terminal
+- **THEN** its output is isolated from the close interface and the following progress renders coherently
+
+#### Scenario: Squash and hosted effects stay isolated
+
+- **WHEN** interactive close lands locally or through the hosted path
+- **THEN** the squash candidate commit and the branch push run outside the alternate screen and the interface repaints fully afterwards
+
+### Requirement: Close releases input ownership before its completion notice
+
+When interactive close reaches a successful or cancelled terminal state and a completion notice is presented in the shared session, the close screen SHALL remove its keyboard handling before the notice is shown so the notice receives `q`, Escape, Enter, and Ctrl+C and can be dismissed. The close screen SHALL NOT consume keys after the operation resolves.
+
+#### Scenario: Completion notice is dismissible
+
+- **WHEN** a close completes successfully and the shared session shows the close-complete notice
+- **THEN** pressing `q`, Escape, Enter, or Ctrl+C dismisses the notice and returns control
+
+#### Scenario: Cancellation notice is dismissible
+
+- **WHEN** close is cancelled at the review gate and the cancellation notice is shown
+- **THEN** the notice receives input and dismisses normally
+
+#### Scenario: Failure surface still owns input
+
+- **WHEN** interactive close stops with a failure
+- **THEN** the failure surface stays readable and dismissible inside the close screen as before

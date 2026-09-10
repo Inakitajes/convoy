@@ -610,6 +610,24 @@ export async function branchUpstream(branch: string, cwd: string): Promise<strin
   return result.stdout.trim() || undefined
 }
 
+/** The remote branch tip a `git ls-remote` receipt observed, or why it could not be read. */
+export type RemoteBranchTip =
+  | { kind: "known"; tip?: string }
+  | { kind: "unknown"; reason: string }
+
+/**
+ * The tip OID `remote` reports for `refs/heads/<ref>` through `git ls-remote`
+ * — a read-only receipt, never a fetch. A query that could not run is
+ * `unknown` (distinct from a known-but-absent branch), so callers never read
+ * an unreadable remote as "nothing pushed".
+ */
+export async function remoteBranchTip(remote: string, ref: string, cwd: string): Promise<RemoteBranchTip> {
+  const result = await execFile("git", ["ls-remote", "--", remote, `refs/heads/${ref}`], { cwd, allowFailure: true })
+  if (result.exitCode !== 0) return { kind: "unknown", reason: (result.stderr || result.stdout).trim().slice(0, 200) }
+  const tip = result.stdout.split("\n").map((line) => line.trim()).filter(Boolean)[0]?.split(/\s+/)[0]
+  return { kind: "known", ...(tip ? { tip } : {}) }
+}
+
 export async function diffStat(base: string, head: string, cwd: string): Promise<string> {
   const result = await execFile("git", ["diff", "--stat", `${base}..${head}`], { cwd, allowFailure: true })
   return result.exitCode === 0 ? result.stdout : ""

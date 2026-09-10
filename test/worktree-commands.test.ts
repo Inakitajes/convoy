@@ -4,8 +4,8 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { parseAndRun, parseCommand, retiredFeatureDiagnostic } from "../src/cli"
-import { parseWorktreesArgs, renderInventory, runWorktreesCommand, worktreesHelp, parseCloseCommandArgs, runCloseCommandFromArgs, closeCommandHelp, withBlockedReporter, formatBlockers, reportBlocked } from "../src/worktree-commands"
-import { pushCommittedRevision, assertNonForceRefspec } from "../src/operation-handlers"
+import { parseWorktreesArgs, renderInventory, runWorktreesCommand, worktreesHelp, parseCloseCommandArgs, runCloseCommandFromArgs, closeCommandHelp, withBlockedReporter, formatBlockers, reportBlocked, driveClose } from "../src/worktree-commands"
+import { pushCommittedRevision, assertNonForceRefspec, reviewOperation } from "../src/operation-handlers"
 import { createOperation, listPendingOperations, operationsRoot, recordStepIntent } from "../src/operation-journal"
 import { acquireWriterClaim, writerClaimPath } from "../src/writer-claims"
 import { execFile } from "../src/git"
@@ -453,6 +453,77 @@ describe("squash and close", () => {
     expect(landedTree).toBe(sourceTree)
   })
 
+  test("interactive close suspends the terminal around the archive commit (withTerminal seam)", async () => {
+    const fixture = await createFixtureRepo({ worktrees: [{ name: "wt", branch: "feat/x" }] })
+    fixtures.push(fixture)
+    const wt = fixture.worktrees["wt"]!
+    await fixture.write(wt, "openspec/changes/add-widget/proposal.md", "# Proposal: Add widget\n")
+    await fixture.write(wt, "openspec/changes/add-widget/tasks.md", "# Tasks\n\n- [x] one\n- [x] two\n")
+    await fixture.commitAll("feat: propose add-widget", wt)
+    await fixture.write(wt, "code.txt", "implementation\n")
+    await fixture.commitAll("feat: implement", wt)
+
+    // A fake openspec CLI that archives by moving the change into the archive.
+    const binDir = await mkdtemp(join(tmpdir(), "convoy-wt-bin-"))
+    scratch.push(binDir)
+    const script = [
+      "#!/usr/bin/env bun",
+      "import { renameSync, mkdirSync, statSync } from 'node:fs'",
+      "import { join } from 'node:path'",
+      "const [cmd, ...rest] = process.argv.slice(2)",
+      "const root = process.cwd()",
+      "if (cmd === 'archive') {",
+      "  const id = rest.find((a) => !a.startsWith('-'))",
+      "  const from = join(root, 'openspec', 'changes', id)",
+      "  const to = join(root, 'openspec', 'changes', 'archive', id)",
+      "  statSync(from)",
+      "  mkdirSync(join(root, 'openspec', 'changes', 'archive'), { recursive: true })",
+      "  renameSync(from, to)",
+      "  process.exit(0)",
+      "}",
+      "console.error('unexpected openspec invocation: ' + cmd)",
+      "process.exit(3)",
+    ].join("\n")
+    await writeFile(join(binDir, "openspec"), script)
+    await chmod(join(binDir, "openspec"), 0o755)
+
+    const commonDir = (await fixture.git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim()
+    const review = (await reviewOperation({ action: "close", checkout: wt, base: "main", commonDir })).review
+    if (!review.available) throw new Error("setup: close review unavailable")
+
+    const previousPath = process.env.PATH
+    process.env.PATH = `${binDir}:${previousPath ?? ""}`
+    // Which wrapped action moved the source branch's HEAD? Only the archive
+    // commit does — the squash candidate commits inside a private worktree and
+    // advances the base, never the source.
+    const seamMoves: boolean[] = []
+    try {
+      const result = await driveClose({ kind: "close", worktree: wt, base: "main", changes: ["add-widget"] }, commonDir, review, {
+        withTerminal: async (action) => {
+          const before = (await execFile("git", ["rev-parse", "HEAD"], { cwd: wt })).stdout.trim()
+          const value = await action()
+          const after = (await execFile("git", ["rev-parse", "HEAD"], { cwd: wt })).stdout.trim()
+          seamMoves.push(before !== after)
+          return value
+        },
+      })
+      expect(result.ok).toBe(true)
+    } finally {
+      process.env.PATH = previousPath
+    }
+
+    // The seam wrapped the archive commit and the squash candidate.
+    expect(seamMoves.length).toBeGreaterThanOrEqual(2)
+    // Exactly the archive commit advanced the source branch inside the seam.
+    expect(seamMoves.filter(Boolean)).toHaveLength(1)
+    // The archive still landed: the selected change moved to the archive and
+    // the base gained the whole-branch squash.
+    const archiveListing = (await fixture.git(["ls-tree", "-r", "--name-only", "feat/x", "openspec/changes/archive/"])).trim()
+    expect(archiveListing).toContain("add-widget")
+    const baseTip = (await fixture.git(["rev-parse", "main"])).trim()
+    expect((await fixture.git(["rev-parse", `${baseTip}^{tree}`])).trim()).toBe((await fixture.git(["rev-parse", "feat/x^{tree}"])).trim())
+  })
+
   test("equal trees land nothing and authorize nothing", async () => {
     const fixture = await createFixtureRepo({ worktrees: [{ name: "wt", branch: "feat/x" }] })
     fixtures.push(fixture)
@@ -618,8 +689,30 @@ describe("convoy close routing (CC-3)", () => {
     const output = chunks.join("")
     expect(output).toContain("sync (as needed)")
     expect(output).toContain("add-widget")
-    expect(output).toContain("whole-branch squash")
+    expect(output).toContain("whole-branch")
+    // Without --local-landing the dry-run discloses the conditional hosted
+    // landing instead of claiming nothing is ever pushed or merged.
+    expect(output).toContain("linked open pull request")
     expect(await fixture.git(["log", "--oneline", "--all"])).not.toMatch(/archive/)
+  })
+
+  test("--local-landing keeps the dry-run's landing local", async () => {
+    const fixture = await createFixtureRepo({ worktrees: [{ name: "wt", branch: "feat/x" }] })
+    fixtures.push(fixture)
+    const chunks: string[] = []
+    const originalWrite = process.stdout.write.bind(process.stdout)
+    process.stdout.write = mock((chunk: string) => {
+      chunks.push(chunk)
+      return true
+    }) as typeof process.stdout.write
+    try {
+      await runCloseCommandFromArgs(parseCloseCommandArgs(["--worktree", fixture.worktrees["wt"]!, "--base", "main", "--local-landing", "--dry-run"]), fixture.root)
+    } finally {
+      process.stdout.write = originalWrite
+    }
+    const output = chunks.join("")
+    expect(output).toContain("whole-branch squash")
+    expect(output).toContain("nothing is pushed or merged")
   })
 })
 

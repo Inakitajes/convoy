@@ -477,6 +477,30 @@ export async function dispatchWorkAction(targetDir: string, route: TuiRoute, wor
     )
     return
   }
+  if (action === "archive") {
+    // Archive acts on one explicitly selected change (never by discovery), so
+    // the operator picks from the checkout's own active changes first.
+    const { readCheckoutActiveChanges } = await import("./checkout-openspec")
+    const { showNoticeTui } = await import("./notice-tui")
+    const active = await readCheckoutActiveChanges(worktree)
+    if (active.kind === "unknown") {
+      await showNoticeTui(route, { title: "archive change", message: `this checkout's active changes could not be read: ${active.reason}` })
+      return
+    }
+    if (active.value.length === 0) {
+      await showNoticeTui(route, { title: "archive change", message: "this checkout has no active changes to archive" })
+      return
+    }
+    const { showChangePickerTui } = await import("./change-picker-tui")
+    const choice = await showChangePickerTui(route, {
+      title: "archive change",
+      changes: active.value.map((change) => ({ changeId: change.changeId, ...(change.title !== undefined ? { title: change.title } : {}) })),
+    })
+    if (choice.kind !== "select") return
+    const { runWorktreeArchive } = await import("./worktree-commands")
+    await runMenuGuarded(route, () => runWorktreeArchive({ worktree, changes: [choice.changeId], route }))
+    return
+  }
   if (action === "fetch" || action === "sync" || action === "push" || action === "pr" || action === "squash" || action === "remove") {
     await runWorktreeMenuOperation(targetDir, route, worktree, action)
     return
@@ -538,7 +562,7 @@ async function confirmHomeClose(input: {
   const message = [
     `Close ${displayName} (${input.worktree})?`,
     "",
-    "Close runs sync → archive → squash: it archives the checkout's active changes and lands ONE commit covering the WHOLE branch on the base — including edits outside the selected changes. Nothing is pushed, merged, or deleted; push and cleanup stay separate.",
+    "Close runs sync → archive → landing: it archives the checkout's active changes and lands ONE commit covering the WHOLE branch on the base — including edits outside the selected changes. Without a linked open pull request nothing is pushed or merged; when close detects one, the landing is hosted (push the branch, GitHub squash-merges that PR with the reviewed message, fast-forward the base) and the review gate names those steps before any effect. Push and cleanup stay separate otherwise.",
     "",
     `branch   ${input.branch || "(no local branch)"}`,
     `base     ${input.base}`,
@@ -615,7 +639,12 @@ async function runWorktreeMenuOperation(targetDir: string, route: TuiRoute, work
       return
     }
     if (action === "pr") {
-      await runMenuGuarded(route, () => runWorktreesCommand({ kind: "pr", worktree, push: false }))
+      // The interactive surface reviews and edits the composed text, then
+      // pushes before creating (reusing the publication seam) and reports the
+      // outcome in a dialog — it never writes raw stdout over the live UI and
+      // never creates a PR from a stale remote head.
+      const { runInteractivePublish } = await import("./publish-action")
+      await runInteractivePublish({ worktree, route })
       return
     }
     if (action === "remove") {
@@ -1328,6 +1357,13 @@ async function dispatchSpecsResolution(targetDir: string, resolution: SpecsResol
       await runMenuGuarded(route, () => runWorktreeClose({ checkout: resolution.worktreeDir, base, changes: [resolution.changeID] }, targetDir))
       return { changeId: resolution.changeID, checkout: resolution.worktreeDir }
     }
+    case "archive-change": {
+      // The board's handoff archives the selected change through the guarded
+      // operation (task: archive change), with its outcome shown in a notice.
+      const { runWorktreeArchive } = await import("./worktree-commands")
+      await runMenuGuarded(route, () => runWorktreeArchive({ worktree: resolution.worktreeDir, changes: [resolution.changeID], route }))
+      return { changeId: resolution.changeID, checkout: resolution.worktreeDir }
+    }
   }
 }
 
@@ -1402,15 +1438,10 @@ export async function openCheckoutConversation(input: { launchDir: string; route
   const branch = (await currentBranch(input.checkout).catch(() => undefined)) ?? ""
 
   if (!(await claimAuthoringWriter({ launchDir: input.launchDir, checkout: input.checkout, branch, sessionId: ref.sessionId, route: input.route }))) return
-  // Suspend the shared home-session renderer; the conversation owns the
-  // terminal until its client exits (design D4).
-  input.route.session.renderer.suspend()
-  let exitCode: number
-  try {
-    exitCode = await openConversationForeground({ checkout: input.checkout, ref, suspend: () => {}, resume: () => {} })
-  } finally {
-    input.route.session.renderer.resume()
-  }
+  // The shared foreground host owns the suspend/clear/resume lifecycle; the
+  // conversation client owns the terminal until it exits (design D4).
+  const renderer = input.route.session.renderer
+  const exitCode = await openConversationForeground({ checkout: input.checkout, ref, suspend: () => renderer.suspend(), resume: () => renderer.resume() })
   await releaseAuthoringWriterIfIdle({ launchDir: input.launchDir, checkout: input.checkout, branch, sessionId: ref.sessionId })
   if (exitCode !== 0) {
     await reportHandoffBlocker(
@@ -1431,13 +1462,8 @@ async function openLinkedConversation(
   const { currentBranch } = await import("./git")
   const branch = (await currentBranch(input.checkout).catch(() => undefined)) ?? ""
   if (!(await claimAuthoringWriter({ launchDir: input.launchDir, checkout: input.checkout, branch, sessionId: ref.sessionId, route: input.route }))) return
-  input.route.session.renderer.suspend()
-  let exitCode: number
-  try {
-    exitCode = await openConversationForeground({ checkout: input.checkout, ref, suspend: () => {}, resume: () => {} })
-  } finally {
-    input.route.session.renderer.resume()
-  }
+  const renderer = input.route.session.renderer
+  const exitCode = await openConversationForeground({ checkout: input.checkout, ref, suspend: () => renderer.suspend(), resume: () => renderer.resume() })
   await releaseAuthoringWriterIfIdle({ launchDir: input.launchDir, checkout: input.checkout, branch, sessionId: ref.sessionId })
   if (exitCode !== 0) {
     await reportHandoffBlocker(
@@ -1563,6 +1589,11 @@ async function proposeInCheckout(input: { launchDir: string; route: TuiRoute; ch
       branch: input.branch,
       checkoutPath: input.checkout,
       kind: "authoring",
+      // The claim is taken before any session exists, under the "convoy"
+      // pre-session owner: the failure-path release and the post-session
+      // re-own (`reconcileOwner: "convoy"`) match this owner, so a failed
+      // propose always releases what it claimed.
+      owner: "convoy",
     })
     if (acquired.status === "acquired") {
       claimed = true
@@ -1591,7 +1622,11 @@ async function proposeInCheckout(input: { launchDir: string; route: TuiRoute; ch
     boundedClose?.()
     if (claimed && commonDir) {
       const { releaseWriterClaim } = await import("./writer-claims")
-      await releaseWriterClaim({ commonDir, branch: input.branch, owner: ref?.sessionId ?? "convoy" }).catch(() => {})
+      // The re-own to the session id only runs after success, so on this
+      // path the claim is still this process's: release by pid, which
+      // matches regardless of the owner string (a mismatched-owner release
+      // is a no-op and would wedge the checkout behind an authoring claim).
+      await releaseWriterClaim({ commonDir, branch: input.branch, ownerPid: process.pid }).catch(() => {})
     }
     return
   }
@@ -1603,13 +1638,8 @@ async function proposeInCheckout(input: { launchDir: string; route: TuiRoute; ch
     await acquireWriterClaim({ commonDir, branch: input.branch, checkoutPath: input.checkout, kind: "authoring", owner: ref.sessionId, reconcileOwner: "convoy" }).catch(() => {})
   }
 
-  input.route.session.renderer.suspend()
-  let exitCode: number
-  try {
-    exitCode = await openConversationForeground({ checkout: input.checkout, ref, suspend: () => {}, resume: () => {} })
-  } finally {
-    input.route.session.renderer.resume()
-  }
+  const renderer = input.route.session.renderer
+  const exitCode = await openConversationForeground({ checkout: input.checkout, ref, suspend: () => renderer.suspend(), resume: () => renderer.resume() })
   await releaseAuthoringWriterIfIdle({ launchDir: input.launchDir, checkout: input.checkout, branch: input.branch, sessionId: ref.sessionId })
   if (exitCode !== 0) {
     await reportHandoffBlocker(`the authoring client exited with code ${exitCode}`, ["reopen the worktree to continue"], input.route)

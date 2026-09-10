@@ -67,18 +67,21 @@ export type HomeWorkAction =
   | "squash"
   | "remove"
   | "close"
+  | "archive"
 
 /**
- * The detail's action sections (capability home-launcher delta): the Life
- * Cycle — conversation, proposal, pipeline, and the deliberate close that
- * finishes it — then the guarded Git/publication operations, ending with
- * worktree removal.
+ * The detail's action sections: the OpenCode authoring sessions, the Runs
+ * section (whose first row is the always-available New run action, with the
+ * checkout's recent runs beneath it), the OpenSpec change operations, and the
+ * guarded Git operations — with the Linked Specs observation last.
  */
-export type DetailSection = "lifecycle" | "git"
+export type DetailSection = "sessions" | "runs" | "git" | "openspec"
 
 /** The detail sections' display labels, in render order. */
 const DETAIL_SECTIONS: ReadonlyArray<{ section: DetailSection; label: string }> = [
-  { section: "lifecycle", label: "Life Cycle" },
+  { section: "sessions", label: "Sessions" },
+  { section: "runs", label: "Runs" },
+  { section: "openspec", label: "OpenSpec" },
   { section: "git", label: "git" },
 ]
 
@@ -645,9 +648,9 @@ export class HomeLauncher {
     // Shared per-action guards, projected as advisory enabled states: a
     // blocked action stays inspectable with its reason (design D4). The
     // handlers revalidate the same guards before any effect. The actions ride
-    // two labeled sections: the Life Cycle (ending in the deliberate close
-    // composition) and the guarded Git/publication operations, which end with
-    // worktree removal.
+    // four labeled sections: Sessions (the OpenCode authoring surfaces), Runs
+    // (led by the New run row), OpenSpec (the change operations), and git (the
+    // guarded operations, ending with worktree removal), with Linked Specs last.
     const verified = worktree.accessible && !worktree.bare
     // The advisory projection of the shared guard: only a readable claim that
     // is live or uncertain disables mutations. A stale claim is provably not
@@ -663,10 +666,10 @@ export class HomeLauncher {
         ? "a managed writer's liveness is uncertain (its process state disagrees with its heartbeat) — inspect or stop it before mutating"
         : "a managed writer is active in this checkout — inspect or stop it before mutating"
     return [
-      // ── work ──────────────────────────────────────────────────────────────
+      // ── sessions: the OpenCode authoring surfaces ─────────────────────────
       {
         id: "conversation",
-        section: "lifecycle",
+        section: "sessions",
         key: "v",
         label: "Open conversation",
         enabled: verified,
@@ -674,29 +677,22 @@ export class HomeLauncher {
       },
       {
         id: "conversation-external",
-        section: "lifecycle",
+        section: "sessions",
         key: "w",
         label: "Open in window",
         enabled: verified,
         blocker: verified ? undefined : inaccessible,
       },
-      {
-        id: "propose",
-        section: "lifecycle",
-        key: "p",
-        label: "Propose a change",
-        enabled: verified,
-        blocker: verified ? undefined : inaccessible,
-      },
+      // ── runs: New run leads the section, always available ────────────────
       {
         id: "pipeline",
-        section: "lifecycle",
-        key: "e",
-        label: "Execute pipeline",
+        section: "runs",
+        key: "n",
+        label: "New run",
         enabled: verified,
         blocker: verified ? undefined : inaccessible,
       },
-      // ── git ───────────────────────────────────────────────────────────────
+      // ── git: the guarded Git/publication operations ──────────────────────
       {
         id: "fetch",
         section: "git",
@@ -725,25 +721,17 @@ export class HomeLauncher {
         id: "pr",
         section: "git",
         key: "g",
-        label: "Compose pull request",
-        enabled: verified && attached,
-        blocker: !verified ? inaccessible : !attached ? detached : undefined,
+        // Publication pushes the branch now, so it shares the push action's
+        // writer guard: a live managed writer must be stopped before mutating.
+        label: "Create pull request",
+        enabled: verified && attached && !writerBusy,
+        blocker: !verified ? inaccessible : !attached ? detached : writerBusy ? busy : undefined,
       },
       {
         id: "squash",
         section: "git",
         key: "m",
         label: "Squash to base",
-        enabled: verified && attached && !writerBusy,
-        blocker: !verified ? inaccessible : !attached ? detached : writerBusy ? busy : undefined,
-      },
-      // The deliberate composition finishes the Life Cycle; worktree removal
-      // is a Git operation under the same shared guard as every other mutation.
-      {
-        id: "close",
-        section: "lifecycle",
-        key: "x",
-        label: "Close review",
         enabled: verified && attached && !writerBusy,
         blocker: !verified ? inaccessible : !attached ? detached : writerBusy ? busy : undefined,
       },
@@ -761,6 +749,31 @@ export class HomeLauncher {
               ? busy
               : undefined,
       },
+      // ── openspec: the change operations, directly above Linked Specs ──────
+      {
+        id: "propose",
+        section: "openspec",
+        key: "p",
+        label: "Propose a change",
+        enabled: verified,
+        blocker: verified ? undefined : inaccessible,
+      },
+      {
+        id: "archive",
+        section: "openspec",
+        key: "a",
+        label: "Archive change",
+        enabled: verified && !writerBusy,
+        blocker: !verified ? inaccessible : writerBusy ? busy : undefined,
+      },
+      {
+        id: "close",
+        section: "openspec",
+        key: "x",
+        label: "Close (archive & merge)",
+        enabled: verified && attached && !writerBusy,
+        blocker: !verified ? inaccessible : !attached ? detached : writerBusy ? busy : undefined,
+      },
     ]
   }
 
@@ -773,11 +786,18 @@ export class HomeLauncher {
   private detailEntries(): DetailEntry[] {
     const worktree = this.detailWorktree
     if (!worktree) return []
-    const entries: DetailEntry[] = this.actionsFor(worktree).map((action) => ({ kind: "action", action }))
+    const actions = this.actionsFor(worktree)
+    const inSection = (section: DetailSection): DetailEntry[] =>
+      actions.filter((action) => action.section === section).map((action) => ({ kind: "action", action }))
+    // The order here is the render order: the Runs action heads its section and
+    // its runs follow, then the OpenSpec change operations, the git operations,
+    // and finally the linked specs.
+    const entries: DetailEntry[] = [...inSection("sessions"), ...inSection("runs")]
     const runs = this.runsEvidence.get(worktree.path)
     if (Array.isArray(runs)) {
       for (const run of runs) entries.push({ kind: "run", run })
     }
+    entries.push(...inSection("openspec"), ...inSection("git"))
     if (!worktree.changesUnknown) {
       for (const change of worktree.changes) entries.push({ kind: "change", change })
     }
@@ -1689,6 +1709,40 @@ export class HomeLauncher {
     if (worktree.dirt) {
       fact("dirt", worktree.dirt.kind === "known" ? (worktree.dirt.value.dirty ? `${worktree.dirt.value.fileCount} file(s) uncommitted` : "clean") : `unknown (${worktree.dirt.reason})`, worktree.dirt.kind === "known" && worktree.dirt.value.dirty ? theme.yellow : theme.text)
     }
+    // The row fold already reports these observations; opening the detail must
+    // not drop them (capability home-launcher: worktree detail surfaces the
+    // observed Git state). Base and upstream stay independent facts with their
+    // own honest unknown/no-upstream conditions — never a single sync verdict.
+    if (worktree.upstream) {
+      const upstream = worktree.upstream
+      let value: string
+      if (upstream.kind === "unknown") {
+        value = `unknown (${upstream.reason})`
+      } else if (upstream.value.upstream === undefined) {
+        value = "none (no upstream)"
+      } else {
+        const counts: string[] = []
+        if (upstream.value.ahead) counts.push(`${upstream.value.ahead} unpushed`)
+        if (upstream.value.behind) counts.push(`${upstream.value.behind} to pull`)
+        value = counts.length > 0 ? `${upstream.value.upstream} · ${counts.join(" · ")}` : `${upstream.value.upstream} · in sync`
+      }
+      fact("upstream", value, upstream.kind === "unknown" ? theme.yellow : theme.dim)
+    }
+    if (worktree.baseDivergence) {
+      const base = worktree.baseDivergence
+      let value: string
+      if (base.kind === "unknown") {
+        value = `unknown (${base.reason})`
+      } else if (base.value.ahead === 0 && base.value.behind === 0) {
+        value = "in sync with base"
+      } else {
+        const counts: string[] = []
+        if (base.value.behind) counts.push(`${base.value.behind} behind base`)
+        if (base.value.ahead) counts.push(`${base.value.ahead} ahead of base`)
+        value = counts.join(" · ")
+      }
+      fact("base", value, base.kind === "unknown" ? theme.yellow : theme.text)
+    }
     if (worktree.activity) {
       fact("activity", worktree.activity.kind === "known" ? `${worktree.activity.value.total} live run(s)` : `unknown (${worktree.activity.reason})`)
     }
@@ -1754,21 +1808,23 @@ export class HomeLauncher {
     for (const { section, label } of DETAIL_SECTIONS) {
       lines.push(...this.headingLines(label, width))
       for (const entry of entryRows(section)) pushEntry(entry)
+      // The Runs section lists the checkout's recent runs (or an honest empty
+      // line) beneath its New run row; every other section is actions only.
+      if (section === "runs") {
+        const runs = this.runsEvidence.get(worktree.path)
+        if (runs === "checking") {
+          lines.push(new StyledText([raw(" ".repeat(4)), fg(theme.dim)("checking…")]))
+        } else if (runs && "error" in runs) {
+          lines.push(new StyledText([raw(" ".repeat(4)), fg(theme.yellow)(`unknown — ${truncate(runs.error, Math.max(8, width - 8))}`)]))
+        } else if (runs && runs.length > 0) {
+          for (const run of runs) pushEntry({ kind: "run", run })
+        } else if (runs) {
+          lines.push(new StyledText([raw(" ".repeat(4)), fg(theme.dim)("no runs recorded for this checkout")]))
+        }
+      }
       lines.push(new StyledText([raw("")]))
     }
-    lines.push(...this.headingLines("recent runs", width))
-    const runs = this.runsEvidence.get(worktree.path)
-    if (runs === "checking") {
-      lines.push(new StyledText([raw(" ".repeat(4)), fg(theme.dim)("checking…")]))
-    } else if (runs && "error" in runs) {
-      lines.push(new StyledText([raw(" ".repeat(4)), fg(theme.yellow)(`unknown — ${truncate(runs.error, Math.max(8, width - 8))}`)]))
-    } else if (runs && runs.length > 0) {
-      for (const run of runs) pushEntry({ kind: "run", run })
-    } else if (runs) {
-      lines.push(new StyledText([raw(" ".repeat(4)), fg(theme.dim)("no runs recorded for this checkout")]))
-    }
-    lines.push(new StyledText([raw("")]))
-    lines.push(...this.headingLines("linked specs", width))
+    lines.push(...this.headingLines("Linked Specs", width))
     if (worktree.changesUnknown) {
       lines.push(new StyledText([raw(" ".repeat(4)), fg(theme.yellow)(`unknown — ${truncate(worktree.changesUnknown, Math.max(8, width - 8))}`)]))
     } else if (worktree.changes.length > 0) {

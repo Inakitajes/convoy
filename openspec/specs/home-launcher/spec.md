@@ -130,3 +130,51 @@ Home SHALL expose contextual fetch, sync-with-detected-base (explicit bases thro
 
 - **WHEN** a locked or inaccessible worktree prevents a requested operation
 - **THEN** Home shows that operation's shared disabled reason rather than hiding the worktree or assigning it a blocking lifecycle stage
+
+### Requirement: Worktree detail groups actions by toolchain
+
+Worktree detail SHALL group its actions into four labeled sections in order: Sessions (Open conversation, Open in window), Runs, OpenSpec (Propose a change, Archive change, Close (archive & merge)), and git (the guarded Git/publication operations, ending with worktree removal); the Linked Specs observation SHALL follow the git section. The Runs section SHALL always list a New run action as its first row, rendered whether or not the checkout has recent runs, with the checkout's recent runs listed beneath it; section headings SHALL remain plain headings. Archive change SHALL open an explicit selection of the checkout's active changes and SHALL archive only the chosen change, never by discovery. Every action SHALL keep its shared per-action guard and remain visible with its blocker when disabled.
+
+#### Scenario: Sections render in order
+
+- **WHEN** a worktree detail with recent runs renders
+- **THEN** it shows Sessions, Runs, OpenSpec, and git sections in that order, followed by Linked Specs
+
+#### Scenario: New run is present without runs
+
+- **WHEN** the checkout has no recent runs
+- **THEN** the Runs section still lists the New run action as its first row
+
+#### Scenario: Archive selects one change
+
+- **WHEN** the operator chooses Archive change
+- **THEN** they select one of the checkout's active changes and the guarded archive runs for that change only
+
+#### Scenario: Close is labeled for what it does
+
+- **WHEN** the OpenSpec section renders
+- **THEN** close appears as Close (archive & merge)
+
+### Requirement: Worktree detail surfaces the observed Git state
+
+Worktree detail SHALL show the same independently observed Git state as the row it opened from: working-tree dirt (or an honest unknown), ahead/behind relative to the branch's configured upstream with the upstream ref identified, ahead/behind relative to the selected base, and detached HEAD. Dirt, the upstream comparison, and the base comparison SHALL remain independent facts — never collapsed into a single synchronization verdict or a lifecycle stage — and an unavailable comparison SHALL be disclosed as unknown with its reason rather than omitted or reported as zero. A branch without an upstream SHALL be reported as having none, distinct from zero divergence.
+
+#### Scenario: Detail shows upstream and base divergence
+
+- **WHEN** a branch is ahead of its upstream and behind its selected base
+- **THEN** the detail identifies the upstream ref and shows the upstream and base comparisons independently
+
+#### Scenario: Divergence observation is unavailable
+
+- **WHEN** an upstream or base comparison cannot be computed
+- **THEN** the detail reports that comparison as unknown with its reason instead of omitting it or showing zero divergence
+
+#### Scenario: Detached checkout
+
+- **WHEN** the checkout has a detached HEAD
+- **THEN** the detail identifies the detached state rather than showing a branch name
+
+#### Scenario: No upstream
+
+- **WHEN** the checkout's branch has no configured upstream
+- **THEN** the detail reports no upstream as a distinct condition, not as zero ahead/behind

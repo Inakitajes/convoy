@@ -1,4 +1,5 @@
-import { isAncestor, resolveCommit, statusPorcelain } from "./git"
+import { isAncestor, remoteBranchTip, resolveCommit, statusPorcelain } from "./git"
+import { readPrMergeState } from "./pr-merge-state"
 import { readCheckoutActiveChanges, readCheckoutArchives } from "./checkout-openspec"
 import { openspecDirName } from "./openspec"
 import type { OperationRecord, OperationStep } from "./operation-journal"
@@ -41,6 +42,8 @@ type EffectIntent = {
   headBranch?: unknown
   baseRepo?: unknown
   baseBranch?: unknown
+  prNumber?: unknown
+  mergeCommit?: unknown
 }
 
 function intentOf(step: OperationStep, record: OperationRecord): EffectIntent {
@@ -166,6 +169,46 @@ export async function reconcileStepReality(step: OperationStep, record: Operatio
       return { finding: "verified", evidence: { worktree: intent.worktree, branch: intent.branch } }
     }
     return { finding: "pending", reason: `the destination ${intent.worktree} is not a registered checkout on ${intent.branch} — the creation step has not completed` }
+  }
+
+  // Hosted close-landing steps (change `close-lands-via-github-pr`, design
+  // D4): each remote step reconciles by receipt — an authoritative query of
+  // the actual remote/hosting state, never a replayed effect.
+  if (record.kind === "close" && step.id === "branch-push" && typeof intent.remote === "string" && typeof intent.remoteRef === "string" && typeof intent.oid === "string") {
+    const queried = await remoteBranchTip(intent.remote, intent.remoteRef, gitCwd)
+    if (queried.kind === "unknown") {
+      return { finding: "pending", reason: `the remote ${intent.remote} could not be queried: ${queried.reason}` }
+    }
+    const remoteTip = queried.tip
+    if (remoteTip === intent.oid) {
+      return { finding: "verified", evidence: { remote: intent.remote, remoteRef: intent.remoteRef, oid: intent.oid } }
+    }
+    return { finding: "pending", reason: `${intent.remote} holds ${remoteTip ? remoteTip.slice(0, 8) : "nothing"} on ${intent.remoteRef}, not the pinned ${intent.oid.slice(0, 8)} — the push has not completed` }
+  }
+
+  if (record.kind === "close" && step.id === "hosted-merge" && typeof intent.prNumber === "number") {
+    const state = await readPrMergeState(intent.prNumber, gitCwd)
+    if (state.reason !== undefined) {
+      return { finding: "pending", reason: `the pull request state could not be read: ${state.reason}` }
+    }
+    if (state.state === "MERGED") {
+      return { finding: "verified", evidence: { prNumber: intent.prNumber, ...(state.mergeCommit ? { mergeCommit: state.mergeCommit } : {}) } }
+    }
+    if (state.state === "OPEN") {
+      return { finding: "pending", reason: `PR #${intent.prNumber} is still open — the squash-merge request has not completed` }
+    }
+    return { finding: "unexplained", reason: `PR #${intent.prNumber} is ${state.state ?? "in an unreadable state"} — a close cannot have landed through it; inspect before any retry` }
+  }
+
+  if (record.kind === "close" && step.id === "base-advancement" && typeof intent.base === "string") {
+    if (typeof intent.mergeCommit !== "string") {
+      return { finding: "pending", reason: `no hosted squash commit was recorded for the ${intent.base} advancement` }
+    }
+    const contained = await isAncestor(intent.mergeCommit, intent.base, gitCwd)
+    if (contained) {
+      return { finding: "verified", evidence: { base: intent.base, mergeCommit: intent.mergeCommit } }
+    }
+    return { finding: "pending", reason: `${intent.base} does not yet contain the hosted squash commit ${intent.mergeCommit.slice(0, 8)} — fetch and reconcile the base` }
   }
 
   return { finding: "pending", reason: "no re-observable effect was recorded for this step" }
