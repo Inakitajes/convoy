@@ -23,6 +23,7 @@ import { homeRendererConfig, sceneForRoute, type TuiRoute, type TuiScene } from 
 
 import { observeWorktreePr, type BoardWorktree } from "./control-board"
 import { runStatusStyles } from "./runs-browser"
+import { formatDuration } from "./run-status"
 import type { LocalActiveChange } from "./checkout-openspec"
 import type { RunStatusKind } from "./runs"
 
@@ -68,12 +69,18 @@ export type HomeWorkAction =
   | "close"
 
 /**
- * The detail's action sections (capability home-launcher delta): work and
- * conversation actions first, then the guarded Git/publication operations,
- * then the destructive cluster — kept together so the dangerous entries are
- * never scattered between the safe ones.
+ * The detail's action sections (capability home-launcher delta): the Life
+ * Cycle — conversation, proposal, pipeline, and the deliberate close that
+ * finishes it — then the guarded Git/publication operations, ending with
+ * worktree removal.
  */
-export type DetailSection = "work" | "git" | "destructive"
+export type DetailSection = "lifecycle" | "git"
+
+/** The detail sections' display labels, in render order. */
+const DETAIL_SECTIONS: ReadonlyArray<{ section: DetailSection; label: string }> = [
+  { section: "lifecycle", label: "Life Cycle" },
+  { section: "git", label: "git" },
+]
 
 /** One recent run of this checkout, listed in the detail's observations. */
 export type DetailRun = {
@@ -638,19 +645,28 @@ export class HomeLauncher {
     // Shared per-action guards, projected as advisory enabled states: a
     // blocked action stays inspectable with its reason (design D4). The
     // handlers revalidate the same guards before any effect. The actions ride
-    // three labeled sections — work, git, destructive — so the dangerous
-    // cluster is never scattered between the safe ones.
+    // two labeled sections: the Life Cycle (ending in the deliberate close
+    // composition) and the guarded Git/publication operations, which end with
+    // worktree removal.
     const verified = worktree.accessible && !worktree.bare
-    const writerBusy = worktree.activity?.kind === "known" && worktree.activity.value.total > 0
+    // The advisory projection of the shared guard: only a readable claim that
+    // is live or uncertain disables mutations. A stale claim is provably not
+    // writing, and an unreadable one is neither free nor live — the executing
+    // guard re-observes it before any effect.
+    const writer = worktree.writer?.kind === "known" ? worktree.writer.value : undefined
+    const writerBusy = writer !== undefined && writer.liveness !== "stale"
     const attached = worktree.branch !== undefined
     const inaccessible = "the checkout is not accessible — repair or prune the registration first"
     const detached = "the checkout has a detached HEAD — this action needs an attached branch to name the source"
-    const busy = "a managed writer is active in this checkout — inspect or stop it before mutating"
+    const busy =
+      writer?.liveness === "uncertain"
+        ? "a managed writer's liveness is uncertain (its process state disagrees with its heartbeat) — inspect or stop it before mutating"
+        : "a managed writer is active in this checkout — inspect or stop it before mutating"
     return [
       // ── work ──────────────────────────────────────────────────────────────
       {
         id: "conversation",
-        section: "work",
+        section: "lifecycle",
         key: "v",
         label: "Open conversation",
         enabled: verified,
@@ -658,7 +674,7 @@ export class HomeLauncher {
       },
       {
         id: "conversation-external",
-        section: "work",
+        section: "lifecycle",
         key: "w",
         label: "Open in window",
         enabled: verified,
@@ -666,7 +682,7 @@ export class HomeLauncher {
       },
       {
         id: "propose",
-        section: "work",
+        section: "lifecycle",
         key: "p",
         label: "Propose a change",
         enabled: verified,
@@ -674,7 +690,7 @@ export class HomeLauncher {
       },
       {
         id: "pipeline",
-        section: "work",
+        section: "lifecycle",
         key: "e",
         label: "Execute pipeline",
         enabled: verified,
@@ -721,12 +737,11 @@ export class HomeLauncher {
         enabled: verified && attached && !writerBusy,
         blocker: !verified ? inaccessible : !attached ? detached : writerBusy ? busy : undefined,
       },
-      // ── destructive ───────────────────────────────────────────────────────
-      // The deliberate composition leads the dangerous cluster; removal and
-      // branch deletion follow it, in rising sharpness.
+      // The deliberate composition finishes the Life Cycle; worktree removal
+      // is a Git operation under the same shared guard as every other mutation.
       {
         id: "close",
-        section: "destructive",
+        section: "lifecycle",
         key: "x",
         label: "Close review",
         enabled: verified && attached && !writerBusy,
@@ -734,7 +749,7 @@ export class HomeLauncher {
       },
       {
         id: "remove",
-        section: "destructive",
+        section: "git",
         key: "d",
         label: "Remove worktree",
         enabled: verified && !worktree.main && !writerBusy,
@@ -1587,6 +1602,8 @@ export class HomeLauncher {
       if (worktree.locked) state.push("locked")
       if (worktree.prunable) state.push("prunable")
       fact("state", state.join(" · ") || (dirt?.kind === "known" ? "clean" : "unknown"), dirt?.kind !== "known")
+      const writer = writerFact(worktree.writer)
+      if (writer) fact("writer", writer.text, writer.warn)
       // Linked PR at the same level as state, on demand: "checking…" while
       // the row's own query runs, the honest fact once it lands — none is
       // honest, unknown is never "no PR", and a merged PR never reads as
@@ -1647,10 +1664,10 @@ export class HomeLauncher {
   /**
    * The detail screen, speaking the list's section language: a divider rule
    * names the worktree, the observed facts ride the fold's label rhythm, and
-   * the selectable rows follow under labeled sections — the work actions,
-   * the guarded Git operations, the destructive cluster, then the checkout's
-   * recent runs and linked changes as focused observations. The selected row
-   * is one full-width accent block hanging from an inverted navy marker.
+   * the selectable rows follow under labeled sections — the Life Cycle, the
+   * guarded Git operations, then the checkout's recent runs and linked
+   * changes as focused observations. The selected row is one full-width
+   * accent block hanging from an inverted navy marker.
    */
   private detailLines(width: number): { lines: StyledText[]; selectedLine: number } {
     const worktree = this.detailWorktree
@@ -1667,6 +1684,8 @@ export class HomeLauncher {
       lines.push(new StyledText([fg(theme.faint)(label.padEnd(9, " ")), raw(" "), fg(color)(truncate(value, Math.max(8, width - 11)))]))
     }
     fact("branch", worktree.detached ? "detached HEAD" : (worktree.branch ?? "(no branch)"))
+    const writer = writerFact(worktree.writer)
+    if (writer) fact("writer", writer.text, writer.warn ? theme.yellow : theme.dim)
     if (worktree.dirt) {
       fact("dirt", worktree.dirt.kind === "known" ? (worktree.dirt.value.dirty ? `${worktree.dirt.value.fileCount} file(s) uncommitted` : "clean") : `unknown (${worktree.dirt.reason})`, worktree.dirt.kind === "known" && worktree.dirt.value.dirty ? theme.yellow : theme.text)
     }
@@ -1732,8 +1751,8 @@ export class HomeLauncher {
       }
       lines.push(selected ? this.highlighted(chunks, width) : new StyledText(chunks))
     }
-    for (const section of ["work", "git", "destructive"] as const) {
-      lines.push(...this.headingLines(section, width))
+    for (const { section, label } of DETAIL_SECTIONS) {
+      lines.push(...this.headingLines(label, width))
       for (const entry of entryRows(section)) pushEntry(entry)
       lines.push(new StyledText([raw("")]))
     }
@@ -1947,6 +1966,22 @@ function prObservationText(pr: NonNullable<BoardWorktree["pr"]>): string {
     return `ambiguous — ${pr.matches.length} matching pull requests (${pr.matches.map((match) => `#${match.number}`).join(", ")}): ${pr.reason}`
   }
   return `unknown (${pr.reason})`
+}
+
+/**
+ * The managed-writer fact shared by the fold and the detail: kind, owner, and
+ * liveness (live/uncertain/stale) with the claim's age, or none; an unreadable
+ * or newer-schema claim is unknown with its reason, never "free". `warn` marks
+ * the states that disable mutating actions.
+ */
+function writerFact(writer: BoardWorktree["writer"]): { text: string; warn: boolean } | undefined {
+  if (!writer) return undefined
+  if (writer.kind === "unknown") return { text: `unknown (${writer.reason})`, warn: true }
+  if (writer.value === undefined) return { text: "none", warn: false }
+  const claim = writer.value
+  const owner = claim.owner ? ` · ${claim.owner.length > 14 ? `${claim.owner.slice(0, 12)}…` : claim.owner}` : ""
+  const age = formatDuration(Date.now() - claim.startedAt)
+  return { text: `${claim.kind}${owner} · ${claim.liveness} · ${age}`, warn: claim.liveness !== "stale" }
 }
 
 /** A filesystem-safe slug from the operator's work name (allocation convention only). */

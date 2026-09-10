@@ -8,6 +8,7 @@ import {
   observeExecutionActivity,
   observeTreeEquality,
   observeUpstreamDivergence,
+  observeWriterClaim,
 } from "../src/worktree-observations"
 
 /**
@@ -197,5 +198,75 @@ describe("observeExecutionActivity", () => {
       process.env.CONVOY_HOME = previousHome
       await import("node:fs/promises").then((fs) => fs.rm(emptyHome, { recursive: true, force: true }))
     }
+  })
+})
+
+describe("observeWriterClaim", () => {
+  /** The fixture repo's absolute common dir, where the shared claims live. */
+  async function commonDirOf(fixture: FixtureRepo): Promise<string> {
+    return (await fixture.git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim()
+  }
+
+  /** Writes one writer-claim record keyed by the branch (separators escaped). */
+  async function writeClaim(fixture: FixtureRepo, branch: string, record: Record<string, unknown>): Promise<void> {
+    await fixture.write(await commonDirOf(fixture), `convoy/writer-claims/${branch.replace(/\//g, "__")}.json`, JSON.stringify(record))
+  }
+
+  test("a missing claim is an honest none, never unknown", async () => {
+    const fixture = await createFixtureRepo({ worktrees: [{ name: "free", branch: "feat/free" }] })
+    fixtures.push(fixture)
+    const observed = await observeWriterClaim({ commonDir: await commonDirOf(fixture), branch: "feat/free" })
+    expect(observed).toMatchObject({ kind: "known", value: undefined })
+  })
+
+  test("a live claim exposes kind, owner, and liveness", async () => {
+    const fixture = await createFixtureRepo({ worktrees: [{ name: "live", branch: "feat/live" }] })
+    fixtures.push(fixture)
+    await writeClaim(fixture, "feat/live", {
+      schemaVersion: 1,
+      branch: "feat/live",
+      checkoutPath: fixture.worktrees["live"]!,
+      kind: "authoring",
+      owner: "ses_test",
+      pid: process.pid,
+      startedAt: Date.now() - 1_000,
+      heartbeatAt: Date.now(),
+    })
+    expect(await observeWriterClaim({ commonDir: await commonDirOf(fixture), branch: "feat/live" })).toMatchObject({
+      kind: "known",
+      value: { kind: "authoring", owner: "ses_test", liveness: "live" },
+    })
+  })
+
+  test("a dead writer past the freshness window is stale, not live", async () => {
+    const fixture = await createFixtureRepo({ worktrees: [{ name: "stale", branch: "feat/stale" }] })
+    fixtures.push(fixture)
+    await writeClaim(fixture, "feat/stale", {
+      schemaVersion: 1,
+      branch: "feat/stale",
+      checkoutPath: fixture.worktrees["stale"]!,
+      kind: "pipeline",
+      pid: 999_999,
+      startedAt: Date.now() - 3_600_000,
+      heartbeatAt: Date.now() - 3_600_000,
+    })
+    expect(await observeWriterClaim({ commonDir: await commonDirOf(fixture), branch: "feat/stale" })).toMatchObject({
+      kind: "known",
+      value: { kind: "pipeline", liveness: "stale" },
+    })
+  })
+
+  test("an unreadable claim is unknown, never free", async () => {
+    const fixture = await createFixtureRepo({ worktrees: [{ name: "corrupt", branch: "feat/corrupt" }] })
+    fixtures.push(fixture)
+    await fixture.write(await commonDirOf(fixture), "convoy/writer-claims/feat__corrupt.json", "{ not json")
+    const observed = await observeWriterClaim({ commonDir: await commonDirOf(fixture), branch: "feat/corrupt" })
+    expect(observed.kind).toBe("unknown")
+    if (observed.kind === "unknown") expect(observed.reason).toBeTruthy()
+  })
+
+  test("a detached checkout and an unresolved common dir are typed, not crashes", async () => {
+    expect(await observeWriterClaim({ commonDir: "/tmp/nowhere/.git", branch: undefined })).toMatchObject({ kind: "known", value: undefined })
+    expect((await observeWriterClaim({ commonDir: undefined, branch: "feat/x" })).kind).toBe("unknown")
   })
 })

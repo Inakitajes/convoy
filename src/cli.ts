@@ -403,7 +403,7 @@ async function runWorktreeScopedRun(command: { worktree: string; changes: string
 }
 
 /** Runs one worktree detail action from Home: every action targets the same validated checkout. */
-async function dispatchWorkAction(targetDir: string, route: TuiRoute, worktree: string, action: HomeWorkAction): Promise<void> {
+export async function dispatchWorkAction(targetDir: string, route: TuiRoute, worktree: string, action: HomeWorkAction): Promise<void> {
   // Fresh target validation before any effect: the row was observed at view
   // load; the action re-observes so a moved/removed checkout reports instead
   // of executing against a replacement (capability work-context delta).
@@ -467,7 +467,12 @@ async function dispatchWorkAction(targetDir: string, route: TuiRoute, worktree: 
     // the explicit archive set (empty allowed), whole-branch scope, and the
     // source/base diff-stat (task 10.5) before any sync/archive/squash effect.
     if (!(await confirmHomeClose({ route, worktree, branch: branch ?? "", base, targetDir, archive }))) return
-    await runWorktreeClose({ checkout: worktree, base, changes: archive.kind === "known" ? archive.value.map((change) => change.changeId) : [], route }, targetDir)
+    // A refused close shows its blockers in a visible notice (task 7.9)
+    // instead of writing them to stderr behind the TUI and returning to Home
+    // as if nothing happened.
+    await runMenuGuarded(route, () =>
+      runWorktreeClose({ checkout: worktree, base, changes: archive.kind === "known" ? archive.value.map((change) => change.changeId) : [], route }, targetDir),
+    )
     return
   }
   if (action === "fetch" || action === "sync" || action === "push" || action === "pr" || action === "squash" || action === "remove") {
@@ -486,11 +491,12 @@ async function dispatchWorkAction(targetDir: string, route: TuiRoute, worktree: 
 /**
  * Runs one guarded menu operation with the blocked reporter routed to a visible
   * TUI notice (capability worktree-operations, task 7.9): a blocked fetch/sync/
-  * push/pr/squash renders every blocker and remediation instead of writing to an
-  * unwritten stderr stream and silently returning to the menu. When no route
-  * (headless), the default stderr/exit reporting stands.
+  * push/pr/squash/close renders every blocker and remediation instead of writing
+  * to an unwritten stderr stream and silently returning to the menu. When no
+  * route (headless), the default stderr/exit reporting stands.
   */
-async function runMenuGuarded(route: TuiRoute, fn: () => Promise<void>): Promise<void> {
+async function runMenuGuarded(route: TuiRoute | undefined, fn: () => Promise<void>): Promise<void> {
+  if (!route) return fn()
   const { withBlockedReporter, formatBlockers } = await import("./worktree-commands")
   const { showNoticeTui } = await import("./notice-tui")
   await withBlockedReporter(
@@ -1315,7 +1321,9 @@ async function dispatchSpecsResolution(targetDir: string, resolution: SpecsResol
       const detected = await detectBaseRef(targetDir).catch(() => undefined)
       const base = detected?.ref
       if (!base) throw new Error("no base could be detected for close — pass an explicit base")
-      await runWorktreeClose({ checkout: resolution.worktreeDir, base, changes: [resolution.changeID] }, targetDir)
+      // A refused close surfaces its blockers through the launching browser's
+      // notice (task 7.9) rather than returning silently.
+      await runMenuGuarded(route, () => runWorktreeClose({ checkout: resolution.worktreeDir, base, changes: [resolution.changeID] }, targetDir))
       return { changeId: resolution.changeID, checkout: resolution.worktreeDir }
     }
   }

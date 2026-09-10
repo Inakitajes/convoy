@@ -2,6 +2,7 @@ import { resolve } from "node:path"
 
 import { currentBranch, execFile, isAncestor, realpathSafe as physical, resolveCommit, statusPorcelain, treeOf } from "./git"
 import { listRuns } from "./runs"
+import { claimLiveness, readWriterClaim, type WriterClaimKind } from "./writer-claims"
 
 /**
  * Live run IDs attached to a checkout path (realpath-compared), with the
@@ -195,6 +196,47 @@ export async function observeExecutionActivity(checkout: string): Promise<Observ
   const live = await observeLiveRunsAt(checkout)
   if (live.kind === "unknown") return unknown(live.reason)
   return known({ liveRunIds: live.value, total: live.value.length })
+}
+
+/** One checkout's managed writer, as the shared writer claim records it. */
+export type ManagedWriter = {
+  kind: WriterClaimKind
+  /** The run id (pipeline) or session id (authoring) that holds the claim. */
+  owner?: string
+  pid: number
+  startedAt: number
+  heartbeatAt: number
+  liveness: "live" | "stale" | "uncertain"
+}
+
+/**
+ * The managed writer attached to one checkout (change `worktree-control-center`):
+ * the shared writer-claim record read for display, independent of execution
+ * activity. `known(undefined)` is an honest "no managed writer"; a found claim
+ * exposes its kind, owner, and liveness; an unreadable, corrupt, or
+ * newer-schema record is `unknown` with its reason — never reported as free,
+ * because absence of a readable claim is not proof that no writer exists.
+ */
+export async function observeWriterClaim(input: {
+  commonDir: string | undefined
+  branch: string | undefined
+}): Promise<Observed<ManagedWriter | undefined>> {
+  if (input.commonDir === undefined) return unknown("the repository's common directory could not be resolved to key a writer claim")
+  if (input.branch === undefined) return known(undefined)
+  const read = await readWriterClaim(input.commonDir, input.branch)
+  if (read.status === "found") {
+    return known({
+      kind: read.value.kind,
+      ...(read.value.owner !== undefined ? { owner: read.value.owner } : {}),
+      pid: read.value.pid,
+      startedAt: read.value.startedAt,
+      heartbeatAt: read.value.heartbeatAt,
+      liveness: claimLiveness(read.value),
+    })
+  }
+  if (read.status === "missing") return known(undefined)
+  if (read.status === "unsupported") return unknown(`the writer-claim record uses an unsupported schema version (${String(read.schemaVersion)})`)
+  return unknown(read.reason)
 }
 
 /** The checked-out branch of a checkout, typed (undefined = detached). */

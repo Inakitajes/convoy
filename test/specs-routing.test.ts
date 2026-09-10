@@ -23,6 +23,7 @@ const actualSpecs = await import("../src/specs")
 const actualLaunchTui = await import("../src/launch-tui")
 const actualOpencode = await import("../src/opencode")
 const actualNotice = await import("../src/notice-tui")
+const actualRemovalConfirm = await import("../src/removal-confirm-tui")
 
 // Snapshot the real functions BEFORE mock.module: bun patches the module
 // record in place, so the namespace objects above reflect the mock once
@@ -32,9 +33,11 @@ const realLoadSpecsView = actualSpecs.loadSpecsView
 const realLaunchRunTui = actualLaunchTui.launchRunTui
 const realOpenIterateWindow = actualOpencode.openIterateOpencodeWindow
 const realShowNotice = actualNotice.showNoticeTui
+const realShowRemovalConfirm = actualRemovalConfirm.showRemovalConfirmTui
 
 let capturing = false
 let resolutions: SpecsResolution[] = [{ type: "exit" }]
+let confirmResult: "confirm" | "cancel" = "confirm"
 const launchCalls: Record<string, unknown>[] = []
 const iterateCalls: Record<string, unknown>[] = []
 const noticeCalls: Record<string, unknown>[] = []
@@ -74,7 +77,15 @@ mock.module("../src/notice-tui", () => ({
   },
 }))
 
-const { openSpecsBrowser } = await import("../src/cli")
+mock.module("../src/removal-confirm-tui", () => ({
+  ...actualRemovalConfirm,
+  showRemovalConfirmTui: async (route: unknown, options: Record<string, unknown>) => {
+    if (!capturing) return realShowRemovalConfirm(route as never, options as never)
+    return confirmResult
+  },
+}))
+
+const { openSpecsBrowser, dispatchWorkAction } = await import("../src/cli")
 
 let root: string
 
@@ -84,6 +95,7 @@ beforeEach(async () => {
   iterateCalls.length = 0
   noticeCalls.length = 0
   resolutions = [{ type: "exit" }]
+  confirmResult = "confirm"
   root = await makeChangeRepo()
 })
 
@@ -232,6 +244,63 @@ describe("openSpecsBrowser checkout routing (work-context handoffs)", () => {
       expect(launchCalls).toHaveLength(0)
       expect(noticeCalls).toHaveLength(1)
       expect((noticeCalls[0] as { message: string }).message).toContain("no longer a valid target")
+    } finally {
+      await rm(main, { recursive: true, force: true })
+    }
+  })
+})
+
+describe("blocked close handoffs (task 7.9)", () => {
+  /**
+   * Commits the worktree's change so the checkout is clean, then plants a live
+   * managed writer claim on its branch: the writer conflict is then the only
+   * blocker a close review reports.
+   */
+  async function blockWithLiveWriter(main: string, worktreeDir: string): Promise<void> {
+    await git(worktreeDir, ["add", "."])
+    await git(worktreeDir, ["-c", "user.email=t@x", "-c", "user.name=T", "commit", "-q", "-m", "add-widget"])
+    const { repoCommonDir } = await import("../src/repo-store")
+    const { writerClaimPath } = await import("../src/writer-claims")
+    const commonDir = (await repoCommonDir(main))!
+    await mkdir(join(commonDir, "convoy", "writer-claims"), { recursive: true })
+    await writeFile(
+      writerClaimPath(commonDir, "feat/add-widget"),
+      JSON.stringify({
+        schemaVersion: 1,
+        branch: "feat/add-widget",
+        checkoutPath: worktreeDir,
+        kind: "authoring",
+        owner: "ses_test",
+        pid: process.pid,
+        startedAt: Date.now(),
+        heartbeatAt: Date.now(),
+      }),
+    )
+  }
+
+  test("the specs close-review surfaces a refused close as a visible notice", async () => {
+    const { main, worktreeDir } = await makeWorktreeRepo("routing-specs-close-blocked")
+    try {
+      capturing = true
+      await blockWithLiveWriter(main, worktreeDir)
+      action({ type: "close-change", changeID: "add-widget", worktreeDir, branch: "feat/add-widget" })
+      await openSpecsBrowser(main, {} as never)
+      expect(noticeCalls).toHaveLength(1)
+      expect((noticeCalls[0] as { message: string }).message).toContain("managed writer")
+    } finally {
+      await rm(main, { recursive: true, force: true })
+    }
+  })
+
+  test("the Home close action surfaces a refused close instead of returning silently", async () => {
+    const { main, worktreeDir } = await makeWorktreeRepo("routing-home-close-blocked")
+    try {
+      capturing = true
+      confirmResult = "confirm"
+      await blockWithLiveWriter(main, worktreeDir)
+      await dispatchWorkAction(main, {} as never, worktreeDir, "close")
+      expect(noticeCalls).toHaveLength(1)
+      expect((noticeCalls[0] as { message: string }).message).toContain("managed writer")
     } finally {
       await rm(main, { recursive: true, force: true })
     }

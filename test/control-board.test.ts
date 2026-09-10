@@ -118,6 +118,33 @@ describe("assembleControlBoard", () => {
     if (row.dirt?.kind === "known") expect(row.dirt.value.dirty).toBe(true)
   })
 
+  test("the managed writer claim is an independent fact from execution activity", async () => {
+    const fixture = await createFixtureRepo({ worktrees: [{ name: "writing", branch: "feat/writing" }] })
+    fixtures.push(fixture)
+    const commonDir = (await fixture.git(["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim()
+    await fixture.write(
+      commonDir,
+      "convoy/writer-claims/feat__writing.json",
+      JSON.stringify({
+        schemaVersion: 1,
+        branch: "feat/writing",
+        checkoutPath: fixture.worktrees["writing"]!,
+        kind: "authoring",
+        owner: "ses_board",
+        pid: process.pid,
+        startedAt: Date.now() - 1_000,
+        heartbeatAt: Date.now(),
+      }),
+    )
+    const board = await assembleControlBoard(fixture.root)
+    const wtPath = await physical(fixture.worktrees["writing"]!)
+    const row = board.worktrees.find((worktree) => worktree.path === wtPath)!
+    expect(row.writer).toMatchObject({ kind: "known", value: { kind: "authoring", owner: "ses_board", liveness: "live" } })
+    // A checkout with no readable claim is an honest none, never unknown.
+    const main = board.worktrees.find((worktree) => worktree.main)!
+    expect(main.writer).toMatchObject({ kind: "known", value: undefined })
+  })
+
   test("the detected base rides along for the divergence disclosures", async () => {
     const fixture = await createFixtureRepo({})
     fixtures.push(fixture)

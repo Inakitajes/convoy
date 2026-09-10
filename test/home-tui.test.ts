@@ -323,7 +323,11 @@ describe("worktrees-first home (capability home-launcher delta)", () => {
     const busy = worktree({
       path: "/wt/blocked",
       branch: "feat/blocked",
-      activity: { kind: "known", value: { liveRunIds: ["r1", "r2"], total: 2 }, collectedAt: 0 },
+      writer: {
+        kind: "known",
+        value: { kind: "pipeline", owner: "20260910-120000-abcd", pid: 4242, startedAt: Date.now() - 120_000, heartbeatAt: Date.now(), liveness: "live" },
+        collectedAt: 0,
+      },
     })
     const session = await openHome({ height: 48, worktrees: [worktree({ path: mainPath, branch: "main", main: true }), busy] })
     try {
@@ -340,6 +344,86 @@ describe("worktrees-first home (capability home-launcher delta)", () => {
       session.press("x") // blocked close must not resolve the close action
       await session.renderOnce()
       expect(session.instance.result).toBeInstanceOf(Promise)
+    } finally {
+      await closeHome(session)
+    }
+  })
+
+  test("a live managed writer renders its kind and liveness as an independent fact", async () => {
+    const busy = worktree({
+      path: "/wt/writing",
+      branch: "feat/writing",
+      writer: {
+        kind: "known",
+        value: { kind: "authoring", owner: "ses_f74d79c70ffeW9TrnXMN1pHBjq", pid: 4242, startedAt: Date.now() - 300_000, heartbeatAt: Date.now(), liveness: "live" },
+        collectedAt: 0,
+      },
+    })
+    const session = await openHome({ height: 48, worktrees: [worktree({ path: mainPath, branch: "main", main: true }), busy] })
+    try {
+      session.press("down")
+      await session.renderOnce()
+      session.press("down")
+      await session.renderOnce()
+      session.press("return")
+      await session.renderOnce()
+      const frame = frameOf(session)
+      expect(frame).toContain("writer")
+      expect(frame).toContain("authoring")
+      expect(frame).toContain("live")
+      // The owner id is shortened for the row, not dumped whole.
+      expect(frame).not.toContain("ses_f74d79c70ffeW9TrnXMN1pHBjq")
+    } finally {
+      await closeHome(session)
+    }
+  })
+
+  test("a stale writer claim stays visible but does not disable close", async () => {
+    const stale = worktree({
+      path: "/wt/stale",
+      branch: "feat/stale",
+      writer: {
+        kind: "known",
+        value: { kind: "pipeline", owner: "20260901-000000-dead", pid: 999_999, startedAt: Date.now() - 3_600_000, heartbeatAt: Date.now() - 3_600_000, liveness: "stale" },
+        collectedAt: 0,
+      },
+    })
+    const session = await openHome({ height: 48, worktrees: [worktree({ path: mainPath, branch: "main", main: true }), stale] })
+    try {
+      session.press("down")
+      await session.renderOnce()
+      session.press("down")
+      await session.renderOnce()
+      session.press("return")
+      await session.renderOnce()
+      const frame = frameOf(session)
+      expect(frame).toContain("writer")
+      expect(frame).toContain("stale")
+      // A stale claim is provably not writing: the action still fires.
+      session.press("x")
+      await expect(session.instance.result).resolves.toEqual({ type: "work", worktree: "/wt/stale", action: "close" })
+    } finally {
+      await closeHome(session)
+    }
+  })
+
+  test("an unreadable writer claim is unknown, never silently free", async () => {
+    const broken = worktree({
+      path: "/wt/broken-claim",
+      branch: "feat/broken-claim",
+      writer: { kind: "unknown", reason: "the claim record is corrupt", collectedAt: 0 },
+    })
+    const session = await openHome({ height: 48, worktrees: [worktree({ path: mainPath, branch: "main", main: true }), broken] })
+    try {
+      session.press("down")
+      await session.renderOnce()
+      session.press("down")
+      await session.renderOnce()
+      session.press("return")
+      await session.renderOnce()
+      const frame = frameOf(session)
+      expect(frame).toContain("writer")
+      expect(frame).toContain("unknown (the claim record is corrupt)")
     } finally {
       await closeHome(session)
     }
@@ -513,30 +597,34 @@ describe("worktree detail sections and observations", () => {
     await session.renderOnce()
   }
 
-  test("the detail groups its actions into work, git, and destructive sections", async () => {
+  test("the detail groups its actions into Life Cycle and git sections", async () => {
     const session = await openHome({ height: 60 })
     try {
       await openDetail(session)
       const frame = frameOf(session)
-      // Three labeled sections, in that order — the destructive cluster
-      // stays together at the end of the actions, never scattered between
-      // the safe ones.
-      const workAt = frame.indexOf("\u2500\u2500 work ")
+      // Two labeled sections, in that order: the Life Cycle (which ends with
+      // the deliberate close composition) then the Git operations, ending
+      // with worktree removal. There is no separate destructive section.
+      const lifecycleAt = frame.indexOf("\u2500\u2500 Life Cycle ")
       const gitAt = frame.indexOf("\u2500\u2500 git ")
-      const destructiveAt = frame.indexOf("\u2500\u2500 destructive ")
-      expect(workAt).toBeGreaterThanOrEqual(0)
-      expect(gitAt).toBeGreaterThan(workAt)
-      expect(destructiveAt).toBeGreaterThan(gitAt)
+      expect(lifecycleAt).toBeGreaterThanOrEqual(0)
+      expect(gitAt).toBeGreaterThan(lifecycleAt)
       const conversationAt = frame.indexOf("Open conversation")
-      const fetchAt = frame.indexOf("Fetch remote")
+      const pipelineAt = frame.indexOf("Execute pipeline")
       const closeAt = frame.indexOf("Close review")
+      const fetchAt = frame.indexOf("Fetch remote")
+      const squashAt = frame.indexOf("Squash to base")
       const removeAt = frame.indexOf("Remove worktree")
-      expect(conversationAt).toBeGreaterThan(workAt)
+      // The Life Cycle holds the work actions and close, in order.
+      expect(conversationAt).toBeGreaterThan(lifecycleAt)
+      expect(pipelineAt).toBeGreaterThan(conversationAt)
+      expect(closeAt).toBeGreaterThan(pipelineAt)
+      expect(closeAt).toBeLessThan(gitAt)
+      // Git holds the operations and ends with removal.
       expect(fetchAt).toBeGreaterThan(gitAt)
-      // The dangerous cluster leads with the deliberate composition; removal
-      // and branch deletion follow it.
-      expect(closeAt).toBeGreaterThan(destructiveAt)
-      expect(removeAt).toBeGreaterThan(closeAt)
+      expect(squashAt).toBeGreaterThan(fetchAt)
+      expect(removeAt).toBeGreaterThan(squashAt)
+      expect(frame).not.toContain("destructive")
       // The observation sections follow, honest when empty: the hermetic
       // default records no runs and the fixture carries no changes.
       expect(frame).toContain("recent runs")
@@ -1168,20 +1256,19 @@ describe("small terminals (list and detail stay navigable)", () => {
 describe("typical action coverage (used by tests above)", () => {
   test("HomeWorkAction ids are exhaustive", () => {
     const ids: HomeWorkAction[] = [
-      // work
+      // Life Cycle
       "conversation",
       "conversation-external",
       "propose",
       "pipeline",
+      "close",
       // git
       "fetch",
       "sync",
       "push",
       "pr",
       "squash",
-      // destructive
       "remove",
-      "close",
     ]
     expect(ids).toHaveLength(11)
   })

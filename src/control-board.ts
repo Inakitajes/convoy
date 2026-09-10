@@ -3,7 +3,7 @@ import { join } from "node:path"
 import { detectBaseRef, execFile } from "./git"
 import { listWorktrees } from "./worktree-inventory"
 import { readCheckoutActiveChanges, readCheckoutArchives, readCheckoutCanonicalSpecs, type LocalActiveChange } from "./checkout-openspec"
-import { observeBaseDivergence, observeDirt, observeExecutionActivity, observeUpstreamDivergence, type Observed } from "./worktree-observations"
+import { observeBaseDivergence, observeDirt, observeExecutionActivity, observeUpstreamDivergence, observeWriterClaim, type ManagedWriter, type Observed } from "./worktree-observations"
 import { PrCache, type PrAdapter, type PrFacts, type PrObservation } from "./pr-observations"
 
 /**
@@ -47,6 +47,13 @@ export type BoardWorktree = {
   upstream?: Observed<{ upstream?: string; ahead?: number; behind?: number }>
   /** Live managed writers attached to this checkout; client attachment is not activity. */
   activity?: Observed<{ liveRunIds: string[]; total: number }>
+  /**
+   * The managed writer currently holding the checkout's writer claim, read from
+   * the shared coordination record — independent of execution activity. Missing
+   * is an honest none; unreadable/corrupt/newer-schema is unknown with its
+   * reason, never a silent "free".
+   */
+  writer?: Observed<ManagedWriter | undefined>
   /**
    * Scoped pull-request observation for this checkout's branch (task 2.6,
    * design D2): known (with the PR facts or a verified empty result),
@@ -105,12 +112,13 @@ export async function assembleControlBoard(targetDir: string, options: { base?: 
       changes: [],
     }
     if (entry.accessible && !entry.bare) {
-      const [changes, archives, specs, dirt, activity] = await Promise.all([
+      const [changes, archives, specs, dirt, activity, writer] = await Promise.all([
         readCheckoutActiveChanges(entry.path),
         readCheckoutArchives(entry.path),
         readCheckoutCanonicalSpecs(entry.path),
         observeDirt(entry.path),
         observeExecutionActivity(entry.path),
+        observeWriterClaim({ commonDir: inventory.commonDir, branch: entry.branch }),
       ])
       if (changes.kind === "known") row.changes = changes.value
       else row.changesUnknown = changes.reason
@@ -118,6 +126,7 @@ export async function assembleControlBoard(targetDir: string, options: { base?: 
       if (specs.kind === "known" && specs.value.length > 0) row.specCount = specs.value.length
       row.dirt = dirt
       row.activity = activity
+      row.writer = writer
       if (row.branch && detectedBase) {
         row.baseDivergence = await observeBaseDivergence(entry.path, detectedBase)
         row.upstream = await observeUpstreamDivergence(entry.path, row.branch)
