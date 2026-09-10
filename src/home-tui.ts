@@ -725,9 +725,11 @@ export class HomeLauncher {
         id: "pr",
         section: "git",
         key: "g",
-        label: "Compose pull request",
-        enabled: verified && attached,
-        blocker: !verified ? inaccessible : !attached ? detached : undefined,
+        // Publication pushes the branch now, so it shares the push action's
+        // writer guard: a live managed writer must be stopped before mutating.
+        label: "Create pull request",
+        enabled: verified && attached && !writerBusy,
+        blocker: !verified ? inaccessible : !attached ? detached : writerBusy ? busy : undefined,
       },
       {
         id: "squash",

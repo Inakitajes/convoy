@@ -275,7 +275,7 @@ describe("worktrees-first home (capability home-launcher delta)", () => {
       const frame = frameOf(session)
       // The contextual menu carries every independent operation (capability
       // home-launcher delta), each with its own guard — not just close.
-      for (const label of ["Fetch remote", "Sync with base", "Push branch", "Compose pull request", "Squash to base", "Remove worktree", "Close review"]) {
+      for (const label of ["Fetch remote", "Sync with base", "Push branch", "Create pull request", "Squash to base", "Remove worktree", "Close review"]) {
         expect(frame).toContain(label)
       }
     } finally {

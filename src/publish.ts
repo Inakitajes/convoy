@@ -45,6 +45,11 @@ export type CreatePublishSeamInput = {
   run?: PublishRunner
 }
 
+/** The disclosed publication destination: the branch, its remote, and the PR base. */
+export type PublishPlan = { branch: string; remote: string; base: string }
+/** The publication seam's shape (prepare → compose → apply), for injected tests and callers. */
+export type PublishSeam = ReturnType<typeof createPublishSeam>
+
 export function createPublishSeam(input: CreatePublishSeamInput) {
   const cwd = input.cwd
   const run: PublishRunner =
@@ -64,7 +69,7 @@ export function createPublishSeam(input: CreatePublishSeamInput) {
      * Resolves and discloses repository, branch, destination remote, and PR
      * base, or explains exactly what is missing (D5: no guessed pushes).
      */
-    async prepare(): Promise<{ ok: true; plan: { branch: string; remote: string; base: string } } | { ok: false; message: string }> {
+    async prepare(): Promise<{ ok: true; plan: PublishPlan } | { ok: false; message: string }> {
       const branch = (await run("git", ["symbolic-ref", "--quiet", "--short", "HEAD"], { allowFailure: true })).stdout.trim()
       if (!branch) {
         return { ok: false, message: "HEAD is detached; check out the run's branch before publishing" }
@@ -131,7 +136,7 @@ export function createPublishSeam(input: CreatePublishSeamInput) {
      * nothing, so it is safe to surface before any push or PR creation. The
      * operator reviews (and may edit) this text, then applies it.
      */
-    async compose(plan: { branch: string; remote: string; base: string }): Promise<{ ok: true; title: string; text: string } | { ok: false; message: string }> {
+    async compose(plan: PublishPlan): Promise<{ ok: true; title: string; text: string } | { ok: false; message: string }> {
       return { ok: true, ...(await composePrText({ cwd, runDir: input.runDir, branch: plan.branch })) }
     },
 
@@ -142,7 +147,7 @@ export function createPublishSeam(input: CreatePublishSeamInput) {
      * exactly that, and the retry reuses the push because the existing-PR
      * check runs before creation.
      */
-    async apply(plan: { branch: string; remote: string; base: string }, accepted?: { title: string; text: string }): Promise<{ ok: true; outcome: { pushed: boolean; url?: string } } | { ok: false; message: string }> {
+    async apply(plan: PublishPlan, accepted?: { title: string; text: string }): Promise<{ ok: true; outcome: { pushed: boolean; url?: string } } | { ok: false; message: string }> {
       // Git push is independent of the GitHub CLI (delta run-finalization):
       // missing gh blocks only the PR action below, never this push.
       const push = await run("git", ["push", plan.remote, `${plan.branch}:${plan.branch}`], { allowFailure: true })

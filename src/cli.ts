@@ -613,7 +613,12 @@ async function runWorktreeMenuOperation(targetDir: string, route: TuiRoute, work
       return
     }
     if (action === "pr") {
-      await runMenuGuarded(route, () => runWorktreesCommand({ kind: "pr", worktree, push: false }))
+      // The interactive surface reviews and edits the composed text, then
+      // pushes before creating (reusing the publication seam) and reports the
+      // outcome in a dialog — it never writes raw stdout over the live UI and
+      // never creates a PR from a stale remote head.
+      const { runInteractivePublish } = await import("./publish-action")
+      await runInteractivePublish({ worktree, route })
       return
     }
     if (action === "remove") {
