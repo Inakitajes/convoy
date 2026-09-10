@@ -4,6 +4,8 @@ import { parseKeypress } from "@opentui/core"
 import { EventEmitter } from "node:events"
 
 import { CloseTui, type CloseFollowUpItem, type CloseFollowUpsView, type CloseTuiOptions } from "../src/close-tui"
+import { showCloseOutcome } from "../src/worktree-commands"
+import { TuiSession, type TuiRoute } from "../src/tui-session"
 import type { CloseLandingDecision } from "../src/close-events"
 
 function keyEvent(name: string, options: { ctrl?: boolean; shift?: boolean } = {}) {
@@ -593,6 +595,61 @@ describe("close TUI follow-ups", () => {
       await expect(selection).resolves.toEqual({ type: "done" })
     } finally {
       session.instance.destroy()
+    }
+  })
+})
+
+describe("close TUI completion handoff", () => {
+  // The frozen-notice regression (change `close-tui-terminal-coherence`): a
+  // close screen in progress mode stops propagation for every key, so it must
+  // release input before the shared-session notice mounts. These tests drive
+  // the production handoff (`showCloseOutcome`) with REAL parsed key events; if
+  // the close listener were still installed, the notice would never resolve.
+  function sharedSession() {
+    return createTestRenderer({ width: 100, height: 30 })
+  }
+
+  async function expectDismissed(notice: Promise<void>): Promise<void> {
+    // Fail fast instead of hanging if the notice never receives the key.
+    const outcome = await Promise.race([
+      notice.then(() => "dismissed" as const),
+      new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 1_000)),
+    ])
+    expect(outcome).toBe("dismissed")
+  }
+
+  test("the completion notice receives a real q", async () => {
+    const testRenderer = await sharedSession()
+    const session = new TuiSession(testRenderer.renderer)
+    const route: TuiRoute = { session }
+    try {
+      const close = new CloseTui(testRenderer.renderer, "/workspace/convoy", undefined, new EventEmitter(), session.openScene("convoy-close-scene"))
+      const notice = showCloseOutcome(route, close, { steps: ["landed abc1234 on main"] })
+      // Let the dynamic notice import and mount complete.
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      const parsed = parseKeypress("q")
+      if (!parsed) throw new Error("could not parse q")
+      testRenderer.renderer.keyInput.processParsedKey(parsed)
+      await expectDismissed(notice)
+    } finally {
+      session.destroy()
+    }
+  })
+
+  test("the completion notice receives Ctrl+C", async () => {
+    const testRenderer = await sharedSession()
+    const session = new TuiSession(testRenderer.renderer)
+    const route: TuiRoute = { session }
+    try {
+      const close = new CloseTui(testRenderer.renderer, "/workspace/convoy", undefined, new EventEmitter(), session.openScene("convoy-close-scene"))
+      const notice = showCloseOutcome(route, close, { cancelled: true, steps: [] })
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      const parsed = parseKeypress("\u0003")
+      if (!parsed) throw new Error("could not parse ctrl+c")
+      testRenderer.renderer.keyInput.processParsedKey(parsed)
+      await expectDismissed(notice)
+    } finally {
+      session.destroy()
     }
   })
 })

@@ -1436,15 +1436,10 @@ export async function openCheckoutConversation(input: { launchDir: string; route
   const branch = (await currentBranch(input.checkout).catch(() => undefined)) ?? ""
 
   if (!(await claimAuthoringWriter({ launchDir: input.launchDir, checkout: input.checkout, branch, sessionId: ref.sessionId, route: input.route }))) return
-  // Suspend the shared home-session renderer; the conversation owns the
-  // terminal until its client exits (design D4).
-  input.route.session.renderer.suspend()
-  let exitCode: number
-  try {
-    exitCode = await openConversationForeground({ checkout: input.checkout, ref, suspend: () => {}, resume: () => {} })
-  } finally {
-    input.route.session.renderer.resume()
-  }
+  // The shared foreground host owns the suspend/clear/resume lifecycle; the
+  // conversation client owns the terminal until it exits (design D4).
+  const renderer = input.route.session.renderer
+  const exitCode = await openConversationForeground({ checkout: input.checkout, ref, suspend: () => renderer.suspend(), resume: () => renderer.resume() })
   await releaseAuthoringWriterIfIdle({ launchDir: input.launchDir, checkout: input.checkout, branch, sessionId: ref.sessionId })
   if (exitCode !== 0) {
     await reportHandoffBlocker(
@@ -1465,13 +1460,8 @@ async function openLinkedConversation(
   const { currentBranch } = await import("./git")
   const branch = (await currentBranch(input.checkout).catch(() => undefined)) ?? ""
   if (!(await claimAuthoringWriter({ launchDir: input.launchDir, checkout: input.checkout, branch, sessionId: ref.sessionId, route: input.route }))) return
-  input.route.session.renderer.suspend()
-  let exitCode: number
-  try {
-    exitCode = await openConversationForeground({ checkout: input.checkout, ref, suspend: () => {}, resume: () => {} })
-  } finally {
-    input.route.session.renderer.resume()
-  }
+  const renderer = input.route.session.renderer
+  const exitCode = await openConversationForeground({ checkout: input.checkout, ref, suspend: () => renderer.suspend(), resume: () => renderer.resume() })
   await releaseAuthoringWriterIfIdle({ launchDir: input.launchDir, checkout: input.checkout, branch, sessionId: ref.sessionId })
   if (exitCode !== 0) {
     await reportHandoffBlocker(
@@ -1646,13 +1636,8 @@ async function proposeInCheckout(input: { launchDir: string; route: TuiRoute; ch
     await acquireWriterClaim({ commonDir, branch: input.branch, checkoutPath: input.checkout, kind: "authoring", owner: ref.sessionId, reconcileOwner: "convoy" }).catch(() => {})
   }
 
-  input.route.session.renderer.suspend()
-  let exitCode: number
-  try {
-    exitCode = await openConversationForeground({ checkout: input.checkout, ref, suspend: () => {}, resume: () => {} })
-  } finally {
-    input.route.session.renderer.resume()
-  }
+  const renderer = input.route.session.renderer
+  const exitCode = await openConversationForeground({ checkout: input.checkout, ref, suspend: () => renderer.suspend(), resume: () => renderer.resume() })
   await releaseAuthoringWriterIfIdle({ launchDir: input.launchDir, checkout: input.checkout, branch: input.branch, sessionId: ref.sessionId })
   if (exitCode !== 0) {
     await reportHandoffBlocker(`the authoring client exited with code ${exitCode}`, ["reopen the worktree to continue"], input.route)
