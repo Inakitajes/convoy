@@ -5,9 +5,10 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import { goalModeFor, parseArgs, parseCommand, resolveRunOptions, runHomeNavigationLoop, shouldLaunchHome } from "../src/cli"
+import { describeHomeCloseArchiveSet, goalModeFor, parseArgs, parseCommand, resolveRunOptions, runHomeNavigationLoop, shouldLaunchHome } from "../src/cli"
 import { modelGateways } from "../src/model-routing"
 import { builtInAgents, builtInPipelines, resolvePipeline } from "../src/pipeline"
+import type { LocalActiveChange } from "../src/checkout-openspec"
 import type { Pipeline, RunPlan } from "../src/types"
 
 const validRunID = "20240101-120000-abcd"
@@ -23,6 +24,29 @@ describe("home launcher gate", () => {
   test("does not consume arguments such as --dir", () => {
     expect(shouldLaunchHome(["--dir", "/some/repo"], true, true)).toBeFalse()
     expect(shouldLaunchHome(["--help"], true, true)).toBeFalse()
+  })
+})
+
+describe("home close archive disclosure", () => {
+  const activeChange = (over: Partial<LocalActiveChange>): LocalActiveChange => ({
+    checkout: "/wt",
+    changeId: "feat-x",
+    sourcePath: "/wt/openspec/changes/feat-x",
+    hasMarkdown: true,
+    artifacts: { proposal: true, design: false, tasks: true, deltaSpecs: [], other: [] },
+    ...over,
+  })
+
+  test("discloses the checkout's own active changes with their task state", () => {
+    expect(describeHomeCloseArchiveSet({ kind: "known", value: [] })).toBe("none — no active changes in this checkout")
+    expect(describeHomeCloseArchiveSet({ kind: "known", value: [activeChange({ tasks: { done: 4, total: 4 } })] })).toBe("feat-x (4/4 tasks)")
+    expect(
+      describeHomeCloseArchiveSet({
+        kind: "known",
+        value: [activeChange({ tasks: { done: 3, total: 4 } }), activeChange({ changeId: "feat-y", tasks: undefined })],
+      }),
+    ).toBe("feat-x (3/4 tasks), feat-y (no tasks file)")
+    expect(describeHomeCloseArchiveSet({ kind: "unknown", reason: "permission denied" })).toBe("unknown (permission denied) — nothing will be archived")
   })
 })
 

@@ -15,6 +15,10 @@ export type RemovalChoice = "confirm" | "force" | "cancel"
  * an explicit force path (as a separate deliberate confirmation) only when the
  * blockers are all content — the main checkout, the process's own checkout, a
  * locked/unverified registration, and unknown state never offer force.
+ *
+ * The confirm hint label is overridable (`confirmLabel`) so non-removal
+ * borrowers — close review's launch confirmation — never present the removal
+ * verb for an action that deletes nothing.
  */
 export function showRemovalConfirmTui(
   route: TuiRoute,
@@ -24,6 +28,8 @@ export function showRemovalConfirmTui(
     mode: "confirm" | "blocked" | "force"
     /** Offer force removal in the blocked dialog (only content blockers). */
     forceAvailable?: boolean
+    /** The confirm hint's verb; defaults to "remove" (the dialog's own action). */
+    confirmLabel?: string
   },
 ): Promise<RemovalChoice> {
   const scene = sceneForRoute(route, "convoy-removal-confirm-scene")!
@@ -149,7 +155,7 @@ class RemovalConfirmTui {
   constructor(
     private readonly renderer: CliRenderer,
     private readonly scene: TuiScene,
-    private readonly options: { title: string; message: string; mode: "confirm" | "blocked" | "force"; forceAvailable?: boolean },
+    private readonly options: { title: string; message: string; mode: "confirm" | "blocked" | "force"; forceAvailable?: boolean; confirmLabel?: string },
   ) {
     this.result = new Promise((resolve) => {
       this.resolveResult = resolve
@@ -220,7 +226,7 @@ class RemovalConfirmTui {
     const hints =
       this.options.mode === "confirm"
         ? [
-            { keys: "y", label: "remove", priority: 2 },
+            { keys: "y", label: this.options.confirmLabel ?? "remove", priority: 2 },
             { keys: "n/esc", label: "cancel", priority: 1 },
           ]
         : this.options.mode === "force"

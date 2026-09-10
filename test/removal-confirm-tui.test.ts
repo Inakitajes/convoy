@@ -33,8 +33,12 @@ async function openDialog(options: Parameters<typeof showRemovalConfirmTui>[1]) 
 }
 
 test("a safe removal confirms with y and cancels with n", async () => {
-  const { testRenderer, result, press } = await openDialog({ title: "remove worktree", message: "Remove /x?", mode: "confirm" })
+  // A wide message keeps the hint row from being truncated out of the footer.
+  const { testRenderer, result, press } = await openDialog({ title: "remove worktree", message: "Remove /worktrees/some-feat-branch-x?", mode: "confirm" })
   try {
+    await testRenderer.renderOnce()
+    // The removal dialog keeps its own verb: y really removes.
+    expect(testRenderer.captureCharFrame()).toContain("[y] remove")
     press("n")
     await expect(result).resolves.toBe("cancel")
     const againTest = await openDialog({ title: "remove worktree", message: "Remove /x?", mode: "confirm" })
@@ -44,6 +48,27 @@ test("a safe removal confirms with y and cancels with n", async () => {
     } finally {
       await againTest.testRenderer.mockInput.pressKey("c", { ctrl: true })
     }
+  } finally {
+    await testRenderer.mockInput.pressKey("c", { ctrl: true })
+  }
+})
+
+test("a non-removal borrower can label the confirm hint without the removal verb", async () => {
+  // Close review borrows this dialog; it deletes nothing, so its hint says confirm.
+  const { testRenderer, result, press } = await openDialog({
+    title: "close worktree",
+    message: "Close feat-x (/x)?\n\nbranch   feat/feat-x\nbase     main\narchive  feat-x (4/4 tasks)",
+    mode: "confirm",
+    confirmLabel: "confirm",
+  })
+  try {
+    await testRenderer.renderOnce()
+    const frame = testRenderer.captureCharFrame()
+    expect(frame).toContain("convoy close worktree")
+    expect(frame).toContain("[y] confirm")
+    expect(frame).not.toContain("[y] remove")
+    press("y")
+    await expect(result).resolves.toBe("confirm")
   } finally {
     await testRenderer.mockInput.pressKey("c", { ctrl: true })
   }

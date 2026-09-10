@@ -27,6 +27,7 @@ import { formatVersion } from "./version"
 import type { UpdateResult } from "./update"
 import type { TuiRoute } from "./tui-session"
 import type { HomeDestination, HomeResolution, HomeWorkAction } from "./home-tui"
+import type { LocalActiveChange, ReadResult } from "./checkout-openspec"
 
 /**
  * Flags as written: every scalar stays undefined until the user sets it, so
@@ -456,12 +457,17 @@ async function dispatchWorkAction(targetDir: string, route: TuiRoute, worktree: 
       await reportHandoffBlocker("no base could be detected for close — pass an explicit base with `convoy worktrees close --base <ref>`", [], route)
       return
     }
+    // The archive set is the checkout's own active changes, read fresh here and
+    // disclosed in the confirmation before any effect (capability feature-close:
+    // an explicit archive set, never a silent zero-archive from the menu path).
+    const { readCheckoutActiveChanges } = await import("./checkout-openspec")
+    const archive = await readCheckoutActiveChanges(worktree)
     // Launch-time pre-mutation confirmation (task 10.1), same contract the
     // specs browser shows: name source worktree/path/branch, selected base,
     // the explicit archive set (empty allowed), whole-branch scope, and the
     // source/base diff-stat (task 10.5) before any sync/archive/squash effect.
-    if (!(await confirmHomeClose({ route, worktree, branch: branch ?? "", base, targetDir }))) return
-    await runWorktreeClose({ checkout: worktree, base, changes: [], route }, targetDir)
+    if (!(await confirmHomeClose({ route, worktree, branch: branch ?? "", base, targetDir, archive }))) return
+    await runWorktreeClose({ checkout: worktree, base, changes: archive.kind === "known" ? archive.value.map((change) => change.changeId) : [], route }, targetDir)
     return
   }
   if (action === "fetch" || action === "sync" || action === "push" || action === "pr" || action === "squash" || action === "remove") {
@@ -498,31 +504,68 @@ async function runMenuGuarded(route: TuiRoute, fn: () => Promise<void>): Promise
 /**
  * The Home launch-time close confirmation (capability feature-close, task
  * 10.1): naming the source worktree/path/branch, selected base, the explicit
- * archive set (empty allowed), whole-branch scope, and the source/base
- * diff-stat (task 10.5) before any effect. Cancellation performs nothing.
+ * archive set (the checkout's own active changes; empty allowed), whole-branch
+ * scope, and the source/base diff-stat (task 10.5) before any effect.
+ * Cancellation performs nothing.
  */
-async function confirmHomeClose(input: { route: TuiRoute; worktree: string; branch: string; base: string; targetDir: string }): Promise<boolean> {
+async function confirmHomeClose(input: {
+  route: TuiRoute
+  worktree: string
+  branch: string
+  base: string
+  targetDir: string
+  archive: ReadResult<LocalActiveChange[]>
+}): Promise<boolean> {
   const { showRemovalConfirmTui } = await import("./removal-confirm-tui")
   const { execFile } = await import("./git")
   const displayName = input.worktree.split("/").pop() || input.worktree
   const stat = await execFile("git", ["diff", "--stat", `${input.base}...HEAD`, "--", "."], { cwd: input.worktree, allowFailure: true })
   const diffStat = stat.exitCode === 0 && stat.stdout.trim() ? stat.stdout.trim().split("\n").slice(0, 8).join("\n") : "unavailable"
+  // The same facts validateArchiveInputs enforces at execution: a change
+  // without a known-complete tasks file blocks the ordinary archive, so the
+  // confirmation discloses that before the operator commits to the run.
+  const incomplete =
+    input.archive.kind === "known" &&
+    input.archive.value.some((change) => change.tasks === undefined || change.tasks === "unknown" || change.tasks.done < change.tasks.total)
   const message = [
     `Close ${displayName} (${input.worktree})?`,
     "",
-    "Close runs sync → archive → squash: it archives the selected changes and lands ONE commit covering the WHOLE branch on the base — including edits outside the selected changes. Nothing is pushed, merged, or deleted; push and cleanup stay separate.",
+    "Close runs sync → archive → squash: it archives the checkout's active changes and lands ONE commit covering the WHOLE branch on the base — including edits outside the selected changes. Nothing is pushed, merged, or deleted; push and cleanup stay separate.",
     "",
     `branch   ${input.branch || "(no local branch)"}`,
     `base     ${input.base}`,
-    `archive  none — zero selected changes`,
+    `archive  ${describeHomeCloseArchiveSet(input.archive)}`,
     "scope    whole-branch (selecting changes never narrows publication or squash scope)",
+    ...(incomplete ? ["note     a change with unknown or incomplete tasks blocks the archive step — cancel to complete it first"] : []),
     "",
     `diffstat ${diffStat}`,
     "",
     "Selection never narrows close's whole-branch squash; cancel safely.",
   ].join("\n")
-  const choice = await showRemovalConfirmTui(input.route, { title: "close worktree", message, mode: "confirm" })
+  const choice = await showRemovalConfirmTui(input.route, { title: "close worktree", message, mode: "confirm", confirmLabel: "confirm" })
   return choice === "confirm"
+}
+
+/**
+ * The confirmation's archive-set disclosure (exported for tests): the
+ * checkout's own active changes with their task state, an honest "none", or
+ * the unreadable fact — exactly the set the archive step will act on, never an
+ * assumed empty set.
+ */
+export function describeHomeCloseArchiveSet(archive: ReadResult<LocalActiveChange[]>): string {
+  if (archive.kind === "unknown") return `unknown (${archive.reason}) — nothing will be archived`
+  if (archive.value.length === 0) return "none — no active changes in this checkout"
+  return archive.value
+    .map((change) => {
+      const state =
+        change.tasks === undefined
+          ? " (no tasks file)"
+          : change.tasks === "unknown"
+            ? " (tasks unknown)"
+            : ` (${change.tasks.done}/${change.tasks.total} tasks)`
+      return `${change.changeId}${state}`
+    })
+    .join(", ")
 }
 
 async function runWorktreeMenuOperation(targetDir: string, route: TuiRoute, worktree: string, action: "fetch" | "sync" | "push" | "pr" | "squash" | "remove"): Promise<void> {
