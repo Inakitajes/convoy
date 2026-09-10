@@ -475,6 +475,30 @@ export async function dispatchWorkAction(targetDir: string, route: TuiRoute, wor
     )
     return
   }
+  if (action === "archive") {
+    // Archive acts on one explicitly selected change (never by discovery), so
+    // the operator picks from the checkout's own active changes first.
+    const { readCheckoutActiveChanges } = await import("./checkout-openspec")
+    const { showNoticeTui } = await import("./notice-tui")
+    const active = await readCheckoutActiveChanges(worktree)
+    if (active.kind === "unknown") {
+      await showNoticeTui(route, { title: "archive change", message: `this checkout's active changes could not be read: ${active.reason}` })
+      return
+    }
+    if (active.value.length === 0) {
+      await showNoticeTui(route, { title: "archive change", message: "this checkout has no active changes to archive" })
+      return
+    }
+    const { showChangePickerTui } = await import("./change-picker-tui")
+    const choice = await showChangePickerTui(route, {
+      title: "archive change",
+      changes: active.value.map((change) => ({ changeId: change.changeId, ...(change.title !== undefined ? { title: change.title } : {}) })),
+    })
+    if (choice.kind !== "select") return
+    const { runWorktreeArchive } = await import("./worktree-commands")
+    await runMenuGuarded(route, () => runWorktreeArchive({ worktree, changes: [choice.changeId], route }))
+    return
+  }
   if (action === "fetch" || action === "sync" || action === "push" || action === "pr" || action === "squash" || action === "remove") {
     await runWorktreeMenuOperation(targetDir, route, worktree, action)
     return
@@ -1329,6 +1353,13 @@ async function dispatchSpecsResolution(targetDir: string, resolution: SpecsResol
       // A refused close surfaces its blockers through the launching browser's
       // notice (task 7.9) rather than returning silently.
       await runMenuGuarded(route, () => runWorktreeClose({ checkout: resolution.worktreeDir, base, changes: [resolution.changeID] }, targetDir))
+      return { changeId: resolution.changeID, checkout: resolution.worktreeDir }
+    }
+    case "archive-change": {
+      // The board's handoff archives the selected change through the guarded
+      // operation (task: archive change), with its outcome shown in a notice.
+      const { runWorktreeArchive } = await import("./worktree-commands")
+      await runMenuGuarded(route, () => runWorktreeArchive({ worktree: resolution.worktreeDir, changes: [resolution.changeID], route }))
       return { changeId: resolution.changeID, checkout: resolution.worktreeDir }
     }
   }

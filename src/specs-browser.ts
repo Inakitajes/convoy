@@ -71,7 +71,7 @@ function isSelectableRow(row: ListRow | undefined): row is SelectableRow {
 type MenuItem = {
   action: { id: string; label: string; enabled: boolean; blockers: readonly string[]; remediation?: readonly string[] }
   /** Present only when the browser can run the action itself. */
-  dispatch?: "close" | "refresh"
+  dispatch?: "close" | "refresh" | "archive"
 }
 
 /** The reading pane's chrome rows above the strip: title, rule — the strip is the third. */
@@ -568,28 +568,39 @@ export class SpecsBrowser {
     const worktree = this.menuTarget()
     if (!worktree) return []
     const items: MenuItem[] = []
+    const selectedChange = this.level === "root" ? this.selectedChange() : this.subject?.kind === "change" ? this.subject.change : undefined
+    const archiveId = selectedChange && selectedChange.checkout === worktree.path ? selectedChange.id : undefined
     if (worktree.branch) {
-      const change = this.level === "root" ? this.selectedChange() : this.subject?.kind === "change" ? this.subject.change : undefined
-      const inScope = change && change.checkout === worktree.path ? change.id : undefined
       items.push({
         action: {
           id: "close",
-          label: "Close review",
+          label: "Close (archive & merge)",
           enabled: worktree.accessible,
           blockers: worktree.accessible ? [] : ["the registered checkout path is missing — repair or prune it first"],
         },
         dispatch: "close",
-        ...(inScope ? {} : {}),
       })
-      void inScope
     } else {
       items.push({
         action: {
           id: "close",
-          label: "Close review",
+          label: "Close (archive & merge)",
           enabled: false,
           blockers: ["the checkout has a detached HEAD — close needs an attached branch to name the source"],
         },
+      })
+    }
+    // Archive acts on one explicitly selected change through the guarded
+    // operation — never by discovery — so it needs a change in this checkout.
+    if (archiveId !== undefined) {
+      items.push({
+        action: {
+          id: "archive",
+          label: "Archive change",
+          enabled: worktree.accessible,
+          blockers: worktree.accessible ? [] : ["the registered checkout path is missing — repair or prune it first"],
+        },
+        dispatch: "archive",
       })
     }
     items.push({ action: { id: "refresh", label: "Refresh", enabled: true, blockers: [] }, dispatch: "refresh" })
@@ -661,6 +672,12 @@ export class SpecsBrowser {
       case "refresh":
         void this.refresh()
         return
+      case "archive": {
+        const selectedChange = this.level === "root" ? this.selectedChange() : this.subject?.kind === "change" ? this.subject.change : undefined
+        const inScope = selectedChange && selectedChange.checkout === worktree.path ? selectedChange : undefined
+        if (inScope) this.finish({ type: "archive-change", changeID: inScope.id, worktreeDir: worktree.path })
+        return
+      }
     }
   }
 
@@ -1336,7 +1353,9 @@ export class SpecsBrowser {
       if (item.dispatch && item.action.enabled) {
         lines.push(new StyledText([marker, selected ? bold(fg(theme.text)(label)) : fg(theme.text)(label)]))
       } else {
-        lines.push(new StyledText([marker, fg(theme.dim)(`${label} — blocked`)]))
+        // Truncate the whole blocked line, not just the label: appending
+        // " — blocked" after a max-width label would overflow the panel.
+        lines.push(new StyledText([marker, fg(theme.dim)(truncate(`${item.action.label} — blocked`, Math.max(8, width - 2)))]))
       }
       for (const blocker of item.action.blockers) {
         lines.push(new StyledText([raw("    "), fg(theme.yellow)(truncate(blocker, Math.max(8, width - 6)))]))

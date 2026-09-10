@@ -742,7 +742,7 @@ async function completeInterruptedArchiveCommit(commonDir: string, operationId: 
   await resolveOperation({ commonDir, operationId, gitCwd: checkout, outcome: "resolved" }).catch(() => {})
 }
 
-async function runArchive(command: Extract<WorktreesCommand, { kind: "archive" }>, cwd?: string): Promise<void> {
+async function runArchive(command: Extract<WorktreesCommand, { kind: "archive" }>, cwd?: string, route?: TuiRoute): Promise<void> {
   const { commonDir } = await repoContext(cwd)
   // Recovery before fresh preflight (design D9): an interrupted archive of
   // this checkout is reconciled against reality before anything new runs —
@@ -761,7 +761,29 @@ async function runArchive(command: Extract<WorktreesCommand, { kind: "archive" }
     effect: async (target) => archiveSelectedChanges(target.checkoutPath, command.changes, commonDir),
   })
   if (!result.ok) return reportBlocked(result.blockers, result.reason)
-  process.stdout.write(`archived and committed: ${result.value.archived.join(", ")}\n`)
+  const summary = `archived and committed: ${result.value.archived.join(", ")}`
+  if (route) {
+    const { showNoticeTui } = await import("./notice-tui")
+    await showNoticeTui(route, { title: "archive complete", message: summary })
+  } else {
+    process.stdout.write(`${summary}\n`)
+  }
+}
+
+/**
+ * The Home archive action: an explicit change selection archived through the
+ * same guarded operation, with the outcome shown in a TUI notice instead of
+ * raw stdout over the alternate screen.
+ */
+export async function runWorktreeArchive(
+  input: { worktree: string; changes: string[]; allowIncomplete?: boolean; route?: TuiRoute },
+  cwd?: string,
+): Promise<void> {
+  await runArchive(
+    { kind: "archive", worktree: input.worktree, changes: input.changes, ...(input.allowIncomplete ? { allowIncomplete: true } : {}) },
+    cwd,
+    input.route,
+  )
 }
 
 // ── squash ───────────────────────────────────────────────────────────────

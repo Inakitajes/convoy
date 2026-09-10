@@ -109,7 +109,7 @@ test("! opens the Actions menu on the selected change and Enter opens the close 
   await session.renderOnce()
   const frame = session.captureCharFrame()
   expect(frame).toContain("Actions")
-  expect(frame).toContain("Close review")
+  expect(frame).toContain("Close (archive & merge)")
 
   // Enter arms the close confirmation instead of emitting the resolution.
   session.press("return")
@@ -123,6 +123,20 @@ test("! opens the Actions menu on the selected change and Enter opens the close 
   // Only the explicit confirm emits the reviewed resolution.
   session.press("y")
   await expect(session.instance.result).resolves.toEqual({ type: "close-change", changeID: "add-widget", worktreeDir: root, branch: "feat/add-widget" })
+})
+
+test("the Actions menu archives the selected change", async () => {
+  const session = await openBrowser(viewWith(worktree()))
+
+  session.press("!")
+  await session.renderOnce()
+  expect(session.captureCharFrame()).toContain("Archive change")
+
+  // Close is the menu's default selection; move onto Archive change and run it.
+  session.press("down")
+  await session.renderOnce()
+  session.press("return")
+  await expect(session.instance.result).resolves.toEqual({ type: "archive-change", changeID: "add-widget", worktreeDir: root })
 })
 
 test("x on a change row opens the close confirmation with that archive selection", async () => {
@@ -145,7 +159,7 @@ test("the ordinary detail view's menu offers the same close action as the root",
   await session.renderOnce()
   session.press("!")
   await session.renderOnce()
-  expect(session.captureCharFrame()).toContain("Close review")
+  expect(session.captureCharFrame()).toContain("Close (archive & merge)")
 
   session.press("return")
   await session.renderOnce()
@@ -162,10 +176,14 @@ test("a blocked close review stays inspectable with its blockers and never dispa
   session.press("!")
   await session.renderOnce()
   const frame = session.captureCharFrame()
-  expect(frame).toContain("Close review — blocked")
+  expect(frame).toContain("Close (archive & merge) — blocked")
   expect(frame).toContain("detached HEAD")
 
-  // Enter on the blocked entry must not dispatch anything: the menu stays open.
+  // Archive has no branch requirement, so it is the menu's default selection
+  // here; move onto the blocked close entry and confirm Enter dispatches
+  // nothing while the menu stays open.
+  session.press("up")
+  await session.renderOnce()
   session.press("return")
   await session.renderOnce()
   expect(session.captureCharFrame()).toContain("Actions")
