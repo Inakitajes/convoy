@@ -536,7 +536,7 @@ async function confirmHomeClose(input: {
   const message = [
     `Close ${displayName} (${input.worktree})?`,
     "",
-    "Close runs sync → archive → squash: it archives the checkout's active changes and lands ONE commit covering the WHOLE branch on the base — including edits outside the selected changes. Nothing is pushed, merged, or deleted; push and cleanup stay separate.",
+    "Close runs sync → archive → landing: it archives the checkout's active changes and lands ONE commit covering the WHOLE branch on the base — including edits outside the selected changes. Without a linked open pull request nothing is pushed or merged; when close detects one, the landing is hosted (push the branch, GitHub squash-merges that PR with the reviewed message, fast-forward the base) and the review gate names those steps before any effect. Push and cleanup stay separate otherwise.",
     "",
     `branch   ${input.branch || "(no local branch)"}`,
     `base     ${input.base}`,

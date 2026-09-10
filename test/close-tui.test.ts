@@ -4,6 +4,7 @@ import { parseKeypress } from "@opentui/core"
 import { EventEmitter } from "node:events"
 
 import { CloseTui, type CloseFollowUpItem, type CloseFollowUpsView, type CloseTuiOptions } from "../src/close-tui"
+import type { CloseLandingDecision } from "../src/close-events"
 
 function keyEvent(name: string, options: { ctrl?: boolean; shift?: boolean } = {}) {
   return {
@@ -307,6 +308,116 @@ describe("close TUI commit gate", () => {
       await expect(session.instance.withTerminal(async () => "done")).resolves.toBe("done")
       expect(suspended).toBe(1)
       expect(resumed).toBe(1)
+    } finally {
+      session.instance.destroy()
+    }
+  })
+})
+
+describe("close TUI landing gate", () => {
+  test("a linked PR offers the hosted landing: four choices and the local shortcut", async () => {
+    const session = await openClose()
+    try {
+      const decision = session.instance.confirmMessageWithLanding(
+        { message: "feat(cli): hosted or local\n\n- change add-widget", source: "model" },
+        "open pull request detected: #7 Add widget — https://github.com/acme/repo/pull/7\nHosted landing plan: push feat/x to its remote, ask GitHub to squash-merge PR #7 with the reviewed message, then fast-forward main to GitHub's squash commit.",
+      )
+      await session.renderOnce()
+      const frame = session.captureCharFrame()
+      expect(frame).toContain("commit message")
+      expect(frame).toContain("Land locally instead")
+      expect(frame).toContain("Hosted landing plan")
+      // The choices render vertically with the marker cycling across four.
+      expect(frame).toContain("▸ Accept")
+      session.press("down")
+      session.press("down")
+      await session.renderOnce()
+      expect(session.captureCharFrame()).toContain("▸ Land locally instead")
+      session.press("down")
+      await session.renderOnce()
+      expect(session.captureCharFrame()).toContain("▸ Cancel")
+      // The cycle wraps back to Accept.
+      session.press("down")
+      await session.renderOnce()
+      expect(session.captureCharFrame()).toContain("▸ Accept")
+      // The 'l' shortcut declines the hosted path with the reviewed text.
+      session.press("l")
+      await expect(decision).resolves.toEqual({ kind: "local", message: "feat(cli): hosted or local\n\n- change add-widget" })
+    } finally {
+      session.instance.destroy()
+    }
+  })
+
+  test("accepting the landing gate resolves hosted with the reviewed message", async () => {
+    const session = await openClose()
+    try {
+      const decision = session.instance.confirmMessageWithLanding({ message: "feat: close", source: "fallback" })
+      await session.renderOnce()
+      session.press("y")
+      await expect(decision).resolves.toEqual({ kind: "hosted", message: "feat: close" })
+    } finally {
+      session.instance.destroy()
+    }
+  })
+
+  test("cancelling the landing gate cancels close", async () => {
+    const session = await openClose()
+    try {
+      const decision = session.instance.confirmMessageWithLanding({ message: "feat: close", source: "fallback" })
+      await session.renderOnce()
+      session.press("escape")
+      await expect(decision).resolves.toEqual({ kind: "cancel" })
+    } finally {
+      session.instance.destroy()
+    }
+  })
+
+  test("the plain gate (no linked PR) keeps three choices and the message contract", async () => {
+    const session = await openClose()
+    try {
+      const decision = session.instance.confirmMessage({ message: "feat: close", source: "fallback" })
+      await session.renderOnce()
+      const frame = session.captureCharFrame()
+      expect(frame).toContain("Accept")
+      expect(frame).toContain("Cancel")
+      expect(frame).not.toContain("Land locally instead")
+      // The 'l' shortcut is inert without the landing offer: the gate stays up.
+      session.press("l")
+      await new Promise((resolve) => setTimeout(resolve, 5))
+      session.press("y")
+      await expect(decision).resolves.toBe("feat: close")
+    } finally {
+      session.instance.destroy()
+    }
+  })
+
+  test("a saved edit rides the landing decision either way (design D4)", async () => {
+    const session = await openClose()
+    try {
+      const decision = session.instance.confirmMessageWithLanding({ message: "feat: original subject", source: "model" })
+      await session.renderOnce()
+      session.press("e")
+      await session.renderOnce()
+      session.feed("\x1b[F")
+      session.feed("\x1b[1;2H")
+      session.feed("\x7f")
+      session.type("fix: edited subject")
+      session.press("s", { ctrl: true })
+      await session.renderOnce()
+      session.press("l")
+      await expect(decision).resolves.toEqual({ kind: "local", message: "fix: edited subject" })
+    } finally {
+      session.instance.destroy()
+    }
+  })
+
+  test("terminal EOF cancels the landing gate instead of hanging", async () => {
+    const input = new EventEmitter()
+    const session = await openClose(100, 30, input)
+    try {
+      const decision: Promise<CloseLandingDecision> = session.instance.confirmMessageWithLanding({ message: "feat: close", source: "fallback" })
+      input.emit("end")
+      await expect(decision).resolves.toEqual({ kind: "cancel" })
     } finally {
       session.instance.destroy()
     }
