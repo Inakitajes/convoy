@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Defines the shared transition screen Convoy shows while a destination in the home session loads, animating a breathing sea of characters in the current theme and handing off to the destination atomically so an operator is never left staring at an unresponsive, frozen menu.
+Defines the shared transition screen Convoy shows while a destination in the home session loads, animating a directional current of characters with convoys riding it, in the current theme, and handing off to the destination atomically so an operator is never left staring at an unresponsive, frozen menu.
 
 ## Requirements
 
