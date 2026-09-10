@@ -188,6 +188,37 @@ test("enter opens the change's tabbed reading pane and escape returns", async ()
   await expect(session.instance.result).resolves.toEqual({ type: "exit" })
 })
 
+test("clicking a tab selects its group like the digit keys do", async () => {
+  const session = await openBrowser()
+  try {
+    session.press("return") // the first selectable row is the first change
+    await session.renderOnce()
+    await settle()
+    await session.renderOnce()
+    const internals = session.instance as unknown as {
+      selectedGroup: number
+      detailsText: { x: number; y: number }
+      readerTabRegions: Array<{ group: number; start: number; end: number }>
+    }
+    const design = internals.readerTabRegions.find((region) => region.group === 1)
+    expect(design).toBeDefined()
+    // A click anywhere in the tab's span lands on it.
+    await session.mockMouse.click(internals.detailsText.x + design!.start, internals.detailsText.y + 2)
+    await session.renderOnce()
+    await settle()
+    await session.renderOnce()
+    expect(internals.selectedGroup).toBe(1)
+    const frame = session.captureCharFrame()
+    expect(frame).toContain("A simple form.")
+    // A click on the title row (not the strip row) changes nothing.
+    await session.mockMouse.click(internals.detailsText.x + design!.start, internals.detailsText.y)
+    await session.renderOnce()
+    expect(internals.selectedGroup).toBe(1)
+  } finally {
+    await close(session)
+  }
+})
+
 test("rendered markdown strips frontmatter noise in the detail pane", async () => {
   const session = await openBrowser()
 

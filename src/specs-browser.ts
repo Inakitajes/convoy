@@ -74,6 +74,12 @@ type MenuItem = {
   dispatch?: "close" | "refresh"
 }
 
+/** The reading pane's chrome rows above the strip: title, rule — the strip is the third. */
+const READER_TAB_ROW = 2
+
+/** A rendered tab's clickable column span, relative to the reading pane's text. */
+type ReaderTabRegion = { group: number; start: number; end: number }
+
 export class SpecsBrowser {
   readonly result: Promise<SpecsResolution>
 
@@ -93,6 +99,8 @@ export class SpecsBrowser {
   private groups: SpecGroup[] = []
   private selectedGroup = 0
   private detailScroll = 0
+  /** Column spans the tab strip rendered this frame; a click resolves through them. */
+  private readerTabRegions: ReaderTabRegion[] = []
   /** Outcome of the last copy attempt, reported in the reader's title bar. */
   private copyStatus?: ClipboardResult
   /** Set while the Actions menu overlays the current level. */
@@ -204,6 +212,25 @@ export class SpecsBrowser {
       this.render()
     }
 
+    // A click on the reader's tab strip row (below title and rule) selects
+    // that group — the mouse path of the digit keys. The menu overlay, the
+    // close modal, and the fullscreen title bar leave no strip to aim at.
+    const openTab = (event: { x: number; y: number; preventDefault(): void; stopPropagation(): void }) => {
+      if (this.level !== "detail" || this.fullscreen || this.menuOpen || this.pendingClose) return
+      if (event.y !== this.detailsText.y + READER_TAB_ROW) return
+      const col = event.x - this.detailsText.x
+      const hit = this.readerTabRegions.find((region) => col >= region.start && col < region.end)
+      if (!hit || hit.group === this.selectedGroup) return
+      event.preventDefault()
+      event.stopPropagation()
+      this.selectedGroup = hit.group
+      this.detailScroll = 0
+      // Same lazy-load the digit keys run: the first paint shows the pending
+      // placeholder, the settled read re-renders the group's markdown.
+      void this.loadSelectedGroup().then(() => this.render())
+      this.render()
+    }
+
     // The list's own rows carry the section containers, so the panel adds no
     // padding of its own — the containers reach within the shell's 1-column
     // margin on both edges.
@@ -223,8 +250,10 @@ export class SpecsBrowser {
       height: "100%",
       backgroundColor: theme.bg,
       onMouseScroll: wheel,
+      onMouseDown: openTab,
     })
     details.text.onMouseScroll = wheel
+    details.text.onMouseDown = openTab
 
     const footer = this.panel({
       id: "convoy-specs-footer",
@@ -968,7 +997,7 @@ export class SpecsBrowser {
     }
 
     this.listText.content = detail ? "" : this.listContent(rootMenu ? listWidth : innerWidth)
-    this.detailsText.content = detail || rootMenu ? this.detailsContent(detail ? innerWidth : paneWidth - 4) : ""
+    this.detailsText.content = detail || rootMenu ? this.detailsContent(detail ? innerWidth - 2 : paneWidth - 2) : ""
     this.footerText.content = this.footerContent(innerWidth)
     // The close confirm modal overlays everything while it is armed.
     this.overlay.visible = Boolean(this.pendingClose)
@@ -1160,22 +1189,35 @@ export class SpecsBrowser {
       return joinLines(loadingDivider().concat(blank).slice(0, this.detailsHeight()))
     }
     const rendered = this.docFor(source, Math.max(20, width))
-    const overhead = 1 + (this.groups.length > 1 && !this.fullscreen ? 2 : 0)
-    const contentHeight = Math.max(1, this.detailsHeight() - overhead)
+    // Fullscreen keeps its single folded title bar; the ordinary reader
+    // splays its chrome: the subject's name stands alone, and full-width
+    // rules sandwich the tab strip (title | rule | strip | rule | body).
+    const chrome = this.fullscreen ? 1 : this.groups.length > 1 ? 4 : 2
+    const contentHeight = Math.max(1, this.detailsHeight() - chrome)
     const maxScroll = Math.max(0, rendered.length - contentHeight)
     this.detailScroll = Math.max(0, Math.min(this.detailScroll, maxScroll))
     this.readerPosition = this.fullscreen ? readerScrollPosition(this.detailScroll, maxScroll) : ""
     // The divider (and the tab strip) are built with the settled position so
     // the reader's title bar never runs a frame behind the content.
-    lines.push(...loadingDivider())
-    if (this.groups.length > 1 && !this.fullscreen) {
-      lines.push(this.tabStrip(width))
-      lines.push(plain(""))
+    if (this.fullscreen) {
+      lines.push(...loadingDivider())
+    } else {
+      lines.push(new StyledText([bold(fg(theme.text)(truncate(name, Math.max(8, width))))]))
+      lines.push(this.readerRule(width))
+      if (this.groups.length > 1) {
+        lines.push(this.tabStrip(width))
+        lines.push(this.readerRule(width))
+      }
     }
     const body = rendered.slice(this.detailScroll, this.detailScroll + contentHeight)
     lines.push(...body)
     while (lines.length < this.detailsHeight()) lines.push(plain(""))
     return joinLines(lines.slice(0, this.detailsHeight()))
+  }
+
+  /** The full-width rule the reader's chrome hangs from — the divider, without a label notch. */
+  private readerRule(width: number): StyledText {
+    return new StyledText([fg(theme.dim)("─".repeat(Math.max(0, width)))])
   }
 
   /**
@@ -1185,46 +1227,66 @@ export class SpecsBrowser {
    * arbitrarily bolded text among its own siblings; the siblings stay quiet
    * (faint digit, dim label) so the eye lands on the fill, not on weight.
    * Digits keep their tab-jump meaning and ride inside the active chip, so
-   * the affordance survives the highlight. The strip truncates within its
-   * width: the active tab claims its budget first, siblings share the rest.
+   * the affordance survives the highlight. Each rendered tab records its
+   * column span for the click handler; the strip truncates within its width —
+   * the active tab claims its budget first, siblings share the rest, and
+   * those that no longer fit drop into a `+N` marker.
    */
   private tabStrip(width: number): StyledText {
-    const usable = Math.max(8, width - 2)
+    this.readerTabRegions = []
+    const usable = Math.max(8, width)
     const active = this.groups[this.selectedGroup]!
     const activeDigit = ` ${this.selectedGroup + 1} `
     // The active chip claims its footprint first — separator, padded digit
     // cells, and label — so siblings can never crowd it off the strip. A
     // sibling that no longer fits drops into the `+N` marker (the footer's
-    // position and the arrow keys still reach it) instead of wrapping the
-    // strip into the body's line budget.
+    // position, the arrow keys, and a click still reach it) instead of
+    // wrapping the strip into the body's line budget.
     const activeLabel = truncate(active.label, Math.max(1, usable - 10))
     let remaining = usable - activeDigit.length - activeLabel.length - 2
-    const tabs: TextChunk[] = [raw(" ")]
+    const tabs: TextChunk[] = []
+    let col = 0
     const dropped: string[] = []
     this.groups.forEach((candidate, index) => {
       const separator = index > 0 ? 2 : 0
       if (index === this.selectedGroup) {
-        if (separator) tabs.push(raw("  "))
+        if (separator) {
+          tabs.push(raw("  "))
+          col += 2
+        }
+        const start = col
         tabs.push(bg(theme.accent)(fg(theme.chipText)(activeDigit)))
         tabs.push(bg(theme.accent)(bold(fg(theme.chipText)(activeLabel))))
         tabs.push(bg(theme.accent)(fg(theme.chipText)(" ")))
+        col += activeDigit.length + activeLabel.length + 1
+        this.readerTabRegions.push({ group: index, start, end: col })
         return
       }
       const label = truncate(candidate.label, Math.max(1, remaining - separator - 2))
-      const cost = separator + 2 + displayWidth(label)
+      const labelWidth = displayWidth(label)
+      const cost = separator + 2 + labelWidth
       if (cost > remaining) {
         dropped.push(`${index + 1}`)
         return
       }
       remaining -= cost
-      if (separator) tabs.push(raw("  "))
+      if (separator) {
+        tabs.push(raw("  "))
+        col += 2
+      }
+      const start = col
       tabs.push(fg(theme.faint)(`${index + 1}`))
       tabs.push(raw(" "))
       tabs.push(fg(theme.dim)(label))
+      col += 2 + labelWidth
+      this.readerTabRegions.push({ group: index, start, end: col })
     })
     if (dropped.length > 0) {
       const marker = ` +${dropped.length}`
-      if (marker.length <= remaining) tabs.push(fg(theme.faint)(marker))
+      if (marker.length <= remaining) {
+        tabs.push(fg(theme.faint)(marker))
+        col += marker.length
+      }
     }
     return new StyledText(tabs)
   }
