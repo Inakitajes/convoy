@@ -15,7 +15,7 @@ See `proposal.md` — Why. The detail renders actions from `actionsFor(worktree)
 
 **D1 — Runs section with a leading New run row.** The pipeline launcher becomes `New run` and is the first selectable row of the `Runs` section, with the recent-runs list beneath it. Section headings stay plain headings. Rationale: the run entry is a launcher, not an observation, so it leads the runs it produces while keeping every header purely a header.
 
-**D2 — OpenSpec section sits directly above Linked Specs.** Propose/Archive/Close are grouped with the spec observation they act on, and `git` keeps its guarded operations above. Rationale: the operator reads change work next to the changes it concerns.
+**D2 — OpenSpec sits above git.** The change operations (Propose/Archive/Close) are grouped before the guarded Git operations, with Linked Specs last. Rationale: the operator reaches the change work before the publication/plumbing operations that follow it.
 
 **D3 — Archive is an explicit selection.** `runArchive` never discovers changes, so Home opens `change-picker-tui` over the checkout's own active changes and then runs `runWorktreeArchive` (which shows a notice instead of raw stdout); the specs browser emits an `archive-change` resolution for the selected change. Rationale: preserves the operation's explicitness contract.
 

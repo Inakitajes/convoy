@@ -4,7 +4,7 @@ Home's worktree detail mixed OpenCode authoring (open conversation/window), Conv
 
 ## What Changes
 
-- Group the worktree detail actions into four labeled sections in order: **Sessions** (Open conversation, Open in window), **Runs** (a `New run` action always present as the first row of the section, with the checkout's recent runs beneath it), **git** (the guarded Git/publication operations), and **OpenSpec** (Propose a change, Archive change, Close (archive & merge)) directly above the Linked Specs observation.
+- Group the worktree detail actions into four labeled sections in order: **Sessions** (Open conversation, Open in window), **Runs** (a `New run` action always present as the first row of the section, with the checkout's recent runs beneath it), **OpenSpec** (Propose a change, Archive change, Close (archive & merge)), and **git** (the guarded Git/publication operations), with the Linked Specs observation last.
 - Rename `Execute pipeline` to `New run` (key `n`) and `Close review` to `Close (archive & merge)`.
 - Add `Archive change`: an OpenSpec action that selects one of the checkout's active changes and archives it through the existing guarded archive operation; the specs browser Actions menu offers the same action for its selected change.
 - Keep every action's shared guard; disabled actions stay visible with their reason.

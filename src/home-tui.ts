@@ -72,9 +72,8 @@ export type HomeWorkAction =
 /**
  * The detail's action sections: the OpenCode authoring sessions, the Runs
  * section (whose first row is the always-available New run action, with the
- * checkout's recent runs beneath it), the guarded Git operations, and the
- * OpenSpec change operations — which sit directly above the Linked Specs
- * observation.
+ * checkout's recent runs beneath it), the OpenSpec change operations, and the
+ * guarded Git operations — with the Linked Specs observation last.
  */
 export type DetailSection = "sessions" | "runs" | "git" | "openspec"
 
@@ -82,8 +81,8 @@ export type DetailSection = "sessions" | "runs" | "git" | "openspec"
 const DETAIL_SECTIONS: ReadonlyArray<{ section: DetailSection; label: string }> = [
   { section: "sessions", label: "Sessions" },
   { section: "runs", label: "Runs" },
-  { section: "git", label: "git" },
   { section: "openspec", label: "OpenSpec" },
+  { section: "git", label: "git" },
 ]
 
 /** One recent run of this checkout, listed in the detail's observations. */
@@ -650,9 +649,8 @@ export class HomeLauncher {
     // blocked action stays inspectable with its reason (design D4). The
     // handlers revalidate the same guards before any effect. The actions ride
     // four labeled sections: Sessions (the OpenCode authoring surfaces), Runs
-    // (led by the New run row), git (the guarded operations, ending with
-    // worktree removal), and OpenSpec (the change operations, directly above
-    // Linked Specs).
+    // (led by the New run row), OpenSpec (the change operations), and git (the
+    // guarded operations, ending with worktree removal), with Linked Specs last.
     const verified = worktree.accessible && !worktree.bare
     // The advisory projection of the shared guard: only a readable claim that
     // is live or uncertain disables mutations. A stale claim is provably not
@@ -792,13 +790,14 @@ export class HomeLauncher {
     const inSection = (section: DetailSection): DetailEntry[] =>
       actions.filter((action) => action.section === section).map((action) => ({ kind: "action", action }))
     // The order here is the render order: the Runs action heads its section and
-    // its runs follow before the git/OpenSpec actions, then the linked specs.
+    // its runs follow, then the OpenSpec change operations, the git operations,
+    // and finally the linked specs.
     const entries: DetailEntry[] = [...inSection("sessions"), ...inSection("runs")]
     const runs = this.runsEvidence.get(worktree.path)
     if (Array.isArray(runs)) {
       for (const run of runs) entries.push({ kind: "run", run })
     }
-    entries.push(...inSection("git"), ...inSection("openspec"))
+    entries.push(...inSection("openspec"), ...inSection("git"))
     if (!worktree.changesUnknown) {
       for (const change of worktree.changes) entries.push({ kind: "change", change })
     }

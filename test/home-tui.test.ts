@@ -635,7 +635,7 @@ describe("selection surface", () => {
   })
 
   test("the detail's selected action rides the accent fill behind an inverted navy marker", async () => {
-    const session = await openHome()
+    const session = await openHome({ height: 60 })
     try {
       session.press("down") // New leads
       await session.renderOnce()
@@ -676,23 +676,23 @@ describe("worktree detail sections and observations", () => {
     await session.renderOnce()
   }
 
-  test("the detail groups its actions into Sessions, Runs, git, and OpenSpec sections", async () => {
+  test("the detail groups its actions into Sessions, Runs, OpenSpec, and git sections", async () => {
     const session = await openHome({ height: 60 })
     try {
       await openDetail(session)
       const frame = frameOf(session)
-      // Four labeled action sections in order — Sessions, Runs, git, OpenSpec —
-      // with the Linked Specs observation last (OpenSpec sits directly above it).
+      // Four labeled action sections in order — Sessions, Runs, OpenSpec, git —
+      // with the Linked Specs observation last.
       const sessionsAt = frame.indexOf("\u2500\u2500 Sessions ")
       const runsAt = frame.indexOf("\u2500\u2500 Runs ")
-      const gitAt = frame.indexOf("\u2500\u2500 git ")
       const openspecAt = frame.indexOf("\u2500\u2500 OpenSpec ")
+      const gitAt = frame.indexOf("\u2500\u2500 git ")
       const linkedAt = frame.indexOf("\u2500\u2500 Linked Specs ")
       expect(sessionsAt).toBeGreaterThanOrEqual(0)
       expect(runsAt).toBeGreaterThan(sessionsAt)
-      expect(gitAt).toBeGreaterThan(runsAt)
-      expect(openspecAt).toBeGreaterThan(gitAt)
-      expect(linkedAt).toBeGreaterThan(openspecAt)
+      expect(openspecAt).toBeGreaterThan(runsAt)
+      expect(gitAt).toBeGreaterThan(openspecAt)
+      expect(linkedAt).toBeGreaterThan(gitAt)
       // Sessions holds the OpenCode authoring surfaces.
       const conversationAt = frame.indexOf("Open conversation")
       const windowAt = frame.indexOf("Open in window")
@@ -701,15 +701,7 @@ describe("worktree detail sections and observations", () => {
       // Runs leads with the New run row, before the runs list.
       const newRunAt = frame.indexOf("New run")
       expect(newRunAt).toBeGreaterThan(runsAt)
-      expect(newRunAt).toBeLessThan(gitAt)
-      // git holds the operations and ends with removal.
-      const fetchAt = frame.indexOf("Fetch remote")
-      const squashAt = frame.indexOf("Squash to base")
-      const removeAt = frame.indexOf("Remove worktree")
-      expect(fetchAt).toBeGreaterThan(gitAt)
-      expect(squashAt).toBeGreaterThan(fetchAt)
-      expect(removeAt).toBeGreaterThan(squashAt)
-      expect(removeAt).toBeLessThan(openspecAt)
+      expect(newRunAt).toBeLessThan(openspecAt)
       // OpenSpec holds the change operations, ending with close.
       const proposeAt = frame.indexOf("Propose a change")
       const archiveAt = frame.indexOf("Archive change")
@@ -717,7 +709,15 @@ describe("worktree detail sections and observations", () => {
       expect(proposeAt).toBeGreaterThan(openspecAt)
       expect(archiveAt).toBeGreaterThan(proposeAt)
       expect(closeAt).toBeGreaterThan(archiveAt)
-      expect(closeAt).toBeLessThan(linkedAt)
+      expect(closeAt).toBeLessThan(gitAt)
+      // git holds the operations and ends with removal.
+      const fetchAt = frame.indexOf("Fetch remote")
+      const squashAt = frame.indexOf("Squash to base")
+      const removeAt = frame.indexOf("Remove worktree")
+      expect(fetchAt).toBeGreaterThan(gitAt)
+      expect(squashAt).toBeGreaterThan(fetchAt)
+      expect(removeAt).toBeGreaterThan(squashAt)
+      expect(removeAt).toBeLessThan(linkedAt)
       expect(frame).not.toContain("destructive")
       // The Runs and Linked Specs observations stay honest when empty.
       expect(frame).toContain("no runs recorded for this checkout")
