@@ -460,3 +460,81 @@ test.each([120, 84])("a selected canonical spec uses the full root body at width
     await close(session)
   }
 })
+
+test("a spec reads as copy and navigation only — no actions, no fullscreen", async () => {
+  const view = sampleView()
+  view.changes = []
+  const session = await openBrowser(view, 120, 30)
+  try {
+    // The canonical spec is the last selectable row: shift+g lands on it.
+    session.press("g", { shift: true })
+    await session.renderOnce()
+    session.press("return") // enter the spec's reading pane
+    await session.renderOnce()
+    await settle()
+    await session.renderOnce()
+    const frame = session.captureCharFrame()
+    // Copy is the whole point; actions and fullscreen would be dead hints.
+    expect(frame).toContain("copy")
+    expect(frame).not.toContain("actions")
+    expect(frame).not.toContain("full")
+
+    // v does nothing: the footer, title, and body stay exactly as they were.
+    const before = session.captureCharFrame()
+    session.press("v")
+    await session.renderOnce()
+    expect(session.captureCharFrame()).toBe(before)
+
+    await close(session)
+  } finally {
+    // close already resolved the browser; nothing to release
+  }
+})
+
+test("c copies the open document without entering fullscreen — change groups and specs alike", async () => {
+  const copied: string[] = []
+  const report = async (text: string) => {
+    copied.push(text)
+    return "copied-native" as const
+  }
+  const testRenderer = await createTestRenderer({ width: 120, height: 40 })
+  const instance = new SpecsBrowser(testRenderer.renderer, sampleView(), report)
+  await testRenderer.renderOnce()
+  const session = {
+    ...testRenderer,
+    instance,
+    press(key: string, options: { ctrl?: boolean; shift?: boolean } = {}) {
+      testRenderer.renderer.keyInput.emit("keypress", keyEvent(key, options))
+    },
+  }
+  try {
+    // Enter the change's detail level and copy the proposal tab directly.
+    session.press("return")
+    await session.renderOnce()
+    await settle()
+    await session.renderOnce()
+    session.press("c")
+    await Bun.sleep(30)
+    await session.renderOnce()
+    expect(copied).toHaveLength(1)
+    expect(copied[0]).toContain("Let operators sign in.")
+    const footer = session.captureCharFrame().split("\n").at(-2) ?? ""
+    expect(footer).toContain("copied")
+
+    // Switch to the design tab; the copy report belongs to the new document.
+    session.press("l")
+    await session.renderOnce()
+    await settle()
+    await session.renderOnce()
+    expect((session.captureCharFrame().split("\n").at(-2) ?? "")).not.toContain("copied")
+    session.press("c")
+    await Bun.sleep(30)
+    await session.renderOnce()
+    expect(copied).toHaveLength(2)
+    expect(copied[1]).toContain("A simple form.")
+
+    await close(session)
+  } finally {
+    // cleanup handled by close
+  }
+})

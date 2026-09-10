@@ -221,10 +221,11 @@ export class SpecsBrowser {
       const col = event.x - this.detailsText.x
       const hit = this.readerTabRegions.find((region) => col >= region.start && col < region.end)
       if (!hit || hit.group === this.selectedGroup) return
-      event.preventDefault()
+            event.preventDefault()
       event.stopPropagation()
       this.selectedGroup = hit.group
       this.detailScroll = 0
+      this.copyStatus = undefined
       // Same lazy-load the digit keys run: the first paint shows the pending
       // placeholder, the settled read re-renders the group's markdown.
       void this.loadSelectedGroup().then(() => this.render())
@@ -503,16 +504,17 @@ export class SpecsBrowser {
         this.detailScroll = key.shift ? Number.MAX_SAFE_INTEGER : 0
         break
       case "v":
-        // The fullscreen reader exists only at the detail level, so a plain
-        // toggle here is exactly the reader's open/close key.
-        this.toggleFullscreen()
+        // The fullscreen reader folds the change's chrome (title, rules, tab
+        // strip) into one title bar — worth it only when there is chrome to
+        // fold. A spec reads as one bare document, so it has no fullscreen:
+        // copying (c) is the whole point there.
+        if (this.subject?.kind === "change") this.toggleFullscreen()
         return
       case "c":
-        if (this.fullscreen) {
-          void this.copyActiveTab()
-          return
-        }
-        break
+        // Copy what the reader holds — the active document, whatever tab or
+        // subject it is — without first entering the fullscreen reader.
+        void this.copyActiveTab()
+        return
       case "a": {
         const subject = this.subject
         if (subject?.kind === "change") this.finish({ type: "apply-change", changeID: subject.change.id, checkout: subject.change.checkout })
@@ -728,6 +730,9 @@ export class SpecsBrowser {
     if (index >= this.groups.length) return false
     this.selectedGroup = index
     this.detailScroll = 0
+    // The copy status describes the document it reported on; a new tab starts
+    // with no report.
+    this.copyStatus = undefined
     void this.loadSelectedGroup().then(() => this.render())
     return true
   }
@@ -737,6 +742,7 @@ export class SpecsBrowser {
     if (next === this.selectedGroup) return
     this.selectedGroup = next
     this.detailScroll = 0
+    this.copyStatus = undefined
     void this.loadSelectedGroup().then(() => this.render())
   }
 
@@ -1340,24 +1346,35 @@ export class SpecsBrowser {
     }
     // The discoverable action-menu entry is pinned (priority 0): footer
     // truncation may drop every other hint, but access to the menu — and
-    // through it close review and its blockers — survives.
+    // through it close review and its blockers — survives. A spec has no
+    // actions and no fullscreen: its footer is copy and navigation only.
     const actionsHint: Hint = { keys: "!", label: "actions", priority: 0, style: "spaced" }
     if (this.level === "detail") {
       const subject = this.subject
       const hints: Hint[] = [
-        actionsHint,
         ...(subject?.kind === "change"
           ? ([
+              actionsHint,
               { keys: "a", label: "pply", priority: 2, style: "glued" },
               { keys: "i", label: "terate", priority: 5, style: "glued" },
+              { keys: "v", label: "full", priority: 3, style: "glued" },
             ] as Hint[])
           : []),
-        { keys: "v", label: "full", priority: 3, style: "glued" },
+        { keys: "c", label: "opy", priority: 5, style: "glued" },
         { keys: "esc", label: "back", priority: 4 },
         { keys: "q", label: this.scene ? "back" : "uit", priority: 1, style: this.scene ? undefined : "glued" },
       ]
-      const position = `${this.selectedGroup + 1}/${Math.max(1, this.groups.length)}`
-      return hintsRow(hints, [[fg(theme.faint)(position)]], width, { style: "spaced", overflow: moreHintsMarker })
+      // One composed right side: hintsRow picks a single candidate, so the
+      // group position and the copy report share the entry.
+      const right: TextChunk[] = []
+      if (subject?.kind === "change") {
+        right.push(fg(theme.faint)(`${this.selectedGroup + 1}/${Math.max(1, this.groups.length)}`))
+      }
+      if (this.copyStatus) {
+        if (right.length > 0) right.push(fg(theme.faint)("  "))
+        right.push(fg(theme.faint)(copyStatusLabel(this.copyStatus)))
+      }
+      return hintsRow(hints, right.length > 0 ? [right] : [], width, { style: "spaced", overflow: moreHintsMarker })
     }
 
     const selected = this.rows[this.selectedRow]
