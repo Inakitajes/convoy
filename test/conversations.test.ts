@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, mock, spyOn, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test"
 
 import type { OpencodeClient } from "@opencode-ai/sdk/v2"
 
@@ -12,8 +12,11 @@ import type { OpencodeClient } from "@opencode-ai/sdk/v2"
  * production OpenCode spawn path is exercised against a mocked `Bun.spawn`.
  *
  * bun runs this file's top-level code before any test, so mock.module is
- * visible process-wide — the connectOpcencode stub delegates everything else
- * to the real opencode module.
+ * visible process-wide — the mock delegates every export to the real opencode
+ * module, and the connectOpencode stub answers from the fake harness only
+ * while one of this file's tests is running. Files whose tests exercise the
+ * real connectOpencode (identity, SDK routing) therefore observe the real
+ * client on every platform and in every file-scheduling order.
  */
 
 const actualOpencode = await import("../src/opencode")
@@ -39,9 +42,16 @@ const fakeClient = {
   },
 } as unknown as OpencodeClient
 
+// Snapshot the real connectOpencode BEFORE mock.module: bun patches the module
+// record in place, so consulting it through actualOpencode after registration
+// would reach the mock and recurse.
+const realConnectOpencode = actualOpencode.connectOpencode
+
+let harnessMockActive = false
+
 mock.module("../src/opencode", () => ({
   ...actualOpencode,
-  connectOpencode: () => fakeClient,
+  connectOpencode: (url: string) => (harnessMockActive ? fakeClient : realConnectOpencode(url)),
 }))
 
 const { authoringClientArgv, openConversationExternal, openConversationForeground, sessionActivity } = await import(
@@ -58,7 +68,12 @@ function resetHarness(): void {
   getThrows = false
 }
 
+beforeEach(() => {
+  harnessMockActive = true
+})
+
 afterEach(() => {
+  harnessMockActive = false
   Bun.spawn = originalSpawn
   resetHarness()
 })
