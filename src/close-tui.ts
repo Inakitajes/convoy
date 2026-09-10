@@ -6,7 +6,7 @@ import {
   type CloseChecklistState,
   type CloseChecklistRowStatus,
 } from "./close-presentation"
-import type { CloseEvent, CloseMessageProposal } from "./close-events"
+import type { CloseEvent, CloseLandingDecision, CloseMessageProposal } from "./close-events"
 import { stripControlBytes } from "./commit-text"
 import {
   hintsRow,
@@ -112,6 +112,11 @@ export class CloseTui {
   private resolveMessage?: (message: string | undefined) => void
   private resolveFollowUp?: (resolution: CloseFollowUpResolution) => void
   private resolveDismiss?: () => void
+  // The hosted-landing gate (change `close-lands-via-github-pr`, design D5):
+  // when a linked open PR enables the hosted path, the review screen carries a
+  // fourth "Land locally instead" choice resolving the landing decision.
+  private landingOffer = false
+  private resolveLanding?: (decision: CloseLandingDecision) => void
 
   // The independent animation cadence (design D2): a running checklist row's
   // spinner frame is recomputed on ticks, not sampled only when an operation
@@ -190,6 +195,12 @@ export class CloseTui {
       }
       if (key.name === "y") {
         this.finishMessage("accept")
+        return
+      }
+      // The landing choice (change `close-lands-via-github-pr`): a deliberate
+      // "land locally instead" keeps every step local with the reviewed text.
+      if (key.name === "l" && this.landingOffer) {
+        this.finishMessage("local")
         return
       }
       if (key.name === "e") {
@@ -347,6 +358,7 @@ export class CloseTui {
   }
 
   confirmMessage(proposal: CloseMessageProposal, notice?: string): Promise<string | undefined> {
+    this.landingOffer = false
     this.mode = "message"
     this.syncTicker()
     this.message = proposal
@@ -357,6 +369,28 @@ export class CloseTui {
     if (this.inputClosed) return Promise.resolve(undefined)
     return new Promise((resolve) => {
       this.resolveMessage = resolve
+    })
+  }
+
+  /**
+   * The landing gate (change `close-lands-via-github-pr`, design D5): the same
+   * review screen with an extra "Land locally instead" choice. Accept keeps
+   * the reviewed message and lands through GitHub; the local choice keeps the
+   * same reviewed message and lands locally; cancel keeps everything as it
+   * was. Nothing lands before this resolves.
+   */
+  confirmMessageWithLanding(proposal: CloseMessageProposal, notice?: string): Promise<CloseLandingDecision> {
+    this.landingOffer = true
+    this.mode = "message"
+    this.syncTicker()
+    this.message = proposal
+    this.reviewedMessage = proposal.message
+    this.messageNotice = notice
+    this.messageChoice = 0
+    this.render()
+    if (this.inputClosed) return Promise.resolve({ kind: "cancel" })
+    return new Promise((resolve) => {
+      this.resolveLanding = resolve
     })
   }
 
@@ -425,16 +459,26 @@ export class CloseTui {
   /**
    * Ends the message gate (design D4): Accept returns the reviewed message —
    * the value currently shown, whether accepted as-is or saved from the
-   * editor — and cancel returns undefined. Nothing lands before this call.
+   * editor — and cancel returns undefined. With the landing offer, the local
+   * choice resolves the landing decision with the same reviewed message.
+   * Nothing lands before this call.
    */
-  private finishMessage(outcome: "accept" | "cancel") {
-    const resolve = this.resolveMessage
-    if (!resolve) return
+  private finishMessage(outcome: "accept" | "cancel" | "local") {
+    const resolveMessage = this.resolveMessage
+    const resolveLanding = this.resolveLanding
+    if (!resolveMessage && !resolveLanding) return
     this.resolveMessage = undefined
+    this.resolveLanding = undefined
+    this.landingOffer = false
     this.mode = "progress"
     this.syncTicker()
     this.render()
-    resolve(outcome === "accept" ? this.reviewedMessage : undefined)
+    if (resolveMessage) resolveMessage(outcome === "accept" ? this.reviewedMessage : undefined)
+    if (resolveLanding) {
+      if (outcome === "cancel") resolveLanding({ kind: "cancel" })
+      else if (outcome === "local") resolveLanding({ kind: "local", message: this.reviewedMessage ?? this.message?.message ?? "" })
+      else resolveLanding({ kind: "hosted", message: this.reviewedMessage ?? this.message?.message ?? "" })
+    }
   }
 
   /** Opens the centered editor overlay seeded with the complete reviewed message. */
@@ -515,13 +559,15 @@ export class CloseTui {
   }
 
   private moveMessageChoice(delta: number) {
-    this.messageChoice = (this.messageChoice + delta + 3) % 3
+    const choices = this.landingOffer ? 4 : 3
+    this.messageChoice = (this.messageChoice + delta + choices) % choices
     this.render()
   }
 
   /** Enter on the review screen activates the highlighted choice (design D3). */
   private activateMessageChoice() {
-    const choice = (["accept", "edit", "cancel"] as const)[this.messageChoice]!
+    const choices = this.landingOffer ? (["accept", "edit", "local", "cancel"] as const) : (["accept", "edit", "cancel"] as const)
+    const choice = choices[this.messageChoice]!
     if (choice === "edit") this.openEditOverlay()
     else this.finishMessage(choice)
   }
@@ -661,7 +707,7 @@ export class CloseTui {
       lines.push(...wrapStyled(new StyledText([fg(theme.text)(line)]), width))
     }
     lines.push(t`${fg(theme.faint)("─".repeat(Math.max(1, width)))}`, plain(""))
-    const labels = ["Accept", "Edit", "Cancel"]
+    const labels: string[] = this.landingOffer ? ["Accept", "Edit", "Land locally instead", "Cancel"] : ["Accept", "Edit", "Cancel"]
     labels.forEach((label, index) => {
       const selected = index === this.messageChoice
       lines.push(new StyledText([selected ? fg(theme.accent)("▸ ") : raw("  "), selected ? bold(fg(theme.text)(label)) : fg(theme.dim)(label)]))
@@ -722,8 +768,12 @@ export class CloseTui {
         { keys: "↑/↓", label: "choose", priority: 4 },
         { keys: "enter", label: "confirm", priority: 1 },
         { keys: "e", label: "dit", priority: 2, style: "glued" },
-        { keys: "esc", label: "cancel", priority: 3 },
       ]
+      // The landing offer's local shortcut rides the same glued-word shape as
+      // "e dit" ("l and locally" reads "land locally"), and sheds first on a
+      // narrow row like any other fast-path hint.
+      if (this.landingOffer) hints.push({ keys: "l", label: "and locally", priority: 4, style: "glued" })
+      hints.push({ keys: "esc", label: "cancel", priority: 3 })
       return hintsRow(hints, [], width, { style: "spaced", overflow: moreHintsMarker })
     }
     if (this.mode === "edit") {

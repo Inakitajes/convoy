@@ -81,6 +81,8 @@ export type SpecsResolution =
   | { type: "continue-change"; changeID: string; worktreeDir: string; branch: string }
   /** Close: the worktree composite (sync → selected archive → whole-branch squash). */
   | { type: "close-change"; changeID: string; worktreeDir: string; branch: string }
+  /** Archive one explicitly selected change through the guarded archive operation. */
+  | { type: "archive-change"; changeID: string; worktreeDir: string }
 
 /**
  * Maps a change-relative markdown path to its artifact section. Name-based on

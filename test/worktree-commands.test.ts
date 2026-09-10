@@ -618,8 +618,30 @@ describe("convoy close routing (CC-3)", () => {
     const output = chunks.join("")
     expect(output).toContain("sync (as needed)")
     expect(output).toContain("add-widget")
-    expect(output).toContain("whole-branch squash")
+    expect(output).toContain("whole-branch")
+    // Without --local-landing the dry-run discloses the conditional hosted
+    // landing instead of claiming nothing is ever pushed or merged.
+    expect(output).toContain("linked open pull request")
     expect(await fixture.git(["log", "--oneline", "--all"])).not.toMatch(/archive/)
+  })
+
+  test("--local-landing keeps the dry-run's landing local", async () => {
+    const fixture = await createFixtureRepo({ worktrees: [{ name: "wt", branch: "feat/x" }] })
+    fixtures.push(fixture)
+    const chunks: string[] = []
+    const originalWrite = process.stdout.write.bind(process.stdout)
+    process.stdout.write = mock((chunk: string) => {
+      chunks.push(chunk)
+      return true
+    }) as typeof process.stdout.write
+    try {
+      await runCloseCommandFromArgs(parseCloseCommandArgs(["--worktree", fixture.worktrees["wt"]!, "--base", "main", "--local-landing", "--dry-run"]), fixture.root)
+    } finally {
+      process.stdout.write = originalWrite
+    }
+    const output = chunks.join("")
+    expect(output).toContain("whole-branch squash")
+    expect(output).toContain("nothing is pushed or merged")
   })
 })
 

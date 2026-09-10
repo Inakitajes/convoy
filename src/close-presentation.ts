@@ -100,6 +100,9 @@ function firstLine(value: string): string {
 function squashPhaseDetail(phase: CloseSquashPhase): string {
   if (phase === "composing-message") return "composing the commit message"
   if (phase === "awaiting-message-review") return "awaiting message review"
+  if (phase === "pushing-branch") return "pushing the branch to its remote"
+  if (phase === "requesting-merge") return "requesting GitHub's squash-merge"
+  if (phase === "catching-up-base") return "fast-forwarding the local base"
   return "creating the one-parent landing commit"
 }
 

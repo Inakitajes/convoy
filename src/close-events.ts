@@ -12,9 +12,43 @@ export type CloseStep = "sync" | "archive" | "squash-merge"
 /**
  * The squash-merge step's typed sub-states (design D8): stable identifiers the
  * renderers map to their own copy, so semantic operation state stays in the
- * orchestrator instead of being inferred from which renderer is waiting.
+ * orchestrator instead of being inferred from which renderer is waiting. The
+ * hosted sub-phases narrate the remote landing steps (change
+ * `close-lands-via-github-pr`): publishing the branch, requesting GitHub's
+ * squash-merge, and advancing the local base to the hosted commit.
  */
-export type CloseSquashPhase = "composing-message" | "awaiting-message-review" | "creating-commit"
+export type CloseSquashPhase =
+  | "composing-message"
+  | "awaiting-message-review"
+  | "creating-commit"
+  | "pushing-branch"
+  | "requesting-merge"
+  | "catching-up-base"
+
+/**
+ * The landing decision the interactive message gate can carry when a linked
+ * open PR offers the hosted path (change `close-lands-via-github-pr`, design
+ * D5): accept the reviewed message and land through GitHub, decline and land
+ * locally with the same reviewed message, or cancel the close. A plain
+ * message gate (no linked PR) never offers the hosted choice.
+ */
+export type CloseLandingDecision =
+  | { kind: "hosted"; message: string }
+  | { kind: "local"; message: string }
+  | { kind: "cancel" }
+
+/**
+ * The observed facts of a hosted landing (change `close-lands-via-github-pr`):
+ * stated only after they were observed, never claimed in advance.
+ */
+export type HostedMergeFacts = {
+  prNumber: number
+  /** GitHub's squash commit, when the hosting evidence resolved it. */
+  mergeSha?: string
+  base: string
+  /** Whether the local base was fast-forwarded (false = it already contained the hosted commit). */
+  baseAdvanced: boolean
+}
 
 /** How the close ended, stated once (design D8: no dual merge-shape narration). */
 export type CloseDisposition =

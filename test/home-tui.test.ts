@@ -256,8 +256,8 @@ describe("worktrees-first home (capability home-launcher delta)", () => {
       expect(frame).toContain("add-widget")
       expect(frame).toContain("Open conversation")
       expect(frame).toContain("Propose a change")
-      expect(frame).toContain("Execute pipeline")
-      expect(frame).toContain("Close review")
+      expect(frame).toContain("New run")
+      expect(frame).toContain("Close (archive & merge)")
     } finally {
       await closeHome(session)
     }
@@ -275,7 +275,7 @@ describe("worktrees-first home (capability home-launcher delta)", () => {
       const frame = frameOf(session)
       // The contextual menu carries every independent operation (capability
       // home-launcher delta), each with its own guard — not just close.
-      for (const label of ["Fetch remote", "Sync with base", "Push branch", "Compose pull request", "Squash to base", "Remove worktree", "Close review"]) {
+      for (const label of ["Fetch remote", "Sync with base", "Push branch", "Create pull request", "Squash to base", "Remove worktree", "Close (archive & merge)"]) {
         expect(frame).toContain(label)
       }
     } finally {
@@ -310,12 +310,91 @@ describe("worktrees-first home (capability home-launcher delta)", () => {
       await session.renderOnce()
       session.press("return") // open its detail
       await session.renderOnce()
-      session.press("e") // execute pipeline
+      session.press("n") // New run
       const resolution = (await session.instance.result) as HomeResolution
       expect(resolution).toEqual({ type: "work", worktree: wtPath, action: "pipeline" })
     } catch {
       await closeHome(session)
       throw new Error("test failed")
+    }
+  })
+
+  test("the OpenSpec Archive change action resolves as a work action", async () => {
+    const session = await openHome()
+    try {
+      session.press("down") // New leads
+      await session.renderOnce()
+      session.press("down") // the worktree row
+      await session.renderOnce()
+      session.press("return") // open its detail
+      await session.renderOnce()
+      session.press("a") // Archive change
+      const resolution = (await session.instance.result) as HomeResolution
+      expect(resolution).toEqual({ type: "work", worktree: wtPath, action: "archive" })
+    } catch {
+      await closeHome(session)
+      throw new Error("test failed")
+    }
+  })
+
+  test("the detail surfaces the same Git state the row reports", async () => {
+    const session = await openHome({
+      height: 48,
+      worktrees: [
+        worktree({ path: mainPath, branch: "main", main: true }),
+        worktree({
+          path: wtPath,
+          branch: "feat/add-widget",
+          dirt: { kind: "known", value: { dirty: false, fileCount: 0 }, collectedAt: 0 },
+          // Ahead of its upstream by two and behind its base by three: the row
+          // fold already shows this, and the detail must not drop it.
+          upstream: { kind: "known", value: { upstream: "origin/feat/add-widget", ahead: 2, behind: 0 }, collectedAt: 0 },
+          baseDivergence: { kind: "known", value: { ahead: 0, behind: 3, baseContainedInSource: false }, collectedAt: 0 },
+        }),
+      ],
+    })
+    try {
+      session.press("down") // New leads
+      await session.renderOnce()
+      session.press("down") // the worktree row
+      await session.renderOnce()
+      session.press("return") // open its detail
+      await session.renderOnce()
+      const frame = frameOf(session)
+      expect(frame).toContain("upstream")
+      expect(frame).toContain("origin/feat/add-widget")
+      expect(frame).toContain("2 unpushed")
+      expect(frame).toContain("3 behind base")
+    } finally {
+      await closeHome(session)
+    }
+  })
+
+  test("the detail reports no upstream and unknown comparisons without inventing zero", async () => {
+    const session = await openHome({
+      height: 48,
+      worktrees: [
+        worktree({ path: mainPath, branch: "main", main: true }),
+        worktree({
+          path: wtPath,
+          branch: "feat/add-widget",
+          upstream: { kind: "known", value: { upstream: undefined }, collectedAt: 0 },
+          baseDivergence: { kind: "unknown", reason: "base ref does not resolve", collectedAt: 0 },
+        }),
+      ],
+    })
+    try {
+      session.press("down") // New leads
+      await session.renderOnce()
+      session.press("down") // the worktree row
+      await session.renderOnce()
+      session.press("return") // open its detail
+      await session.renderOnce()
+      const frame = frameOf(session)
+      expect(frame).toContain("none (no upstream)")
+      expect(frame).toContain("unknown (base ref does not resolve)")
+    } finally {
+      await closeHome(session)
     }
   })
 
@@ -338,7 +417,7 @@ describe("worktrees-first home (capability home-launcher delta)", () => {
       session.press("return") // open its detail
       await session.renderOnce()
       const frame = frameOf(session)
-      expect(frame).toContain("Close review")
+      expect(frame).toContain("Close (archive & merge)")
       expect(frame).toContain("blocked:")
       expect(frame).toContain("managed writer")
       session.press("x") // blocked close must not resolve the close action
@@ -556,7 +635,7 @@ describe("selection surface", () => {
   })
 
   test("the detail's selected action rides the accent fill behind an inverted navy marker", async () => {
-    const session = await openHome()
+    const session = await openHome({ height: 60 })
     try {
       session.press("down") // New leads
       await session.renderOnce()
@@ -597,39 +676,51 @@ describe("worktree detail sections and observations", () => {
     await session.renderOnce()
   }
 
-  test("the detail groups its actions into Life Cycle and git sections", async () => {
+  test("the detail groups its actions into Sessions, Runs, OpenSpec, and git sections", async () => {
     const session = await openHome({ height: 60 })
     try {
       await openDetail(session)
       const frame = frameOf(session)
-      // Two labeled sections, in that order: the Life Cycle (which ends with
-      // the deliberate close composition) then the Git operations, ending
-      // with worktree removal. There is no separate destructive section.
-      const lifecycleAt = frame.indexOf("\u2500\u2500 Life Cycle ")
+      // Four labeled action sections in order — Sessions, Runs, OpenSpec, git —
+      // with the Linked Specs observation last.
+      const sessionsAt = frame.indexOf("\u2500\u2500 Sessions ")
+      const runsAt = frame.indexOf("\u2500\u2500 Runs ")
+      const openspecAt = frame.indexOf("\u2500\u2500 OpenSpec ")
       const gitAt = frame.indexOf("\u2500\u2500 git ")
-      expect(lifecycleAt).toBeGreaterThanOrEqual(0)
-      expect(gitAt).toBeGreaterThan(lifecycleAt)
+      const linkedAt = frame.indexOf("\u2500\u2500 Linked Specs ")
+      expect(sessionsAt).toBeGreaterThanOrEqual(0)
+      expect(runsAt).toBeGreaterThan(sessionsAt)
+      expect(openspecAt).toBeGreaterThan(runsAt)
+      expect(gitAt).toBeGreaterThan(openspecAt)
+      expect(linkedAt).toBeGreaterThan(gitAt)
+      // Sessions holds the OpenCode authoring surfaces.
       const conversationAt = frame.indexOf("Open conversation")
-      const pipelineAt = frame.indexOf("Execute pipeline")
-      const closeAt = frame.indexOf("Close review")
+      const windowAt = frame.indexOf("Open in window")
+      expect(conversationAt).toBeGreaterThan(sessionsAt)
+      expect(windowAt).toBeGreaterThan(conversationAt)
+      // Runs leads with the New run row, before the runs list.
+      const newRunAt = frame.indexOf("New run")
+      expect(newRunAt).toBeGreaterThan(runsAt)
+      expect(newRunAt).toBeLessThan(openspecAt)
+      // OpenSpec holds the change operations, ending with close.
+      const proposeAt = frame.indexOf("Propose a change")
+      const archiveAt = frame.indexOf("Archive change")
+      const closeAt = frame.indexOf("Close (archive & merge)")
+      expect(proposeAt).toBeGreaterThan(openspecAt)
+      expect(archiveAt).toBeGreaterThan(proposeAt)
+      expect(closeAt).toBeGreaterThan(archiveAt)
+      expect(closeAt).toBeLessThan(gitAt)
+      // git holds the operations and ends with removal.
       const fetchAt = frame.indexOf("Fetch remote")
       const squashAt = frame.indexOf("Squash to base")
       const removeAt = frame.indexOf("Remove worktree")
-      // The Life Cycle holds the work actions and close, in order.
-      expect(conversationAt).toBeGreaterThan(lifecycleAt)
-      expect(pipelineAt).toBeGreaterThan(conversationAt)
-      expect(closeAt).toBeGreaterThan(pipelineAt)
-      expect(closeAt).toBeLessThan(gitAt)
-      // Git holds the operations and ends with removal.
       expect(fetchAt).toBeGreaterThan(gitAt)
       expect(squashAt).toBeGreaterThan(fetchAt)
       expect(removeAt).toBeGreaterThan(squashAt)
+      expect(removeAt).toBeLessThan(linkedAt)
       expect(frame).not.toContain("destructive")
-      // The observation sections follow, honest when empty: the hermetic
-      // default records no runs and the fixture carries no changes.
-      expect(frame).toContain("recent runs")
+      // The Runs and Linked Specs observations stay honest when empty.
       expect(frame).toContain("no runs recorded for this checkout")
-      expect(frame).toContain("linked specs")
       expect(frame).toContain("no active changes in this checkout")
     } finally {
       await closeHome(session)
@@ -660,7 +751,7 @@ describe("worktree detail sections and observations", () => {
       await session.renderOnce()
       expect(asked).toEqual([wtPath])
       const frame = frameOf(session)
-      expect(frame).toContain("recent runs")
+      expect(frame).toContain("\u2500\u2500 Runs ")
       // The rows speak the runs list's status vocabulary: the check and the
       // cross, one per recorded run.
       expect(frame).toContain("✓")
@@ -668,8 +759,8 @@ describe("worktree detail sections and observations", () => {
       expect(frame).toContain("Ship add-widget")
       expect(frame).toContain("run-42")
       expect(frame).toContain("completed")
-      // The run rows are the entries right after the eleven actions.
-      for (let i = 0; i < 11; i++) {
+      // The run rows follow the two Session actions and the Runs header action.
+      for (let i = 0; i < 3; i++) {
         session.press("down")
         await session.renderOnce()
       }
@@ -701,13 +792,13 @@ describe("worktree detail sections and observations", () => {
     try {
       await openDetail(session)
       const frame = frameOf(session)
-      expect(frame).toContain("linked specs")
+      expect(frame).toContain("Linked Specs")
       // The row speaks the specs browser's vocabulary: the change diamond.
       expect(frame).toContain("◆")
       expect(frame).toContain("add-login")
       expect(frame).toContain("tasks 2/5")
-      // The change row rides after the eleven actions (no runs recorded).
-      for (let i = 0; i < 11; i++) {
+      // The change row follows the twelve actions (no runs recorded).
+      for (let i = 0; i < 12; i++) {
         session.press("down")
         await session.renderOnce()
       }
@@ -731,7 +822,7 @@ describe("worktree detail sections and observations", () => {
     try {
       await openDetail(session)
       const frame = frameOf(session)
-      expect(frame).toContain("linked specs")
+      expect(frame).toContain("Linked Specs")
       expect(frame).toContain("unknown — the openspec directory is unreadable")
     } finally {
       await closeHome(session)
@@ -1256,11 +1347,14 @@ describe("small terminals (list and detail stay navigable)", () => {
 describe("typical action coverage (used by tests above)", () => {
   test("HomeWorkAction ids are exhaustive", () => {
     const ids: HomeWorkAction[] = [
-      // Life Cycle
+      // Sessions
       "conversation",
       "conversation-external",
-      "propose",
+      // Runs
       "pipeline",
+      // OpenSpec
+      "propose",
+      "archive",
       "close",
       // git
       "fetch",
@@ -1270,6 +1364,6 @@ describe("typical action coverage (used by tests above)", () => {
       "squash",
       "remove",
     ]
-    expect(ids).toHaveLength(11)
+    expect(ids).toHaveLength(12)
   })
 })

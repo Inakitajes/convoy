@@ -1,9 +1,4 @@
-# feature-close Specification
-
-## Purpose
-Close a feature in one orchestrated sequence — sync, archive, squash, merge, optional cleanup — so canonical specs are produced against a fresh base branch and no drift window or stale-change state can survive.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Close composes explicitly reviewed worktree operations
 `convoy close` and the Worktrees close action SHALL use the same optional composite operation for an explicitly selected checkout and base: review, sync as needed, archive the explicitly selected local active changes in reviewed order, then squash the entire branch result. Zero selected changes SHALL be supported; no tasks from unselected inherited changes SHALL become a close prerequisite. Selected archive inputs SHALL satisfy the ordinary archive task/cleanliness rules. Already archived local artifacts SHALL be readable context but SHALL NOT imply prior integration or require a new feature incarnation. The operator SHALL see the source/base difference as a diff-stat summary (or fuller diff) before effects, together with the fact that selecting changes controls archive inputs, not squash scope. Initial source/base and all requested steps SHALL be reviewed before effects. Push, worktree removal, and local branch deletion SHALL remain optional separately accepted actions. When a linked open PR for the branch is detected through usable hosting evidence, the landing step SHALL be the hosted path (publish the branch, request the PR's squash-merge with the reviewed message, fast-forward the local base to GitHub's squash commit) and its remote effects SHALL be disclosed as part of the reviewed plan; without a linked PR, unavailable evidence, or an operator decline of the hosted path, close SHALL land locally and there SHALL be no automatic hosted PR merge, PR closure, or remote branch deletion.
@@ -64,18 +59,3 @@ On the hosted path, the accepted message SHALL become the hosted squash commit's
 #### Scenario: Hosted merge request fails
 - **WHEN** GitHub rejects or cannot perform the squash-merge for the linked PR
 - **THEN** close stops with the blocker and remediation, the local branch, worktree, and PR remain unchanged, and retry reconciles by receipt rather than duplicating effects
-
-### Requirement: Close recovery ends with the operation rather than a receipt
-Close SHALL follow the temporary recovery contract in worktree-operations. Recovery SHALL reconcile pending effects before ordinary fresh-operation preflight when those effects themselves changed checkout/index state. Candidate, source, base, selected archive output, accepted message, and requested follow-ups SHALL be retained only while unresolved. A candidate observed in the base during recovery SHALL be checked against recorded preparation before being acknowledged. Archive completion without its commit acknowledgement SHALL be verified against actual output and unrelated dirt before committing. Resolved steps SHALL not be blindly repeated; unexplained differences SHALL stop with guidance. Resolved close SHALL delete temporary journals/refs and SHALL NOT persist feature records, receipts, or an idempotency guarantee for unrelated future invocations. Subsequent content equality SHALL be reported as no difference, not proof that an earlier close happened.
-
-#### Scenario: Crash after archive before commit
-- **WHEN** OpenSpec archived a selected change but the process stopped before committing
-- **THEN** resume validates actual archive output and the pending operation before committing only that output or refusing unexplained changes
-
-#### Scenario: Crash after base advancement
-- **WHEN** a pending candidate is already contained in the base but landing acknowledgement is absent
-- **THEN** recovery verifies its preparation and actual effects, reconciles the existing landing before normal preflight, and does not create another candidate for that completed step
-
-#### Scenario: Later close after resolved operation
-- **WHEN** the earlier journal was removed after success and the operator invokes close again
-- **THEN** current Git/content/PR facts drive a fresh review, without requiring or manufacturing a permanent landing receipt

@@ -17,6 +17,7 @@ import {
   isAncestor,
   mainWorktreeDir,
   mergeBase,
+  remoteBranchTip,
   removeWorktree,
   resetSoft,
   resolveCommit,
@@ -378,6 +379,40 @@ describe("git-repo functions", () => {
       await git(["remote", "add", "origin", dir], dir)
       await git(["push", "-u", "origin", "main"], dir)
       expect(await upstreamRef(dir)).toBe("origin/main")
+    })
+  })
+
+  // ---- remoteBranchTip ----
+
+  describe("remoteBranchTip", () => {
+    /** Creates a bare `origin` and pushes `main` to it, returning the pushed tip. */
+    async function withRemote(dir: string): Promise<{ remote: string; tip: string }> {
+      const remote = await mkdtemp(join(tmpdir(), "convoy-ext-origin-"))
+      dirs.push(remote)
+      await git(["init", "-q", "--bare", "-b", "main", remote], remote)
+      await git(["remote", "add", "origin", remote], dir)
+      await git(["push", "-q", "origin", "main"], dir)
+      const tip = await gitOut(["rev-parse", "HEAD"], dir)
+      return { remote, tip }
+    }
+
+    test("reports the known tip for a pushed branch", async () => {
+      const dir = await createRepo()
+      const { tip } = await withRemote(dir)
+      expect(await remoteBranchTip("origin", "main", dir)).toEqual({ kind: "known", tip })
+    })
+
+    test("a reachable remote without the branch is known-but-absent, not unknown", async () => {
+      const dir = await createRepo()
+      await withRemote(dir)
+      expect(await remoteBranchTip("origin", "feat/missing", dir)).toEqual({ kind: "known" })
+    })
+
+    test("an unqueryable remote is unknown, never read as nothing pushed", async () => {
+      const dir = await createRepo()
+      const queried = await remoteBranchTip("origin", "main", dir)
+      expect(queried.kind).toBe("unknown")
+      if (queried.kind === "unknown") expect(queried.reason.length).toBeGreaterThan(0)
     })
   })
 
