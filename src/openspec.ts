@@ -90,10 +90,14 @@ export function titleFromProposal(body: string, fallback: string): string {
   const heading = stripped.match(/^#\s+(.+)$/m)
   const fromHeading = heading?.[1]?.trim()
   if (fromHeading) return fromHeading
+  // Structural headings (`## Why`, the OpenSpec template's opener) are not
+  // titles: a proposal without a top-level `#` titles itself from its first
+  // prose line instead of leaking markup like "## Why" into board rows and
+  // reader headers. Display surfaces truncate long prose already.
   const line = stripped
     .split(/\r?\n/)
     .map((entry) => entry.trim())
-    .find((entry) => entry.length > 0)
+    .find((entry) => entry.length > 0 && !/^#{1,6}\s/.test(entry))
   return line || fallback
 }
 

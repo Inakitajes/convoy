@@ -480,6 +480,14 @@ describe("OpenSpec listing and canned prompt", () => {
     expect(titleFromProposal("   \n\n", "add-empty")).toBe("add-empty")
   })
 
+  test("titleFromProposal never leaks structural headings as titles (the template's ## Why opener)", () => {
+    // The OpenSpec template opens with `## Why`; a proposal without a
+    // top-level `#` titles itself from its first prose line instead.
+    expect(titleFromProposal("## Why\n\nConvoy reconciles two models.\n\n## What Changes", "fallback")).toBe("Convoy reconciles two models.")
+    expect(titleFromProposal("## Why", "add-only-headings")).toBe("add-only-headings")
+    expect(titleFromProposal("## Why\n\n## What Changes\n\n### Impact", "add-all-headings")).toBe("add-all-headings")
+  })
+
   test("openSpecPromptFor is pipeline-aware and never invents a brief", () => {
     expect(openSpecPromptFor("implement")).toBe("Implement the attached OpenSpec change.")
     expect(openSpecPromptFor("implement-lite")).toBe("Implement the attached OpenSpec change.")

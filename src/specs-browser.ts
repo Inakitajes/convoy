@@ -1169,19 +1169,64 @@ export class SpecsBrowser {
     // the reader's title bar never runs a frame behind the content.
     lines.push(...loadingDivider())
     if (this.groups.length > 1 && !this.fullscreen) {
-      const tabs: TextChunk[] = [raw(" ")]
-      this.groups.forEach((candidate, index) => {
-        if (index > 0) tabs.push(fg(theme.faint)("  "))
-        tabs.push(fg(theme.faint)(`${index + 1} `))
-        tabs.push(index === this.selectedGroup ? bold(fg(theme.accent)(candidate.label)) : fg(theme.dim)(candidate.label))
-      })
-      lines.push(new StyledText(tabs))
+      lines.push(this.tabStrip(width))
       lines.push(plain(""))
     }
     const body = rendered.slice(this.detailScroll, this.detailScroll + contentHeight)
     lines.push(...body)
     while (lines.length < this.detailsHeight()) lines.push(plain(""))
     return joinLines(lines.slice(0, this.detailsHeight()))
+  }
+
+  /**
+   * The reading pane's tab strip. The active tab is the same padded inverted
+   * block the board's selected rows wear — one fill cell either side of the
+   * label — so the group the reader is on reads as a chip rather than as
+   * arbitrarily bolded text among its own siblings; the siblings stay quiet
+   * (faint digit, dim label) so the eye lands on the fill, not on weight.
+   * Digits keep their tab-jump meaning and ride inside the active chip, so
+   * the affordance survives the highlight. The strip truncates within its
+   * width: the active tab claims its budget first, siblings share the rest.
+   */
+  private tabStrip(width: number): StyledText {
+    const usable = Math.max(8, width - 2)
+    const active = this.groups[this.selectedGroup]!
+    const activeDigit = ` ${this.selectedGroup + 1} `
+    // The active chip claims its footprint first — separator, padded digit
+    // cells, and label — so siblings can never crowd it off the strip. A
+    // sibling that no longer fits drops into the `+N` marker (the footer's
+    // position and the arrow keys still reach it) instead of wrapping the
+    // strip into the body's line budget.
+    const activeLabel = truncate(active.label, Math.max(1, usable - 10))
+    let remaining = usable - activeDigit.length - activeLabel.length - 2
+    const tabs: TextChunk[] = [raw(" ")]
+    const dropped: string[] = []
+    this.groups.forEach((candidate, index) => {
+      const separator = index > 0 ? 2 : 0
+      if (index === this.selectedGroup) {
+        if (separator) tabs.push(raw("  "))
+        tabs.push(bg(theme.accent)(fg(theme.chipText)(activeDigit)))
+        tabs.push(bg(theme.accent)(bold(fg(theme.chipText)(activeLabel))))
+        tabs.push(bg(theme.accent)(fg(theme.chipText)(" ")))
+        return
+      }
+      const label = truncate(candidate.label, Math.max(1, remaining - separator - 2))
+      const cost = separator + 2 + displayWidth(label)
+      if (cost > remaining) {
+        dropped.push(`${index + 1}`)
+        return
+      }
+      remaining -= cost
+      if (separator) tabs.push(raw("  "))
+      tabs.push(fg(theme.faint)(`${index + 1}`))
+      tabs.push(raw(" "))
+      tabs.push(fg(theme.dim)(label))
+    })
+    if (dropped.length > 0) {
+      const marker = ` +${dropped.length}`
+      if (marker.length <= remaining) tabs.push(fg(theme.faint)(marker))
+    }
+    return new StyledText(tabs)
   }
 
   /** The Actions menu overlay: dispatchable entries plus blocked reasons/remediation. */
