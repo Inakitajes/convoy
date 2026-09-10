@@ -72,25 +72,6 @@ The root SHALL present Worktrees from Git inventory rather than Features, Worktr
 - **WHEN** the operator looks for historical work after Git worktree removal
 - **THEN** that checkout is absent from the root without a Completed entry, and any retained run history remains accessible independently
 
-### Requirement: The root list is the whole board
-
-The root SHALL be a list-only browse board: the navigation list SHALL fill the body in both wide and compact layouts, with no secondary details panel beside or beneath it — a row's divider rule and its own line already carry the facts the operator needs. Pressing Enter SHALL open the selected change or canonical spec in the full-width reading level, and returning to the root SHALL restore the list-only full-body layout for the still-selected subject and checkout. The reading pane exists only at the detail level (the Actions menu MAY borrow a pane beside the narrowed list while it is open at the root). The board SHALL present two named sections — `changes`, whose worktree dividers carry each checkout's local active changes beneath them, and `specs`, the checkout-local canonical specs — each drawn as its own rounded container whose header is visually distinct from the plain worktree rules inside it, with worktree sections separated by a full blank line and the two containers opening back-to-back. The board SHALL render no header row: the section containers and the footer are its only chrome, and the section containers SHALL span the body minus the shell's single-column margin on each edge.
-
-#### Scenario: Root renders as a single list
-
-- **WHEN** the browse board renders at the root in either a wide or compact terminal, regardless of which row is selected
-- **THEN** the browse list fills the body and no details panel is present
-
-#### Scenario: Return from a reader
-
-- **WHEN** the user presses Enter on any row and then returns from its reading level
-- **THEN** that subject remains selected at the root and the list-only full-body layout is restored
-
-#### Scenario: Worktree sections sit apart
-
-- **WHEN** more than one checkout is registered
-- **THEN** a full blank line separates each worktree section from the next, beneath the `changes` header
-
 ### Requirement: Change detail groups artifacts by type
 
 Entering an active change, a local archived change, or a canonical spec SHALL show one full-width reading pane under a horizontal tab strip, with one tab per artifact group: Proposal, Design, Tasks, Delta Specs, and Other when present. All delta spec files SHALL share a single Delta Specs tab regardless of how many capabilities they span, concatenated with a small heading naming each capability before that capability's files. The tab strip SHALL be omitted when the subject has a single group (a canonical spec, or a change with one artifact group), leaving only a title row identifying the subject. Tabs SHALL switch with left/right keys (or `h`/`l`) and digit keys `1` through `9`; up/down keys SHALL scroll the active tab's content line by line. Each tab's content SHALL render as markdown with YAML frontmatter stripped; delta spec content MAY style its requirement-operation headers (`ADDED`, `MODIFIED`, `REMOVED`) distinctly. Files that cannot be read SHALL render as a placeholder instead of failing the browser. All groups SHALL remain scoped to the selected checkout-local source.
@@ -236,3 +217,30 @@ Pressing the close key (`x`) on a selected change whose containing checkout has 
 
 - **WHEN** a source branch contains two changes and the operator explicitly selects only one to archive during close
 - **THEN** review names that one archive selection and separately warns that squash covers the whole reviewed branch, including other edits
+
+## REMOVED Requirements
+
+### Requirement: Canonical selection keeps the root list full-size
+**Reason**: Superseded by the list-only root board: the redundant details panel is gone in wide and compact layouts for every selection, so there is no canonical-selection-specific panel behavior left to keep.
+**Migration**: See the ADDED requirement "The root list is the whole board".
+
+## ADDED Requirements
+
+### Requirement: The root list is the whole board
+
+The root SHALL be a list-only browse board: the navigation list SHALL fill the body in both wide and compact layouts, with no secondary details panel beside or beneath it — a row's divider rule and its own line already carry the facts the operator needs. Pressing Enter SHALL open the selected change or canonical spec in the full-width reading level, and returning to the root SHALL restore the list-only full-body layout for the still-selected subject and checkout. The reading pane exists only at the detail level (the Actions menu MAY borrow a pane beside the narrowed list while it is open at the root). The board SHALL present two named sections — `changes`, whose worktree dividers carry each checkout's local active changes beneath them, and `specs`, the checkout-local canonical specs — each drawn as its own rounded container whose header is visually distinct from the plain worktree rules inside it, with worktree sections separated by a full blank line and the two containers opening back-to-back. The board SHALL render no header row: the section containers and the footer are its only chrome, and the section containers SHALL span the body minus the shell's single-column margin on each edge.
+
+#### Scenario: Root renders as a single list
+
+- **WHEN** the browse board renders at the root in either a wide or compact terminal, regardless of which row is selected
+- **THEN** the browse list fills the body and no details panel is present
+
+#### Scenario: Return from a reader
+
+- **WHEN** the user presses Enter on any row and then returns from its reading level
+- **THEN** that subject remains selected at the root and the list-only full-body layout is restored
+
+#### Scenario: Worktree sections sit apart
+
+- **WHEN** more than one checkout is registered
+- **THEN** a full blank line separates each worktree section from the next, beneath the `changes` header
