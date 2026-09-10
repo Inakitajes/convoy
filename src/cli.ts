@@ -1566,6 +1566,11 @@ async function proposeInCheckout(input: { launchDir: string; route: TuiRoute; ch
       branch: input.branch,
       checkoutPath: input.checkout,
       kind: "authoring",
+      // The claim is taken before any session exists, under the "convoy"
+      // pre-session owner: the failure-path release and the post-session
+      // re-own (`reconcileOwner: "convoy"`) match this owner, so a failed
+      // propose always releases what it claimed.
+      owner: "convoy",
     })
     if (acquired.status === "acquired") {
       claimed = true
@@ -1594,7 +1599,11 @@ async function proposeInCheckout(input: { launchDir: string; route: TuiRoute; ch
     boundedClose?.()
     if (claimed && commonDir) {
       const { releaseWriterClaim } = await import("./writer-claims")
-      await releaseWriterClaim({ commonDir, branch: input.branch, owner: ref?.sessionId ?? "convoy" }).catch(() => {})
+      // The re-own to the session id only runs after success, so on this
+      // path the claim is still this process's: release by pid, which
+      // matches regardless of the owner string (a mismatched-owner release
+      // is a no-op and would wedge the checkout behind an authoring claim).
+      await releaseWriterClaim({ commonDir, branch: input.branch, ownerPid: process.pid }).catch(() => {})
     }
     return
   }
