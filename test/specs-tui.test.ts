@@ -360,7 +360,7 @@ test("up from the first change row stays on it instead of recursing onto the hea
   await close(session)
 })
 
-test("a selected change row's diamond is a padded block with a blue square before the title", async () => {
+test("a selected change row's diamond leads the row and rides a blue square before the title", async () => {
   const session = await openBrowser()
   try {
     // The first change (add-login) is selected by default; inspect its row line.
@@ -371,15 +371,20 @@ test("a selected change row's diamond is a padded block with a blue square befor
     const spans = selectedLine.spans
     const diamond = spans.findIndex((span) => span.text === "◆" && span.bg.a > 0)
     expect(diamond).toBeGreaterThanOrEqual(1)
-    // The marker block: the diamond glyph plus one cell of the same color on
-    // each side (padding), never a lone inverted glyph in the accent fill.
-    const block = spans.slice(diamond - 1, diamond + 2)
-    expect(block.map((span) => span.text)).toEqual([" ", "◆", " "])
+    // The marker hangs straight from the container's inner edge — the same
+    // column the worktree rule's dashes start at — with one trailing fill
+    // cell inside the accent block, never a lone inverted glyph floating
+    // mid-row.
+    const block = spans.slice(diamond, diamond + 2)
+    expect(block.map((span) => span.text)).toEqual(["◆", " "])
     const markerColor = spans[diamond]!.bg
     const same = (a: { r: number; g: number; b: number }, b: { r: number; g: number; b: number }) =>
       a.r === b.r && a.g === b.g && a.b === b.b
-    expect(same(block[0]!.bg, markerColor)).toBe(true)
-    expect(same(block[2]!.bg, markerColor)).toBe(true)
+    expect(same(block[1]!.bg, markerColor)).toBe(true)
+    // The glyph itself leads the fill: nothing rides between the container's
+    // inner edge and the marker.
+    const lead = spans.slice(0, diamond)
+    expect(lead.some((span) => span.bg.a > 0)).toBe(false)
     // A blue (accent) square separates the marker block from the title — one
     // blend of the marker color and the accent fill that rides behind the row.
     const breathe = spans[diamond + 2]!

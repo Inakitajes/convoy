@@ -1101,36 +1101,40 @@ export class SpecsBrowser {
       // (glyph plus one cell either side), the home row's shape.
       const worktree = this.worktreeFor(change)
       const markerColor = worktree ? worktreeDotColor(worktree) : theme.accent
-      // The marker rides the containing worktree's state color, one cell of
-      // the same color on either side — so a selected row reads as a padded
-      // three-cell block, the run-list checkbox's shape, rather than a lone
-      // inverted diamond floating in the accent fill.
+      // The marker rides the containing worktree's state color. Selected, one
+      // fill cell trails the glyph inside the accent block — the run-list
+      // checkbox's shape. No leading pad: the marker hangs straight from the
+      // container's inner edge, where the worktree rule's dashes also start,
+      // so a child never sits one column deeper than its own section rule.
       const marker: TextChunk[] = selected
-        ? [bg(markerColor)(" "), bg(markerColor)(fg(theme.chipText)("◆")), bg(markerColor)(" ")]
-        : [raw(" "), fg(markerColor)("◆"), raw(" ")]
+        ? [bg(markerColor)(fg(theme.chipText)("◆")), bg(markerColor)(" ")]
+        : [fg(markerColor)("◆"), raw(" ")]
       const heading = change.title === change.id ? change.id : `${change.id} — ${change.title}`
-      const title = truncate(heading, Math.max(12, width - 18))
       const counts = artifactCounts(change)
       const countText = counts === "—" ? "" : `  ${truncate(counts, Math.max(0, width - displayWidth(heading) - 8))}`
-      // One column in from the container border, like every other child row;
-      // a blank breathing column then separates the marker block from the
+      // The headline gets the room the row actually has: the marker, its gap,
+      // and the counts' own budget only when there are counts to show — a
+      // long headline stretches to the container's edge instead of stopping
+      // at a fixed reserve.
+      const title = truncate(heading, Math.max(12, width - 3 - (countText ? displayWidth(countText) : 0)))
+      // A blank breathing column separates the marker block from the
       // headline — on the selected row it rides the accent fill, so the block
       // reads as a marker followed by a blue square before the title.
       if (selected) {
         return this.highlighted([...marker, raw(" "), bold(fg(theme.chipText)(title)), fg(theme.chipText)(countText)], width)
       }
-      return padBetween([...marker, raw(" "), fg(theme.text)(title)], [fg(theme.dim)(countText)], width)
+      return padBetween([...marker, fg(theme.text)(title)], [fg(theme.dim)(countText.trimStart())], width)
     }
     if (row.kind === "sectionEnd") return this.sectionEndLine(width)
     // Canonical specs are stateless — already-integrated truth, not work in
-    // any state — so they carry no state-coded diamond: a quiet gray bullet
-    // riding one column in from the container border.
+    // any state — so they carry no state-coded diamond: a quiet gray bullet,
+    // hanging straight from the container's inner edge like every child row.
     const marker = selected ? fg(theme.chipText)("•") : fg(theme.dim)("•")
-    const name = truncate(specDisplayPath(row.path), Math.max(12, width - 6))
+    const name = truncate(specDisplayPath(row.path), Math.max(12, width - 4))
     if (selected) {
-      return this.highlighted([raw(" "), marker, raw(" "), bold(fg(theme.chipText)(name))], width)
+      return this.highlighted([marker, raw(" "), bold(fg(theme.chipText)(name))], width)
     }
-    return new StyledText([raw(" "), marker, raw(" "), fg(theme.dim)(name)])
+    return new StyledText([marker, raw(" "), fg(theme.dim)(name)])
   }
 
   /** A section divider: one dim rule with the label riding inside it. */
