@@ -16,6 +16,7 @@ import { resolve, join } from "node:path"
 import { readFile, readdir, stat } from "node:fs/promises"
 import { stripControlBytes } from "./commit-text"
 import type { TuiRoute } from "./tui-session"
+import type { CloseTui } from "./close-tui"
 import type { CloseEvent, CloseLandingDecision, CloseMessageProposal, HostedMergeFacts } from "./close-events"
 
 /**
@@ -608,7 +609,13 @@ async function validateArchiveInputs(checkout: string, changes: string[], option
  * its commit is recoverable through `convoy worktrees recover` — the journal
  * lives outside the checkout and reconciles against reality.
  */
-async function archiveSelectedChanges(checkout: string, changes: string[], commonDir: string): Promise<{ archived: string[] }> {
+async function archiveSelectedChanges(
+  checkout: string,
+  changes: string[],
+  commonDir: string,
+  /** Releases the alternate screen around the inherited-terminal archive commit (interactive close). */
+  withTerminal?: <T>(action: () => Promise<T>) => Promise<T>,
+): Promise<{ archived: string[] }> {
   const { createOperation, recordStepIntent, acknowledgeStep, resolveOperation } = await import("./operation-journal")
   // Intent before effect: one journaled step per selected change plus the
   // commit. A journal that cannot be persisted blocks the mutation — an
@@ -674,7 +681,11 @@ async function archiveSelectedChanges(checkout: string, changes: string[], commo
   }
   // Commit only the verified archive output, under the operator's identity.
   await execFile("git", ["add", "--", `${openspecDirName}/`], { cwd: checkout })
-  await commitAsUser(`chore: archive ${archived.join(", ")}`, checkout)
+  // `commitAsUser` inherits the terminal (signing, hooks), so an interactive
+  // close suspends its alternate screen around it: otherwise git's summary
+  // paints over the live interface and the diff renderer never repaints.
+  const commit = () => commitAsUser(`chore: archive ${archived.join(", ")}`, checkout)
+  await (withTerminal ? withTerminal(commit) : commit())
   const commitAck = await acknowledgeStep(commonDir, operationId, "commit", { changes: archived })
   if (!commitAck.ok) {
     throw new Error(`the archive commit succeeded but its journal acknowledgement failed: ${commitAck.reason} — inspect with \`convoy worktrees recover --operation ${operationId}\``)
@@ -691,7 +702,12 @@ async function archiveSelectedChanges(checkout: string, changes: string[], commo
  * OpenSpec paths, exactly that output is committed and the operation resolved.
  * Anything unexplained blocks with recovery guidance instead of guessing.
  */
-async function reconcilePendingArchiveOperations(commonDir: string, checkout: string): Promise<void> {
+async function reconcilePendingArchiveOperations(
+  commonDir: string,
+  checkout: string,
+  /** Releases the alternate screen around the reconcile commit when one is needed (interactive close). */
+  withTerminal?: <T>(action: () => Promise<T>) => Promise<T>,
+): Promise<void> {
   const pending = await listPendingOperations(commonDir)
   for (const operationId of pending) {
     const read = await readOperation(commonDir, operationId)
@@ -705,7 +721,7 @@ async function reconcilePendingArchiveOperations(commonDir: string, checkout: st
     }
     if (outcome.status === "needs-work") {
       if (outcome.remaining.length === 1 && outcome.remaining[0] === "commit") {
-        await completeInterruptedArchiveCommit(commonDir, operationId, checkout)
+        await completeInterruptedArchiveCommit(commonDir, operationId, checkout, withTerminal)
         continue
       }
       throw new Error(`a pending archive operation (${operationId}) still has unresolved steps (${outcome.remaining.join(", ")}) — inspect it with \`convoy worktrees recover --operation ${operationId}\` before archiving here`)
@@ -720,7 +736,13 @@ async function reconcilePendingArchiveOperations(commonDir: string, checkout: st
  * identity; a clean tree means the commit already happened and is only
  * acknowledged. The journal is then resolved and released.
  */
-async function completeInterruptedArchiveCommit(commonDir: string, operationId: string, checkout: string): Promise<void> {
+async function completeInterruptedArchiveCommit(
+  commonDir: string,
+  operationId: string,
+  checkout: string,
+  /** Releases the alternate screen around the inherited-terminal reconcile commit (interactive close). */
+  withTerminal?: <T>(action: () => Promise<T>) => Promise<T>,
+): Promise<void> {
   const { acknowledgeStep, resolveOperation, readOperation } = await import("./operation-journal")
   const read = await readOperation(commonDir, operationId)
   const intent = read.status === "found" ? (read.value.intent as { changes?: unknown } | undefined) : undefined
@@ -733,7 +755,8 @@ async function completeInterruptedArchiveCommit(commonDir: string, operationId: 
   }
   if (lines.length > 0) {
     await execFile("git", ["add", "--", `${openspecDirName}/`], { cwd: checkout })
-    await commitAsUser(`chore: archive ${changes.join(", ")}`, checkout)
+    const commit = () => commitAsUser(`chore: archive ${changes.join(", ")}`, checkout)
+    await (withTerminal ? withTerminal(commit) : commit())
   }
   const ack = await acknowledgeStep(commonDir, operationId, "commit", { completed: true, ...(lines.length === 0 ? { alreadyCommitted: true } : {}) })
   if (!ack.ok) {
@@ -859,9 +882,10 @@ type CloseProgress = {
   resolveLanding?: (proposal: CloseMessageProposal, notice?: string) => Promise<CloseLandingDecision>
   /**
    * Releases the alternate screen around mutations whose git output is
-   * inherited (the squash candidate's `commitAsUser`, remote push/gh effects):
-   * the TUI must suspend first or git's summary paints over the live
-   * interface, and a diff-based renderer never repaints the stomped cells.
+   * inherited (the archive commits, the squash candidate's `commitAsUser`, and
+   * the remote branch push): the TUI must suspend first or git's summary paints
+   * over the live interface, and a diff-based renderer never repaints the
+   * stomped cells.
    */
   withTerminal?: <T>(action: () => Promise<T>) => Promise<T>
 }
@@ -934,8 +958,8 @@ export async function driveClose(
       // 2. Archive the explicitly selected local changes (zero supported).
       if (command.changes.length > 0) {
         emit({ type: "step-started", step: "archive" })
-        await reconcilePendingArchiveOperations(commonDir, target.checkoutPath)
-        const archived = await archiveSelectedChanges(target.checkoutPath, command.changes, commonDir)
+        await reconcilePendingArchiveOperations(commonDir, target.checkoutPath, progress.withTerminal)
+        const archived = await archiveSelectedChanges(target.checkoutPath, command.changes, commonDir, progress.withTerminal)
         steps.push(`archived ${archived.archived.join(", ")}`)
         emit({ type: "step-completed", step: "archive", detail: archived.archived.join(", ") })
       } else {
@@ -1066,6 +1090,20 @@ function withPullRequestOutcome(outcome: { steps: string[] }, pr: ClosePullReque
   return { ...outcome, ...(pr.status === "found" ? { pullRequest: { number: pr.number, ...(pr.title !== undefined ? { title: pr.title } : {}), url: pr.url } } : {}) }
 }
 
+/**
+ * The shared-session close handoff (capability feature-close): the close
+ * screen's progress mode consumes every key (`stopPropagation`), so it must
+ * release its keyboard handling before the completion notice mounts — otherwise
+ * the notice never receives `q`/Escape/Enter/Ctrl+C and stays frozen. `destroy`
+ * is idempotent and leaves a shared renderer alive; `openScene` then closes the
+ * close tree as the notice mounts. Exported for the lifecycle regression test.
+ */
+export async function showCloseOutcome(route: TuiRoute, tui: CloseTui, outcome: CloseOutcome): Promise<void> {
+  tui.destroy()
+  const { showNoticeTui } = await import("./notice-tui")
+  await showNoticeTui(route, { title: outcome.cancelled ? "close cancelled" : "close complete", message: closeSummaryLines(outcome).join("\n") })
+}
+
 async function runClose(command: Extract<WorktreesCommand, { kind: "close" }>, cwd?: string, route?: TuiRoute): Promise<void> {
   const { commonDir } = await repoContext(cwd)
   const review = await reviewOperation({ action: "close", checkout: command.worktree, base: command.base, commonDir })
@@ -1090,8 +1128,9 @@ async function runClose(command: Extract<WorktreesCommand, { kind: "close" }>, c
       }
       const summary = closeSummaryLines(result.value)
       if (route) {
-        const { showNoticeTui } = await import("./notice-tui")
-        await showNoticeTui(route, { title: result.value.cancelled ? "close cancelled" : "close complete", message: summary.join("\n") })
+        // Release the close screen's input before the notice mounts (the
+        // frozen-notice fix); the finally below stays as a safety net.
+        await showCloseOutcome(route, tui, result.value)
       } else {
         process.stdout.write(`${summary.join("\n")}\n`)
       }

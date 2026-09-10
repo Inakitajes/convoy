@@ -19,6 +19,12 @@ import { homedir } from "node:os"
  * The child receives structured arguments (no shell string), so nothing is
  * re-parsed or re-quoted on the way in. Exit code is returned for outcome
  * reporting; the caller decides what a non-zero exit means.
+ *
+ * The child transiently owns the primary screen the alternate screen reveals.
+ * The host clears it after suspending (before the child starts) and again after
+ * the child exits (before resuming), so neither Convoy's teardown nor the
+ * child's startup terminal queries and frame setup stay visible on the surface
+ * Convoy later reveals.
  */
 export async function runForegroundChild(input: {
   argv: readonly string[]
@@ -29,9 +35,13 @@ export async function runForegroundChild(input: {
   resume(): void
   /** Environment for the child; defaults to the parent's. */
   env?: Record<string, string>
+  /** Wipes the released primary screen; defaults to {@link clearPrimaryScreen}. Injected for tests. */
+  clear?: () => void
 }): Promise<number> {
+  const clear = input.clear ?? clearPrimaryScreen
   input.suspend()
   try {
+    clear()
     const proc = Bun.spawn([...input.argv], {
       cwd: input.cwd,
       stdin: "inherit",
@@ -41,8 +51,19 @@ export async function runForegroundChild(input: {
     })
     return await proc.exited
   } finally {
+    clear()
     input.resume()
   }
+}
+
+/**
+ * Wipes the visible primary screen after the alternate screen is released, so a
+ * foreground child's startup capability queries and leftovers never stay on the
+ * surface Convoy reveals when it exits. The scrollback above the screen is
+ * intentionally left intact (no `ESC[3J`).
+ */
+export function clearPrimaryScreen(): void {
+  process.stdout.write("\x1b[2J\x1b[H")
 }
 
 const SESSION_WINDOW_BACKENDS = ["herdr", "zellij", "ghostty", "terminal"] as const

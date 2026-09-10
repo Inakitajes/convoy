@@ -203,6 +203,7 @@ describe("authoringClientArgv / openConversationForeground (task 4.6)", () => {
       ref: SESSION,
       suspend: () => {},
       resume: () => {},
+      clear: () => {},
       env: { FOO: "bar" },
     })
 

@@ -106,6 +106,8 @@ export function openConversationForeground(input: {
   suspend(): void
   resume(): void
   env?: Record<string, string>
+  /** Injected primary-screen clear (tests); the host's terminal clear by default. */
+  clear?: () => void
 }): Promise<number> {
   return runForegroundChild({
     argv: authoringClientArgv({ checkout: input.checkout, ref: input.ref }),
@@ -113,6 +115,7 @@ export function openConversationForeground(input: {
     suspend: input.suspend,
     resume: input.resume,
     ...(input.env ? { env: input.env } : {}),
+    ...(input.clear ? { clear: input.clear } : {}),
   })
 }
 
