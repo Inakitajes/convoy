@@ -1691,6 +1691,40 @@ export class HomeLauncher {
     if (worktree.dirt) {
       fact("dirt", worktree.dirt.kind === "known" ? (worktree.dirt.value.dirty ? `${worktree.dirt.value.fileCount} file(s) uncommitted` : "clean") : `unknown (${worktree.dirt.reason})`, worktree.dirt.kind === "known" && worktree.dirt.value.dirty ? theme.yellow : theme.text)
     }
+    // The row fold already reports these observations; opening the detail must
+    // not drop them (capability home-launcher: worktree detail surfaces the
+    // observed Git state). Base and upstream stay independent facts with their
+    // own honest unknown/no-upstream conditions — never a single sync verdict.
+    if (worktree.upstream) {
+      const upstream = worktree.upstream
+      let value: string
+      if (upstream.kind === "unknown") {
+        value = `unknown (${upstream.reason})`
+      } else if (upstream.value.upstream === undefined) {
+        value = "none (no upstream)"
+      } else {
+        const counts: string[] = []
+        if (upstream.value.ahead) counts.push(`${upstream.value.ahead} unpushed`)
+        if (upstream.value.behind) counts.push(`${upstream.value.behind} to pull`)
+        value = counts.length > 0 ? `${upstream.value.upstream} · ${counts.join(" · ")}` : `${upstream.value.upstream} · in sync`
+      }
+      fact("upstream", value, upstream.kind === "unknown" ? theme.yellow : theme.dim)
+    }
+    if (worktree.baseDivergence) {
+      const base = worktree.baseDivergence
+      let value: string
+      if (base.kind === "unknown") {
+        value = `unknown (${base.reason})`
+      } else if (base.value.ahead === 0 && base.value.behind === 0) {
+        value = "in sync with base"
+      } else {
+        const counts: string[] = []
+        if (base.value.behind) counts.push(`${base.value.behind} behind base`)
+        if (base.value.ahead) counts.push(`${base.value.ahead} ahead of base`)
+        value = counts.join(" · ")
+      }
+      fact("base", value, base.kind === "unknown" ? theme.yellow : theme.text)
+    }
     if (worktree.activity) {
       fact("activity", worktree.activity.kind === "known" ? `${worktree.activity.value.total} live run(s)` : `unknown (${worktree.activity.reason})`)
     }

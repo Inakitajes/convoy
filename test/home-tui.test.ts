@@ -319,6 +319,67 @@ describe("worktrees-first home (capability home-launcher delta)", () => {
     }
   })
 
+  test("the detail surfaces the same Git state the row reports", async () => {
+    const session = await openHome({
+      height: 48,
+      worktrees: [
+        worktree({ path: mainPath, branch: "main", main: true }),
+        worktree({
+          path: wtPath,
+          branch: "feat/add-widget",
+          dirt: { kind: "known", value: { dirty: false, fileCount: 0 }, collectedAt: 0 },
+          // Ahead of its upstream by two and behind its base by three: the row
+          // fold already shows this, and the detail must not drop it.
+          upstream: { kind: "known", value: { upstream: "origin/feat/add-widget", ahead: 2, behind: 0 }, collectedAt: 0 },
+          baseDivergence: { kind: "known", value: { ahead: 0, behind: 3, baseContainedInSource: false }, collectedAt: 0 },
+        }),
+      ],
+    })
+    try {
+      session.press("down") // New leads
+      await session.renderOnce()
+      session.press("down") // the worktree row
+      await session.renderOnce()
+      session.press("return") // open its detail
+      await session.renderOnce()
+      const frame = frameOf(session)
+      expect(frame).toContain("upstream")
+      expect(frame).toContain("origin/feat/add-widget")
+      expect(frame).toContain("2 unpushed")
+      expect(frame).toContain("3 behind base")
+    } finally {
+      await closeHome(session)
+    }
+  })
+
+  test("the detail reports no upstream and unknown comparisons without inventing zero", async () => {
+    const session = await openHome({
+      height: 48,
+      worktrees: [
+        worktree({ path: mainPath, branch: "main", main: true }),
+        worktree({
+          path: wtPath,
+          branch: "feat/add-widget",
+          upstream: { kind: "known", value: { upstream: undefined }, collectedAt: 0 },
+          baseDivergence: { kind: "unknown", reason: "base ref does not resolve", collectedAt: 0 },
+        }),
+      ],
+    })
+    try {
+      session.press("down") // New leads
+      await session.renderOnce()
+      session.press("down") // the worktree row
+      await session.renderOnce()
+      session.press("return") // open its detail
+      await session.renderOnce()
+      const frame = frameOf(session)
+      expect(frame).toContain("none (no upstream)")
+      expect(frame).toContain("unknown (base ref does not resolve)")
+    } finally {
+      await closeHome(session)
+    }
+  })
+
   test("a blocked close stays visible with its blocker and does not fire", async () => {
     const busy = worktree({
       path: "/wt/blocked",
