@@ -5,7 +5,7 @@ Convoy currently reconciles two competing models: inferred OpenSpec/worktree sta
 ## What Changes
 
 - Make **Worktrees** the primary Home and control-center vocabulary. A worktree is a Git checkout, not a new persisted entity; do not introduce “Spaces”, work IDs, ownership manifests, or completion tombstones.
-- Enumerate every worktree registered in the current Git repository, including externally created, main, detached, locked, inaccessible, and spec-less checkouts. Show independent Git, PR, local OpenSpec, and execution facts rather than a global lifecycle stage.
+- Enumerate every worktree registered in the current Git repository, including externally created, main, detached, locked, inaccessible, and spec-less checkouts. Show independent Git, PR, local OpenSpec, execution, and managed-writer facts rather than a global lifecycle stage.
 - Read changes, tasks, archives, and canonical specs only inside the selected checkout. Identical change IDs in different worktrees remain independent sources; inherited files are present, not owned. Archive or run only explicitly selected changes.
 - Create worktrees through “What are we building today?”: propose a conventional branch and conventional location, review/edit the base and destination, then create without commits, PRs, or feature registration.
 - Expose independent fetch, sync-with-base, push, semantic PR composition/creation, archive-change, pipeline, conversation, squash-to-base, worktree removal, and branch deletion actions. Close becomes an optional composition of those same operations with explicit archive selection and optional cleanup.

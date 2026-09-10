@@ -35,7 +35,7 @@ Folder basename is the visible worktree name, qualified by path/branch when ambi
 
 ### D2. Observe independent facts; do not synthesize a lifecycle
 
-Use small typed observations with known/unavailable states, source, and collection time. Collect local inventory first, local detail lazily or with bounded concurrency, and optional PR queries asynchronously. Do not require a giant global snapshot to render a usable list. A failed probe is not a negative fact.
+Use small typed observations with known/unavailable states, source, and collection time. Collect local inventory first, local detail lazily or with bounded concurrency, and optional PR queries asynchronously. Do not require a giant global snapshot to render a usable list. A failed probe is not a negative fact. Observe the managed-writer claim (kind, owner, liveness) as its own fact, independent of execution activity: a stale claim is not a live writer, an unreadable or newer-schema record is unknown rather than free, and the detail's disabled state is a projection of the same guard the handlers revalidate before any effect.
 
 Git comparisons use explicit operands:
 - `base...HEAD` gives base-only/source-only commit counts; base contained in HEAD means up to date with that selected revision, not merely related histories.
