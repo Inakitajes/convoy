@@ -7,7 +7,7 @@ import { readRunMetadata, openRunMetadata, recordProgress, type RunMetadataStore
 import type { RepoSnapshot } from "../src/git"
 import type { Pipeline, AgentStep, HumanStep } from "../src/types"
 import type { Workspace } from "../src/workspace"
-import type { ProgressUI, GoalLoopView } from "../src/progress"
+import type { ProgressUI, GoalLoopView, SessionErrorSignal } from "../src/progress"
 import type { AdvisorEvent } from "../src/advisor-events"
 
 function validAgentStep(name: string): AgentStep {
@@ -381,6 +381,34 @@ describe("openRunMetadata", () => {
       expect(raw!.phases.design?.status).toBe("completed")
       expect(raw!.phases.design?.endedAt).toBeGreaterThanOrEqual(before)
       expect(raw!.phases.design?.durationMs).toBeGreaterThanOrEqual(0)
+    } finally {
+      await cleanup()
+    }
+  })
+
+  test("persists a classified session error only while a phase is failed", async () => {
+    const { dir, ws, cleanup } = await withDir("failure-signal")
+    const failure: SessionErrorSignal = { name: "ProviderAuthError", message: "expired key", providerID: "anthropic" }
+    const store = await openRunMetadata(ws, "/target", validPipeline([validAgentStep("design"), validAgentStep("code")]))
+    try {
+      await store.phaseEnded("design", "failed", failure)
+      await store.phaseEnded("code", "failed")
+      await store.flush()
+      const metadata = (await readRunMetadata(`${dir}/metadata.json`))!
+      expect(metadata.phases.design?.error).toEqual(failure)
+      expect(metadata.phases.code?.error).toBeUndefined()
+
+      await store.phaseStarted("design")
+      await store.flush()
+      const restarted = (await readRunMetadata(`${dir}/metadata.json`))!
+      expect(restarted.phases.design?.status).toBe("running")
+      expect(restarted.phases.design?.error).toBeUndefined()
+
+      await store.phaseEnded("design", "failed", failure)
+      await store.phaseEnded("design", "completed")
+      await store.flush()
+      const recovered = (await readRunMetadata(`${dir}/metadata.json`))!
+      expect(recovered.phases.design?.error).toBeUndefined()
     } finally {
       await cleanup()
     }
@@ -995,6 +1023,30 @@ describe("recordProgress", () => {
     await recorder.phaseFailed("test")
     expect(calls).toContain("phaseFailed(test)")
     expect(storeCalls).toContain("phaseEnded(test, failed)")
+  })
+
+  test("forwards failure classifications to metadata without changing the UI contract", async () => {
+    const calls: string[] = []
+    const failures: SessionErrorSignal[] = []
+    const uiFailures: SessionErrorSignal[] = []
+    const fakeUI = makeFakeUI(calls)
+    fakeUI.phaseFailed = (name, _detail, failure) => {
+      calls.push(`phaseFailed(${name})`)
+      if (failure) uiFailures.push(failure)
+    }
+    const mockStore = makeMockStore([])
+    mockStore.phaseEnded = (_name, _status, failure) => {
+      if (failure) failures.push(failure)
+      return Promise.resolve()
+    }
+    const recorder = recordProgress(fakeUI, mockStore)
+    const failure = { name: "APIError", message: "rate limited", statusCode: 429, isRetryable: true }
+
+    await recorder.phaseFailed("test", "rate limited", failure)
+
+    expect(failures).toEqual([failure])
+    expect(uiFailures).toEqual([failure])
+    expect(calls).toContain("phaseFailed(test)")
   })
 
   test("forwards suspend, resume, stop, message", async () => {
