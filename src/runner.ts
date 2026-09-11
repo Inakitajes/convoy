@@ -56,6 +56,7 @@ import {
   type ProgressUsage,
   type RunControlState,
   type RunOutcome,
+  type SessionErrorSignal,
 } from "./progress"
 import { discoverProjectContextFiles } from "./project-context"
 import { createStepRunnerImpl, stepRunnerFor, stepRunnerModel, type StepRunnerId, type StepRunnerImpl } from "./step-runners"
@@ -73,8 +74,8 @@ export type ActiveSession = {
 }
 
 export class UserAbortError extends Error {
-  constructor(message = "aborted by user") {
-    super(message)
+  constructor(message = "aborted by user", options?: ErrorOptions) {
+    super(message, options)
     this.name = "UserAbortError"
   }
 }
@@ -1493,7 +1494,7 @@ async function runPhase(
     )
     progress.phaseCompleted(phase.name, "report saved and commit checked")
   } catch (error) {
-    progress.phaseFailed(phase.name, formatSdkError(error))
+    progress.phaseFailed(phase.name, formatSdkError(error), sessionErrorOf(error))
     throw error
   }
 }
@@ -1827,6 +1828,11 @@ export async function runPhaseUntilResolved(
             },
             runner: phase.runner,
             runDir: workspace.dir,
+          }).catch((gateFailure: unknown) => {
+            // The gate only decides the failed attempt; an abort taken there does
+            // not change why the phase failed, so the attempt error travels on as
+            // the cause and the phase record keeps its session classification.
+            throw isUserAbortError(gateFailure) ? new UserAbortError(gateFailure.message, { cause: error }) : gateFailure
           })
           if (outcome === "continue") {
             // The failed attempt's chat text is gone; the rescued deliverable can
@@ -2075,10 +2081,7 @@ async function runPhaseAttempt(
     text: result.assistantText,
   })
 
-  if (result.error) {
-    if (isMessageAbortedError(result.error)) throw new SessionAbortedError(result.error)
-    throw new LoggedAttemptError(formatSdkError(result.error), { cause: result.error })
-  }
+  if (result.error) throw attemptFailureFor(result.error)
   return result.assistantText
 }
 
@@ -2474,6 +2477,7 @@ export async function promptPhase(
     if (!input.shutdown.aborted && !isUserAbortError(error)) {
       await abortSessionQuietly(client, session.data.id, input.targetDir, input.phase.name)
     }
+    if (isMessageAbortedError(error)) throw new SessionAbortedError(error)
     throw error
   } finally {
     // The report/advisor handles must outlive the idle/failed prompt: the human
@@ -2757,7 +2761,7 @@ type SessionSignal =
   | { type: "todos"; todos: ProgressTodo[]; message: string }
   | { type: "diff"; summary: ProgressDiffSummary }
   | { type: "idle" }
-  | { type: "error"; error: string }
+  | { type: "error"; error: SessionErrorSignal }
 
 const sessionPollMs = 30_000
 const maxConsecutivePollFailures = 10
@@ -2823,7 +2827,7 @@ export function watchSession(
   let settled = false
   let sawWork = false
   let idlePollsWithoutResult = 0
-  let lastSessionError: string | undefined
+  let lastSessionError: SessionErrorSignal | undefined
   let verifying: Promise<boolean> | undefined
 
   let resolveResult!: (value: SessionResult) => void
@@ -2886,6 +2890,10 @@ export function watchSession(
         const turn = anchor === -1 ? assistant : assistant.slice(anchor + 1)
         const last = turn[turn.length - 1]
         if (!last || (!last.info.time.completed && !last.info.error)) return false
+        if (last.info.error && lastSessionError) {
+          finish({ error: new SessionError(lastSessionError) })
+          return true
+        }
         finish({
           value: {
             info: last.info,
@@ -2925,13 +2933,13 @@ export function watchSession(
         return
       case "error":
         lastSessionError = signal.error
-        input.progress.phaseActivity(input.phaseName, `session error: ${signal.error}`, "error")
+        input.progress.phaseActivity(input.phaseName, `session error: ${signal.error.message}`, "error")
         await verifyCompletion()
         return
       case "idle":
         input.progress.phaseActivity(input.phaseName, "session idle; collecting results", "info")
         if (!(await verifyCompletion()) && sawWork) {
-          finish({ error: new Error(lastSessionError ?? "session went idle without a completed response") })
+          finish({ error: lastSessionError ? new SessionError(lastSessionError) : new Error("session went idle without a completed response") })
         }
         return
     }
@@ -2984,7 +2992,7 @@ export function watchSession(
           idlePollsWithoutResult++
           const limit = sawWork ? 2 : 4
           if (idlePollsWithoutResult >= limit) {
-            finish({ error: new Error(lastSessionError ?? `session ${sawWork ? "went idle" : "never started"} without a completed response`) })
+            finish({ error: lastSessionError ? new SessionError(lastSessionError) : new Error(`session ${sawWork ? "went idle" : "never started"} without a completed response`) })
             return
           }
         } else {
@@ -3168,7 +3176,7 @@ export function describeSessionActivity(payload: unknown, state: ActivityState):
     case "session.diff":
       return { type: "diff", summary: diffSummaryFromEvent(properties.diff) }
     case "session.error":
-      return { type: "error", error: formatEventError(properties.error) }
+      return { type: "error", error: sessionErrorFromEvent(properties.error) }
     default:
       if (type.startsWith("session.next.")) return activity("info", type.replace(/^session\.next\./, ""))
       return undefined
@@ -3641,13 +3649,24 @@ function describeToolContent(value: unknown) {
   return "done"
 }
 
-function formatEventError(value: unknown) {
-  if (!value || typeof value !== "object") return String(value ?? "unknown error")
-  const message = (value as { message?: unknown }).message
-  if (typeof message === "string") return message
-  const data = (value as { data?: unknown }).data
-  if (data && typeof data === "object" && typeof (data as { message?: unknown }).message === "string") return (data as { message: string }).message
-  return String((value as { name?: unknown; type?: unknown }).name ?? (value as { type?: unknown }).type ?? "unknown error")
+export function sessionErrorFromEvent(value: unknown): SessionErrorSignal {
+  if (!value || typeof value !== "object") return { name: "UnknownError", message: String(value ?? "unknown error") }
+  const error = value as { name?: unknown; type?: unknown; message?: unknown; data?: unknown }
+  const data = error.data && typeof error.data === "object" ? (error.data as Record<string, unknown>) : undefined
+  const suppliedName = typeof error.name === "string" ? error.name : typeof error.type === "string" ? error.type : undefined
+  const name = suppliedName ?? "UnknownError"
+  const message = typeof error.message === "string" ? error.message : typeof data?.message === "string" ? data.message : suppliedName ?? "unknown error"
+  return {
+    name,
+    message,
+    ...(typeof data?.statusCode === "number" ? { statusCode: data.statusCode } : {}),
+    ...(typeof data?.isRetryable === "boolean" ? { isRetryable: data.isRetryable } : {}),
+    ...(typeof data?.providerID === "string" ? { providerID: data.providerID } : {}),
+  }
+}
+
+export function formatEventError(value: unknown) {
+  return sessionErrorFromEvent(value).message
 }
 
 function pickString(values: Record<string, unknown>, keys: string[]) {
@@ -3872,16 +3891,64 @@ class LoggedAttemptError extends Error {
   }
 }
 
+/**
+ * An OpenCode session error with its original machine-readable classification.
+ * The SDK name lives in `signal.name` only: `Error.name` stays fixed so a
+ * provider payload can never impersonate a harness sentinel such as
+ * `UserAbortError`, which is recognised by name.
+ */
+export class SessionError extends Error {
+  constructor(readonly signal: SessionErrorSignal) {
+    super(signal.message)
+    this.name = "SessionError"
+  }
+}
+
 /** Typed cancellation returned when Esc aborts an OpenCode message. */
 export class SessionAbortedError extends LoggedAttemptError {
-  constructor(error: { name: "MessageAbortedError"; data?: { message?: string } }) {
-    super(error.data?.message || "OpenCode session message aborted", { cause: error })
+  constructor(error: { name: "MessageAbortedError"; data?: { message?: string } } | SessionError) {
+    super(error instanceof SessionError ? error.message : error.data?.message || "OpenCode session message aborted", { cause: error })
     this.name = "SessionAbortedError"
   }
 }
 
-export function isMessageAbortedError(error: unknown): error is { name: "MessageAbortedError"; data?: { message?: string } } {
+export function isMessageAbortedError(error: unknown): error is { name: "MessageAbortedError"; data?: { message?: string } } | SessionError {
+  if (error instanceof SessionError) return error.signal.name === "MessageAbortedError"
   return Boolean(error && typeof error === "object" && "name" in error && error.name === "MessageAbortedError")
+}
+
+/**
+ * The session classification behind a phase failure, found through the `cause`
+ * chain: the attempt boundary and the failure gate each add one wrapper. A
+ * cancelled message stays a cancellation wherever it sits in the chain.
+ */
+export function sessionErrorOf(error: unknown): SessionErrorSignal | undefined {
+  for (let current = error, depth = 0; current instanceof Error && depth < maxCauseDepth; current = current.cause, depth++) {
+    if (current instanceof SessionAbortedError) return undefined
+    if (current instanceof SessionError) return current.signal
+  }
+  return undefined
+}
+
+const maxCauseDepth = 8
+
+/**
+ * The attempt-boundary failure for a raw SDK error carried by the terminal
+ * assistant message. It gets the same classification as an event-delivered
+ * `session.error`, so the gate text and the phase metadata do not depend on
+ * which of the two representations reached the harness first.
+ */
+export function attemptFailureFor(error: unknown): LoggedAttemptError {
+  if (isMessageAbortedError(error)) return new SessionAbortedError(error)
+  // Only an OpenCode session error carries a classification. A Claude Code
+  // failure arrives as a plain string and stays an ordinary attempt failure.
+  if (!isSessionErrorPayload(error)) return new LoggedAttemptError(formatSdkError(error), { cause: error })
+  const sessionError = new SessionError(sessionErrorFromEvent(error))
+  return new LoggedAttemptError(describeSessionError(sessionError), { cause: sessionError })
+}
+
+function isSessionErrorPayload(value: unknown): value is { name: string } {
+  return Boolean(value && typeof value === "object" && "name" in value && typeof value.name === "string")
 }
 
 export function extractAssistantText(parts: readonly Part[]) {
@@ -3944,7 +4011,8 @@ async function exists(path: string) {
   }
 }
 
-function formatSdkError(error: unknown): string {
+export function formatSdkError(error: unknown): string {
+  if (error instanceof SessionError) return describeSessionError(error)
   if (error instanceof Error) return error.message
   if (typeof error === "object" && error && "data" in error) {
     const data = (error as { data?: unknown }).data
@@ -3952,4 +4020,10 @@ function formatSdkError(error: unknown): string {
   }
   if (typeof error === "object" && error && "name" in error) return String((error as { name?: unknown }).name)
   return String(error)
+}
+
+export function describeSessionError(error: SessionError): string {
+  const { statusCode, isRetryable } = error.signal
+  if (statusCode === undefined) return error.message
+  return `${error.message} (HTTP ${statusCode}, ${isRetryable ? "retryable" : "not retryable"})`
 }

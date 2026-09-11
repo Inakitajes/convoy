@@ -12,6 +12,7 @@ import {
   RunShutdown,
   RunControl,
   SessionAbortedError,
+  SessionError,
   UserAbortError,
   PhaseGroupError,
   waitForPhaseGate,
@@ -36,6 +37,9 @@ import {
   applyReportCheckpoint,
   resolveDeliverableCandidate,
   runPhaseUntilResolved,
+  attemptFailureFor,
+  sessionErrorFromEvent,
+  sessionErrorOf,
   restorePhaseFromPreviousRun,
   selectInterruptedPhase,
   shouldSkip,
@@ -43,6 +47,8 @@ import {
   watchSession,
   withReadOnlyRepositoryBoundary,
   softBudgetNudgeText,
+  formatEventError,
+  formatSdkError,
   type ActiveSession,
 } from "../src/runner"
 import type { AgentStep, DeliverableContract, HumanStep, Pipeline, Step } from "../src/types"
@@ -218,6 +224,125 @@ describe("runner helpers", () => {
     const wrapped = new SessionAbortedError(error)
     expect(wrapped.name).toBe("SessionAbortedError")
     expect(wrapped.cause).toBe(error)
+  })
+
+  test("preserves session-error classifications while retaining legacy message formatting", () => {
+    expect(sessionErrorFromEvent({ name: "APIError", message: "rate limited", data: { statusCode: 429, isRetryable: true } })).toEqual({
+      name: "APIError",
+      message: "rate limited",
+      statusCode: 429,
+      isRetryable: true,
+    })
+    expect(sessionErrorFromEvent({ name: "ProviderAuthError", data: { message: "expired key", providerID: "anthropic" } })).toEqual({
+      name: "ProviderAuthError",
+      message: "expired key",
+      providerID: "anthropic",
+    })
+    expect(sessionErrorFromEvent({ name: "MessageOutputLengthError", data: {} })).toEqual({
+      name: "MessageOutputLengthError",
+      message: "MessageOutputLengthError",
+    })
+    expect(sessionErrorFromEvent(undefined)).toEqual({ name: "UnknownError", message: "unknown error" })
+  })
+
+  test("keeps legacy event-error text for every message fallback", () => {
+    const cases: Array<[unknown, string]> = [
+      [{ message: "direct message", data: { message: "nested message" } }, "direct message"],
+      [{ data: { message: "nested message" } }, "nested message"],
+      [{ name: "MessageOutputLengthError", data: {} }, "MessageOutputLengthError"],
+      [{ type: "UnknownError" }, "UnknownError"],
+      [{}, "unknown error"],
+      [[], "unknown error"],
+      [undefined, "unknown error"],
+    ]
+
+    for (const [payload, expected] of cases) expect(formatEventError(payload)).toBe(expected)
+  })
+
+  test("retains only valid primitive classifications from a session error", () => {
+    expect(sessionErrorFromEvent({ name: "APIError", data: { statusCode: "429", isRetryable: 1, providerID: 42 } })).toEqual({
+      name: "APIError",
+      message: "APIError",
+    })
+  })
+
+  test("emits classified session-error signals while activity text remains unchanged", () => {
+    const signal = describeSessionActivity(
+      { type: "session.error", properties: { error: { name: "APIError", data: { message: "rate limited", statusCode: 429, isRetryable: true } } } },
+      newActivityState(),
+    )
+
+    expect(signal).toEqual({
+      type: "error",
+      error: { name: "APIError", message: "rate limited", statusCode: 429, isRetryable: true },
+    })
+    expect(describeSessionActivity({ type: "session.next.step.failed", properties: { error: { data: { message: "rate limited" } } } }, newActivityState())).toEqual({
+      type: "activity",
+      kind: "error",
+      message: "step failed: rate limited",
+    })
+  })
+
+  test("formats typed session errors for failure surfaces without changing unclassified errors", () => {
+    expect(formatSdkError(new SessionError({ name: "APIError", message: "rate limited", statusCode: 429, isRetryable: true }))).toBe(
+      "rate limited (HTTP 429, retryable)",
+    )
+    expect(formatSdkError(new SessionError({ name: "APIError", message: "bad request", statusCode: 400, isRetryable: false }))).toBe(
+      "bad request (HTTP 400, not retryable)",
+    )
+    expect(formatSdkError(new SessionError({ name: "UnknownError", message: "plain failure" }))).toBe("plain failure")
+    expect(formatSdkError(new Error("unchanged"))).toBe("unchanged")
+  })
+
+  test("turns event-delivered message aborts into typed cancellations", () => {
+    const error = new SessionError({ name: "MessageAbortedError", message: "stopped" })
+    expect(isMessageAbortedError(error)).toBeTrue()
+    expect(new SessionAbortedError(error).cause).toBe(error)
+  })
+
+  test("finds a session classification directly or through the attempt wrapper", () => {
+    const failure = new SessionError({ name: "ProviderAuthError", message: "expired key", providerID: "anthropic" })
+    expect(sessionErrorOf(failure)).toEqual(failure.signal)
+    expect(sessionErrorOf(new Error("attempt failed", { cause: failure }))).toEqual(failure.signal)
+    expect(sessionErrorOf(new SessionAbortedError(failure))).toBeUndefined()
+    expect(sessionErrorOf(new Error("operator abort"))).toBeUndefined()
+    // An abort answered at the failure gate wraps the attempt error one level deeper.
+    const gateAbort = new UserAbortError("aborted from phase gate", { cause: new Error("attempt failed", { cause: failure }) })
+    expect(sessionErrorOf(gateAbort)).toEqual(failure.signal)
+    // A cancelled message stays a cancellation however deep it sits.
+    expect(sessionErrorOf(new UserAbortError("aborted from phase gate", { cause: new SessionAbortedError(failure) }))).toBeUndefined()
+  })
+
+  test("classifies a message-level session error at the attempt boundary like an event-delivered one", () => {
+    // The terminal assistant message can carry the raw SDK error without a
+    // matching `session.error` event (the completion poll can win the race).
+    const rateLimited = attemptFailureFor({ name: "APIError", data: { message: "rate limited", statusCode: 429, isRetryable: true } })
+    expect(rateLimited.message).toBe("rate limited (HTTP 429, retryable)")
+    expect(rateLimited.cause).toBeInstanceOf(SessionError)
+    expect(sessionErrorOf(rateLimited)).toEqual({ name: "APIError", message: "rate limited", statusCode: 429, isRetryable: true })
+
+    const unknown = attemptFailureFor({ name: "UnknownError", data: { message: "plain failure" } })
+    expect(unknown.message).toBe("plain failure")
+    expect(sessionErrorOf(unknown)).toEqual({ name: "UnknownError", message: "plain failure" })
+
+    const aborted = attemptFailureFor({ name: "MessageAbortedError", data: { message: "stopped" } })
+    expect(aborted).toBeInstanceOf(SessionAbortedError)
+    expect(sessionErrorOf(aborted)).toBeUndefined()
+  })
+
+  test("a Claude Code failure string stays an unclassified attempt failure", () => {
+    const failure = attemptFailureFor("claude exited with error_max_turns")
+    expect(failure.message).toBe("claude exited with error_max_turns")
+    expect(failure.cause).toBe("claude exited with error_max_turns")
+    expect(sessionErrorOf(failure)).toBeUndefined()
+  })
+
+  test("a session error never impersonates the operator-abort sentinel", () => {
+    const forged = new SessionError({ name: "UserAbortError", message: "provider said so" })
+    expect(forged.name).toBe("SessionError")
+    expect(isUserAbortError(forged)).toBeFalse()
+    expect(isMessageAbortedError(new SessionError({ name: "MessageAbortedError", message: "stopped" }))).toBeTrue()
+    expect(isMessageAbortedError(new SessionError({ name: "APIError", message: "rate limited", statusCode: 429 }))).toBeFalse()
   })
 
   test("parses provider/model values", () => {
@@ -619,7 +744,7 @@ describe("run phase gate", () => {
           sessionRef!.id = "ses_failed"
           const handle = reports.begin("ses_failed", phase, phase.deliverableContract, qualityDimensionWeights)
           await handle.write({ markdown: "# Survived the failure" })
-          throw new Error("provider temporarily unavailable")
+          throw new SessionError({ name: "APIError", message: "provider temporarily unavailable", statusCode: 429, isRetryable: true })
         },
         restorePhaseBaseline: async () => {
           restores++
@@ -636,6 +761,7 @@ describe("run phase gate", () => {
     expect(restores).toBe(0)
     expect(prompts[0]?.kind).toBe("failure")
     expect(prompts[0]?.canRetry).toBe(true)
+    expect(prompts[0]?.error).toBe("provider temporarily unavailable (HTTP 429, retryable)")
   })
 
   test("a loop-guard trip reaches the decision gate instead of being swallowed", async () => {
@@ -780,6 +906,49 @@ describe("run phase gate", () => {
           },
         ),
       ).rejects.toThrow(UserAbortError)
+      expect(shutdown.aborted).toBe(true)
+    } finally {
+      shutdown.dispose()
+    }
+  })
+
+  test("answering abort at a failure gate keeps the failed attempt's session classification", async () => {
+    const workspace = await retryWorkspace()
+    const progress: ProgressUI = {
+      ...noopProgress,
+      askHumanReview: (info) => {
+        expect(info.kind).toBe("failure")
+        expect(info.error).toBe("API key is invalid.")
+        return Promise.resolve("abort")
+      },
+    }
+    const shutdown = trackedShutdown()
+    const rejected = { name: "ProviderAuthError", data: { message: "API key is invalid.", providerID: "anthropic" } }
+
+    try {
+      const failure = await runPhaseUntilResolved(
+        {} as never,
+        workspace,
+        agentStep("implementer"),
+        "/repo",
+        prepared,
+        undefined,
+        progress,
+        shutdown,
+        createGitLock(),
+        { serverUrl: "http://127.0.0.1:1" },
+        {
+          runPhaseAttempt: async () => {
+            throw attemptFailureFor(rejected)
+          },
+          restorePhaseBaseline: async () => {},
+        },
+      ).then(
+        () => undefined,
+        (error: unknown) => error,
+      )
+      expect(failure).toBeInstanceOf(UserAbortError)
+      expect(sessionErrorOf(failure)).toEqual({ name: "ProviderAuthError", message: "API key is invalid.", providerID: "anthropic" })
       expect(shutdown.aborted).toBe(true)
     } finally {
       shutdown.dispose()
@@ -2545,6 +2714,63 @@ describe("watchSession turn scoping", () => {
     expect(result.lastAssistantParts).toHaveLength(1)
   })
 
+  test("rejects idle event-delivered failures with their session classification", async () => {
+    async function* stream() {
+      yield { type: "session.next.prompted", properties: { sessionID: "ses_1" } }
+      yield { type: "session.error", properties: { sessionID: "ses_1", error: { name: "APIError", data: { message: "rate limited", statusCode: 429, isRetryable: true } } } }
+      yield { type: "session.idle", properties: { sessionID: "ses_1" } }
+      await new Promise<void>(() => {})
+    }
+    const client = {
+      event: { subscribe: async () => ({ stream: stream() }) },
+      session: {
+        messages: async () => ({ data: [] }),
+        status: async () => ({ data: {} }),
+      },
+    } as never
+    const watcher = watchSession(client, {
+      directory: "/repo",
+      phaseName: "build",
+      sessionID: "ses_1",
+      progress: noopProgress,
+      signal: new AbortController().signal,
+    })
+
+    try {
+      await expect(watcher.result).rejects.toMatchObject({ name: "SessionError", signal: { name: "APIError", statusCode: 429, isRetryable: true } })
+    } finally {
+      await watcher.stop()
+    }
+  })
+
+  test("prefers an event classification over the terminal assistant error", async () => {
+    async function* stream() {
+      yield { type: "session.error", properties: { sessionID: "ses_1", error: { name: "APIError", data: { message: "rate limited", statusCode: 429, isRetryable: true } } } }
+      await new Promise<void>(() => {})
+    }
+    const terminal = assistantMessage("msg_1", 0, "")
+    const client = {
+      event: { subscribe: async () => ({ stream: stream() }) },
+      session: {
+        messages: async () => ({ data: [{ ...terminal, info: { ...terminal.info, error: { name: "APIError", data: { message: "rate limited" } } } }] }),
+        status: async () => ({ data: {} }),
+      },
+    } as never
+    const watcher = watchSession(client, {
+      directory: "/repo",
+      phaseName: "build",
+      sessionID: "ses_1",
+      progress: noopProgress,
+      signal: new AbortController().signal,
+    })
+
+    try {
+      await expect(watcher.result).rejects.toMatchObject({ name: "SessionError", signal: { name: "APIError", statusCode: 429, isRetryable: true } })
+    } finally {
+      await watcher.stop()
+    }
+  })
+
   test("aborts the session when the loop guard sees the same tool call over and over", async () => {
     const aborted: string[] = []
     const activities: string[] = []
@@ -2693,6 +2919,45 @@ describe("loopGuard seam regressions", () => {
     })
 
     expect(result.info.id).toBe("msg_1")
+  })
+
+  test("promptPhase turns an event-delivered message abort into a typed cancellation", async () => {
+    const started = deferred()
+    async function* stream() {
+      await started.promise
+      yield { type: "session.next.prompted", properties: { sessionID: "ses_1" } }
+      yield { type: "session.error", properties: { sessionID: "ses_1", error: { name: "MessageAbortedError", data: { message: "stopped" } } } }
+      yield { type: "session.idle", properties: { sessionID: "ses_1" } }
+      await new Promise<void>(() => {})
+    }
+    const client = {
+      event: { subscribe: async () => ({ stream: stream() }) },
+      session: {
+        create: async () => ({ data: { id: "ses_1" } }),
+        promptAsync: async () => {
+          started.resolve()
+          return {}
+        },
+        messages: async () => ({ data: [] }),
+        status: async () => ({ data: {} }),
+        abort: async () => ({}),
+      },
+    } as never
+
+    await expect(
+      promptPhase(client, {
+        phase: agentStep("implementer"),
+        workspace: { dir: "/run", runID: "test-run" } as Workspace,
+        targetDir: "/repo",
+        prompt: "do the thing",
+        model: { providerID: "openai", modelID: "gpt-5.5" },
+        attachments: [],
+        progress: noopProgress,
+        shutdown: trackedShutdown(),
+        attempt: 1,
+        loopGuardConfig: resolveLoopGuard({}),
+      }),
+    ).rejects.toBeInstanceOf(SessionAbortedError)
   })
 
   test("queues the soft nudge through v2 for a session created and prompted through v1", async () => {

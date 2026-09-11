@@ -487,10 +487,10 @@ export function trackRunStatus(progress: ProgressUI, tracker: RunStatusTracker):
       tracker.phaseEnded(name, "skipped")
       progress.phaseSkipped(name)
     },
-    phaseFailed(name, detail) {
+    phaseFailed(name, detail, failure) {
       endHumanWait(name)
       tracker.phaseEnded(name, "failed")
-      progress.phaseFailed(name, detail)
+      progress.phaseFailed(name, detail, failure)
     },
     phaseRestored(name, snapshot) {
       tracker.phaseEnded(name, snapshot.status)
