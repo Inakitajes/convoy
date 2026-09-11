@@ -355,7 +355,7 @@ async function homeWorkContext(targetDir: string): Promise<HomeContext> {
 
 /**
  * The home session's context load wrapped in the shared loading transition —
- * the same breathing-sea handoff the destinations use, so the first launch and
+ * the same convoy-current handoff the destinations use, so the first launch and
  * every return to Home cover a genuinely slow control-board load instead of
  * freezing on the previous frame. Fast loads and non-interactive paths never
  * see it. A Ctrl+C during the transition has already flagged the session's
@@ -370,7 +370,9 @@ export async function loadHomeWithTransition(
 ): Promise<HomeContext | undefined> {
   const { withLoadingTransition, isLoadingInterrupted } = await import("./loading-transition")
   try {
-    return await withLoadingTransition(route, "home", load, { targetDir, ...options })
+    // Home's wordmark is the brand (CONVOY); the destination stays "home" for
+    // the status line and the failure messages.
+    return await withLoadingTransition(route, "CONVOY", load, { targetDir, label: "home", ...options })
   } catch (error) {
     if (!isLoadingInterrupted(error)) throw error
     return undefined

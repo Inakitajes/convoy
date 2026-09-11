@@ -1,19 +1,28 @@
 import { BoxRenderable, StyledText, TextRenderable, bold, fg } from "@opentui/core"
 
 import { joinLines, paletteForTerminal, raw, setTheme, terminalBackgroundHex, theme } from "./tui-theme"
-import { CONVOY_LETTERS, CONVOY_WORDMARK, CONVOY_WORDMARK_WIDTH, WORDMARK_GAP } from "./home-tui"
 import { sceneForRoute, type TuiRoute, type TuiScene } from "./tui-session"
 
 import type { CliRenderer, KeyEvent, TextChunk } from "@opentui/core"
 
 /**
  * The shared loading transition of the home session: while a destination load
- * outlasts a short threshold, a scene of a dimmed breathing sea of characters
- * behind a centered CONVOY card replaces the frozen home frame, and the
- * destination's own scene mount paints over it atomically (the same contract
- * every home-session screen already uses — scenes close only when the next one
- * mounts). Rejected or interrupted loads never leave a dead screen, and loads
- * that finish quickly never flash it.
+ * outlasts a short threshold, a scene of a directional current of characters
+ * with convoys riding it, behind a centered, frameless name wordmark, replaces
+ * the frozen home frame, and the destination's own scene mount paints over it
+ * atomically (the same contract every home-session screen already uses — scenes
+ * close only when the next one mounts). Rejected or interrupted loads never
+ * leave a dead screen, and loads that finish quickly never flash it.
+ *
+ * The field is a "convoy current": a deterministic bed of streamlines flowing
+ * along one heading (thin glassy bands, never reaching the accent tone) with
+ * a handful of bright formations gliding down it, each a lead pulsing into a
+ * fading wake. It is densest toward the terminal's edges and calmest behind
+ * the name, so it reads as a group moving with purpose — not an isotropic
+ * swirl, not random noise.
+ * The center names what is loading (CONVOY, SPECS, RUNS) in a block
+ * alphabet; a name with unknown letters or one too wide falls back to plain
+ * uppercase text.
  *
  * OpenTUI is imported eagerly by this module, so it is only ever loaded on
  * interactive paths (specs.ts dynamic-imports it under `route`).
@@ -21,15 +30,6 @@ import type { CliRenderer, KeyEvent, TextChunk } from "@opentui/core"
 
 /** Quiet period before a slow load earns the transition (no flash on fast loads). */
 export const loadingThresholdMs = 150
-
-/**
- * The transition's paint pull: the model field is dimmed by this factor
- * before quantization, so every painted tone sits one notch under the shared
- * ramp's brightness. Paired with {@linkcode seaCell}'s compressed thresholds
- * it keeps the sea's full structure — blank troughs, dot bodies, colon crests
- * — while nothing ever reaches the shared ramp's bright text tone.
- */
-export const seaDimFactor = 0.85
 
 /** Animation cadence cap (~30 fps): bounds CPU and ANSI output over SSH. */
 const frameIntervalMs = 1000 / 30
@@ -61,23 +61,33 @@ export type LoadingTransitionOptions = {
   targetDir?: string
   /** Overrides the motion preference: a boolean, or a resolver consulted after the threshold wins (tests inject fakes). */
   reducedMotion?: boolean | (() => boolean | Promise<boolean>)
+  /**
+   * The destination's name, used by the status line and the failure messages.
+   * Defaults to `name`. The status drops it when the wordmark already shows the
+   * same word (Home keeps it: the wordmark reads CONVOY while Home loads).
+   */
+  label?: string
 }
 
 /**
- * Runs `load`, showing the breathing-sea transition on the route's session only when
- * the load genuinely outlasts the threshold. Without a route (non-interactive
- * and piped invocations) the load runs unchanged. Every settlement path leaves
- * the session healthy: the transition stops animating as soon as the load
- * settles, and the destination's own scene mount replaces it in place.
+ * Runs `load`, showing the convoy-current transition named `name` on the route's
+ * session only when the load genuinely outlasts the threshold. Without a route
+ * (non-interactive and piped invocations) the load runs unchanged. Every
+ * settlement path leaves the session healthy: the transition stops animating as
+ * soon as the load settles, and the destination's own scene mount replaces it in
+ * place.
  */
 export async function withLoadingTransition<T>(
   route: TuiRoute | undefined,
-  label: string | undefined,
+  name: string | undefined,
   load: () => Promise<T>,
   options: LoadingTransitionOptions = {},
 ): Promise<T> {
   if (!route) return load()
 
+  // The destination's name for status/errors; the wordmark may differ (Home's
+  // wordmark is CONVOY while its destination stays "home").
+  const destination = options.label ?? name
   const threshold = options.thresholdMs ?? loadingThresholdMs
   let loadSettled = false
   const loadPromise = load().then(
@@ -110,10 +120,13 @@ export async function withLoadingTransition<T>(
     rejectInterrupt = reject
   })
   const transition = new LoadingTransition(route.session.renderer, scene, {
-    ...(label === undefined ? {} : { label }),
+    ...(name === undefined ? {} : { name }),
+    ...(options.label === undefined ? {} : { label: options.label }),
     reducedMotion: resolved.reducedMotion,
     onInterrupt: () =>
-      rejectInterrupt(new LoadingInterruptedError(label === undefined ? "interrupted while loading" : `interrupted while loading ${label}`)),
+      rejectInterrupt(
+        new LoadingInterruptedError(destination === undefined ? "interrupted while loading" : `interrupted while loading ${destination}`),
+      ),
   })
   try {
     return await Promise.race([loadPromise, interrupted])
@@ -126,8 +139,8 @@ export async function withLoadingTransition<T>(
       const { showNoticeTui } = await import("./notice-tui")
       try {
         await showNoticeTui(route, {
-          title: label ?? "loading",
-          message: `couldn't load${label ? ` ${label}` : ""}: ${reason}`,
+          title: destination ?? "loading",
+          message: `couldn't load${destination ? ` ${destination}` : ""}: ${reason}`,
         })
       } catch {
         // The session is going away; the original failure still reports.
@@ -211,105 +224,207 @@ export function probeReducedMotion(): Promise<boolean> {
   return probePromise
 }
 
-// ── the breathing sea (pure model, unit-testable without a renderer) ───────
+// ── the convoy current (pure model, unit-testable without a renderer) ──────
 
 /**
- * One traveling swell of the sea: a plane wave with spatial frequencies
- * `kx`/`ky` (radians per grid cell) that carries its crests at `speed` grid
- * cells per second along its own wave vector, weighted within the combined sea.
+ * The current's heading: a gentle tilt off horizontal, its unit components.
+ * Everything flows along this vector, so the bed reads as a current with a
+ * direction rather than an isotropic swirl. {@linkcode fieldSlope} is the
+ * heading's rows-per-column, used to keep the convoys riding it.
  */
-export type Swell = {
-  kx: number
-  ky: number
-  speed: number
-  weight: number
+export const fieldCos = 0.978
+export const fieldSin = 0.208
+export const fieldSlope = fieldSin / fieldCos
+
+/** Apparent along-flow speed of the current, in grid cells per second. */
+export const fieldFlowSpeed = 3.4
+
+/** Cross-flow spatial frequencies: the thin streamlines. */
+export const fieldStreamK1 = 1.15
+export const fieldStreamK2 = 0.55
+/** Along-flow warp frequencies: the long, slow bends of the streams. */
+export const fieldWarpK1 = 0.2
+export const fieldWarpK2 = 0.13
+
+/** The bed's gain and shaping: it stays a texture beneath the convoys. */
+export const fieldBedGain = 0.62
+export const fieldBedShape = 1.3
+/** The bed never reaches the accent band; accent is reserved for the convoys. */
+export const fieldBedCap = 0.78
+
+/**
+ * The radial vignette's radii over normalized center distance (0 at the
+ * center, 1 at a corner): inside {@linkcode fieldCenterRadius} the field is
+ * fully calm, beyond {@linkcode fieldEdgeRadius} it runs at full strength,
+ * with a smoothstep in between. The calm pocket sits behind the name; the
+ * terminal's edges carry the texture.
+ */
+export const fieldCenterRadius = 0.3
+export const fieldEdgeRadius = 0.92
+
+/**
+ * The current at one sample: two crossing streamlines whose phases warp each
+ * other and drift along the heading, remapped to [0,1]. Pure, deterministic,
+ * branch-free and stateless — a function of position and time alone. Adjacent
+ * samples correlate (the warps are continuous), so it reads as flowing water
+ * rather than random flicker.
+ */
+export function fieldValue(x: number, y: number, t: number): number {
+  const along = x * fieldCos + y * fieldSin - fieldFlowSpeed * t
+  const cross = -x * fieldSin + y * fieldCos
+  const v1 = Math.sin(cross * fieldStreamK1 + 1.6 * Math.sin(along * fieldWarpK1 + t * 0.5) + t * 0.6)
+  const v2 = Math.sin(cross * fieldStreamK2 - 1.1 * Math.sin(along * fieldWarpK2 - t * 0.4) - t * 0.3)
+  return 0.5 + 0.25 * (v1 + v2)
 }
 
-/** Slow global pulse: the whole sea brightens and dims in place (breathing). */
-export const breathPeriodMs = 4_000
-/** Brightness floor of the breath, so the field never goes fully dark. */
-export const breathFloor = 0.5
+export type Convoy = {
+  /** Lane as a fraction of the field height (0 = top, 1 = bottom). */
+  lane: number
+  /** Along-flow speed, in grid cells per second. */
+  speed: number
+  /** Phase offset, in grid cells. */
+  offset: number
+  /** The formation's length in cells, from lead to tail. */
+  length: number
+}
 
 /**
- * The sea's swells: two crossed plane waves whose interference reads as an
- * undulating surface, deliberately incommensurable wavelengths so the pattern
- * never visibly repeats. Waves travel; nothing expands outward from a point —
- * the motion is swell and breath, not rings.
+ * The current's convoys: deterministic formations that ride the flow, each a
+ * bright lead pulsing down a fading wake. Fixed lanes, speeds and phases — no
+ * state — so a resize never strands a formation and a static frame is exact.
  */
-export const seaSwells: readonly Swell[] = [
-  { kx: (2 * Math.PI) / 16, ky: (2 * Math.PI) / 34, speed: 3.5, weight: 0.62 },
-  { kx: (2 * Math.PI) / 29, ky: -(2 * Math.PI) / 21, speed: 2.5, weight: 0.38 },
+export const fieldConvoys: readonly Convoy[] = [
+  { lane: 0.06, speed: 6.0, offset: 22, length: 14 },
+  { lane: 0.16, speed: 7.6, offset: 0, length: 18 },
+  { lane: 0.3, speed: 5.2, offset: 37, length: 15 },
+  { lane: 0.7, speed: 6.6, offset: 71, length: 16 },
+  { lane: 0.84, speed: 8.4, offset: 12, length: 13 },
+  { lane: 0.94, speed: 5.9, offset: 54, length: 12 },
 ]
 
-/** The breath envelope in [breathFloor, 1]: a full sine over one period. */
-export function breathAmplitude(now: number): number {
-  return breathFloor + ((1 - breathFloor) / 2) * (1 + Math.sin((2 * Math.PI * now) / breathPeriodMs))
+/**
+ * The lead's x at `now` (ms), in grid cells: the formation enters from the
+ * left edge and wraps past the right, so it is always somewhere on the field.
+ * Pure.
+ */
+export function convoyHeadX(convoy: Convoy, cols: number, now: number): number {
+  const travel = cols + convoy.length
+  const phase = convoy.offset + (now / 1_000) * convoy.speed
+  return positiveModulo(phase, travel) - convoy.length
 }
 
 /**
- * Per-cell brightness in [0,1]: the combined swell of the sea, scaled by the
- * breathing envelope. Pure and deterministic — a function of position and time
- * alone, so tests can pin the field and a resize never strands state.
+ * The formation's brightness at `i` cells behind the lead: a bright head that
+ * pulses into a fading wake, so it reads as a line of vehicles rather than a
+ * single comet. Pure.
  */
-export function seaIntensities(cols: number, rows: number, now: number): Float64Array {
+export function convoyWeight(i: number, length: number): number {
+  const taper = Math.max(0, 1 - i / length)
+  const pulse = 0.45 + 0.55 * (0.5 + 0.5 * Math.cos(i * 2.2))
+  return taper * pulse
+}
+
+/**
+ * Normalized distance from the field's center in [0,1] (0 at the center, 1 at
+ * a corner). The sampling grid is roughly physically square (one cell per two
+ * columns and one row), so Euclidean distance over grid coordinates is a fair
+ * on-screen radius. Degenerate single-cell axes measure from the center.
+ */
+export function radialDistance(x: number, y: number, cols: number, rows: number): number {
+  const nx = cols <= 1 ? 0 : (x / (cols - 1)) * 2 - 1
+  const ny = rows <= 1 ? 0 : (y / (rows - 1)) * 2 - 1
+  return Math.hypot(nx, ny) / Math.SQRT2
+}
+
+/** The radial envelope at one sample in [0,1]: the vignette smoothstep. */
+export function vignetteAt(x: number, y: number, cols: number, rows: number): number {
+  return smoothstep(fieldCenterRadius, fieldEdgeRadius, radialDistance(x, y, cols, rows))
+}
+
+function smoothstep(edge0: number, edge1: number, value: number): number {
+  const t = Math.min(1, Math.max(0, (value - edge0) / (edge1 - edge0)))
+  return t * t * (3 - 2 * t)
+}
+
+function positiveModulo(value: number, modulus: number): number {
+  return ((value % modulus) + modulus) % modulus
+}
+
+/**
+ * The current's bed alone: the shaped streamlines scaled by the radial
+ * vignette and capped below the accent band. Pure and deterministic —
+ * a function of position and time alone, so a resize never strands state.
+ */
+export function fieldBedIntensities(cols: number, rows: number, now: number): Float64Array {
   const field = new Float64Array(cols * rows)
-  const breath = breathAmplitude(now)
-  const tSec = now / 1_000
+  const t = now / 1_000
   for (let y = 0; y < rows; y++) {
     for (let x = 0; x < cols; x++) {
-      let wave = 0
-      for (const swell of seaSwells) {
-        // ω = |k|·speed keeps the crest speed honest along the wave vector.
-        const k = Math.hypot(swell.kx, swell.ky)
-        wave += swell.weight * Math.sin(swell.kx * x + swell.ky * y - k * swell.speed * tSec)
-      }
-      const index = y * cols + x
-      field[index] = Math.min(1, Math.max(0, (0.5 + 0.5 * wave) * breath))
+      const bed = Math.pow(fieldValue(x, y, t), fieldBedShape) * vignetteAt(x, y, cols, rows) * fieldBedGain
+      field[y * cols + x] = Math.min(fieldBedCap, bed)
     }
   }
   return field
 }
 
 /**
- * The painted sea's brightness: the model field scaled by
- * {@linkcode seaDimFactor} and clamped — a mild, order-preserving pull that
- * drops every tone one notch toward transparency without collapsing any of
- * them away. Pure — a function of the field alone.
+ * Per-cell intensity in [0,1]: the capped current bed plus the convoys riding
+ * it. Each formation glides at sub-cell resolution (its lead is split between
+ * the two cells it straddles), so motion is smooth rather than stepping column
+ * by column, and convoys fade only inside the calm pocket so the centered name
+ * stays legible while one passes behind it. Pure and deterministic.
  */
-export function dimmedSea(intensities: Float64Array, factor: number = seaDimFactor): Float64Array {
-  const dimmed = new Float64Array(intensities.length)
-  for (let index = 0; index < intensities.length; index += 1) {
-    dimmed[index] = Math.min(1, Math.max(0, intensities[index]! * factor))
+export function fieldIntensities(cols: number, rows: number, now: number): Float64Array {
+  const field = fieldBedIntensities(cols, rows, now)
+  for (const convoy of fieldConvoys) {
+    const lane = Math.round(convoy.lane * (rows - 1))
+    const head = convoyHeadX(convoy, cols, now)
+    for (let i = 0; i < convoy.length; i++) {
+      const position = head - i
+      const base = Math.floor(position)
+      const fraction = position - base
+      // The lead is boosted so it stays the brightest accent even when its
+      // position is split across two cells; the wake stays below it.
+      const weight = i === 0 ? 1.8 : Math.min(1, convoyWeight(i, convoy.length) * 1.15)
+      depositConvoy(field, cols, rows, base, 1 - fraction, lane, head, weight)
+      depositConvoy(field, cols, rows, base + 1, fraction, lane, head, weight)
+    }
   }
-  return dimmed
+  return field
 }
 
-export type RampTone = "faint" | "dim" | "text"
-
-/**
- * Brightness quantized onto the theme's faint → dim → text ramp; undefined
- * cells stay blank. Swell crests read bright, troughs fade to faint.
- */
-export function intensityCell(intensity: number): { glyph: string; color: RampTone } | undefined {
-  if (intensity >= 0.82) return { glyph: "·", color: "text" }
-  if (intensity >= 0.55) return { glyph: ":", color: "dim" }
-  if (intensity >= 0.28) return { glyph: "·", color: "dim" }
-  if (intensity >= 0.08) return { glyph: "·", color: "faint" }
-  return undefined
+function depositConvoy(
+  field: Float64Array,
+  cols: number,
+  rows: number,
+  x: number,
+  share: number,
+  lane: number,
+  head: number,
+  weight: number,
+): void {
+  if (share <= 0 || x < 0 || x >= cols) return
+  const y = Math.max(0, Math.min(rows - 1, lane + Math.round(fieldSlope * (x - head))))
+  const falloff = smoothstep(fieldCenterRadius, 0.45, radialDistance(x, y, cols, rows))
+  if (falloff <= 0) return
+  const index = y * cols + x
+  field[index] = Math.min(1, field[index]! + weight * share * falloff)
 }
 
+export type RampTone = "faint" | "dim" | "accent"
+
 /**
- * The transition's own quantizer: the sea's full range stays spread across
- * the quiet tones — blank troughs, faint dots, dim dots, and colon crests —
- * so the traveling swells keep their contrast *pattern* (that is what reads
- * as waves) while the tones themselves sit closer together and none ever
- * reaches the shared ramp's bright text tone. Thresholds tuned so the painted
- * distribution mirrors the shared ramp's, one notch more transparent.
+ * The field's quantizer: an ordered density ramp of faint dots, dim marks and
+ * accent stars. The current's bed is capped below the accent band, so an accent
+ * star is always a convoy — the movement stays the subject. `text` is never
+ * used; it stays reserved for foreground UI. Pure.
  */
-export function seaCell(intensity: number): { glyph: string; color: RampTone } | undefined {
-  if (intensity >= 0.5) return { glyph: ":", color: "dim" }
-  if (intensity >= 0.25) return { glyph: "·", color: "dim" }
-  if (intensity >= 0.05) return { glyph: "·", color: "faint" }
+export function fieldCell(intensity: number): { glyph: string; color: RampTone } | undefined {
+  if (intensity >= 0.88) return { glyph: "*", color: "accent" }
+  if (intensity >= 0.72) return { glyph: "×", color: "dim" }
+  if (intensity >= 0.52) return { glyph: ":", color: "dim" }
+  if (intensity >= 0.34) return { glyph: "·", color: "faint" }
+  if (intensity >= 0.1) return { glyph: ".", color: "faint" }
   return undefined
 }
 
@@ -337,21 +452,69 @@ export function paintSpan(i: number, count: number, size: number): number {
   return Math.floor(((i + 1) * size) / count) - Math.floor((i * size) / count)
 }
 
+// ── the loading name wordmark (pure, renderer-free) ───────────────────────
+
+/**
+ * The loading screen's 5-row block alphabet, covering the names it renders
+ * (CONVOY, HOME, SPECS, RUNS). A dedicated font, deliberately taller than the
+ * masthead's 3-row CONVOY so S/E/R stay legible at terminal cell size, and
+ * deliberately separate so the masthead is untouched. Glyph widths vary.
+ */
+const LOADING_GLYPHS: Readonly<Record<string, readonly string[]>> = {
+  C: ["████", "██  ", "██  ", "██  ", "████"],
+  O: ["████", "█  █", "█  █", "█  █", "████"],
+  N: ["█  █", "██ █", "█ ██", "█  █", "█  █"],
+  V: ["█  █", "█  █", "█  █", " ██ ", " ██ "],
+  Y: ["█  █", "█  █", "████", " ██ ", " ██ "],
+  H: ["█  █", "█  █", "████", "█  █", "█  █"],
+  E: ["████", "██  ", "████", "██  ", "████"],
+  S: ["████", "██  ", "████", "  ██", "████"],
+  U: ["█  █", "█  █", "█  █", "█  █", "████"],
+  M: ["█   █", "██ ██", "█ █ █", "█   █", "█   █"],
+  P: ["████", "█  █", "████", "█   ", "█   "],
+  R: ["████", "█  █", "████", "█ █ ", "█  █"],
+}
+
+/** The blank columns between block letters on the loading screen. */
+const LOADING_WORDMARK_GAP = "  "
+
+/**
+ * The loading name as block-glyph rows, uppercased, or undefined when any
+ * letter is absent from {@linkcode LOADING_GLYPHS} — the caller then falls back
+ * to plain text rather than drawing a gap. Pure.
+ */
+export function blockWordmark(name: string): string[] | undefined {
+  const glyphs = [...name.toUpperCase()].map((letter) => LOADING_GLYPHS[letter])
+  if (glyphs.length === 0 || glyphs.some((glyph) => glyph === undefined)) return undefined
+  const rows = glyphs[0]!.map(() => "")
+  glyphs.forEach((glyph, index) => {
+    for (let row = 0; row < rows.length; row++) {
+      rows[row] += (index > 0 ? LOADING_WORDMARK_GAP : "") + glyph![row]!
+    }
+  })
+  return rows
+}
+
+/** The painted width of a block wordmark: its widest row. */
+export function wordmarkWidth(lines: readonly string[]): number {
+  return lines.reduce((width, line) => Math.max(width, line.length), 0)
+}
+
 // ── the scene (OpenTUI renderables over the shared session) ────────────────
 
 type LoadingSceneOptions = {
+  name?: string
   label?: string
   reducedMotion: boolean
   onInterrupt: () => void
 }
 
 /**
- * The mounted transition: a full-screen dimmed breathing sea with a solid,
- * rounded card floating centered over it (both axes, like the repo's other
- * overlays). The card carries the home masthead's CONVOY wordmark over the
- * loading status — an empty, quiet rectangle with generous padding, so the
- * waves stay texture and the text stays legible. Follows the repo's screen
- * lifecycle — the scene stays painted until the next scene mounts;
+ * The mounted transition: a full-screen convoy current with the loading
+ * name floating centered over it (both axes) as a block wordmark above the
+ * status line. There is no card, border or backdrop — the field's calm center
+ * keeps the name legible and lets the field show through. Follows the repo's
+ * screen lifecycle — the scene stays painted until the next scene mounts;
  * {@linkcode stop} only detaches listeners and timers.
  */
 class LoadingTransition {
@@ -361,8 +524,7 @@ class LoadingTransition {
   private readonly fieldText: TextRenderable
   private readonly wordmarkText: TextRenderable
   private readonly statusText: TextRenderable
-  private readonly card: BoxRenderable
-  private readonly wide: boolean
+  private readonly blockLines: string[] | undefined
 
   constructor(
     private readonly renderer: CliRenderer,
@@ -379,15 +541,15 @@ class LoadingTransition {
     const fieldBox = new BoxRenderable(renderer, { id: "convoy-loading-field", width: "100%", height: "100%" })
     this.fieldText = new TextRenderable(renderer, { content: "", width: "100%", height: "100%" })
     fieldBox.add(this.fieldText)
-    // The centered card: a quiet, solid rectangle over the dimmed sea. The
-    // same centered-overlay pattern the config modal and notice screens use.
-    this.wide = renderer.width >= CONVOY_WORDMARK_WIDTH + 8
-    // Padding shrinks before the content does; the card stays roomy on normal
-    // terminals and merely snug on small ones.
-    const paddingX = Math.max(2, Math.min(8, Math.floor((renderer.width - (this.wide ? CONVOY_WORDMARK_WIDTH : 8)) / 4)))
-    const paddingY = Math.max(1, Math.min(3, Math.floor((renderer.height - 9) / 4)))
-    const cardOverlay = new BoxRenderable(renderer, {
-      id: "convoy-loading-card-overlay",
+
+    // The name wordmark, decided once per mount: undefined when the block
+    // alphabet lacks a letter or the name is wider than the terminal, in which
+    // case the plain uppercase fallback carries it. There is no card, border or
+    // backdrop — the field's calm center keeps the text legible and visible.
+    const block = blockWordmark(this.name)
+    this.blockLines = block && wordmarkWidth(block) <= renderer.width - 4 ? block : undefined
+    const overlay = new BoxRenderable(renderer, {
+      id: "convoy-loading-overlay",
       position: "absolute",
       left: 0,
       top: 0,
@@ -396,27 +558,15 @@ class LoadingTransition {
       zIndex: 10,
       alignItems: "center",
       justifyContent: "center",
-    })
-    this.card = new BoxRenderable(renderer, {
-      id: "convoy-loading-card",
-      border: true,
-      borderStyle: "rounded",
-      borderColor: theme.border,
-      backgroundColor: theme.overlay,
-      paddingX,
-      paddingY,
-      alignItems: "center",
-      justifyContent: "center",
       flexDirection: "column",
     })
-    this.card.gap = 2
+    overlay.gap = 1
     this.wordmarkText = new TextRenderable(renderer, { content: "" })
     this.statusText = new TextRenderable(renderer, { content: "" })
-    this.card.add(this.wordmarkText)
-    this.card.add(this.statusText)
-    cardOverlay.add(this.card)
+    overlay.add(this.wordmarkText)
+    overlay.add(this.statusText)
     shell.add(fieldBox)
-    shell.add(cardOverlay)
+    shell.add(overlay)
     scene.root.add(shell)
     this.applyChrome()
 
@@ -427,26 +577,27 @@ class LoadingTransition {
     this.render(this.t0)
   }
 
-  /** The card's chrome (border, backdrop, wordmark, status) follows the live theme. */
-  private applyChrome(): void {
-    this.card.borderColor = theme.border
-    this.card.backgroundColor = theme.overlay
-    this.wordmarkText.content = this.wordmarkContent()
-    this.statusText.content = new StyledText([fg(theme.dim)(`loading ${this.options.label ?? "destination"}…`)])
+  /** The loading name, defaulting to a generic "destination" when unspecified. */
+  private get name(): string {
+    return this.options.name ?? "destination"
   }
 
-  /** The home masthead's CONVOY wordmark, centered; the text form on narrow terminals. */
+  /** The name wordmark and status follow the live theme. */
+  private applyChrome(): void {
+    this.wordmarkText.content = this.wordmarkContent()
+    // The status names the destination only when the wordmark does not already:
+    // "loading specs…" under a SPECS wordmark is redundant, but Home's wordmark
+    // is CONVOY, so "loading home…" still adds information.
+    const destination = this.options.label ?? this.name
+    const status =
+      destination.toUpperCase() === this.name.toUpperCase() ? "loading…" : `loading ${destination.toLowerCase()}…`
+    this.statusText.content = new StyledText([fg(theme.dim)(status)])
+  }
+
+  /** The loading name in block glyphs, or plain uppercase when the block form isn't available. */
   private wordmarkContent(): StyledText {
-    if (!this.wide) return new StyledText([bold(fg(theme.accent)("CONVOY"))])
-    const lines = [0, 1, 2].map((glyphRow) => {
-      const chunks: TextChunk[] = []
-      CONVOY_LETTERS.forEach((letter, index) => {
-        if (index > 0) chunks.push(raw(WORDMARK_GAP))
-        chunks.push(bold(fg(theme.accent)(CONVOY_WORDMARK[letter]![glyphRow]!)))
-      })
-      return new StyledText(chunks)
-    })
-    return joinLines(lines)
+    if (!this.blockLines) return new StyledText([bold(fg(theme.accent)(this.name.toUpperCase()))])
+    return joinLines(this.blockLines.map((line) => new StyledText([bold(fg(theme.accent)(line))])))
   }
 
   private readonly handleKeyPress = (key: KeyEvent) => {
@@ -489,26 +640,23 @@ class LoadingTransition {
   private render(now: number): void {
     if (this.finished || this.scene.isClosed || this.renderer.isDestroyed) return
     const width = this.renderer.width
-    // The card floats as an overlay, so the dimmed sea fills the whole terminal.
+    // The name floats as an overlay, so the field fills the whole terminal.
     const bodyHeight = Math.max(1, this.renderer.height)
     const { cols, rows } = transitionGrid(width, bodyHeight)
-    this.fieldText.content = joinLines(
-      this.fieldRows(cols, rows, dimmedSea(seaIntensities(cols, rows, now)), width, bodyHeight),
-    )
+    this.fieldText.content = joinLines(this.fieldRows(cols, rows, fieldIntensities(cols, rows, now), width, bodyHeight))
     this.renderer.requestRender()
   }
 
   /**
    * One terminal row per body row: each sampled grid row paints every body row
    * its {@linkcode paintSpan} owns and each cell stretches across its column
-   * span, so the clamped grid still covers the screen edge to edge. The sea is
-   * dimmed and quantized with the transition's own compressed ramp — the
-   * wave's structure intact, every tone one notch more transparent.
+   * span, so the clamped grid still covers the screen edge to edge. The field
+   * is quantized with the transition's own density ramp.
    */
   private fieldRows(cols: number, rows: number, intensities: Float64Array, width: number, bodyHeight: number): StyledText[] {
     const lines: StyledText[] = []
     for (let y = 0; y < rows; y++) {
-      const line = seaRow(cols, intensities, y * cols, width, seaCell)
+      const line = fieldRow(cols, intensities, y * cols, width, fieldCell)
       const span = paintSpan(y, rows, bodyHeight)
       for (let r = 0; r < span; r++) lines.push(line)
     }
@@ -517,17 +665,17 @@ class LoadingTransition {
 }
 
 /**
- * One painted field row: the row's cells quantized by `cell` (the shared ramp
- * by default; the transition paints with {@linkcode seaCell}), each cell's
- * glyph repeated across its proportional column span so the runs fill exactly
- * `width` columns. Pure and renderer-free, like the sea model.
+ * One painted field row: the row's cells quantized by `cell` (the field's own
+ * density ramp by default), each cell's glyph repeated across its proportional
+ * column span so the runs fill exactly `width` columns. Pure and renderer-free,
+ * like the field model.
  */
-export function seaRow(
+export function fieldRow(
   cols: number,
   intensities: Float64Array,
   offset: number,
   width: number,
-  cell: (intensity: number) => { glyph: string; color: RampTone } | undefined = intensityCell,
+  cell: (intensity: number) => { glyph: string; color: RampTone } | undefined = fieldCell,
 ): StyledText {
   const chunks: TextChunk[] = []
   let run = ""

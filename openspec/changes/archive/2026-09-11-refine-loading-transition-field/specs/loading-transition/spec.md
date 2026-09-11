@@ -1,87 +1,14 @@
-# loading-transition Specification
+## REMOVED Requirements
 
-## Purpose
+### Requirement: Transition animates a breathing sea in the current theme
+**Reason**: The two crossed plane waves read as a regular corrugated grid at terminal resolution; the operator wants a richer, organic backdrop. Superseded by the drifting organic field below.
+**Migration**: The field model is internal to the loading transition with no persistence or operator action; the new model replaces it wholesale. No operator migration is required.
 
-Defines the shared transition screen Convoy shows while a destination in the home session loads, animating a directional current of characters with convoys riding it, in the current theme, and handing off to the destination atomically so an operator is never left staring at an unresponsive, frozen menu.
+### Requirement: The centered CONVOY card carries identity over the field
+**Reason**: With the field calm at the center, a bordered, opaque card is no longer needed, and the identity should name what is actually loading rather than always reading CONVOY. Superseded by the borderless centered name wordmark below.
+**Migration**: The transition is a transient screen with no persisted state; it now renders the loading name directly over the field. No operator migration is required.
 
-## Requirements
-
-### Requirement: Transition is shown only during a real load
-
-When an operator opens Convoy's Home — at launch or on return from any home-session destination — or opens a destination from the home launcher, Convoy SHALL begin loading that screen and SHALL render the loading transition only while the load is genuinely in progress. If the load completes within a short threshold (nominally 150 ms), Convoy SHALL NOT flash the transition and SHALL move straight to the destination.
-
-#### Scenario: Fast load shows no transition
-
-- **WHEN** the operator opens a destination whose load completes within the threshold
-- **THEN** the destination renders immediately and no loading transition is shown
-
-#### Scenario: Slow load shows the transition
-
-- **WHEN** the operator opens a destination whose load exceeds the threshold
-- **THEN** the loading transition is rendered until the destination is ready, then the destination replaces it
-
-#### Scenario: Home opens are covered too
-
-- **WHEN** Convoy launches or returns to Home and the control-board load exceeds the threshold
-- **THEN** the loading transition covers the Home open exactly as it covers a destination open
-
-#### Scenario: Transition never extends the load
-
-- **WHEN** the destination becomes ready while the transition is visible
-- **THEN** the destination replaces the transition immediately and the transition is not held for any animation to finish
-
-### Requirement: Handoff to the destination is atomic
-
-The transition SHALL hand off to the loaded destination without a blank frame and without exiting and re-entering the alternate screen between Convoy screens. The transition SHALL remain painted until the destination scene replaces it.
-
-#### Scenario: No blank frame at handoff
-
-- **WHEN** the destination is ready and replaces the transition
-- **THEN** the destination scene paints over the transition directly with no cleared frame in between
-
-#### Scenario: No alternate-screen toggle
-
-- **WHEN** the transition is replaced by the destination
-- **THEN** the terminal does not exit and re-enter the alternate screen during the handoff
-
-### Requirement: Transition stays responsive on large terminals and remote sessions
-
-The transition SHALL bound its work so it animates smoothly on large terminals and does not stall over SSH or a slow link. Convoy SHALL cap the animation frame rate and limit the number of cells evaluated per frame, and SHALL skip the animation entirely (falling back to a static message) when the terminal is not interactive.
-
-#### Scenario: Large terminal stays responsive
-
-- **WHEN** the transition renders on a terminal larger than a typical workstation size
-- **THEN** the frame rate and computation remain bounded and the animation does not make the terminal unresponsive
-
-#### Scenario: Non-interactive invocation skips animation
-
-- **WHEN** the destination is opened with stdin or stdout not a TTY
-- **THEN** no animated transition renders and the existing non-interactive plain output path is used
-
-### Requirement: Transition can be interrupted
-
-While the transition is visible, `Ctrl+C` SHALL interrupt the pending load, stop the transition, and return control to the operator without starting the destination or leaving the terminal in an unstable state.
-
-#### Scenario: Interrupt cancels the load
-
-- **WHEN** the operator presses `Ctrl+C` while the transition is visible
-- **THEN** the pending destination load is cancelled, the transition stops, and control returns cleanly without a run or destination being started
-
-### Requirement: Reduced motion renders a static frame
-When the operator has expressed a reduced-motion preference, the transition SHALL render a static frame of the field instead of animating it, so the screen remains informative without motion.
-
-#### Scenario: Reduced motion is honored
-- **WHEN** the operator prefers reduced motion and a destination loads slowly
-- **THEN** a static field renders in place of the animation and the destination replaces it when ready
-
-### Requirement: Load failure degrades gracefully
-
-If a destination cannot be loaded, the transition SHALL yield to a plain status message rather than hanging, and Convoy SHALL return control to the operator without leaving a stale or broken screen.
-
-#### Scenario: Load failure reports the reason
-
-- **WHEN** the destination load fails while the transition is visible
-- **THEN** the transition gives way to a readable status message naming the failure, and control returns without a dead screen
+## ADDED Requirements
 
 ### Requirement: Transition animates a directional convoy current in the current theme
 The loading transition SHALL render a field of characters forming a current that flows in one consistent direction — a coherent bed of streamlines that warps and travels over time — in the terminal's current foreground and background theme. Bright formations ("convoys") SHALL ride the current, each a lead that travels with the flow followed by a fading wake, and the theme's accent tone SHALL be reserved for those formations rather than the bed. The field's energy SHALL be strongest toward the terminal's edges and calmest at the center behind the name, so it frames the centered identity instead of competing with it. The animation SHALL be a coherent current; it SHALL NOT read as expanding rings, random per-cell flicker or television static, or an isotropic swirl with no direction. Neighbouring cells SHALL correlate, and the field's evolution SHALL be smooth and deterministic.
@@ -139,3 +66,12 @@ The transition SHALL accept the name of what is loading and render it as the cen
 #### Scenario: A name that cannot use the block alphabet falls back
 - **WHEN** the loading name contains letters the block alphabet does not define, or does not fit the terminal width
 - **THEN** the transition shows the name as plain uppercase text at the center instead
+
+## MODIFIED Requirements
+
+### Requirement: Reduced motion renders a static frame
+When the operator has expressed a reduced-motion preference, the transition SHALL render a static frame of the field instead of animating it, so the screen remains informative without motion.
+
+#### Scenario: Reduced motion is honored
+- **WHEN** the operator prefers reduced motion and a destination loads slowly
+- **THEN** a static field renders in place of the animation and the destination replaces it when ready
