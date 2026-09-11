@@ -1,5 +1,25 @@
 import type { ProgressStepUsage, ProgressTokens, ProgressUsage } from "./progress"
 
+/** Aggregated usage available to post-run hooks when the corresponding facts exist. */
+export type RunUsage = {
+  /** Executor plus advisor cost in USD, present when any phase recorded either. */
+  cost?: number
+  /** Advisor cost in USD, present only when advisor spend was positive. */
+  advisorCost?: number
+  /** Summed executor tokens, present when any phase recorded executor usage. */
+  tokens?: ProgressTokens
+  /** Sum of recorded phase durations. */
+  durationMs?: number
+}
+
+/** The persisted phase facts required to calculate a run-level usage aggregate. */
+export type RunUsagePhase = {
+  cost?: number
+  tokens?: ProgressTokens
+  durationMs?: number
+  advisor?: { cost: number }
+}
+
 /** A zeroed token tally; the canonical empty value for every accumulator. */
 export function emptyTokens(): ProgressTokens {
   return { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
@@ -23,6 +43,47 @@ export function addTokens(left: ProgressTokens, right: ProgressTokens): Progress
 /** Drops NaN/Infinity/undefined to 0 so one bad event can't poison a running total. */
 export function safeCost(cost: number | undefined): number {
   return typeof cost === "number" && Number.isFinite(cost) ? cost : 0
+}
+
+/**
+ * Sums recorded phase facts without fabricating zero-valued usage groups.
+ *
+ * Tokens follow executor usage because metadata records them with the
+ * executor cost. The total cost also counts advisor spend, so a phase whose
+ * advisor was priced still yields a cost, matching the run-history total.
+ */
+export function sumRunUsage(phases: Iterable<RunUsagePhase>): RunUsage | undefined {
+  let executorCost = 0
+  let advisorCost = 0
+  let tokens = emptyTokens()
+  let durationMs = 0
+  let hasExecutorUsage = false
+  let hasAdvisorCost = false
+  let hasDuration = false
+
+  for (const phase of phases) {
+    if (typeof phase.cost === "number" && Number.isFinite(phase.cost)) {
+      hasExecutorUsage = true
+      executorCost += safeCost(phase.cost)
+      if (phase.tokens) tokens = addTokens(tokens, phase.tokens)
+    }
+    if (typeof phase.advisor?.cost === "number" && Number.isFinite(phase.advisor.cost)) {
+      hasAdvisorCost = true
+      advisorCost += safeCost(phase.advisor.cost)
+    }
+    if (typeof phase.durationMs === "number" && Number.isFinite(phase.durationMs)) {
+      hasDuration = true
+      durationMs += phase.durationMs
+    }
+  }
+
+  const usage: RunUsage = {
+    ...(hasExecutorUsage || hasAdvisorCost ? { cost: executorCost + advisorCost } : {}),
+    ...(advisorCost > 0 ? { advisorCost } : {}),
+    ...(hasExecutorUsage ? { tokens } : {}),
+    ...(hasDuration ? { durationMs } : {}),
+  }
+  return Object.keys(usage).length > 0 ? usage : undefined
 }
 
 /** Normalizes opencode's `{ input, output, reasoning, cache: { read, write } }` token shape into ProgressTokens. */

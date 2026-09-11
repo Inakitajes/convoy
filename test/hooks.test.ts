@@ -11,6 +11,17 @@ import type { HooksConfig } from "../src/types"
 import type { Workspace } from "../src/workspace"
 
 const dirs: string[] = []
+const runUsageEnvNames = [
+  "CONVOY_RUN_COST",
+  "CONVOY_RUN_ADVISOR_COST",
+  "CONVOY_RUN_TOKENS_INPUT",
+  "CONVOY_RUN_TOKENS_OUTPUT",
+  "CONVOY_RUN_TOKENS_REASONING",
+  "CONVOY_RUN_TOKENS_CACHE_READ",
+  "CONVOY_RUN_TOKENS_CACHE_WRITE",
+  "CONVOY_RUN_TOKENS_TOTAL",
+  "CONVOY_RUN_DURATION_MS",
+] as const
 
 afterAll(async () => {
   await Promise.all(dirs.map((dir) => rm(dir, { recursive: true, force: true })))
@@ -119,6 +130,57 @@ describe("hooks", () => {
     const context = await hookContext()
     await runHooks("post", [{ command: 'printf "%s" "${CONVOY_GOAL_REACHED-unset}" > nogoal.out', when: "always" }], { ...context, status: "success" })
     expect(await readFile(join(context.targetDir, "nogoal.out"), "utf8")).toBe("unset")
+  })
+
+  test("post hooks receive formatted run usage while pre-hooks do not", async () => {
+    const context = await hookContext()
+    const usage = {
+      cost: 3.2,
+      advisorCost: 0.125,
+      tokens: { input: 1_234_567, output: 20, reasoning: 3, cacheRead: 4, cacheWrite: 5, total: 1_234_599 },
+      durationMs: 90_000.4,
+    }
+    const command = 'printf "%s:%s:%s:%s:%s:%s:%s:%s:%s" "$CONVOY_RUN_COST" "$CONVOY_RUN_ADVISOR_COST" "$CONVOY_RUN_TOKENS_INPUT" "$CONVOY_RUN_TOKENS_OUTPUT" "$CONVOY_RUN_TOKENS_REASONING" "$CONVOY_RUN_TOKENS_CACHE_READ" "$CONVOY_RUN_TOKENS_CACHE_WRITE" "$CONVOY_RUN_TOKENS_TOTAL" "$CONVOY_RUN_DURATION_MS" > usage.out'
+
+    await runHooks("post", [{ command, when: "always" }], { ...context, status: "success", usage })
+    expect(await readFile(join(context.targetDir, "usage.out"), "utf8")).toBe("3.2000:0.1250:1234567:20:3:4:5:1234599:90000")
+
+    await runHooks("pre", [{ command: 'printf "%s" "${CONVOY_RUN_COST-unset}" > pre-usage.out' }], { ...context, usage })
+    expect(await readFile(join(context.targetDir, "pre-usage.out"), "utf8")).toBe("unset")
+  })
+
+  test("post hooks omit unavailable usage groups", async () => {
+    const context = await hookContext()
+    const command = 'printf "%s:%s:%s" "${CONVOY_RUN_COST-unset}" "${CONVOY_RUN_ADVISOR_COST-unset}" "${CONVOY_RUN_DURATION_MS-unset}" > partial-usage.out'
+
+    await runHooks("post", [{ command, when: "always" }], { ...context, status: "failure", usage: { durationMs: 25 } })
+    expect(await readFile(join(context.targetDir, "partial-usage.out"), "utf8")).toBe("unset:unset:25")
+
+    // Advisor-only spend reaches the total without inventing executor tokens.
+    const advisorOnly = 'printf "%s:%s:%s" "$CONVOY_RUN_COST" "$CONVOY_RUN_ADVISOR_COST" "${CONVOY_RUN_TOKENS_TOTAL-unset}" > advisor-usage.out'
+    await runHooks("post", [{ command: advisorOnly, when: "always" }], { ...context, status: "failure", usage: { cost: 0.2, advisorCost: 0.2 } })
+    expect(await readFile(join(context.targetDir, "advisor-usage.out"), "utf8")).toBe("0.2000:0.2000:unset")
+  })
+
+  test("hooks do not inherit run usage from the parent environment", async () => {
+    const context = await hookContext()
+    const previous = runUsageEnvNames.map((name) => [name, process.env[name]] as const)
+    const expansions = runUsageEnvNames.map((name) => `\${${name}-unset}`).join(":")
+    const expected = runUsageEnvNames.map(() => "unset").join(":")
+    for (const name of runUsageEnvNames) process.env[name] = "stale"
+
+    try {
+      await runHooks("pre", [{ command: `printf "%s" "${expansions}" > inherited-pre-usage.out` }], { ...context, usage: { durationMs: 25 } })
+      await runHooks("post", [{ command: `printf "%s" "${expansions}" > inherited-post-usage.out`, when: "always" }], { ...context, status: "success" })
+
+      expect(await readFile(join(context.targetDir, "inherited-pre-usage.out"), "utf8")).toBe(expected)
+      expect(await readFile(join(context.targetDir, "inherited-post-usage.out"), "utf8")).toBe(expected)
+    } finally {
+      for (const [name, value] of previous) {
+        if (value === undefined) delete process.env[name]
+        else process.env[name] = value
+      }
+    }
   })
 
   test("fails on a non-zero hook unless continueOnError is true", async () => {

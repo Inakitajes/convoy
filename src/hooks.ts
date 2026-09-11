@@ -5,6 +5,7 @@ import { log } from "./log"
 
 import type { ProgressUI } from "./progress"
 import type { HookSet, HookSpec, HookWhen, HooksConfig } from "./types"
+import type { RunUsage } from "./usage"
 import type { Workspace } from "./workspace"
 
 export type HookStage = "pre" | "post"
@@ -22,6 +23,8 @@ export type RunHookContext = {
   score?: number
   /** Outcome of the goal loop, when these post-hooks run after one. */
   goal?: GoalHookOutcome
+  /** Aggregated phase facts available only to post-hooks. */
+  usage?: RunUsage
 }
 
 /**
@@ -148,7 +151,20 @@ async function runHookCommand(stage: HookStage, hook: HookSpec, context: RunHook
   // The loopback bridge's bearer credential is for the OpenCode custom tools
   // only. Hooks are arbitrary project commands and do not need either value;
   // do not let them inherit a live capability to call the bridge.
-  const { [advisorUrlEnv]: _advisorUrl, [advisorTokenEnv]: _advisorToken, ...parentEnv } = process.env
+  const {
+    [advisorUrlEnv]: _advisorUrl,
+    [advisorTokenEnv]: _advisorToken,
+    CONVOY_RUN_COST: _runCost,
+    CONVOY_RUN_ADVISOR_COST: _runAdvisorCost,
+    CONVOY_RUN_TOKENS_INPUT: _runTokensInput,
+    CONVOY_RUN_TOKENS_OUTPUT: _runTokensOutput,
+    CONVOY_RUN_TOKENS_REASONING: _runTokensReasoning,
+    CONVOY_RUN_TOKENS_CACHE_READ: _runTokensCacheRead,
+    CONVOY_RUN_TOKENS_CACHE_WRITE: _runTokensCacheWrite,
+    CONVOY_RUN_TOKENS_TOTAL: _runTokensTotal,
+    CONVOY_RUN_DURATION_MS: _runDuration,
+    ...parentEnv
+  } = process.env
   const env = {
     ...parentEnv,
     CONVOY_HOOK_STAGE: stage,
@@ -167,6 +183,7 @@ async function runHookCommand(stage: HookStage, hook: HookSpec, context: RunHook
           ...(context.goal.score !== undefined ? { CONVOY_GOAL_SCORE: String(context.goal.score) } : {}),
         }
       : {}),
+    ...(stage === "post" ? usageEnv(context.usage) : {}),
   }
 
   const proc = Bun.spawn([shell, "-lc", hook.command], {
@@ -216,6 +233,26 @@ async function runHookCommand(stage: HookStage, hook: HookSpec, context: RunHook
     if (timeout) clearTimeout(timeout)
     if (abortKillTimer) clearTimeout(abortKillTimer)
     context.signal?.removeEventListener("abort", abort)
+  }
+}
+
+/** Converts in-memory usage into the stable text contract exposed to post-hooks. */
+function usageEnv(usage: RunUsage | undefined): Record<string, string> {
+  if (!usage) return {}
+  return {
+    ...(usage.cost !== undefined ? { CONVOY_RUN_COST: usage.cost.toFixed(4) } : {}),
+    ...(usage.advisorCost !== undefined ? { CONVOY_RUN_ADVISOR_COST: usage.advisorCost.toFixed(4) } : {}),
+    ...(usage.tokens
+      ? {
+          CONVOY_RUN_TOKENS_INPUT: String(usage.tokens.input),
+          CONVOY_RUN_TOKENS_OUTPUT: String(usage.tokens.output),
+          CONVOY_RUN_TOKENS_REASONING: String(usage.tokens.reasoning),
+          CONVOY_RUN_TOKENS_CACHE_READ: String(usage.tokens.cacheRead),
+          CONVOY_RUN_TOKENS_CACHE_WRITE: String(usage.tokens.cacheWrite),
+          CONVOY_RUN_TOKENS_TOTAL: String(usage.tokens.total),
+        }
+      : {}),
+    ...(usage.durationMs !== undefined ? { CONVOY_RUN_DURATION_MS: String(Math.round(usage.durationMs)) } : {}),
   }
 }
 
