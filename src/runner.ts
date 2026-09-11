@@ -873,6 +873,7 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
     // along: CONVOY_GOAL_REACHED distinguishes "cleared the bar" from "gave up
     // short of it" in a way `when: success` alone cannot).
     postHooksStarted = true
+    const usage = metadata.runUsage()
     await runHooks("post", hookSet.post, {
       workspace,
       targetDir: options.targetDir,
@@ -891,6 +892,7 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
             },
           }
         : {}),
+      ...(usage ? { usage } : {}),
     })
 
     // Automatic run finalization (capability run-finalization): the terminal
@@ -995,6 +997,7 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
     // gates on CONVOY_GOAL_REACHED correctly stays inert.
     if (!postHooksStarted && !isUserAbortError(failure)) {
       postHooksStarted = true
+      const usage = metadata?.runUsage()
       try {
         await runHooks("post", hookSet.post, {
           workspace,
@@ -1004,6 +1007,7 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
           status: "failure",
           progress,
           signal: shutdown.signal,
+          ...(usage ? { usage } : {}),
         })
       } catch (hookError) {
         failure = new Error(`${formatSdkError(error)}; post-hook failed: ${formatSdkError(hookError)}`)

@@ -375,6 +375,20 @@ hooks:
             fi
 ```
 
+Post-hooks also receive the run's recorded usage without parsing `metadata.json`: `CONVOY_RUN_COST` (executor plus advisor spend) and `CONVOY_RUN_ADVISOR_COST` are USD decimals with exactly four fractional digits; `CONVOY_RUN_TOKENS_INPUT`, `CONVOY_RUN_TOKENS_OUTPUT`, `CONVOY_RUN_TOKENS_REASONING`, `CONVOY_RUN_TOKENS_CACHE_READ`, `CONVOY_RUN_TOKENS_CACHE_WRITE`, and `CONVOY_RUN_TOKENS_TOTAL` are integer token counts; and `CONVOY_RUN_DURATION_MS` is the integer sum of recorded phase durations. Cost appears only after a phase reports executor or advisor spend, token variables appear together only after a phase reports executor usage, advisor cost appears only when advisor spend is positive, and duration appears only after a phase records one — absent facts are not represented as zero. For example, a post-hook can comment the result on its PR and enforce a decimal budget:
+
+```yaml
+hooks:
+  post:
+    - name: report run usage
+      command: gh pr comment --body "Convoy run: \$${CONVOY_RUN_COST} in ${CONVOY_RUN_DURATION_MS}ms"
+    - name: enforce budget
+      when: always
+      command: 'awk "BEGIN { exit !(${CONVOY_RUN_COST:-0} <= 5.0000) }"'
+```
+
+Use `awk` for the budget guard because shell integer comparisons cannot compare decimal USD amounts. A failing post-hook fails the run unless `continueOnError: true` is set.
+
 The dashboard shows the goal, the current iteration, and the trajectory (`◆ convoy · goal 90 · iter 2/4 · 71 → …`), and when the cycle ends — goal met, plateau, iteration cap, no score, or a failure — the dashboard holds its finish screen **once**, with the verdict in place of the live goal readout (`✓ goal 92/100`, `plateau 86/100`, `cap 88/100`, `no score`, or `✗ run failed`) and the full trajectory (`71 → 84 → 92`); the terminal prints the trajectory and why it stopped after the dashboard closes. Goal fragment phases appear under the parent pipeline with their iteration-qualified names (for example `goal-measure-1-score-report`); the whole cycle runs in one run, so the dashboard never remounts between rounds.
 
 ## Requirements
@@ -837,7 +851,7 @@ The rules:
 - **Resume is frozen**: the resolved pipeline is persisted in the run's `metadata.json`; `--resume` replays it even if the config changed since.
 - **Dirty-tree recovery**: a writable phase interrupted before its commit (Ctrl+C, a failed commit step, a killed process) leaves uncommitted work in the tree, which normally blocks `--resume`. In an interactive terminal, resume offers to commit that work as the interrupted phase (`convoy(<phase>): …` with the resumed run's `Convoy-Run` trailer), mark it done, and continue with the following phases. If the interrupted phase had already accepted a structured commit description through `write_report`, recovery reuses it; otherwise the message describes the staged paths or says plainly what happened. Read-only phases are never recoverable as agent output: preserved changes must be resolved manually, and resume also verifies their recorded HEAD/branch baseline. Decline (or a non-TTY resume) keeps the old "commit/stash first" behavior.
 - **Permissions are additive**: `permissions.deny` extends the hard denylist, `permissions.allow` extends the allowlist, deny always wins, and there is deliberately no way for a repo to grant itself `--yolo`.
-- **Hooks are trusted local shell commands**: `hooks.pre` runs after the run workspace/dashboard is initialized and before the pipeline starts (pre-hooks are skipped on `--resume`); `hooks.post` runs at the end according to `when`. Top-level hooks apply to every pipeline, and `hooks.pipelines.<name>` entries are appended for that pipeline. Hooks run via `$SHELL -lc` from the target repo by default, receive `CONVOY_RUN_ID`, `CONVOY_RUN_DIR`, `CONVOY_TARGET_DIR`, `CONVOY_PIPELINE`, `CONVOY_PROMPT_FILE`, and post-hooks also receive `CONVOY_RUN_STATUS`, plus `CONVOY_RUN_SCORE` on a scored pipeline and `CONVOY_GOAL_REACHED`/`CONVOY_GOAL_SCORE`/`CONVOY_GOAL_TARGET` when a [goal loop](#goal-mode) ran (in which case post-hooks run once, after the loop, not once per iteration). A failing hook fails the run unless `continueOnError: true` is set. Each hook is also a row in the dashboard pipeline — pre-hooks ahead of the steps, post-hooks after — with live running/✓/✗/skipped status, and the tail of its output lands in that row's `logs` tab; the rows are recorded in the run metadata, so re-opened runs show them too.
+- **Hooks are trusted local shell commands**: `hooks.pre` runs after the run workspace/dashboard is initialized and before the pipeline starts (pre-hooks are skipped on `--resume`); `hooks.post` runs at the end according to `when`. Top-level hooks apply to every pipeline, and `hooks.pipelines.<name>` entries are appended for that pipeline. Hooks run via `$SHELL -lc` from the target repo by default, receive `CONVOY_RUN_ID`, `CONVOY_RUN_DIR`, `CONVOY_TARGET_DIR`, `CONVOY_PIPELINE`, `CONVOY_PROMPT_FILE`, and post-hooks also receive `CONVOY_RUN_STATUS`, plus `CONVOY_RUN_SCORE` on a scored pipeline, `CONVOY_GOAL_REACHED`/`CONVOY_GOAL_SCORE`/`CONVOY_GOAL_TARGET` when a [goal loop](#goal-mode) ran, and recorded run usage (`CONVOY_RUN_COST`, `CONVOY_RUN_ADVISOR_COST`, `CONVOY_RUN_TOKENS_*`, and `CONVOY_RUN_DURATION_MS`; formats and presence rules are in [Goal mode](#goal-mode)). Pre-hooks never receive usage variables. A failing hook fails the run unless `continueOnError: true` is set. Each hook is also a row in the dashboard pipeline — pre-hooks ahead of the steps, post-hooks after — with live running/✓/✗/skipped status, and the tail of its output lands in that row's `logs` tab; the rows are recorded in the run metadata, so re-opened runs show them too.
 
 ## Global configuration
 

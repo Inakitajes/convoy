@@ -306,6 +306,7 @@ describe("openRunMetadata", () => {
     try {
       expect(typeof store.snapshot).toBe("function")
       expect(typeof store.phaseStatus).toBe("function")
+      expect(typeof store.runUsage).toBe("function")
       expect(typeof store.serverStarted).toBe("function")
       expect(typeof store.serverStopped).toBe("function")
       expect(typeof store.phaseStarted).toBe("function")
@@ -536,6 +537,45 @@ describe("openRunMetadata", () => {
       raw = await readRunMetadata(`${dir}/metadata.json`)
       expect(raw!.phases.design?.advisorEvents).toHaveLength(2)
       expect(raw!.phases.design?.advisor?.attempted).toBe(2)
+    } finally {
+      await cleanup()
+    }
+  })
+
+  test("runUsage aggregates recorded executor, advisor, and duration facts", async () => {
+    const { ws, cleanup } = await withDir("run-usage")
+    const store = await openRunMetadata(ws, "/target", validPipeline([validAgentStep("design"), validAgentStep("test")]))
+    try {
+      expect(store.runUsage()).toBeUndefined()
+
+      store.phaseStepUsage("design", {
+        cost: 0.5,
+        tokens: { input: 1_000, output: 200, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 1_200 },
+      })
+      store.phaseUsageTotal("test", {
+        cost: 0.25,
+        tokens: { input: 400, output: 100, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 500 },
+      })
+      store.phaseAdvisorEvent("design", {
+        ...advisorRequestedEvent("usage-advisor"),
+        type: "advisor.completed",
+        model: "advisor-model",
+        latencyMs: 10,
+        usage: { cost: 0.2, tokens: { input: 1, output: 2, reasoning: 0, cacheRead: 0, cacheWrite: 0 }, model: "advisor-model" },
+        adviceChars: 0,
+      })
+      await store.phaseStarted("design")
+      await store.phaseEnded("design", "completed")
+      await store.phaseStarted("test")
+      await store.phaseEnded("test", "failed")
+      await store.phaseStarted("post-hook: notify")
+      await store.phaseEnded("post-hook: notify", "completed")
+
+      const usage = store.runUsage()
+      expect(usage?.cost).toBeCloseTo(0.95)
+      expect(usage?.advisorCost).toBeCloseTo(0.2)
+      expect(usage?.tokens).toEqual({ input: 1_400, output: 300, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 1_700 })
+      expect(usage?.durationMs).toBeGreaterThanOrEqual(0)
     } finally {
       await cleanup()
     }
@@ -890,6 +930,7 @@ describe("recordProgress", () => {
       pipeline: validPipeline([]),
       snapshot: () => undefined,
       phaseStatus: () => undefined,
+      runUsage: () => undefined,
       goalState: () => undefined,
       checkpointGoal: () => Promise.resolve(),
       boundary: () => undefined,

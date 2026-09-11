@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 
 import type { ProgressTokens } from "../src/progress"
-import { PhaseUsage, addTokens, cloneTokens, emptyTokens, safeCost, tokensFromValue } from "../src/usage"
+import { PhaseUsage, addTokens, cloneTokens, emptyTokens, safeCost, sumRunUsage, tokensFromValue } from "../src/usage"
 
 function tk(input: number, output: number): ProgressTokens {
   return { input, output, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: input + output }
@@ -97,5 +97,28 @@ describe("PhaseUsage", () => {
     // total-reported, so its cost is suppressed rather than added on top
     usage.addStep({ stepID: "x", cost: 99, tokens: tk(999, 0) })
     expect(usage.totals().cost).toBe(5)
+  })
+})
+
+describe("sumRunUsage", () => {
+  test("sums executor and advisor usage, tokens, and recorded durations", () => {
+    expect(sumRunUsage([
+      { cost: 0.5, tokens: tk(1_000, 200), durationMs: 60_000, advisor: { cost: 0.2 } },
+      { cost: 0.25, tokens: tk(400, 100), durationMs: 30_000 },
+      { durationMs: 500 },
+    ])).toEqual({
+      cost: 0.95,
+      advisorCost: 0.2,
+      tokens: { input: 1_400, output: 300, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 1_700 },
+      durationMs: 90_500,
+    })
+  })
+
+  test("keeps independently recorded usage groups and ignores invalid numbers", () => {
+    // Advisor-only spend is still spend: the total counts it, tokens stay absent.
+    expect(sumRunUsage([{ advisor: { cost: 0.2 } }])).toEqual({ cost: 0.2, advisorCost: 0.2 })
+    expect(sumRunUsage([{ durationMs: 10 }, { advisor: { cost: 0 } }])).toEqual({ cost: 0, durationMs: 10 })
+    expect(sumRunUsage([{ cost: Number.NaN, tokens: tk(1, 1), durationMs: Number.POSITIVE_INFINITY, advisor: { cost: Number.NaN } }])).toBeUndefined()
+    expect(sumRunUsage([])).toBeUndefined()
   })
 })

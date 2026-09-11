@@ -16,7 +16,7 @@ import type {
 import type { QualityScore } from "./quality-score"
 import type { FeaturePlanLink, Pipeline } from "./types"
 import type { ModelGateway } from "./model-routing"
-import { PhaseUsage } from "./usage"
+import { PhaseUsage, sumRunUsage, type RunUsage } from "./usage"
 import { aggregateAdvisorEvents, type AdvisorEvent, type AdvisorPhaseAggregate } from "./advisor-events"
 import { readCommitLedger, readFinalizationRecord, readRunBoundary, type CommitLedgerEntry, type FinalizationRecord, type RunBoundary } from "./finalization/types"
 import { resolveRunTitleFor } from "./run-title"
@@ -117,6 +117,8 @@ export type RunMetadataStore = {
   pipeline: Pipeline
   snapshot(name: string): ProgressPhaseSnapshot | undefined
   phaseStatus(name: string): PhaseMetadataStatus | undefined
+  /** Current aggregate of phase facts recorded during this run. */
+  runUsage(): RunUsage | undefined
   /** The durable goal-cycle record, when the run has reached a goal checkpoint. */
   goalState(): GoalRunState | undefined
   /** Persists a goal checkpoint after a stage boundary, score promotion, or settlement. */
@@ -315,6 +317,9 @@ export async function openRunMetadata(
     },
     phaseStatus(name) {
       return data.phases[name]?.status
+    },
+    runUsage() {
+      return sumRunUsage(Object.values(data.phases))
     },
     goalState() {
       return data.goal
