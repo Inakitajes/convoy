@@ -23,6 +23,7 @@ import { readRunMetadata, type RunMetadata } from "./metadata"
 import { preflightRunPlan } from "./preflight"
 import type { LaunchBranchCheck, LaunchBranchProposal, LaunchFeaturePreset, LaunchRunPreparation, LaunchRunSelection } from "./launch-tui"
 import type { SpinOptions } from "./spin"
+import type { PublishCommandOptions } from "./publish-command"
 import { formatVersion } from "./version"
 import type { UpdateResult } from "./update"
 import type { TuiRoute } from "./tui-session"
@@ -95,6 +96,7 @@ export type CliCommand =
   | { type: "opencode-install" }
   | { type: "close"; args: string[] }
   | { type: "worktrees"; args: string[] }
+  | { type: "publish"; options: PublishCommandOptions }
   | { type: "retired-feature"; args: string[] }
   | { type: "config"; targetDir: string }
   | { type: "init"; options: InitOptions }
@@ -178,6 +180,14 @@ export async function parseAndRun(argv: string[]) {
       return
     }
     await runWorktreesCommand(parsed)
+    return
+  }
+  if (command.type === "publish") {
+    // The explicit headless publication request (capability run-finalization):
+    // the only way a non-interactive run is published. The seam it wraps keeps
+    // every current-target/provenance/recovery guard the dashboard has.
+    const { runPublishCommand } = await import("./publish-command")
+    process.exitCode = await runPublishCommand(command.options)
     return
   }
   if (command.type === "retired-feature") {
@@ -1905,6 +1915,12 @@ export async function parseCommand(argv: string[]): Promise<CliCommand> {
     // by the worktree-commands module.
     return { type: "worktrees", args: argv.slice(1) }
   }
+  if (argv[0] === "publish") {
+    // The explicit headless publication request: effects require --yes; without
+    // it (or with --dry-run) the command only prints the reviewed plan and text.
+    if (argv.slice(1).some((arg) => arg === "--help" || arg === "-h")) return { type: "help", text: publishHelp() }
+    return { type: "publish", options: parsePublishArgs(argv.slice(1)) }
+  }
   if (argv[0] === "feature") {
     // The feature lifecycle is retired (capability feature-lifecycle): the
     // command is recognized by spelling alone — before any subcommand or flag
@@ -2058,6 +2074,60 @@ export function parseSpinArgs(argv: string[]): SpinOptions {
     }
     throw new Error(`usage: convoy spin [--change <id>] [--prefix <type>] (unexpected argument: ${arg})`)
   }
+  return options
+}
+
+/**
+ * Parses `convoy publish`'s flags. `--yes` authorizes the push + PR effects and
+ * `--dry-run` inspects without them; neither given is also safe (review only).
+ * A run context is optional and accepts one of `--run-dir` or `--run`.
+ */
+export function parsePublishArgs(argv: string[]): PublishCommandOptions {
+  const options: PublishCommandOptions = { yes: false, dryRun: false }
+  for (let i = 0; i < argv.length; i++) {
+    const { flag, value } = splitFlag(argv[i]!)
+    const takeValue = (): string => {
+      if (value !== undefined) return value
+      const next = argv[++i]
+      if (next === undefined || (next.startsWith("-") && next !== "-")) throw new Error(`${flag} requires a value`)
+      return next
+    }
+
+    switch (flag) {
+      case "--worktree":
+        options.worktree = takeValue()
+        break
+      case "--run-dir":
+        options.runDir = takeValue()
+        break
+      case "--run": {
+        const runId = takeValue()
+        if (!isValidRunID(runId)) throw new Error(`invalid run id: ${runId}`)
+        options.runId = runId
+        break
+      }
+      case "--title":
+        options.title = takeValue()
+        break
+      case "--body":
+        options.body = takeValue()
+        break
+      case "--yes":
+        if (value !== undefined) throw new Error("--yes does not take a value")
+        options.yes = true
+        break
+      case "--dry-run":
+        if (value !== undefined) throw new Error("--dry-run does not take a value")
+        options.dryRun = true
+        break
+      default:
+        throw new Error(`usage: convoy publish [--worktree <path>] [--run-dir <path> | --run <id>] [--title <text> --body <text>] [--yes] [--dry-run] (unexpected argument: ${argv[i]})`)
+    }
+  }
+
+  if (options.yes && options.dryRun) throw new Error("use either --yes (publish) or --dry-run (inspect), not both")
+  if ((options.title === undefined) !== (options.body === undefined)) throw new Error("--title and --body must be provided together")
+  if (options.runDir !== undefined && options.runId !== undefined) throw new Error("use either --run-dir or --run, not both")
   return options
 }
 
@@ -2494,6 +2564,7 @@ Usage:
   convoy runs [run-id]
   convoy specs
   convoy worktrees [--help]
+  convoy publish [--yes] [--dry-run]
   convoy spin
   convoy close
   convoy opencode install
@@ -2526,6 +2597,10 @@ Commands:
                              explicit checkout and base, sync as needed, archive the explicitly
                              selected local changes, then squash the whole branch onto the base
                              ("convoy close --help" for options)
+  publish                  The explicit headless publication request: compose the run-aware PR
+                             title/body, print the reviewed plan and text, and push + create the
+                             PR only with --yes (--dry-run inspects without effect)
+                             ("convoy publish --help" for options)
   opencode install          Install the global /convoy-spin OpenCode command — a thin wrapper at
                              ~/.config/opencode/commands/convoy-spin.md that runs convoy spin
                              from a session (opt-in, idempotent; touches no other command file)
@@ -2605,6 +2680,36 @@ Config keys:
   attachments:             files attached to every step
   The same schema lives globally at ~/.convoy/config.yaml; project config merges on top.
   Precedence: CLI flags > project config > global config > built-in defaults.
+`
+}
+
+function publishHelp() {
+  return `convoy publish
+
+The explicit headless publication request for a run (capability run-finalization):
+compose the run-aware pull-request title and body, print the reviewed plan and
+text, and push + create the PR only under explicit authorization. Run completion
+alone never publishes.
+
+Usage:
+  convoy publish [--worktree <path>] [--run-dir <path> | --run <id>]
+                 [--title <text> --body <text>] [--yes] [--dry-run]
+
+Flags:
+  --worktree <path>        Target checkout (default: the current directory)
+  --run-dir <path>         Run workspace whose recap and metadata seed the PR body and
+                           enable the run's current-target and recovery gates
+  --run <id>               Run id under ~/.convoy/runs, when no --run-dir is given
+  --title <text>           Explicit title, provided together with --body
+  --body <text>            Explicit body, provided together with --title
+  --yes                    Authorize the normal push and the PR creation
+  --dry-run                Compose and print only; never a push or PR
+
+Without --yes (or with --dry-run) the command only prints the disclosed branch,
+remote, base, title, and body, so the default is safe. Unlike
+\`convoy worktrees pr\`, it uses the run-aware composer: the branch's conventional
+prefix and the OpenSpec proposal title, and a Why / What / How-tested body
+grounded in the proposal, the run recap, and validation reports.
 `
 }
 

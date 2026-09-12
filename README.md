@@ -369,10 +369,20 @@ hooks:
         - name: open PR
           command: |
             if [ "$CONVOY_GOAL_REACHED" = "true" ]; then
-              git push -u origin HEAD && gh pr create --fill
+              convoy publish --run-dir "$CONVOY_RUN_DIR" --worktree "$CONVOY_TARGET_DIR" --yes
             else
               echo "scored $CONVOY_GOAL_SCORE, needed $CONVOY_GOAL_TARGET — no PR opened"
             fi
+```
+
+`convoy publish` is the explicit headless publication request. It composes the same run-aware title and Why / What / How-tested body the dashboard's **Create PR** action composes — the branch's conventional prefix plus the OpenSpec proposal title, grounded in the proposal, the run recap (`reports/run-report.md`), and the validation reports — prints the disclosed branch/remote/base and the exact text, and pushes and creates the PR **only under explicit `--yes`**. Without `--yes`, or with `--dry-run`, it prints the review and performs no effect, so a run completing never publishes on its own. It is deliberately distinct from `convoy worktrees pr`, which is worktree-only and composes a generic body from the branch slug and commit subjects.
+
+```bash
+# compose and inspect without any effect
+convoy publish --run-dir ~/.convoy/runs/<id> --worktree . --dry-run
+
+# compose, push, and create/report the PR
+convoy publish --run-dir ~/.convoy/runs/<id> --worktree . --yes
 ```
 
 The dashboard shows the goal, the current iteration, and the trajectory (`◆ convoy · goal 90 · iter 2/4 · 71 → …`), and when the cycle ends — goal met, plateau, iteration cap, no score, or a failure — the dashboard holds its finish screen **once**, with the verdict in place of the live goal readout (`✓ goal 92/100`, `plateau 86/100`, `cap 88/100`, `no score`, or `✗ run failed`) and the full trajectory (`71 → 84 → 92`); the terminal prints the trajectory and why it stopped after the dashboard closes. Goal fragment phases appear under the parent pipeline with their iteration-qualified names (for example `goal-measure-1-score-report`); the whole cycle runs in one run, so the dashboard never remounts between rounds.

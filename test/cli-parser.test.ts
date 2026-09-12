@@ -138,3 +138,35 @@ describe("resolveRunOptions", () => {
     if (command.type === "help") expect(command.text).toContain("convoy spin")
   })
 })
+
+describe("convoy publish parsing", () => {
+  test("parses defaults, values, and inline flags", async () => {
+    expect(await parseCommand(["publish"])).toEqual({ type: "publish", options: { yes: false, dryRun: false } })
+    expect(await parseCommand(["publish", "--worktree", "/repo", "--run-dir", "/runs/x", "--yes"])).toEqual({
+      type: "publish",
+      options: { worktree: "/repo", runDir: "/runs/x", yes: true, dryRun: false },
+    })
+    expect(await parseCommand(["publish", "--run", "20260912-164500-abcd", "--dry-run"])).toEqual({
+      type: "publish",
+      options: { runId: "20260912-164500-abcd", yes: false, dryRun: true },
+    })
+    expect(await parseCommand(["publish", "--title=feat: X", "--body=why"])).toEqual({
+      type: "publish",
+      options: { title: "feat: X", body: "why", yes: false, dryRun: false },
+    })
+  })
+
+  test("rejects unknown flags, conflicting modes, and incomplete overrides", async () => {
+    await expect(parseCommand(["publish", "--nope"])).rejects.toThrow("usage: convoy publish")
+    await expect(parseCommand(["publish", "--yes", "--dry-run"])).rejects.toThrow("either --yes")
+    await expect(parseCommand(["publish", "--title", "feat: X"])).rejects.toThrow("--title and --body must be provided together")
+    await expect(parseCommand(["publish", "--run-dir", "/a", "--run", "20260912-164500-abcd"])).rejects.toThrow("either --run-dir or --run")
+    await expect(parseCommand(["publish", "--run", "not-an-id"])).rejects.toThrow("invalid run id")
+  })
+
+  test("publish --help explains its usage", async () => {
+    const command = await parseCommand(["publish", "--help"])
+    expect(command.type).toBe("help")
+    if (command.type === "help") expect(command.text).toContain("convoy publish")
+  })
+})
