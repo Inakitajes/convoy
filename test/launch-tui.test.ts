@@ -774,7 +774,7 @@ describe("launch TUI pipeline choices", () => {
   test("carries the goal cycle for scored pipelines so the preview can show it", () => {
     const choices = pipelineChoices(undefined, builtInAgents)
     const ship = choices.find((choice) => choice.name === "ship")
-    expect(ship?.goal).toMatchObject({ target: 85, maxIterations: 3, plateau: 3, briefRecipient: "fix", scoreProducer: "score-report" })
+    expect(ship?.goal).toMatchObject({ target: 90, maxIterations: 5, plateau: 3, briefRecipient: "fix", scoreProducer: "score-report" })
     expect(ship?.goal?.improve.map((step) => step.stepName)).toEqual(["fix"])
     expect(ship?.goal?.measure.map((step) => step.stepName)).toEqual(["score", "score", "score-report"])
   })

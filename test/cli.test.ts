@@ -822,8 +822,8 @@ describe("goalModeFor", () => {
     expect(goalModeFor(planWith(review))).toEqual({ mode: "off" })
   })
 
-  test("is on for ship, whose terminal goal step declares target 85 with defaults", () => {
-    expect(goalModeFor(planWith(ship))).toEqual({ mode: "on", goal: 85, maxIterations: 3, plateau: 3 })
+  test("is on for ship, whose terminal goal step declares target 90 with 5 improve rounds", () => {
+    expect(goalModeFor(planWith(ship))).toEqual({ mode: "on", goal: 90, maxIterations: 5, plateau: 3 })
   })
 
   test("is off for a pipeline whose goal step is absent even when it ends in a score", () => {

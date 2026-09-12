@@ -165,13 +165,26 @@ describe("reconstructedPhases", () => {
     expect(rows.map((row) => row.name)).toEqual([
       "pre-hook-1",
       "sync",
+      "scope",
+      "clean-code__openrouter-deepseek-deepseek-v4-flash-0731-high",
+      "clean-code__openrouter-z-ai-glm-5-3-flash-high",
+      "security__openrouter-deepseek-deepseek-v4-flash-0731-high",
+      "security__openrouter-z-ai-glm-5-3-flash-high",
+      "bugs__openrouter-deepseek-deepseek-v4-flash-0731-high",
+      "bugs__openrouter-z-ai-glm-5-3-flash-high",
+      "report",
+      "triage",
+      "fixes",
+      "run-report",
       ...qualified("measure", 0),
       ...qualified("improve", 1),
       // The terminal lifecycle row closes every phase list (SC-2).
       "Compact run",
     ])
     // Display groups are per-invocation ids, never the shared fragment groupId.
-    expect(new Set(rows.map((row) => row.groupId))).toEqual(new Set([undefined, "g1", "goal-measure-0", "goal-improve-1"]))
+    expect(new Set(rows.map((row) => row.groupId))).toEqual(
+      new Set([undefined, "g1", "g2", "g3", "g4", "g5", "g6", "g7", "goal-measure-0", "goal-improve-1"]),
+    )
   })
 
   test("a live run lists the in-flight invocation before its phases start", () => {
@@ -181,6 +194,12 @@ describe("reconstructedPhases", () => {
     )
     expect(reconstructedPhases(metadata, true).map((row) => row.groupId)).toEqual([
       "g1",
+      "g2",
+      ...Array(6).fill("g3"),
+      "g4",
+      "g5",
+      "g6",
+      "g7",
       ...qualified("measure", 0).map(() => "goal-measure-0"),
       ...qualified("improve", 1).map(() => "goal-improve-1"),
       // The lifecycle row is not a goal invocation; it has no group.

@@ -22,7 +22,7 @@ Convoy takes a PRD and turns it into a structured, reviewable implementation: a 
 Typical uses:
 
 - **Build a feature from a PRD.** `convoy --prompt-file prd.md` runs the default `implement` pipeline; the implementation phase writes with an advisor model at its shoulder, and what lands has already been pattern-aligned, security-audited, design-polished, tested, and adversarially reviewed — one commit per phase, so you review a story, not a blob.
-- **Close a branch out.** `convoy -p ship "what this branch does"` merges the advanced base in and resolves the conflicts, grades the merged result against the quality rubric, and keeps fixing and re-scoring until it clears 85/100 — so the pull request you open has a number behind it, not a vibe.
+- **Close a branch out.** `convoy -p ship "what this branch does"` merges the advanced base in and resolves the conflicts, reviews the merged result (clean-code, security, and bug audits), triages and fixes the accepted findings, then grades it against the quality rubric and keeps fixing and re-scoring until it clears 90/100 — so the pull request you open has a number behind it, not a vibe.
 - **Get a second opinion before merging.** `convoy -p review "pre-merge check"` changes no code: each audit runs in parallel on two different models, everything is synthesized into one prioritized findings report at `reports/report.md`, and the run ends with a verified score.
 - **Turn a findings list into fixes.** `convoy -p fixer` takes a report and proves each finding with a focused regression test *before* touching production code, then reports a per-finding verdict.
 - **Encode your team's actual workflow.** Pipelines are YAML in `.convoy/config.yaml`: define your own steps, agents, and models, with named human gates anywhere, and run `convoy -p <name>`.
@@ -72,7 +72,7 @@ They are built around one cycle. Two of its four steps are Convoy's:
 ```
    plan            build              shape            close
 (your editor) ──► convoy ──► (your editor, by hand) ──► convoy -p ship ──► PR
-                 implement                              sync · score · loop
+                 implement                              sync · review · fix · loop
 ```
 
 You write the plan, `implement` turns it into something functional, you shape it by hand until you like it, and `ship` proves it merges and clears the quality bar before the pull request exists. Everything else in the table serves that cycle from the side: `review` and the `hunter`s tell you where you stand without changing anything, and `fixer` turns a findings list into proven fixes.
@@ -81,7 +81,7 @@ You write the plan, `implement` turns it into something functional, you shape it
 |---|---|---|
 | `implement` | yes | **The default** (runs with no `-p`). Implement a PRD with an **advised** implementation phase — Terra xhigh writes and consults Sol xhigh at its decision points — then audit, polish, test, and adversarial review (the table above), and close with a one-page extractive recap of the whole run (`reports/run-report.md`). Does not score: that is `ship`'s job. |
 | `implement-lite` | yes | `implement`'s shape on low-cost models: DeepSeek V4 Flash 0731 writes, Grok 4.6 advises the implementer and polishes design, GLM 5.3 runs the audits, and `adversarial` runs on GLM 5.3. The advisor is the last thing to go, because it is what makes a cheap implementer worth running. Ends with the same run recap — the recap is already the cheapest step in the pipeline. |
-| `ship` | yes | **The close of the cycle.** A `sync` phase merges the advanced base branch in and resolves the conflicts — real and semantic — so what gets graded is the branch as it will actually merge. Then two independent quality-scorers grade it against the rubric and a consensus step reconciles and verifies. `ship` ends in a terminal `goal` step that declares `target: 85` and embeds its own improve/measure fragments, so the improve/re-score loop runs **without any flag**: it keeps closing gaps until the score clears 85, plateaus, or hits the iteration cap. See [Quality scoring](#quality-scoring) and [Goal mode](#goal-mode). Two things it expects from your config, because both are machine-local: `permissions.allow` entries for `git merge*`, `git add*` and `git checkout --ours*`/`--theirs*` (without them those commands fall through to "ask" rather than failing), and, optionally, `hooks.pipelines.ship` to fetch the base beforehand and open the PR afterwards — Convoy never runs remote git itself. Post-hooks receive `CONVOY_GOAL_REACHED`, so the PR step can require the bar was actually met. |
+| `ship` | yes | **The close of the cycle, with a review-and-fix pass built in.** A `sync` phase merges the advanced base branch in and resolves the conflicts — real and semantic — so what gets graded is the branch as it will actually merge. Then a report-only review scopes the diff and runs the clean-code/security/bug audits across two cheap models, a prioritized report feeds an adversarial triage and a fixer that applies only the accepted findings, and `run-report` recaps the prefix. `ship` ends in a terminal `goal` step that declares `target: 90` and embeds its own improve/measure fragments, so the improve/re-score loop runs **without any flag**: two independent quality-scorers grade against the rubric, a consensus step reconciles and verifies, and the loop keeps closing gaps until the score clears 90, plateaus, or hits the 5-round iteration cap. Every phase runs on OpenRouter models, never a machine-local provider alias. See [Quality scoring](#quality-scoring) and [Goal mode](#goal-mode). Two things it expects from your config, because both are machine-local: `permissions.allow` entries for `git merge*`, `git add*` and `git checkout --ours*`/`--theirs*` (without them those commands fall through to "ask" rather than failing), and, optionally, `hooks.pipelines.ship` to fetch the base beforehand and open the PR afterwards (a post-hook can call `convoy publish` for the run-aware PR text) — Convoy never runs remote git itself. Post-hooks receive `CONVOY_GOAL_REACHED`, so the PR step can require the bar was actually met. |
 | `fixer` | yes | The follow-up to a report-only run. Give it a set of findings (as the prompt or an attachment) and it proves each one with a focused regression test **before** touching production code, applies minimal fixes only for the findings that actually went red, then independently reruns those proofs and the surrounding checks to report a final per-finding verdict (`fixed`, `already-resolved`, `not-reproducible`, `not-automatable`, `blocked`, `not-fixed`). The validation phase runs the commands itself (see [verifying steps](#project-configuration-convoyconfigyaml)) rather than taking the fix phase's word for it, and never promotes an unproven finding to fixed. |
 | `review` | **no — report only** | Scope the diff (attaching the branch's original PRD when Convoy has one), run the bug / clean-code(+patterns) / security audits **in parallel across two models each**, synthesize one prioritized findings report, then **measure**: two independent quality-scorers grade the same diff against the rubric and a consensus step reconciles and verifies. The deliverables are `reports/report.md` and the machine-readable score in `reports/score-report.md`. Makes no changes. |
 | `review-lite` | **no — report only** | Same shape as `review`, but nothing runs on Opus: `openrouter/z-ai/glm-5.3#high` scopes and reconciles the score, DeepSeek V4 Flash 0731 writes the report, and the audit and scorer fan-outs pair GLM 5.3 with `openrouter/x-ai/grok-4.6#high`. The cheap way to get a full review and a number. |
@@ -97,7 +97,7 @@ You write the plan, `implement` turns it into something functional, you shape it
 
 `ship`, `review` and `review-lite` end the run with a **measurement**, not just a findings list. The problem with open-ended review is that it is open-ended: an agent asked to "find problems" will always find one more, and its severities are ranked against whatever it happened to find — so a cosmetic nit can come back labeled `critical`. Scoring inverts that: the agent grades against a **fixed, closed contract** — the rubric — and every number must carry evidence a maintainer can check.
 
-This is why `ship` has no separate audit phases. The scorer already grades bugs, security, maintainability and scope against the rubric; an open-ended audit in front of it only produces findings the score then has to re-weigh.
+`ship` runs a bounded review-and-fix prefix first — a report-only scan, an adversarial triage, and a single fix pass — so obvious gaps are closed before measurement rather than left for the scorer to re-weigh as an open-ended audit. Measurement is still independent: the prefix's fixes are graded by fresh scorers, and the goal loop then closes only what the score still reports.
 
 ### The rubric
 
@@ -305,8 +305,8 @@ pipelines:
         reports: none
 
       - goal:
-          target: 85          # required, 1–100
-          maxIterations: 3    # default 3: improvement rounds after iteration zero
+          target: 90          # required, 1–100
+          maxIterations: 5    # default 3: improvement rounds after iteration zero
           plateau: 3          # default 3: stop when an improvement adds fewer points
 
           improve:            # writable directed-fix subflow
@@ -333,10 +333,10 @@ pipelines:
                 prdHistory: true
 ```
 
-This is the whole embedded shape of the built-in `ship`, so with `ship` this is simply what happens — no flag required:
+This is the terminal goal step of the built-in `ship`, whose prefix syncs, reviews, triages, fixes, and recaps before it — so with `ship` this is simply what happens, no flag required:
 
 ```bash
-convoy -p ship "what this branch does"          # measure, improve, re-measure until 85
+convoy -p ship "what this branch does"          # measure, improve, re-measure until 90
 ```
 
 Execution is measure-first and bounded:

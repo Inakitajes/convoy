@@ -320,28 +320,73 @@ describe("built-in implement-lite pipeline", () => {
 describe("built-in ship pipeline", () => {
   const ship = () => resolvePipeline({ name: "ship", spec: builtInPipelines.ship!, agents: builtInAgents })
 
-  test("carries a defaultPrompt so `convoy -p ship` works without typing one", () => {
-    expect(ship().defaultPrompt).toBe("Sync this branch with its base and iterate until it clears the quality bar.")
+  test("carries a defaultPrompt and suggestions so `convoy -p ship` works without typing one", () => {
+    expect(ship().defaultPrompt).toBe("Sync this branch with its base, review and fix it to the quality bar, then open the pull request.")
+    expect(ship().suggestedPrompts?.length).toBeGreaterThan(0)
   })
   const shipSteps = () => ship().steps.filter((step): step is AgentStep => step.type === "agent")
 
-  test("the prefix is just the sync; the measurement layer lives in the goal step", () => {
-    expect(shipSteps().map((step) => step.name)).toEqual(["sync"])
+  test("the prefix is sync → report-only review → triage/fix → recap; measurement lives in the goal step", () => {
+    expect(shipSteps().map((step) => step.stepName)).toEqual([
+      "sync",
+      "scope",
+      "clean-code",
+      "clean-code",
+      "security",
+      "security",
+      "bugs",
+      "bugs",
+      "report",
+      "triage",
+      "fixes",
+      "run-report",
+    ])
   })
 
-  test("syncs the base in before anything reads the diff, so the score describes the merged result", () => {
+  test("syncs the base in before anything reads the diff, so the review describes the merged result", () => {
     const [sync] = shipSteps()
 
-    expect(sync).toMatchObject({ agentName: "sync-with-base", model: "openrouter/z-ai/glm-5.3", variant: "high" })
+    expect(sync).toMatchObject({ agentName: "sync-with-base", model: "openrouter/deepseek/deepseek-v4-flash-0731", variant: "high" })
     // The merge writes to the repository: goal mode refuses a report-only
     // pipeline, so this step is also what makes ship goal-eligible.
     expect(sync?.readOnly).toBeFalsy()
   })
 
-  test("declares its own goal, so the improve/re-score loop runs without --goal", () => {
+  test("scopes and audits across two cheap OpenRouter models before any fix", () => {
+    const byName = Object.fromEntries(shipSteps().map((step) => [step.name, step]))
+    expect(byName.scope).toMatchObject({ agentName: "review-scope", readOnly: true, verify: true })
+    for (const base of ["clean-code", "security", "bugs"] as const) {
+      const fan = shipSteps().filter((step) => step.stepName === base)
+      expect(fan).toHaveLength(2)
+      expect(fan.map((step) => step.model)).toEqual([
+        "openrouter/deepseek/deepseek-v4-flash-0731",
+        "openrouter/z-ai/glm-5.3-flash",
+      ])
+      expect(fan.every((step) => step.readOnly)).toBe(true)
+    }
+    expect(byName.report).toMatchObject({ agentName: "review-report", readOnly: true })
+  })
+
+  test("triages adversarially, lets only the fixer write in the prefix, and recaps the run", () => {
+    const byName = Object.fromEntries(shipSteps().map((step) => [step.name, step]))
+
+    expect(byName.triage).toMatchObject({ agentName: "review-adversary", model: "openrouter/z-ai/glm-5.3", variant: "high", readOnly: true })
+    expect(byName.fixes).toMatchObject({
+      agentName: "review-fixer",
+      model: "openrouter/deepseek/deepseek-v4-flash-0731",
+      variant: "high",
+      advisor: "openai/gpt-6-astra",
+      advisorVariant: "xhigh",
+    })
+    expect(byName.fixes?.readOnly).toBeFalsy()
+    expect(byName.fixes?.inputFiles).toContain("reports/triage.md")
+    expect(byName["run-report"]).toMatchObject({ agentName: "run-reporter", readOnly: true, inputDiff: false })
+  })
+
+  test("declares its own goal, so the improve/re-score loop runs without any flag", () => {
     const goal = ship().goalPlan
-    expect(goal?.target).toBe(85)
-    expect(goal?.maxIterations).toBe(3)
+    expect(goal?.target).toBe(90)
+    expect(goal?.maxIterations).toBe(5)
     expect(goal?.plateau).toBe(3)
     expect(goal?.briefRecipient).toBe("fix")
     expect(goal?.scoreProducer).toBe("score-report")
@@ -352,7 +397,8 @@ describe("built-in ship pipeline", () => {
     const [fix] = goal.improve.steps
 
     expect(goal.improve.steps.map((step) => step.name)).toEqual(["fix"])
-    expect(fix).toMatchObject({ agentName: "goal-fixer", inputDiff: true, prdHistory: true })
+    expect(fix).toMatchObject({ agentName: "goal-fixer", model: "openrouter/deepseek/deepseek-v4-flash-0731", variant: "high", inputDiff: true, prdHistory: true })
+    expect(fix?.advisor).toBe("openai/gpt-6-astra")
     expect(fix?.readOnly).toBeFalsy()
   })
 
@@ -384,7 +430,7 @@ describe("built-in ship pipeline", () => {
 
     expect(report).toMatchObject({
       agentName: "quality-score-report",
-      model: "openrouter/x-ai/grok-4.6",
+      model: "openrouter/z-ai/glm-5.3",
       variant: "high",
       readOnly: true,
       verify: true,
@@ -394,6 +440,10 @@ describe("built-in ship pipeline", () => {
       "reports/score__openrouter-x-ai-grok-4-6-high.md",
       "reports/score__openrouter-z-ai-glm-5-3-high.md",
     ])
+  })
+
+  test("runs on OpenRouter only: no machine-local provider alias in the built-in", () => {
+    expect(JSON.stringify(builtInPipelines.ship)).not.toContain("nan/")
   })
 })
 
@@ -504,9 +554,7 @@ describe("PRD history pipeline plumbing", () => {
       expect(steps.filter((step): step is AgentStep => step.type === "agent" && step.name !== "scope").every((step) => step.prdHistory === undefined)).toBe(true)
     }
 
-    // ship and goal-fix have no scope step; their scorers and consensus carry
-    // the PRD so the measurement is graded against the original requirements.
-    // ship's measurement now lives in its goal step: the fragment's scorers and
+    // ship's measurement lives in its goal step: the fragment's scorers and
     // consensus carry the PRD so the measurement is graded against the original
     // requirements, and the fixer does too, so it knows the original
     // requirements while closing exactly the reported gaps.
