@@ -790,17 +790,19 @@ export class HomeLauncher {
     const inSection = (section: DetailSection): DetailEntry[] =>
       actions.filter((action) => action.section === section).map((action) => ({ kind: "action", action }))
     // The order here is the render order: the Runs action heads its section and
-    // its runs follow, then the OpenSpec change operations, the git operations,
-    // and finally the linked specs.
+    // its runs follow, then the OpenSpec change operations, the checkout's
+    // linked specs (which ride that same section), and finally the git
+    // operations.
     const entries: DetailEntry[] = [...inSection("sessions"), ...inSection("runs")]
     const runs = this.runsEvidence.get(worktree.path)
     if (Array.isArray(runs)) {
       for (const run of runs) entries.push({ kind: "run", run })
     }
-    entries.push(...inSection("openspec"), ...inSection("git"))
+    entries.push(...inSection("openspec"))
     if (!worktree.changesUnknown) {
       for (const change of worktree.changes) entries.push({ kind: "change", change })
     }
+    entries.push(...inSection("git"))
     return entries
   }
 
@@ -1694,25 +1696,48 @@ export class HomeLauncher {
     if (!worktree) return { lines: [], selectedLine: 0 }
     const entries = this.detailEntries()
     this.detailSelected = Math.max(0, Math.min(this.detailSelected, entries.length - 1))
-    const lines: StyledText[] = [
-      ...this.headingLines(truncate(worktreeDisplayNameOf(worktree), Math.max(8, width - 12)), width),
-      new StyledText([fg(theme.dim)(truncate(shortPath(worktree.path, width), width))]),
+    const lines: StyledText[] = []
+    // The checkout zone: the identity the operator works from — folder
+    // basename, path, branch, and the linked pull request — rides one solid
+    // accent fill, so the working context reads as a distinct surface above
+    // the rest. Text uses the chip color the highlight vocabulary paints on
+    // colored fills; warnings keep their yellow.
+    const zoneRows: TextChunk[][] = [
+      [],
+      [bold(fg(theme.chipText)(truncate(worktreeDisplayNameOf(worktree), Math.max(8, width))))],
+      [fg(theme.chipText)(truncate(shortPath(worktree.path, width), width))],
     ]
-    // The fold's fact-row rhythm: a faint nine-column label, one space, the
-    // honest value.
+    // The zone's fact-row rhythm: a nine-column label, one space, the honest
+    // value.
+    const zoneFact = (label: string, value: string, color = theme.chipText) => {
+      zoneRows.push([fg(theme.chipText)(label.padEnd(9, " ")), raw(" "), fg(color)(truncate(value, Math.max(8, width - 11)))])
+    }
+    zoneFact("branch", worktree.detached ? "detached HEAD" : (worktree.branch ?? "(no branch)"))
+    // PR evidence rides the same on-demand observation the row fired on
+    // landing; the detail view never re-queries on its own. Unknown is never
+    // "no PR" and a merged PR never reads as completed work.
+    const prEvidence = this.prEvidence.get(worktree.path)
+    if (prEvidence && prEvidence !== "checking") {
+      zoneFact("pr", prObservationText(prEvidence), prEvidence.availability === "known" ? theme.chipText : theme.yellow)
+    } else {
+      zoneFact("pr", "checking…", theme.chipText)
+    }
+    zoneRows.push([])
+    lines.push(...filledLines(zoneRows, width, theme.accent))
+    lines.push(new StyledText([raw("")]))
+    // The remaining observations stay plain under the zone: a faint nine-column
+    // label, one space, the honest value. The row fold already reports these
+    // (capability home-launcher: worktree detail surfaces the observed Git
+    // state); base and upstream stay independent facts with their own honest
+    // unknown/no-upstream conditions — never a single sync verdict.
     const fact = (label: string, value: string, color = theme.text) => {
       lines.push(new StyledText([fg(theme.faint)(label.padEnd(9, " ")), raw(" "), fg(color)(truncate(value, Math.max(8, width - 11)))]))
     }
-    fact("branch", worktree.detached ? "detached HEAD" : (worktree.branch ?? "(no branch)"))
     const writer = writerFact(worktree.writer)
     if (writer) fact("writer", writer.text, writer.warn ? theme.yellow : theme.dim)
     if (worktree.dirt) {
       fact("dirt", worktree.dirt.kind === "known" ? (worktree.dirt.value.dirty ? `${worktree.dirt.value.fileCount} file(s) uncommitted` : "clean") : `unknown (${worktree.dirt.reason})`, worktree.dirt.kind === "known" && worktree.dirt.value.dirty ? theme.yellow : theme.text)
     }
-    // The row fold already reports these observations; opening the detail must
-    // not drop them (capability home-launcher: worktree detail surfaces the
-    // observed Git state). Base and upstream stay independent facts with their
-    // own honest unknown/no-upstream conditions — never a single sync verdict.
     if (worktree.upstream) {
       const upstream = worktree.upstream
       let value: string
@@ -1746,15 +1771,6 @@ export class HomeLauncher {
     if (worktree.activity) {
       fact("activity", worktree.activity.kind === "known" ? `${worktree.activity.value.total} live run(s)` : `unknown (${worktree.activity.reason})`)
     }
-    // PR evidence rides the same on-demand observation the row fired on
-    // landing; the detail view never re-queries on its own. Unknown is never
-    // "no PR" and a merged PR never reads as completed work.
-    const prEvidence = this.prEvidence.get(worktree.path)
-    if (prEvidence && prEvidence !== "checking") {
-      fact("pr", prObservationText(prEvidence), prEvidence.availability === "known" ? theme.text : theme.yellow)
-    } else {
-      fact("pr", "checking…", theme.dim)
-    }
     if (worktree.changesUnknown) fact("changes", `unknown (${worktree.changesUnknown})`, theme.yellow)
     else fact("changes", `${worktree.changes.length} active`)
     if (worktree.locked) fact("lock", worktree.locked.reason ? `locked: ${worktree.locked.reason}` : "locked", theme.yellow)
@@ -1763,9 +1779,11 @@ export class HomeLauncher {
     lines.push(new StyledText([raw("")]))
     // Selectable rows under their labeled sections: the sectioned actions,
     // then the checkout's observations. Every section breathes — one blank
-    // before each rule (the facts block already breathes before the first) —
-    // and an observation section always renders its heading with an honest
-    // status line: empty is a fact, never an omission.
+    // before each rule (the checkout zone already breathes before the first) —
+    // and the Runs section always renders an honest status line when it has no
+    // runs: empty is a fact, never an omission. Linked Specs is the exception:
+    // it rides the OpenSpec section it belongs to and disappears when the
+    // checkout has nothing to link.
     let selectedLine = lines.length
     let selectedIndex = 0
     const entryRows = (section: DetailSection) => entries.filter((entry) => entry.kind === "action" && entry.action.section === section)
@@ -1819,18 +1837,24 @@ export class HomeLauncher {
         } else if (runs && runs.length > 0) {
           for (const run of runs) pushEntry({ kind: "run", run })
         } else if (runs) {
-          lines.push(new StyledText([raw(" ".repeat(4)), fg(theme.dim)("no runs recorded for this checkout")]))
+          lines.push(new StyledText([fg(theme.dim)("no runs recorded for this checkout")]))
         }
       }
       lines.push(new StyledText([raw("")]))
-    }
-    lines.push(...this.headingLines("Linked Specs", width))
-    if (worktree.changesUnknown) {
-      lines.push(new StyledText([raw(" ".repeat(4)), fg(theme.yellow)(`unknown — ${truncate(worktree.changesUnknown, Math.max(8, width - 8))}`)]))
-    } else if (worktree.changes.length > 0) {
-      for (const change of worktree.changes) pushEntry({ kind: "change", change })
-    } else {
-      lines.push(new StyledText([raw(" ".repeat(4)), fg(theme.dim)("no active changes in this checkout")]))
+      // The Linked Specs observation rides immediately after the OpenSpec
+      // section that produces those specs, ahead of the git operations it has
+      // nothing to do with. A checkout with no linked changes shows no section
+      // at all; an unreadable list still shows its unknown observation, because
+      // unknown is not none.
+      if (section === "openspec" && (worktree.changesUnknown || worktree.changes.length > 0)) {
+        lines.push(...this.headingLines("Linked Specs", width))
+        if (worktree.changesUnknown) {
+          lines.push(new StyledText([raw(" ".repeat(4)), fg(theme.yellow)(`unknown — ${truncate(worktree.changesUnknown, Math.max(8, width - 8))}`)]))
+        } else {
+          for (const change of worktree.changes) pushEntry({ kind: "change", change })
+        }
+        lines.push(new StyledText([raw("")]))
+      }
     }
     return { lines, selectedLine }
   }

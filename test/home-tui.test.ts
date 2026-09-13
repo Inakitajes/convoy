@@ -681,18 +681,15 @@ describe("worktree detail sections and observations", () => {
     try {
       await openDetail(session)
       const frame = frameOf(session)
-      // Four labeled action sections in order — Sessions, Runs, OpenSpec, git —
-      // with the Linked Specs observation last.
+      // Four labeled action sections in order: Sessions, Runs, OpenSpec, git.
       const sessionsAt = frame.indexOf("\u2500\u2500 Sessions ")
       const runsAt = frame.indexOf("\u2500\u2500 Runs ")
       const openspecAt = frame.indexOf("\u2500\u2500 OpenSpec ")
       const gitAt = frame.indexOf("\u2500\u2500 git ")
-      const linkedAt = frame.indexOf("\u2500\u2500 Linked Specs ")
       expect(sessionsAt).toBeGreaterThanOrEqual(0)
       expect(runsAt).toBeGreaterThan(sessionsAt)
       expect(openspecAt).toBeGreaterThan(runsAt)
       expect(gitAt).toBeGreaterThan(openspecAt)
-      expect(linkedAt).toBeGreaterThan(gitAt)
       // Sessions holds the OpenCode authoring surfaces.
       const conversationAt = frame.indexOf("Open conversation")
       const windowAt = frame.indexOf("Open in window")
@@ -717,11 +714,77 @@ describe("worktree detail sections and observations", () => {
       expect(fetchAt).toBeGreaterThan(gitAt)
       expect(squashAt).toBeGreaterThan(fetchAt)
       expect(removeAt).toBeGreaterThan(squashAt)
-      expect(removeAt).toBeLessThan(linkedAt)
       expect(frame).not.toContain("destructive")
-      // The Runs and Linked Specs observations stay honest when empty.
+      // The Runs observation stays honest when empty; the Linked Specs section
+      // is omitted entirely when the checkout has nothing to link.
       expect(frame).toContain("no runs recorded for this checkout")
-      expect(frame).toContain("no active changes in this checkout")
+      expect(frame).not.toContain("Linked Specs")
+      expect(frame).not.toContain("no active changes in this checkout")
+    } finally {
+      await closeHome(session)
+    }
+  })
+
+  test("the detail fills only the identity, path, branch, and PR as one accent zone", async () => {
+    const session = await openHome({ height: 60 })
+    try {
+      await openDetail(session)
+      const spans = session.captureSpans()
+      // The folder basename, path, branch, and the linked PR share one accent
+      // fill; the rest of the observed facts stay plain.
+      for (const needle of ["add-widget", "/wt/add-widget", "feat/add-widget", "pr"]) {
+        const row = spans.lines.find((line) => line.spans.some((span) => span.text.includes(needle)))!
+        expect(row).toBeDefined()
+        const filled = row.spans.filter((span) => span.bg.a > 0 && sameColor(span.bg, accentBg()))
+        const filledWidth = filled.reduce((total, span) => total + span.text.length, 0)
+        expect(filledWidth).toBeGreaterThan(60)
+      }
+      for (const needle of ["dirt", "activity", "changes"]) {
+        const row = spans.lines.find((line) => line.spans.some((span) => span.text.includes(needle)))!
+        expect(row).toBeDefined()
+        expect(row.spans.every((span) => span.bg.a === 0)).toBe(true)
+      }
+      // A selectable action below the zone stays transparent too.
+      const idle = spans.lines.find((line) => line.spans.some((span) => span.text.includes("Fetch remote")))!
+      expect(idle.spans.every((span) => span.bg.a === 0)).toBe(true)
+    } finally {
+      await closeHome(session)
+    }
+  })
+
+  test("the zone's PR warning stays yellow on the accent fill", async () => {
+    const session = await openHome({ height: 60 })
+    try {
+      await openDetail(session)
+      const spans = session.captureSpans()
+      const reason = "unknown (no PR observation requested by this test)"
+      const row = spans.lines.find((line) => line.spans.some((span) => span.text.includes(reason)))!
+      expect(row).toBeDefined()
+      const warning = row.spans.find((span) => span.text.includes(reason))!
+      // The warning keeps its own color on the accent fill, and the row still
+      // rides the zone.
+      expect(sameColor(warning.fg, paletteColor(theme.yellow))).toBe(true)
+      expect(row.spans.some((span) => span.bg.a > 0 && sameColor(span.bg, accentBg()))).toBe(true)
+      const label = row.spans.find((span) => span.text.trimEnd() === "pr")!
+      expect(sameColor(label.fg, paletteColor(theme.chipText))).toBe(true)
+    } finally {
+      await closeHome(session)
+    }
+  })
+
+  test("the Runs empty line sits flush with its section heading", async () => {
+    const session = await openHome({ height: 60 })
+    try {
+      await openDetail(session)
+      const spans = session.captureSpans()
+      const prefix = (row: { spans: Array<{ text: string }> }, needle: string): string => {
+        const index = row.spans.findIndex((span) => span.text.includes(needle))
+        return row.spans.slice(0, index).map((span) => span.text).join("")
+      }
+      const heading = spans.lines.find((line) => line.spans.some((span) => span.text.includes("\u2500\u2500 Runs ")))!
+      const empty = spans.lines.find((line) => line.spans.some((span) => span.text.includes("no runs recorded for this checkout")))!
+      // Same content column as the section rule above it: no phantom indent.
+      expect(prefix(empty, "no runs recorded for this checkout")).toBe(prefix(heading, "\u2500\u2500 Runs "))
     } finally {
       await closeHome(session)
     }
@@ -773,7 +836,7 @@ describe("worktree detail sections and observations", () => {
     }
   })
 
-  test("the detail lists its linked changes and opens the focused one", async () => {
+  test("the detail lists its linked changes under OpenSpec and opens the focused one", async () => {
     const change: LocalActiveChange = {
       checkout: wtPath,
       changeId: "add-login",
@@ -793,21 +856,27 @@ describe("worktree detail sections and observations", () => {
       await openDetail(session)
       const frame = frameOf(session)
       expect(frame).toContain("Linked Specs")
+      // Linked Specs rides immediately after the OpenSpec section, before git.
+      const openspecAt = frame.indexOf("\u2500\u2500 OpenSpec ")
+      const linkedAt = frame.indexOf("\u2500\u2500 Linked Specs ")
+      const gitAt = frame.indexOf("\u2500\u2500 git ")
+      expect(linkedAt).toBeGreaterThan(openspecAt)
+      expect(gitAt).toBeGreaterThan(linkedAt)
       // The row speaks the specs browser's vocabulary: the change diamond.
       expect(frame).toContain("◆")
       expect(frame).toContain("add-login")
       expect(frame).toContain("tasks 2/5")
-      // The change row follows the twelve actions (no runs recorded).
-      for (let i = 0; i < 12; i++) {
+      // The change row follows Sessions (2), Runs (1), and OpenSpec (3).
+      for (let i = 0; i < 6; i++) {
         session.press("down")
         await session.renderOnce()
       }
       session.press("return")
       const resolution = (await session.instance.result) as HomeResolution
       expect(resolution).toEqual({ type: "work-change", worktree: wtPath, changeId: "add-login" })
-    } catch {
+    } catch (error) {
       await closeHome(session)
-      throw new Error("test failed")
+      throw error
     }
   })
 
@@ -822,8 +891,15 @@ describe("worktree detail sections and observations", () => {
     try {
       await openDetail(session)
       const frame = frameOf(session)
+      // Unknown is not none: the section renders, with its reason, between the
+      // OpenSpec and git sections.
       expect(frame).toContain("Linked Specs")
       expect(frame).toContain("unknown — the openspec directory is unreadable")
+      const openspecAt = frame.indexOf("\u2500\u2500 OpenSpec ")
+      const linkedAt = frame.indexOf("\u2500\u2500 Linked Specs ")
+      const gitAt = frame.indexOf("\u2500\u2500 git ")
+      expect(linkedAt).toBeGreaterThan(openspecAt)
+      expect(gitAt).toBeGreaterThan(linkedAt)
     } finally {
       await closeHome(session)
     }
