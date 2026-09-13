@@ -107,6 +107,19 @@ describe("resolveRunOptions", () => {
     await expect(parseCommand(["control", "extra"])).rejects.toThrow("usage: convoy control")
   })
 
+  test("parseCommand parses run history JSON and stats modes", async () => {
+    expect(await parseCommand(["runs", "--json", "--since", "7d", "--pipeline", "implement"])).toMatchObject({ type: "runs", mode: "json", filter: { pipeline: "implement" } })
+    expect(await parseCommand(["runs", "stats", "--group-by", "step", "--json"])).toMatchObject({ type: "runs", mode: "stats", dimension: "step", json: true })
+    await expect(parseCommand(["runs", "stats", "--group-by", "week"])).rejects.toThrow(/unknown --group-by[\s\S]*usage: convoy runs/)
+    await expect(parseCommand(["runs", "--json", "--since", "yesterday"])).rejects.toThrow(/invalid --since value "yesterday"[\s\S]*usage: convoy runs/)
+    await expect(parseCommand(["runs", "--json", "--bogus"])).rejects.toThrow("usage: convoy runs")
+    await expect(parseCommand(["runs", "--json", "--pipeline", "-x"])).rejects.toThrow("usage: convoy runs")
+    await expect(parseCommand(["runs", "stats", "--since", "-7d"])).rejects.toThrow("usage: convoy runs")
+    await expect(parseCommand(["runs", "stats", "--group-by"])).rejects.toThrow("usage: convoy runs")
+    await expect(parseCommand(["runs", "--since", "7d"])).rejects.toThrow("usage: convoy runs")
+    await expect(parseCommand(["runs", "bad-id", "--json"])).rejects.toThrow("usage: convoy runs")
+  })
+
   test("the retired --feature flag fails before any plan is built", () => {
     // Feature-ID selectors are retired (capability feature-lifecycle): the
     // refusal happens in the parser, before plan review or any side effect.

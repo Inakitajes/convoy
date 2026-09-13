@@ -9,6 +9,7 @@ import { readRunMetadata, type GoalRunState, type PhaseMetadataStatus, type RunM
 import { isValidRunID, convoyHome, runsRoot } from "./workspace"
 import { readAdvisorSplit } from "./advisor-report"
 import type { TuiRoute } from "./tui-session"
+import type { ProgressTokens } from "./progress"
 
 export type RunStatusKind = "completed" | "failed" | "incomplete" | "empty" | "unknown"
 
@@ -19,6 +20,78 @@ export type RunPhaseInfo = {
   cost?: number
   advisorCost?: number
   model?: string
+  tokens?: ProgressTokens
+  logicalModel?: string
+  startedAt?: number
+  endedAt?: number
+}
+
+/** Durable, script-safe projection of a run history entry. */
+export type RunHistoryPhase = RunPhaseInfo
+export type RunHistoryRecord = Pick<
+  RunEntry,
+  "runID" | "title" | "pipeline" | "targetDir" | "status" | "statusKind" | "createdAt" | "cost" | "executorCost" | "advisorCost" | "goal" | "finalization" | "feature"
+> & { phases: RunHistoryPhase[] }
+
+/** Excludes transient liveness and workspace-path observations from public history JSON. */
+export function runHistoryRecord(entry: RunEntry): RunHistoryRecord {
+  return {
+    runID: entry.runID,
+    title: entry.title,
+    status: entry.status,
+    statusKind: entry.statusKind,
+    phases: entry.phases.map((phase) => ({
+      name: phase.name,
+      status: phase.status,
+      ...(finiteNumber(phase.durationMs) ? { durationMs: phase.durationMs } : {}),
+      ...(finiteNumber(phase.cost) ? { cost: phase.cost } : {}),
+      ...(finiteNumber(phase.advisorCost) ? { advisorCost: phase.advisorCost } : {}),
+      ...(isString(phase.model) ? { model: phase.model } : {}),
+      ...(validTokens(phase.tokens) ? { tokens: copyTokens(phase.tokens) } : {}),
+      ...(isString(phase.logicalModel) ? { logicalModel: phase.logicalModel } : {}),
+      ...(finiteNumber(phase.startedAt) ? { startedAt: phase.startedAt } : {}),
+      ...(finiteNumber(phase.endedAt) ? { endedAt: phase.endedAt } : {}),
+    })),
+    ...(isString(entry.pipeline) ? { pipeline: entry.pipeline } : {}),
+    ...(isString(entry.targetDir) ? { targetDir: entry.targetDir } : {}),
+    ...(finiteNumber(entry.createdAt) ? { createdAt: entry.createdAt } : {}),
+    ...(finiteNumber(entry.cost) ? { cost: entry.cost } : {}),
+    ...(finiteNumber(entry.executorCost) ? { executorCost: entry.executorCost } : {}),
+    ...(finiteNumber(entry.advisorCost) ? { advisorCost: entry.advisorCost } : {}),
+    ...(entry.goal !== undefined ? { goal: entry.goal } : {}),
+    ...(entry.finalization !== undefined ? { finalization: entry.finalization } : {}),
+    ...(entry.feature !== undefined ? { feature: entry.feature } : {}),
+  }
+}
+
+function finiteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value)
+}
+
+function isString(value: unknown): value is string {
+  return typeof value === "string"
+}
+
+function validTokens(tokens: unknown): tokens is ProgressTokens {
+  if (typeof tokens !== "object" || tokens === null) return false
+  const value = tokens as Record<keyof ProgressTokens, unknown>
+  return finiteNumber(value.input)
+    && finiteNumber(value.output)
+    && finiteNumber(value.reasoning)
+    && finiteNumber(value.cacheRead)
+    && finiteNumber(value.cacheWrite)
+    && finiteNumber(value.total)
+}
+
+function copyTokens(tokens: ProgressTokens): ProgressTokens {
+  return {
+    input: tokens.input,
+    output: tokens.output,
+    reasoning: tokens.reasoning,
+    cacheRead: tokens.cacheRead,
+    cacheWrite: tokens.cacheWrite,
+    total: tokens.total,
+  }
 }
 
 export type RunEntry = {
@@ -608,6 +681,10 @@ function phaseInfos(metadata: RunMetadata | undefined): RunPhaseInfo[] {
     cost: phase.cost,
     advisorCost: phase.advisor?.cost,
     model: phase.model,
+    tokens: phase.tokens,
+    logicalModel: phase.logicalModel,
+    startedAt: phase.startedAt,
+    endedAt: phase.endedAt,
   }))
 }
 
