@@ -40,6 +40,8 @@ function releaseEnsureFreeBranchName(branch: string, value: string): void {
 import { HomeLauncher } from "../src/home-tui"
 import type { DetailRun, HomeResolution, HomeWorkAction } from "../src/home-tui"
 import type { PrObservation } from "../src/pr-observations"
+import type { BoardSource } from "../src/board-refresh"
+import type { BoardSnapshot } from "../src/board-cache"
 import type { LocalActiveChange } from "../src/checkout-openspec"
 import { theme } from "../src/tui-theme"
 import { versionDetails } from "../src/version"
@@ -1441,5 +1443,195 @@ describe("typical action coverage (used by tests above)", () => {
       "remove",
     ]
     expect(ids).toHaveLength(12)
+  })
+})
+
+/**
+ * Cache-first rendering, continuous refresh, selection identity, and freshness
+ * disclosure (change `live-board-cache-and-refresh`, tasks 4.1–4.6/5.1): a
+ * fake `BoardSource` lets these stay hermetic while exercising the launcher's
+ * real paint → poll → re-render loop.
+ */
+function snapshotWith(rows: BoardWorktree[], builtAt = Date.now()): BoardSnapshot {
+  return { schemaVersion: 1, repoKey: "k", commonDir: "/repo/.git", builtAt, board: { worktrees: rows }, fingerprints: {} }
+}
+
+function fakeSource(snapshots: BoardSnapshot[]): { source: BoardSource; calls: () => number } {
+  let calls = 0
+  const fake = {
+    async refresh() {
+      const snapshot = snapshots[Math.min(calls, snapshots.length - 1)]!
+      calls += 1
+      return { snapshot, refreshed: true }
+    },
+    async cached() {
+      return undefined
+    },
+    current() {
+      return snapshots[Math.min(Math.max(calls - 1, 0), snapshots.length - 1)]
+    },
+    lastError() {
+      return undefined
+    },
+    lastRunEntries() {
+      return undefined
+    },
+  }
+  return { source: fake as unknown as BoardSource, calls: () => calls }
+}
+
+async function openWithSource(options: {
+  worktrees: BoardWorktree[]
+  source?: BoardSource
+  builtAt?: number
+  initialWorktree?: { path: string; branch?: string }
+  pollMs?: number
+  width?: number
+}) {
+  const testRenderer = await createTestRenderer({ width: options.width ?? 110, height: 30 })
+  const instance = new HomeLauncher(testRenderer.renderer, viewDir(), {
+    worktrees: options.worktrees,
+    source: options.source,
+    builtAt: options.builtAt,
+    initialWorktree: options.initialWorktree,
+    pollMs: options.pollMs ?? 100_000,
+    observePr: async () => ({ availability: "unknown", reason: "test", observedAt: 0 }),
+    listRunsForWorktree: async () => [],
+  })
+  await testRenderer.renderOnce()
+  return {
+    ...testRenderer,
+    instance,
+    press(key: string, keyOptions: { ctrl?: boolean; shift?: boolean; sequence?: string } = {}) {
+      testRenderer.renderer.keyInput.emit("keypress", keyEvent(key, keyOptions))
+    },
+  }
+}
+
+/** Closes a launcher directly (its `finish` is the private resolution path tests exercise). */
+function closeLauncher(instance: HomeLauncher): void {
+  ;(instance as unknown as { finish: (value: undefined) => void }).finish(undefined)
+}
+
+describe("cache-first board and refresh (live-board-cache-and-refresh)", () => {
+  const baseRows = (): BoardWorktree[] => [
+    worktree({ path: mainPath, branch: "main", main: true }),
+    worktree({ path: wtPath, branch: "feat/add-widget" }),
+  ]
+
+  test("a refresh updates the board in place and preserves the selected checkout by identity", async () => {
+    const changed = worktree({
+      path: wtPath,
+      branch: "feat/add-widget",
+      dirt: { kind: "known", value: { dirty: true, fileCount: 9 }, collectedAt: 0 },
+    })
+    const { source, calls } = fakeSource([snapshotWith(baseRows()), snapshotWith([baseRows()[0]!, changed])])
+    const session = await openWithSource({ worktrees: baseRows(), source, pollMs: 20 })
+    try {
+      await Bun.sleep(5)
+      // rows are [New worktree, main, add-widget…]: move to the feature checkout.
+      session.press("down")
+      session.press("down")
+      await session.renderOnce()
+      await Bun.sleep(50)
+      await session.renderOnce()
+      expect(calls()).toBeGreaterThanOrEqual(2)
+      const selected = highlightedLines(session).join("\n")
+      expect(selected).toContain("add-widget")
+      expect(selected).toContain("9")
+      // No remount: the same instance is still rendering its own tree.
+      expect(session.instance.result).toBeDefined()
+    } finally {
+      closeLauncher(session.instance)
+    }
+  })
+
+  test("initialWorktree reopens the viewed checkout; a disappeared one falls back to New worktree", async () => {
+    const { source } = fakeSource([snapshotWith(baseRows())])
+    const session = await openWithSource({ worktrees: baseRows(), source, initialWorktree: { path: wtPath, branch: "feat/add-widget" } })
+    expect(highlightedLines(session).join("\n")).toContain("add-widget")
+    closeLauncher(session.instance)
+
+    const gone = fakeSource([snapshotWith(baseRows())])
+    const fallback = await openWithSource({ worktrees: baseRows(), source: gone.source, initialWorktree: { path: "/gone", branch: "feat/gone" } })
+    expect(highlightedLines(fallback).join("\n")).toContain("New worktree")
+    closeLauncher(fallback.instance)
+  })
+
+  test("the refresh indicator shows while in flight and clears when it settles", async () => {
+    let resolveRefresh!: (value: { snapshot: BoardSnapshot; refreshed: boolean }) => void
+    const source = {
+      refresh: () => new Promise<{ snapshot: BoardSnapshot; refreshed: boolean }>((resolve) => (resolveRefresh = resolve)),
+      cached: async () => undefined,
+      current: () => undefined,
+      lastError: () => undefined,
+      lastRunEntries: () => undefined,
+    } as unknown as BoardSource
+    const session = await openWithSource({ worktrees: baseRows(), source })
+    expect(session.captureCharFrame()).toContain("⟳")
+    resolveRefresh({ snapshot: snapshotWith(baseRows()), refreshed: true })
+    await Bun.sleep(5)
+    await session.renderOnce()
+    expect(session.captureCharFrame()).not.toContain("⟳")
+    closeLauncher(session.instance)
+  })
+
+  test("the top-right refresh indicator degrades on a narrow terminal without overflowing", async () => {
+    let resolveRefresh!: (value: { snapshot: BoardSnapshot; refreshed: boolean }) => void
+    const source = {
+      refresh: () => new Promise<{ snapshot: BoardSnapshot; refreshed: boolean }>((resolve) => (resolveRefresh = resolve)),
+      cached: async () => undefined,
+      current: () => undefined,
+      lastError: () => undefined,
+      lastRunEntries: () => undefined,
+    } as unknown as BoardSource
+    const session = await openWithSource({ worktrees: baseRows(), source, width: 40 })
+    try {
+      const frame = session.captureSpans()
+      // No line exceeds the terminal width: the status clips rather than
+      // overflowing, and the worktree list stays on screen.
+      const overflow = frame.lines.filter((line) => line.spans.reduce((total, span) => total + span.width, 0) > frame.cols)
+      expect(overflow).toEqual([])
+      const chars = session.captureCharFrame()
+      expect(chars).toContain("⟳")
+      expect(chars).toContain("New worktree")
+      resolveRefresh({ snapshot: snapshotWith(baseRows()), refreshed: true })
+      await Bun.sleep(5)
+      await session.renderOnce()
+      expect(session.captureCharFrame()).not.toContain("⟳")
+    } finally {
+      closeLauncher(session.instance)
+    }
+  })
+
+  test("aged evidence is marked stale and a fresh snapshot shows its age", async () => {
+    const stale = await openWithSource({ worktrees: baseRows(), builtAt: Date.now() - 60_000 })
+    expect(stale.captureCharFrame()).toContain("stale")
+    closeLauncher(stale.instance)
+    const fresh = await openWithSource({ worktrees: baseRows(), builtAt: Date.now() })
+    expect(fresh.captureCharFrame()).toContain("as of 0s")
+    closeLauncher(fresh.instance)
+  })
+
+  test("finish() clears the poll timer", async () => {
+    const { source, calls } = fakeSource([snapshotWith(baseRows())])
+    const session = await openWithSource({ worktrees: baseRows(), source, pollMs: 20 })
+    await Bun.sleep(60)
+    const before = calls()
+    closeLauncher(session.instance)
+    await Bun.sleep(80)
+    expect(calls()).toBe(before)
+  })
+
+  test("ctrl+r triggers an explicit refresh off the poll cadence", async () => {
+    const { source, calls } = fakeSource([snapshotWith(baseRows())])
+    const session = await openWithSource({ worktrees: baseRows(), source, pollMs: 100_000 })
+    await Bun.sleep(5)
+    const before = calls()
+    session.press("r", { ctrl: true })
+    await Bun.sleep(5)
+    await session.renderOnce()
+    expect(calls()).toBeGreaterThan(before)
+    closeLauncher(session.instance)
   })
 })

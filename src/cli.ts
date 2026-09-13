@@ -293,6 +293,22 @@ export function shouldLaunchHome(argv: readonly string[], stdinTTY: boolean | un
   return argv.length === 0 && stdinTTY === true && stdoutTTY === true
 }
 
+/**
+ * The Home worktree actions that mutate the checkout's evidence. After one of
+ * these, the session invalidates that checkout's cached fingerprint so the next
+ * gated refresh recomputes it instead of trusting a possibly stale token.
+ */
+const mutatingHomeActions: ReadonlySet<HomeWorkAction> = new Set<HomeWorkAction>([
+  "fetch",
+  "sync",
+  "push",
+  "pr",
+  "squash",
+  "archive",
+  "close",
+  "remove",
+])
+
 /** One alternate-screen owner routes every destination until Home itself quits. */
 async function runHomeSession(targetDir: string): Promise<void> {
   // Probe the Kitty graphics protocol before the session renderer takes
@@ -302,6 +318,12 @@ async function runHomeSession(targetDir: string): Promise<void> {
   const kittyGraphics = await probeKittyGraphics()
   const [{ launchHomeTui }, { createTuiSession }] = await Promise.all([import("./home-tui"), import("./tui-session")])
   const session = await createTuiSession(kittyGraphics)
+  // One repository-scoped board source per Home session (change
+  // `live-board-cache-and-refresh`, design D3): cache-first paints and the
+  // continuous background refresh both ride it, and it outlives individual
+  // Home opens so returning is instant.
+  const { BoardSource } = await import("./board-refresh")
+  const boardSource = new BoardSource({ targetDir })
   let interrupted = false
   const route: TuiRoute = {
     session,
@@ -309,6 +331,10 @@ async function runHomeSession(targetDir: string): Promise<void> {
       interrupted = true
     },
   }
+  // Within one session, returning to Home reopens on the checkout the operator
+  // was viewing, by verified identity; the first open passes none and selects
+  // New worktree. Persisted hints stay non-authoritative and never drive this.
+  let lastSelection: { path: string; branch?: string } | undefined
 
   try {
     await runHomeNavigationLoop({
@@ -317,10 +343,26 @@ async function runHomeSession(targetDir: string): Promise<void> {
       targetDir,
       // Every Home open — the first launch and each return from a destination —
       // covers a genuinely slow context load with the shared loading transition.
-      loadHome: () => loadHomeWithTransition(route, targetDir),
-      openHome: (context) => launchHomeTui(targetDir, { route, kittyGraphics, ...context }),
+      loadHome: () => loadHomeWithTransition(route, targetDir, () => homeWorkContext(targetDir, boardSource)),
+      openHome: (context) =>
+        launchHomeTui(targetDir, {
+          route,
+          kittyGraphics,
+          source: boardSource,
+          worktrees: context.worktrees,
+          builtAt: context.builtAt,
+          initialWorktree: lastSelection,
+          onWorktreeSelected: (selection) => {
+            lastSelection = selection
+          },
+        }),
       openWork: async (worktree, action) => {
         await dispatchWorkAction(targetDir, route, worktree, action)
+        // A mutating action changed this checkout's evidence; invalidating its
+        // fingerprint makes the next gated Home refresh recompute it even if a
+        // same-size, mtime-preserving edit would look unchanged (change
+        // `live-board-cache-and-refresh`).
+        if (mutatingHomeActions.has(action)) boardSource.invalidate(worktree)
       },
       openRun: async (worktree, runId) => {
         // A run entry opens the runs browser on that run: the dashboard
@@ -329,15 +371,16 @@ async function runHomeSession(targetDir: string): Promise<void> {
       },
       openChange: async (worktree, changeId) => {
         // A linked change opens the specs browser restored on that change's
-        // row — the identity-keyed resume, never a position guess.
-        await openSpecsBrowser(targetDir, route, { changeId, checkout: worktree })
+        // row — the identity-keyed resume, never a position guess. The home
+        // session's board source is shared so the specs board is cache-warm.
+        await openSpecsBrowser(targetDir, route, { changeId, checkout: worktree }, boardSource)
       },
       createWork: async (draft) => {
         await createWorkFromDraft(targetDir, route, draft)
       },
       openDestination: async (selection) => {
         if (selection === "pipelines") await launchInteractiveRun(targetDir, undefined, undefined, route)
-        else if (selection === "specs") await openSpecsBrowser(targetDir, route)
+        else if (selection === "specs") await openSpecsBrowser(targetDir, route, undefined, boardSource)
         else if (selection === "runs") await openRunsBrowser(undefined, route)
         else await openConfigEditor(targetDir, route)
       },
@@ -347,20 +390,30 @@ async function runHomeSession(targetDir: string): Promise<void> {
   }
 }
 
-/** The resolved context Home opens with: the refreshed worktree inventory. */
+/** The resolved context Home opens with: the worktree rows and their freshness. */
 export type HomeContext = {
   worktrees: import("./control-board").BoardWorktree[]
+  /** When the displayed board was assembled (the age Home discloses). */
+  builtAt?: number
 }
 
 /**
- * The resolved context Home opens with: the refreshed worktree inventory
- * (task 3.1). Home's default selection is always the New worktree entry —
- * the primary action — so no last-selection hint is restored here.
+ * The context Home opens with (task 3.1): a warm cache paints immediately and
+ * kicks a background refresh through the launcher's own poll timer; a cold or
+ * unusable cache performs the first assembly (which the loading transition
+ * covers) and stores it. Without a source (tests, non-session callers) this is
+ * the original one-shot assembly.
  */
-async function homeWorkContext(targetDir: string): Promise<HomeContext> {
-  const { assembleControlBoard } = await import("./control-board")
-  const board = await assembleControlBoard(targetDir)
-  return { worktrees: board.worktrees }
+export async function homeWorkContext(targetDir: string, source?: import("./board-refresh").BoardSource): Promise<HomeContext> {
+  if (!source) {
+    const { assembleControlBoard } = await import("./control-board")
+    const board = await assembleControlBoard(targetDir)
+    return { worktrees: board.worktrees }
+  }
+  const cached = await source.cached()
+  if (cached) return { worktrees: cached.board.worktrees, builtAt: cached.builtAt }
+  const result = await source.refresh()
+  return { worktrees: result.snapshot.board.worktrees, builtAt: result.snapshot.builtAt }
 }
 
 /**
@@ -1278,12 +1331,27 @@ async function openConfigEditor(targetDir: string, route?: TuiRoute) {
  * assessment after a cancelled launcher, a closed dashboard, or authoring
  * (tasks 1.2/1.4) — only an explicit exit ends the browser.
  */
-export async function openSpecsBrowser(targetDir: string, route?: TuiRoute, initialResume?: SpecsResumeSelection): Promise<void> {
+export async function openSpecsBrowser(
+  targetDir: string,
+  route?: TuiRoute,
+  initialResume?: SpecsResumeSelection,
+  source?: import("./board-refresh").BoardSource,
+): Promise<void> {
+  // One repository-scoped source for this specs session (cache-first load plus
+  // the browser's background refresh cadence); the home session shares its own.
+  const boardSource = source ?? new (await import("./board-refresh")).BoardSource({ targetDir })
   let resume = initialResume
   for (;;) {
-    const resolution = await browseSpecs(targetDir, route, resume)
+    const resolution = await browseSpecs(targetDir, route, resume, boardSource)
     resume = await dispatchSpecsResolution(targetDir, resolution, route)
     if (!resume) return
+    // Archive/close mutated the checkout: invalidate its cached fingerprint and
+    // refresh so the reopened board shows the changed artifacts, not a token
+    // that a same-size, mtime-preserving edit could leave unchanged.
+    if (resolution.type === "archive-change" || resolution.type === "close-change") {
+      boardSource.invalidate(resume.checkout)
+      await boardSource.refresh().catch(() => {})
+    }
   }
 }
 

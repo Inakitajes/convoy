@@ -1,12 +1,14 @@
 import { describe, expect, test } from "bun:test"
 import { createTestRenderer } from "@opentui/core/testing"
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, realpath, rm, utimes, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { SpecsBrowser } from "../src/specs-browser"
 import type { BoardWorktree, ControlBoard } from "../src/control-board"
+import { BoardSource, fingerprintCheckout } from "../src/board-refresh"
 import { loadSpecsView, type SpecsChangeEntry, type SpecsResolution, type SpecsView } from "../src/specs"
+import { createFixtureRepo } from "./helpers/multi-worktree"
 
 function keyEvent(name: string, options: { ctrl?: boolean; shift?: boolean; sequence?: string } = {}) {
   return {
@@ -325,3 +327,151 @@ function promisifyExec() {
 
 type SpecsResolutionCheck = SpecsResolution
 void (0 as unknown as SpecsResolutionCheck)
+
+/** The specs board's own background cadence (change `live-board-cache-and-refresh`). */
+describe("specs board background refresh", () => {
+  test("a return from an action refreshes immediately, before any cadence tick", async () => {
+    const base = [worktree({ path: mainDir, branch: "main", main: true })]
+    const withNew = [...base, worktree({ path: worktreeDir, branch: "feat/add-foo" })]
+    let calls = 0
+    const source = {
+      async refresh() {
+        calls += 1
+        return {
+          snapshot: {
+            schemaVersion: 1,
+            repoKey: "k",
+            commonDir: "/common",
+            builtAt: Date.now(),
+            board: board(calls >= 1 ? withNew : base),
+            fingerprints: {},
+          },
+          refreshed: true,
+        }
+      },
+      async cached() {
+        return undefined
+      },
+      current() {
+        return undefined
+      },
+      lastError() {
+        return undefined
+      },
+      lastRunEntries() {
+        return undefined
+      },
+    } as unknown as BoardSource
+    const testRenderer = await createTestRenderer({ width: 120, height: 40 })
+    // The passed view is the stale cache-first paint; the cadence is too slow
+    // to have fired, so an appearing worktree proves the immediate refresh.
+    const instance = new SpecsBrowser(testRenderer.renderer, viewWith(base), async () => "copied-native", undefined, undefined, {
+      source,
+      pollMs: 100_000,
+    })
+    await testRenderer.renderOnce()
+    await Bun.sleep(10)
+    await testRenderer.renderOnce()
+    expect(calls).toBeGreaterThanOrEqual(1)
+    expect(testRenderer.captureCharFrame()).toContain("feat-add-foo")
+    // Closing the surface clears the timer: no further refresh after exit.
+    testRenderer.renderer.keyInput.emit("keypress", keyEvent("c", { ctrl: true }))
+    await instance.result.catch(() => {})
+    const settled = calls
+    await Bun.sleep(40)
+    expect(calls).toBe(settled)
+  })
+
+  test("a post-mutation change appears after re-entry, before the cadence", async () => {
+    const home = await mkdtemp(join(tmpdir(), "convoy-specs-refresh-"))
+    const previousHome = process.env.CONVOY_HOME
+    process.env.CONVOY_HOME = home
+    const fixture = await createFixtureRepo({ worktrees: [{ name: "wt", branch: "feat/wt" }] })
+    try {
+      const checkout = fixture.worktrees["wt"]!
+      await fixture.write(checkout, "openspec/changes/add-widget/proposal.md", "# Add the widget\n")
+      await fixture.write(checkout, "openspec/changes/add-widget/tasks.md", "- [ ] one\n")
+      // A warmed source: the first paint is built from its snapshot.
+      const source = new BoardSource({ targetDir: fixture.root })
+      const warm = await source.refresh()
+      const staleView = await loadSpecsView(fixture.root, warm.snapshot.board)
+      expect(staleView.board.worktrees.flatMap((entry) => entry.changes).map((entry) => entry.changeId)).toContain("add-widget")
+
+      // A mutating external action adds a change in the checkout.
+      await Bun.sleep(10)
+      await fixture.write(checkout, "openspec/changes/new-change/proposal.md", "# New change\n")
+
+      const testRenderer = await createTestRenderer({ width: 120, height: 40 })
+      // Re-entry passes the stale cache-first view; the cadence is far away
+      // (100s), so seeing the new change proves the mount refresh invalidated
+      // the changed checkout's cached artifact facts.
+      const instance = new SpecsBrowser(testRenderer.renderer, staleView, async () => "copied-native", undefined, undefined, {
+        source,
+        pollMs: 100_000,
+      })
+      const deadline = Date.now() + 5_000
+      let seen = false
+      while (Date.now() < deadline) {
+        await Bun.sleep(50)
+        await testRenderer.renderOnce()
+        if (testRenderer.captureCharFrame().includes("new-change")) {
+          seen = true
+          break
+        }
+      }
+      expect(seen).toBe(true)
+      testRenderer.renderer.keyInput.emit("keypress", keyEvent("c", { ctrl: true }))
+      await instance.result.catch(() => {})
+    } finally {
+      await fixture.cleanup()
+      if (previousHome === undefined) delete process.env.CONVOY_HOME
+      else process.env.CONVOY_HOME = previousHome
+      await rm(home, { recursive: true, force: true })
+    }
+  })
+
+  test("a same-size, mtime-restored edit is caught after a known mutation invalidates the checkout", async () => {
+    const home = await mkdtemp(join(tmpdir(), "convoy-specs-invalidate-"))
+    const previousHome = process.env.CONVOY_HOME
+    process.env.CONVOY_HOME = home
+    const fixture = await createFixtureRepo({ worktrees: [{ name: "wt", branch: "feat/wt" }] })
+    try {
+      const checkout = fixture.worktrees["wt"]!
+      await fixture.write(checkout, "openspec/changes/add-widget/proposal.md", "# Add widget\n")
+      // Pin the proposal's mtime to a whole-second timestamp so restoring it
+      // after an edit reproduces an exact fingerprint collision (the raw
+      // mtimeMs+size token), without the filesystem's sub-ms precision.
+      const pinned = new Date(1_700_000_000_000)
+      const proposalPath = join(checkout, "openspec/changes/add-widget/proposal.md")
+      await utimes(proposalPath, pinned, pinned)
+      const source = new BoardSource({ targetDir: fixture.root })
+      const warm = await source.refresh()
+      const physical = await realpath(checkout)
+      const titleOf = (board: ControlBoard): string | undefined =>
+        board.worktrees.flatMap((entry) => entry.changes).find((entry) => entry.changeId === "add-widget")?.title
+      expect(titleOf(warm.snapshot.board)).toBe("Add widget")
+
+      // A same-size content edit with the file's mtime restored to that exact
+      // value: the mtime+size fingerprint alone cannot see it.
+      await writeFile(proposalPath, "# Add widgit\n")
+      await utimes(proposalPath, pinned, pinned)
+      expect(await fingerprintCheckout(checkout)).toBe(warm.snapshot.fingerprints[physical])
+
+      // An ordinary gated cycle trusts that unchanged token and reuses stale
+      // evidence — the gap the invalidation exists to close.
+      const gated = await source.refresh()
+      expect(titleOf(gated.snapshot.board)).toBe("Add widget")
+
+      // The known mutation-return path invalidates the affected checkout, so
+      // the next gated refresh recomputes exactly it.
+      source.invalidate(physical)
+      const invalidated = await source.refresh()
+      expect(titleOf(invalidated.snapshot.board)).toBe("Add widgit")
+    } finally {
+      await fixture.cleanup()
+      if (previousHome === undefined) delete process.env.CONVOY_HOME
+      else process.env.CONVOY_HOME = previousHome
+      await rm(home, { recursive: true, force: true })
+    }
+  })
+})

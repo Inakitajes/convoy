@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises"
 import { bg, BoxRenderable, StyledText, TextRenderable, bold, createCliRenderer, fg, t } from "@opentui/core"
 
 import { copyReportToClipboard, writeClipboardOSC52, type ClipboardResult } from "./clipboard"
+import { BoardSource, defaultRefreshCadenceMs } from "./board-refresh"
 import type { BoardWorktree } from "./control-board"
 import { parseMarkdown, renderMarkdownDoc, type MarkdownDoc } from "./markdown-render"
 import { stripYamlFrontmatter } from "./openspec"
@@ -85,6 +86,16 @@ export class SpecsBrowser {
 
   private resolveResult!: (resolution: SpecsResolution) => void
   private finished = false
+  /**
+   * The repository-scoped board source and its display timer (change
+   * `live-board-cache-and-refresh`, design D3): while this board surface is
+   * displayed, its background cadence keeps the inventory and artifacts
+   * current. The timer is cleared in `finish()`.
+   */
+  private readonly boardSource?: BoardSource
+  private readonly pollMs: number
+  private pollTimer?: ReturnType<typeof setInterval>
+  private refreshing = false
   /** "root": the worktree-rooted entity list; "detail": one subject's reading pane. */
   private level: "root" | "detail" = "root"
   /** Set while the immersive reader replaces the chrome (detail level only). */
@@ -169,7 +180,11 @@ export class SpecsBrowser {
     private readonly scene?: TuiScene,
     /** The selection to restore on re-entry (returning from an action). */
     private readonly resume?: SpecsBrowserResume,
+    /** The repository-scoped source the board polls while displayed (design D3). */
+    runtime: { source?: BoardSource; pollMs?: number } = {},
   ) {
+    this.boardSource = runtime.source
+    this.pollMs = runtime.pollMs ?? defaultRefreshCadenceMs
     this.result = new Promise((resolve) => {
       this.resolveResult = resolve
     })
@@ -327,6 +342,16 @@ export class SpecsBrowser {
     renderer.keyInput.on("keypress", this.handleKeyPress)
     renderer.on("theme_mode", this.handleThemeMode)
     this.render()
+    // A displayed board keeps refreshing on its own cadence; the timer is
+    // cleared in `finish()` so nothing refreshes after this surface closes.
+    // Mounting (including a return from a destination/action, where the passed
+    // view may be the cache-first paint) triggers one immediate gated refresh
+    // so changed evidence lands before the first cadence tick.
+    if (this.boardSource) {
+      this.pollTimer = setInterval(() => void this.refresh(), this.pollMs)
+      this.pollTimer.unref?.()
+      void this.refresh()
+    }
   }
 
   /**
@@ -444,7 +469,7 @@ export class SpecsBrowser {
         // Explicit refresh: reload the whole view, invalidate the
         // artifact/document caches together, and keep the selection attached
         // to identity rather than list position.
-        void this.refresh()
+        void this.refresh(true)
         break
       }
       case "!":
@@ -670,7 +695,7 @@ export class SpecsBrowser {
         return
       }
       case "refresh":
-        void this.refresh()
+        void this.refresh(true)
         return
       case "archive": {
         const selectedChange = this.level === "root" ? this.selectedChange() : this.subject?.kind === "change" ? this.subject.change : undefined
@@ -818,7 +843,8 @@ export class SpecsBrowser {
    * current view — stale evidence stays visible as such instead of readiness
    * being presented as current.
    */
-  private async refresh() {
+  private async refresh(force = false) {
+    if (this.finished || this.refreshing) return
     const previous = this.rows[this.selectedRow]
     const identity =
       previous?.kind === "change"
@@ -828,15 +854,23 @@ export class SpecsBrowser {
           : previous?.kind === "spec"
             ? { kind: "spec" as const, path: previous.path }
             : undefined
+    this.refreshing = true
     try {
-      const next = await loadSpecsView(this.view.targetDir)
+      // With a source, the fingerprint-gated refresh supplies the inventory
+      // and the view is rebuilt from that snapshot; without one, the loader is
+      // the only path (standalone/tests).
+      const next = this.boardSource
+        ? await this.boardSource.refresh(force ? { force: true } : {}).then((result) => loadSpecsView(this.view.targetDir, result.snapshot.board))
+        : await loadSpecsView(this.view.targetDir)
       this.view = next
     } catch {
       // Keep the previous view: a failed refresh must not silently empty the
       // board or present stale readiness as current. The next refresh retries.
+      this.refreshing = false
       this.render()
       return
     }
+    this.refreshing = false
     this.bodies.clear()
     this.docs.clear()
     const rows = this.rows
@@ -1446,6 +1480,7 @@ export class SpecsBrowser {
   private finish(resolution: SpecsResolution) {
     if (this.finished) return
     this.finished = true
+    if (this.pollTimer) clearInterval(this.pollTimer)
     this.renderer.keyInput.off("keypress", this.handleKeyPress)
     this.renderer.off("theme_mode", this.handleThemeMode)
     if (!this.scene && !this.renderer.isDestroyed) this.renderer.destroy()
@@ -1479,10 +1514,11 @@ export class SpecsBrowser {
 }
 
 /** Interactive specs browser: the worktree-rooted board — browse, read, apply, iterate, continue, close. */
-export async function browseSpecsTui(view: SpecsView, route?: TuiRoute, resume?: SpecsBrowserResume): Promise<SpecsResolution> {
+export async function browseSpecsTui(view: SpecsView, route?: TuiRoute, resume?: SpecsBrowserResume, source?: BoardSource): Promise<SpecsResolution> {
+  const runtime = source ? { source } : {}
   if (route) {
     const scene = sceneForRoute(route, "convoy-specs-scene")!
-    return new SpecsBrowser(route.session.renderer, view, copyReportToClipboard, scene, resume).result
+    return new SpecsBrowser(route.session.renderer, view, copyReportToClipboard, scene, resume, runtime).result
   }
   // No backgroundColor yet: the palette is only chosen after the terminal
   // answers the background query, so a light terminal never flashes dark.
@@ -1493,7 +1529,7 @@ export async function browseSpecsTui(view: SpecsView, route?: TuiRoute, resume?:
   })
   const mode = await renderer.waitForThemeMode(1_000).catch(() => null)
   setTheme(paletteForTerminal(mode, terminalBackgroundHex(renderer)))
-  return new SpecsBrowser(renderer, view, copyReportToClipboard, undefined, resume).result
+  return new SpecsBrowser(renderer, view, copyReportToClipboard, undefined, resume, runtime).result
 }
 
 /**

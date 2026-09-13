@@ -22,10 +22,11 @@ import { versionDetails } from "./version"
 import { homeRendererConfig, sceneForRoute, type TuiRoute, type TuiScene } from "./tui-session"
 
 import { observeWorktreePr, type BoardWorktree } from "./control-board"
+import { BoardSource, defaultFreshnessBoundMs, defaultRefreshCadenceMs } from "./board-refresh"
 import { runStatusStyles } from "./runs-browser"
+import type { RunEntry, RunStatusKind } from "./runs"
 import { formatDuration } from "./run-status"
 import type { LocalActiveChange } from "./checkout-openspec"
-import type { RunStatusKind } from "./runs"
 
 import type { BoxOptions, CliRenderer, KeyEvent, PasteEvent, TextChunk } from "@opentui/core"
 import type { Hint, PaletteColor } from "./tui-theme"
@@ -203,6 +204,16 @@ export async function launchHomeTui(
     kittyGraphics?: boolean
     /** The repository's worktree rows; loaded by the session loop and refreshed on every open. */
     worktrees?: BoardWorktree[]
+    /** The repository-scoped board source the launcher polls while Home is displayed. */
+    source?: BoardSource
+    /** The assembled snapshot's build time (the age the masthead discloses). */
+    builtAt?: number
+    /** Within one session, reopen on the checkout the operator was viewing. */
+    initialWorktree?: { path: string; branch?: string }
+    /** Reports the viewed checkout as the selection moves, for session continuity. */
+    onWorktreeSelected?: (selection: { path: string; branch?: string } | undefined) => void
+    /** Poll cadence override (defaults to the shared 5s). */
+    pollMs?: number
   } = {},
 ): Promise<HomeResolution> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
@@ -214,13 +225,25 @@ export async function launchHomeTui(
     return new HomeLauncher(options.route.session.renderer, targetDir, {
       scene,
       worktrees: options.worktrees,
+      source: options.source,
+      builtAt: options.builtAt,
+      initialWorktree: options.initialWorktree,
+      onWorktreeSelected: options.onWorktreeSelected,
+      pollMs: options.pollMs,
     }).result
   }
 
   const renderer = await createCliRenderer(homeRendererConfig(false))
   const mode = await renderer.waitForThemeMode(1_000).catch(() => null)
   setTheme(paletteForTerminal(mode, terminalBackgroundHex(renderer)))
-  return new HomeLauncher(renderer, targetDir, { worktrees: options.worktrees }).result
+  return new HomeLauncher(renderer, targetDir, {
+    worktrees: options.worktrees,
+    source: options.source,
+    builtAt: options.builtAt,
+    initialWorktree: options.initialWorktree,
+    onWorktreeSelected: options.onWorktreeSelected,
+    pollMs: options.pollMs,
+  }).result
 }
 
 export class HomeLauncher {
@@ -288,6 +311,26 @@ export class HomeLauncher {
   private readonly runsEvidence = new Map<string, DetailRun[] | "checking" | { error: string }>()
   private readonly runsInFlight = new Set<string>()
   private readonly listRunsForWorktree: (worktree: BoardWorktree) => Promise<DetailRun[]>
+  /**
+   * The repository-scoped board source (change `live-board-cache-and-refresh`,
+   * design D3): Home paints from its snapshot and polls it while displayed.
+   * The timer lives here and is cleared in `finish()`, so nothing refreshes
+   * while a destination owns the screen.
+   */
+  private readonly boardSource?: BoardSource
+  private readonly onWorktreeSelected?: (selection: { path: string; branch?: string } | undefined) => void
+  private readonly pollMs: number
+  private snapshotBuiltAt?: number
+  private refreshing = false
+  /** A failed refresh's reason: the retained evidence is disclosed as stale. */
+  private refreshError?: string
+  /**
+   * A transient explanation that is not a staleness claim — the open detail's
+   * checkout dropped out of the refreshed inventory — so it renders without
+   * the `stale ·` prefix. Cleared by the next applied snapshot.
+   */
+  private selectionNote?: string
+  private pollTimer?: ReturnType<typeof setInterval>
 
   private readonly mastheadText: TextRenderable
   private readonly mastheadBox: BoxRenderable
@@ -324,6 +367,14 @@ export class HomeLauncher {
       this.finish(undefined)
       return
     }
+    // Explicit refresh (control-board: "The board SHALL provide an explicit
+    // refresh action"): the same source refresh the background cycle runs.
+    if (key.ctrl && key.name === "r") {
+      key.preventDefault()
+      key.stopPropagation()
+      void this.runRefresh(true)
+      return
+    }
     key.preventDefault()
     key.stopPropagation()
     if (this.level === "list") this.handleListKey(key)
@@ -343,10 +394,24 @@ export class HomeLauncher {
       observePr?: (worktree: BoardWorktree) => Promise<PrObservation>
       /** The checkout's recent runs; injected so tests stay hermetic. */
       listRunsForWorktree?: (worktree: BoardWorktree) => Promise<DetailRun[]>
+      /** The repository-scoped board source polled while Home is displayed. */
+      source?: BoardSource
+      /** The assembled snapshot's build time. */
+      builtAt?: number
+      /** Within one session, reopen on the checkout the operator was viewing. */
+      initialWorktree?: { path: string; branch?: string }
+      /** Reports the viewed checkout as the selection moves. */
+      onWorktreeSelected?: (selection: { path: string; branch?: string } | undefined) => void
+      /** Poll cadence override. */
+      pollMs?: number
     } = {},
   ) {
     this.scene = options.scene
     this.proposeBranchName = options.proposeBranchName
+    this.boardSource = options.source
+    this.onWorktreeSelected = options.onWorktreeSelected
+    this.pollMs = options.pollMs ?? defaultRefreshCadenceMs
+    this.snapshotBuiltAt = options.builtAt
     this.observePr = options.observePr ?? ((worktree) => observeWorktreePr({ targetDir: this.targetDir, worktree }))
     this.listRunsForWorktree = options.listRunsForWorktree ?? ((worktree) => this.defaultListRunsForWorktree(worktree))
     this.emptyWork = (options.worktrees ?? []).length === 0
@@ -354,8 +419,11 @@ export class HomeLauncher {
       this.resolveResult = resolve
     })
     this.rows = this.buildRows(options.worktrees ?? [])
-    // The default selection is always the New worktree entry — the list's
-    // first row, the primary action.
+    // Within one Home session, returning reopens on the checkout the operator
+    // was viewing, selected by its verified identity (path plus branch or
+    // detached state) — never by list position or change id. The first open
+    // passes none and selects the New worktree entry.
+    this.selectedRow = this.rowIndexForIdentity(options.initialWorktree) ?? 0
 
     const mount = this.scene?.root ?? renderer.root
     const shell = new BoxRenderable(renderer, {
@@ -460,6 +528,111 @@ export class HomeLauncher {
     // the rest of the board never waits for it.
     this.landOnSelected()
     this.render()
+    // Poll the repository-scoped source while Home is displayed (design D3):
+    // the first cycle runs immediately so a cache-first paint gets fresh
+    // evidence in the background; `finish()` clears the interval.
+    if (this.boardSource) {
+      this.pollTimer = setInterval(() => void this.runRefresh(), this.pollMs)
+      this.pollTimer.unref?.()
+      void this.runRefresh()
+    }
+  }
+
+  /** The worktree row index matching a verified identity (path plus branch/detached), or undefined. */
+  private rowIndexForIdentity(identity: { path: string; branch?: string } | undefined): number | undefined {
+    if (!identity) return undefined
+    const index = this.rows.findIndex((row) => {
+      if (row.kind !== "worktree") return false
+      if (row.worktree.path !== identity.path) return false
+      // Continuity requires the same branch (or the same detached state); a
+      // replaced checkout at a reused path is not the prior selection.
+      if (identity.branch !== undefined && row.worktree.branch !== undefined) return identity.branch === row.worktree.branch
+      return identity.branch === undefined && row.worktree.branch === undefined
+    })
+    return index >= 0 ? index : undefined
+  }
+
+  /** The selected checkout's identity for cross-refresh continuity (only on a worktree row). */
+  private selectionIdentity(): { path: string; branch?: string } | undefined {
+    const row = this.rows[this.selectedRow]
+    if (row?.kind !== "worktree") return undefined
+    return { path: row.worktree.path, ...(row.worktree.branch !== undefined ? { branch: row.worktree.branch } : {}) }
+  }
+
+  /**
+   * One background refresh: paint the in-flight indicator, refresh the
+   * source, then re-render in place without remounting, losing the operator's
+   * selection, or (on failure) discarding the last usable snapshot.
+   */
+  private async runRefresh(force = false): Promise<void> {
+    if (this.finished || !this.boardSource || this.refreshing) return
+    this.refreshing = true
+    this.render()
+    try {
+      const result = await this.boardSource.refresh(force ? { force: true } : {})
+      if (this.finished) return
+      this.applySnapshot(result.snapshot.board.worktrees, result.snapshot.builtAt, result.error, result.runs)
+    } catch (error) {
+      if (this.finished) return
+      this.refreshError = error instanceof Error ? error.message : String(error)
+      // A cold failure with no snapshot has nothing to retain; surface it.
+      this.render()
+    } finally {
+      this.refreshing = false
+      if (!this.finished) this.render()
+    }
+  }
+
+  /**
+   * Applies a refreshed board in place: rows are rebuilt, the selected
+   * checkout is restored by identity (falling back to New worktree when it
+   * disappeared — never a replacement), and an open detail follows its own
+   * row or returns to the list with the explanation.
+   */
+  private applySnapshot(
+    worktrees: BoardWorktree[],
+    builtAt: number,
+    error: string | undefined,
+    runs: RunEntry[] | undefined,
+  ): void {
+    const selected = this.selectionIdentity()
+    const detail = this.detailWorktree
+    this.rows = this.buildRows(worktrees)
+    this.snapshotBuiltAt = builtAt
+    this.refreshError = error
+    this.selectionNote = undefined
+    const restored = this.rowIndexForIdentity(selected)
+    this.selectedRow = restored ?? 0
+    if (this.level === "detail" && detail) {
+      const next = this.rows.find((row) => row.kind === "worktree" && row.worktree.path === detail.path)
+      if (next?.kind === "worktree") {
+        this.detailWorktree = next.worktree
+        if (runs) this.applySharedRuns(next.worktree, runs)
+      } else {
+        this.level = "list"
+        this.detailWorktree = undefined
+        this.selectionNote = `${shortPath(detail.path, 40)} is no longer registered`
+      }
+    }
+    // The refreshed selection may be a different checkout with its own PR
+    // evidence; land on it so the same on-demand rhythm continues.
+    if (this.level === "list") this.landOnSelected()
+    this.render()
+  }
+
+  /** Re-derives one open detail's recent runs from the cycle's shared run-history read. */
+  private applySharedRuns(worktree: BoardWorktree, all: RunEntry[]): void {
+    this.runsEvidence.set(worktree.path, this.detailRunsForWorktree(all, worktree))
+  }
+
+  /** The recent runs belonging to one checkout, newest first and capped to a readable handful. */
+  private detailRunsForWorktree(all: RunEntry[], worktree: BoardWorktree): DetailRun[] {
+    const mine = all.filter(
+      (run) =>
+        run.targetDir === worktree.path ||
+        (!run.targetDir && worktree.branch !== undefined && run.feature?.branch === worktree.branch),
+    )
+    return mine.slice(0, 5).map((run) => ({ runId: run.runID, title: run.title, status: run.status, statusKind: run.statusKind, live: run.live }))
   }
 
   /**
@@ -549,6 +722,7 @@ export class HomeLauncher {
     if (this.level !== "list") return
     const row = this.rows[this.selectedRow]
     const worktree = row?.kind === "worktree" ? row.worktree : undefined
+    this.onWorktreeSelected?.(worktree ? { path: worktree.path, ...(worktree.branch !== undefined ? { branch: worktree.branch } : {}) } : undefined)
     if (!worktree) {
       this.lastLanded = undefined
       return
@@ -592,13 +766,7 @@ export class HomeLauncher {
    */
   private async defaultListRunsForWorktree(worktree: BoardWorktree): Promise<DetailRun[]> {
     const { listRuns } = await import("./runs")
-    const all = await listRuns()
-    const mine = all.filter(
-      (run) =>
-        run.targetDir === worktree.path ||
-        (!run.targetDir && worktree.branch !== undefined && run.feature?.branch === worktree.branch),
-    )
-    return mine.slice(0, 5).map((run) => ({ runId: run.runID, title: run.title, status: run.status, statusKind: run.statusKind, live: run.live }))
+    return this.detailRunsForWorktree(await listRuns(), worktree)
   }
 
   /** Fires the recent-runs listing once per checkout: cached, deduped, hermetic. */
@@ -1272,6 +1440,10 @@ export class HomeLauncher {
     this.finished = true
     clearInterval(this.caretTimer)
     clearInterval(this.proposeTimer)
+    if (this.pollTimer) clearInterval(this.pollTimer)
+    // Remember the checkout the operator was viewing (within one session) so
+    // returning to Home reopens on it by identity; the first open passes none.
+    this.onWorktreeSelected?.(this.selectionIdentity())
     this.renderer.keyInput.off("keypress", this.handleKeyPress)
     this.renderer.keyInput.off("paste", this.handlePaste)
     this.renderer.off("theme_mode", this.handleThemeMode)
@@ -1408,13 +1580,44 @@ export class HomeLauncher {
           if (index > 0) chunks.push(raw(WORDMARK_GAP))
           chunks.push(bold(fg(theme.accent)(CONVOY_WORDMARK[letter]![glyphRow]!)))
         })
-        if (glyphRow === 0) return padBetween(chunks, [fg(theme.faint)(versionDetails())], width)
+        if (glyphRow === 0) return padBetween(chunks, this.mastheadRight(), width)
         return new StyledText(chunks)
       })
       return joinLines(lines)
     }
-    const versionLine = padBetween([bold(fg(theme.accent)("CONVOY"))], [fg(theme.faint)(versionDetails())], width)
+    const versionLine = padBetween([bold(fg(theme.accent)("CONVOY"))], this.mastheadRight(), width)
     return joinLines([versionLine])
+  }
+
+  /**
+   * The masthead's right-aligned truth: the complete version plus the board's
+   * freshness. The refresh indicator rides the top-right corner while a refresh
+   * is in flight and clears when it settles; age is always disclosed, and
+   * evidence older than the freshness bound (or retained after a failed
+   * refresh) is marked stale. On narrow terminals `padBetween` clips it
+   * without displacing the list.
+   */
+  private mastheadRight(): TextChunk[] {
+    const chunks: TextChunk[] = [fg(theme.faint)(versionDetails())]
+    const status = this.refreshStatus()
+    if (status) {
+      chunks.push(fg(theme.faint)(" · "))
+      chunks.push(fg(status.stale ? theme.yellow : theme.faint)(status.text))
+    }
+    return chunks
+  }
+
+  private refreshStatus(): { text: string; stale: boolean } | undefined {
+    if (this.refreshing) return { text: "⟳", stale: false }
+    // A subprocess failure message can be long and multiline; `truncate`
+    // keeps it one bounded line and `padBetween` clips the rest.
+    if (this.refreshError) return { text: `stale · ${truncate(this.refreshError, 64)}`, stale: true }
+    if (this.selectionNote) return { text: this.selectionNote, stale: true }
+    if (this.snapshotBuiltAt === undefined) return undefined
+    const ageMs = Math.max(0, Date.now() - this.snapshotBuiltAt)
+    const age = Math.round(ageMs / 1000)
+    if (ageMs > defaultFreshnessBoundMs) return { text: `stale · as of ${age}s`, stale: true }
+    return { text: `as of ${age}s`, stale: false }
   }
 
   /**
@@ -2019,6 +2222,7 @@ export class HomeLauncher {
       [
         { keys: "↑/↓", label: "select", priority: 4 },
         { keys: "p/s/r/c", label: "go", priority: 3 },
+        { keys: "ctrl+r", label: "refresh", priority: 2 },
         { keys: "n", label: "new worktree", priority: 2 },
         { keys: "enter", label: "open", priority: 1 },
         { keys: "q", label: "quit", priority: 0 },

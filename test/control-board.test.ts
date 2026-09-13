@@ -238,3 +238,123 @@ describe("openspecTaskCounts (shared read)", () => {
     expect(counts.get("add-widget")).toEqual({ done: 2, total: 3 })
   })
 })
+
+/**
+ * Board assembly work-bounding (change `live-board-cache-and-refresh`, tasks
+ * 3.1–3.5): no task query without active changes, a fingerprint-reuse path
+ * that skips the reader entirely, one shared run-history read per cycle,
+ * bounded concurrent observation, and one base detection per cycle.
+ */
+describe("assembleControlBoard work bounding", () => {
+  test("a checkout with no active changes issues no task query", async () => {
+    const fixture = await createFixtureRepo({ worktrees: [{ name: "empty", branch: "feat/empty" }] })
+    fixtures.push(fixture)
+    const checkout = fixture.worktrees["empty"]!
+    await mkdir(join(checkout, "openspec", "changes", "archive"), { recursive: true })
+    let queries = 0
+    const board = await assembleControlBoard(fixture.root, {
+      taskCounts: async () => {
+        queries++
+        return new Map()
+      },
+    })
+    expect(queries).toBe(0)
+    const row = board.worktrees.find((worktree) => worktree.path === join(checkout) || worktree.path.endsWith("/empty"))
+    expect(row?.changes).toEqual([])
+  })
+
+  test("unchanged change content reuses task counts; changed content re-queries", async () => {
+    const fixture = await createFixtureRepo({ worktrees: [{ name: "counted", branch: "feat/counted" }] })
+    fixtures.push(fixture)
+    const checkout = fixture.worktrees["counted"]!
+    await fixture.write(checkout, "openspec/changes/add-x/tasks.md", "- [x] one\n- [ ] two\n")
+    await fixture.write(checkout, "openspec/changes/add-x/proposal.md", "# Add X\n")
+    let queries = 0
+    const taskCounts = async () => {
+      queries++
+      return new Map([["add-x", { done: 1, total: 2 }]])
+    }
+    const first = await assembleControlBoard(fixture.root, { taskCounts })
+    expect(queries).toBe(1)
+    const path = await physical(checkout)
+    const fingerprints = { [path]: "fp-1" }
+    const second = await assembleControlBoard(fixture.root, { taskCounts, fingerprints, reuse: { board: first, fingerprints } })
+    expect(queries).toBe(1)
+    const change = second.worktrees.find((worktree) => worktree.path === path)?.changes.find((entry) => entry.changeId === "add-x")
+    expect(change?.tasks).toEqual({ done: 1, total: 2 })
+
+    const changed = { [path]: "fp-2" }
+    await assembleControlBoard(fixture.root, { taskCounts, fingerprints: changed, reuse: { board: second, fingerprints } })
+    expect(queries).toBe(2)
+  })
+
+  test("one shared run-history read serves several checkouts", async () => {
+    const fixture = await createFixtureRepo({
+      worktrees: [
+        { name: "a", branch: "feat/a" },
+        { name: "b", branch: "feat/b" },
+      ],
+    })
+    fixtures.push(fixture)
+    let reads = 0
+    const board = await assembleControlBoard(fixture.root, {
+      listRuns: async () => {
+        reads++
+        return []
+      },
+    })
+    expect(reads).toBe(1)
+    // Every accessible checkout still reports its own independent activity fact.
+    const accessible = board.worktrees.filter((worktree) => worktree.accessible && !worktree.bare)
+    expect(accessible.length).toBeGreaterThanOrEqual(2)
+    expect(accessible.every((worktree) => worktree.activity?.kind === "known")).toBe(true)
+  })
+
+  test("checkouts are observed concurrently under the configured bound", async () => {
+    const fixture = await createFixtureRepo({
+      worktrees: [
+        { name: "a", branch: "feat/a" },
+        { name: "b", branch: "feat/b" },
+        { name: "c", branch: "feat/c" },
+        { name: "d", branch: "feat/d" },
+      ],
+    })
+    fixtures.push(fixture)
+    for (const name of ["a", "b", "c", "d"]) {
+      const checkout = fixture.worktrees[name]!
+      await fixture.write(checkout, `openspec/changes/add-${name}/tasks.md`, "- [ ] one\n")
+    }
+    let active = 0
+    let max = 0
+    await assembleControlBoard(fixture.root, {
+      concurrency: 2,
+      taskCounts: async () => {
+        active++
+        max = Math.max(max, active)
+        await Bun.sleep(5)
+        active--
+        return new Map()
+      },
+    })
+    expect(max).toBeGreaterThan(0)
+    expect(max).toBeLessThanOrEqual(2)
+  })
+
+  test("the detected base ref is resolved once per cycle", async () => {
+    const fixture = await createFixtureRepo({
+      worktrees: [
+        { name: "a", branch: "feat/a" },
+        { name: "b", branch: "feat/b" },
+      ],
+    })
+    fixtures.push(fixture)
+    let detections = 0
+    await assembleControlBoard(fixture.root, {
+      detectBase: async () => {
+        detections++
+        return { ref: "main" }
+      },
+    })
+    expect(detections).toBe(1)
+  })
+})
