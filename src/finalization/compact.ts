@@ -3,6 +3,7 @@ import { dirname, join } from "node:path"
 
 import { formatCommitMessage, proposeCommitMessage } from "../commit-message"
 import { currentHead, diffStat, execFile, resetSoft, resolveCommit } from "../git"
+import { log } from "../log"
 import { readPersistedRunTitle } from "../run-title"
 import { convoyHome } from "../workspace"
 import type { FeaturePlanLink } from "../types"
@@ -79,10 +80,76 @@ export type RunFinalizationInput = {
 }
 
 /**
+ * One finalization attempt: the durable outcome plus whether its failure was
+ * transient or uncertain, so a retry wrapper can distinguish a probe timeout
+ * from a definite safety refusal without parsing presentation text.
+ */
+export type FinalizationAttempt = {
+  record: FinalizationRecord
+  retryable: boolean
+}
+
+/** Bounded exponential-backoff defaults for transient compaction retries. */
+export const finalizationRetryDefaults = {
+  /** Retries after the initial attempt (four attempts total). */
+  maxRetries: 3,
+  baseDelayMs: 2_000,
+  capDelayMs: 30_000,
+  /** Stops retrying once this much wall clock has elapsed, so slow attempts stay bounded. */
+  totalWindowMs: 300_000,
+} as const
+
+export type FinalizationRetryOptions = {
+  maxRetries?: number
+  baseDelayMs?: number
+  capDelayMs?: number
+  totalWindowMs?: number
+  /** Injectable for tests; defaults to Bun.sleep. */
+  sleep?: (ms: number) => Promise<void>
+}
+
+/**
+ * Runs one finalization attempt and returns its durable record (the
+ * single-attempt entry point; `runFinalizationWithRetry` wraps it).
+ */
+export async function runFinalization(input: RunFinalizationInput): Promise<FinalizationRecord> {
+  return (await attemptFinalization(input)).record
+}
+
+/**
+ * Runs the guarded finalization transaction, retrying only outcomes that are
+ * transient or uncertain. Every attempt re-enters the reconciliation-first
+ * path, so a partial transaction is reconciled before any new mutation and no
+ * work is duplicated or discarded. A terminal safety refusal (a published
+ * replacement commit, a dirty tree, missing evidence, an unrecognized journal,
+ * a lease conflict) is returned immediately, unretried. The record's state and
+ * the run's success are unchanged by retries: exhaustion yields exactly the
+ * outcome a single attempt would have reported.
+ */
+export async function runFinalizationWithRetry(input: RunFinalizationInput, options: FinalizationRetryOptions = {}): Promise<FinalizationRecord> {
+  const maxRetries = options.maxRetries ?? finalizationRetryDefaults.maxRetries
+  const baseDelayMs = options.baseDelayMs ?? finalizationRetryDefaults.baseDelayMs
+  const capDelayMs = options.capDelayMs ?? finalizationRetryDefaults.capDelayMs
+  const totalWindowMs = options.totalWindowMs ?? finalizationRetryDefaults.totalWindowMs
+  const sleep = options.sleep ?? ((ms: number) => Bun.sleep(ms))
+  const startedAt = Date.now()
+  for (let retries = 0; ; retries++) {
+    const result = await attemptFinalization(input)
+    if (!result.retryable) return result.record
+    if (retries >= maxRetries || Date.now() - startedAt >= totalWindowMs) return result.record
+    const delay = Math.min(capDelayMs, baseDelayMs * 2 ** retries)
+    const detail = `compaction hit a transient failure; retrying in ${Math.round(delay / 1000)}s (retry ${retries + 1}/${maxRetries})`
+    input.progress?.activity?.(detail, "info")
+    log.warn(detail)
+    await sleep(delay)
+  }
+}
+
+/**
  * Runs one finalization attempt. Always resolves with a record; throwing is
  * reserved for programmer errors, since a safety refusal is itself a result.
  */
-export async function runFinalization(input: RunFinalizationInput): Promise<FinalizationRecord> {
+async function attemptFinalization(input: RunFinalizationInput): Promise<FinalizationAttempt> {
   const cwd = input.targetDir
   const now = () => Date.now()
   const activity = (detail: string, kind: "info" | "error" = "info") => input.progress?.activity?.(detail, kind)
@@ -119,9 +186,9 @@ export async function runFinalization(input: RunFinalizationInput): Promise<Fina
   }
   // A verified interval whose final tree equals the run-start tree produced no
   // net content: remove the interval instead of manufacturing an empty commit.
-  if (isNetZeroInterval(interval)) {
-    return await finalizeNetZeroInterval(input, interval)
-  }
+    if (isNetZeroInterval(interval)) {
+      return await attemptNetZeroInterval(input, interval)
+    }
 
   let lease: MutationLease | undefined
   try {
@@ -136,7 +203,10 @@ export async function runFinalization(input: RunFinalizationInput): Promise<Fina
     // 5. Publication safety: never replace commits a remote branch advertises.
     const publication = await verifyNotPublished(interval.commits.map((commit) => commit.sha), cwd)
     if (!publication.ok) {
-      return record("blocked", `${publication.reason}. Feature close can still squash-land the whole feature.`, { now })
+      return record("blocked", `${publication.reason}. Feature close can still squash-land the whole feature.`, {
+        now,
+        retryable: publication.kind === "unverifiable",
+      })
     }
 
     // 6. Recovery evidence must be durable before any rewrite begins.
@@ -185,7 +255,7 @@ export async function runFinalization(input: RunFinalizationInput): Promise<Fina
       if (head === interval.startHead && staged === interval.headTree) {
         await resetSoft(interval.headSha, cwd)
         const reason = error instanceof Error ? error.message : String(error)
-        return record("failed", `the squashed commit could not be created; the branch was restored unchanged (${reason})`, { now })
+        return record("failed", `the squashed commit could not be created; the branch was restored unchanged (${reason})`, { now, retryable: true })
       }
       return record("failed", `the squashed commit failed and the worktree no longer matches the transaction; recovery required (${String(error)})`, {
         now,
@@ -240,7 +310,17 @@ export async function runFinalization(input: RunFinalizationInput): Promise<Fina
  * exactly as for a real compaction, and the outcome records
  * `completed` with a no-net-change disposition.
  */
-export async function finalizeNetZeroInterval(input: RunFinalizationInput, interval: Extract<RunInterval, { ok: true }>): Promise<FinalizationRecord> {
+export async function finalizeNetZeroInterval(
+  input: RunFinalizationInput,
+  interval: Extract<RunInterval, { ok: true }>,
+): Promise<FinalizationRecord> {
+  return (await attemptNetZeroInterval(input, interval)).record
+}
+
+async function attemptNetZeroInterval(
+  input: RunFinalizationInput,
+  interval: Extract<RunInterval, { ok: true }>,
+): Promise<FinalizationAttempt> {
   const cwd = input.targetDir
   const now = () => Date.now()
   const commonDir = (await gitCommonDir(cwd)) ?? ""
@@ -255,7 +335,7 @@ export async function finalizeNetZeroInterval(input: RunFinalizationInput, inter
   try {
     const publication = await verifyNotPublished(interval.commits.map((commit) => commit.sha), cwd)
     if (!publication.ok) {
-      return record("blocked", `${publication.reason}. No history was changed.`, { now })
+      return record("blocked", `${publication.reason}. No history was changed.`, { now, retryable: publication.kind === "unverifiable" })
     }
 
     const evidence = await protectEvidence(input, interval, commonDir, "no-net-change")
@@ -550,9 +630,11 @@ function record(
     recoveryRef?: string
     manifestPath?: string
     recoveryRequired?: boolean
+    /** Internal only: a transient/uncertain failure a retry wrapper may re-attempt. Never persisted. */
+    retryable?: boolean
   },
-): FinalizationRecord {
-  return {
+): FinalizationAttempt {
+  const record_: FinalizationRecord = {
     schemaVersion: 1,
     state,
     ...(reason ? { reason } : {}),
@@ -563,6 +645,7 @@ function record(
     ...(options.recoveryRequired ? { recoveryRequired: true } : {}),
     updatedAt: options.now(),
   }
+  return { record: record_, retryable: options.retryable === true }
 }
 
 // Net-zero detection for callers bridging verifyRunInterval to the net-zero path.

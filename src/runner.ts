@@ -19,6 +19,7 @@ import { ensureClaudeAvailable, openClaudeSessionWindow, promptClaudePhase } fro
 import { addAllAndCommit, createCleanRepoSnapshot, currentBranch, currentHead, describeRepoSnapshotDifference, dirtyFilesPreview, dirtyTreeError, ensureRepoReady, restoreRepoSnapshot, type RepoSnapshot, statusPorcelain, writeDiff } from "./git"
 import { gitCommonDir, protectAttemptTip, runRefPrefix } from "./finalization/refs"
 import { recordLedgeredCommit } from "./finalization/ledger"
+import type { FinalizationRetryOptions } from "./finalization/compact"
 import type { RunBoundary } from "./finalization/types"
 import { hookPhaseNames, hooksForPipeline, runHooks, type HookStage } from "./hooks"
 import { getSessionEventHub, payloadProperties } from "./event-hub"
@@ -443,6 +444,8 @@ export type RunDeps = {
   startOpencode: typeof startOpencode
   /** Hosted-run tests inject a recorder; production constructs a real reporter. */
   createHerdrReporter?: (input: { runID: string }) => HerdrReporter
+  /** Test seam: overrides the finalization retry policy (injected sleep/limits). */
+  finalizationRetry?: FinalizationRetryOptions
 }
 
 const defaultRunDeps: RunDeps = { startOpencode }
@@ -568,6 +571,9 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
     // Identity for the terminal title and notifications, reusing the branch
     // resolved for metadata above.
     const phases = progressPhases(pipeline, hookSet)
+    // Persist the canonical planned list once so attach and history can render
+    // every row — hook rows included — before it runs, in canonical order.
+    await metadata.recordPlannedPhases(phases).catch((error) => log.warn(`couldn't persist planned phases: ${formatSdkError(error)}`))
     const identity = {
       project: projectName(options.targetDir),
       pipeline: pipeline.name,
@@ -869,54 +875,34 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
     if (runScoreResult) {
       log.info(`quality score: ${runScoreResult.score.score}/100 (${runScoreResult.score.verdict})`)
     }
-    // Post-hooks run once, after the whole cycle (a goal cycle's outcome rides
-    // along: CONVOY_GOAL_REACHED distinguishes "cleared the bar" from "gave up
-    // short of it" in a way `when: success` alone cannot).
-    postHooksStarted = true
-    await runHooks("post", hookSet.post, {
-      workspace,
-      targetDir: options.targetDir,
-      pipelineName: pipeline.name,
-      prompt: options.prompt,
-      status: "success",
-      progress,
-      signal: shutdown.signal,
-      ...(runScoreResult ? { score: runScoreResult.score.score } : {}),
-      ...(goalOutcome && pipeline.goalPlan
-        ? {
-            goal: {
-              reached: goalOutcome.reached,
-              target: pipeline.goalPlan.target,
-              ...(goalOutcome.bestScore !== undefined ? { score: goalOutcome.bestScore } : {}),
-            },
-          }
-        : {}),
-    })
-
     // Automatic run finalization (capability run-finalization): the terminal
-    // `Compact run` lifecycle row. It runs once, after phases, goal settlement,
-    // and successful post-hooks, before completion is announced. It is not a
-    // configurable step, cannot be filtered, and its outcome is persisted
+    // `Compact run` lifecycle row. It runs once, after phases and goal
+    // settlement and BEFORE the success post-hooks, so a hook that publishes
+    // acts on the compacted result instead of un-compacted history. It is not
+    // a configurable step, cannot be filtered, and its outcome is persisted
     // independently of the pipeline result — a safely blocked or failed
     // compaction leaves this execution successful.
-    const { runFinalization } = await import("./finalization/compact")
+    const { runFinalizationWithRetry } = await import("./finalization/compact")
     progress.phaseStarted(compactRunRowName, "compacting this run's commits")
     const finalizationRecord = await (async () => {
       try {
-        return await runFinalization({
-          runID: workspace.runID,
-          targetDir: options.targetDir,
-          runDir: workspace.dir,
-          boundary: metadata.boundary(),
-          ledger: metadata.ledger(),
-          ...(identity.branch ? { branch: identity.branch } : {}),
-          // The reviewed feature link survives workspace cleanup (task 5.1).
-          ...(options.plan?.feature ? { feature: options.plan.feature } : {}),
-          signal: shutdown.signal,
-          progress: {
-            activity: (detail, kind) => progress.phaseActivity(compactRunRowName, detail, kind),
+        return await runFinalizationWithRetry(
+          {
+            runID: workspace.runID,
+            targetDir: options.targetDir,
+            runDir: workspace.dir,
+            boundary: metadata.boundary(),
+            ledger: metadata.ledger(),
+            ...(identity.branch ? { branch: identity.branch } : {}),
+            // The reviewed feature link survives workspace cleanup (task 5.1).
+            ...(options.plan?.feature ? { feature: options.plan.feature } : {}),
+            signal: shutdown.signal,
+            progress: {
+              activity: (detail, kind) => progress.phaseActivity(compactRunRowName, detail, kind),
+            },
           },
-        })
+          deps.finalizationRetry,
+        )
       } catch (error) {
         // A crash inside finalization is itself a failed attempt, not a
         // pipeline failure: record it and keep the run's success intact.
@@ -941,6 +927,38 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
     }
     const finalizationSection = renderFinalizationSummarySection(finalizationRecord)
     await appendSummarySection(workspace, finalizationSection).catch((error) => log.warn(`couldn't append finalization summary: ${String(error)}`))
+
+    // Success post-hooks run once, after the whole cycle and after compaction
+    // (a goal cycle's outcome rides along: CONVOY_GOAL_REACHED distinguishes
+    // "cleared the bar" from "gave up short of it" in a way `when: success`
+    // alone cannot). The compaction outcome rides along too, so a publishing
+    // hook can gate on a completed compaction instead of re-deriving it.
+    postHooksStarted = true
+    await runHooks("post", hookSet.post, {
+      workspace,
+      targetDir: options.targetDir,
+      pipelineName: pipeline.name,
+      prompt: options.prompt,
+      status: "success",
+      progress,
+      signal: shutdown.signal,
+      ...(runScoreResult ? { score: runScoreResult.score.score } : {}),
+      ...(goalOutcome && pipeline.goalPlan
+        ? {
+            goal: {
+              reached: goalOutcome.reached,
+              target: pipeline.goalPlan.target,
+              ...(goalOutcome.bestScore !== undefined ? { score: goalOutcome.bestScore } : {}),
+            },
+          }
+        : {}),
+      finalization: {
+        state: finalizationRecord.state,
+        ...(finalizationRecord.producedSha ? { producedSha: finalizationRecord.producedSha } : {}),
+        ...(finalizationRecord.producedMessage ? { producedMessage: finalizationRecord.producedMessage } : {}),
+        ...(finalizationRecord.reason ? { reason: finalizationRecord.reason } : {}),
+      },
+    })
 
     await caffeinate.stop()
     await holdFinishScreen(progress, shutdown, {
@@ -3812,6 +3830,7 @@ export function progressPhases(pipeline: Pipeline, hooks?: HookSet): ProgressPha
       ? {
           name: step.name,
           description: step.description,
+          kind: "step" as const,
           groupId: step.groupId,
           stepName: step.stepName,
           plannedModel: stepRunnerFor(step.runner).modelLabel(step.model),
@@ -3822,25 +3841,67 @@ export function progressPhases(pipeline: Pipeline, hooks?: HookSet): ProgressPha
           ...(step.resolvedAdvisor ? { plannedAdvisor: step.resolvedAdvisor.target } : step.advisor ? { plannedAdvisor: step.advisor } : {}),
           ...(step.advisorMaxCalls !== undefined ? { advisorMaxCalls: step.advisorMaxCalls } : {}),
         }
-      : { name: step.name, description: step.description },
+      : { name: step.name, description: step.description, kind: "step" as const },
   )
-  // The terminal `Compact run` lifecycle row (capability run-finalization,
-  // design D1/D8): it always executes as the epilogue, so it is always a
-  // dashboard row — not a configurable step and never a filter target. It
-  // must appear in every phase list handed to `resetPipeline` (live) and
-  // `reconstructedPhases` (attach/history), or dashboards silently drop the
-  // finalization row's started/completed/failed events as unknown phases.
-  const compactRow: ProgressPhase = {
+  // Hooks are dashboard rows too, so their execution is watchable like any
+  // step: pre-hooks ahead of the pipeline, post-hooks after the `Compact run`
+  // lifecycle row (which executes after phases and before success hooks).
+  const hookPhase = (stage: HookStage, specs: readonly HookSpec[]): ProgressPhase[] =>
+    hookPhaseNames(stage, specs).map((name, index) => ({ name, description: specs[index]!.command, kind: "hook" }))
+  return orderPhaseRows({ pre: hooks ? hookPhase("pre", hooks.pre) : [], steps, post: hooks ? hookPhase("post", hooks.post) : [] })
+}
+
+/**
+ * The terminal `Compact run` lifecycle row (capability run-finalization,
+ * design D1/D8): it always executes as the epilogue, so it is always a
+ * dashboard row — not a configurable step and never a filter target. It must
+ * appear in every phase list handed to `resetPipeline` (live) and
+ * `reconstructedPhases` (attach/history), or dashboards silently drop the
+ * finalization row's started/completed/failed events as unknown phases.
+ */
+export function compactRunRow(): ProgressPhase {
+  return {
     name: compactRunRowName,
     description: "compacts this run's commits into one operator-authored conventional commit",
+    kind: "lifecycle",
   }
-  if (!hooks) return [...steps, compactRow]
-  // Hooks are dashboard rows too, so their execution is watchable like any
-  // step: pre-hooks ahead of the pipeline, post-hooks after it, and the
-  // lifecycle row last — it runs after the final post-hook.
-  const hookPhase = (stage: HookStage, specs: readonly HookSpec[]) =>
-    hookPhaseNames(stage, specs).map((name, index) => ({ name, description: specs[index]!.command }))
-  return [...hookPhase("pre", hooks.pre), ...steps, ...hookPhase("post", hooks.post), compactRow]
+}
+
+/**
+ * The one canonical display order every dashboard phase list follows: pre-hook
+ * rows, pipeline step rows, goal invocation groups, the `Compact run`
+ * lifecycle row, then post-hook rows. The terminal row is the last post-hook
+ * row (or the lifecycle row when the run has no post-hooks), matching the
+ * execution order the runner now uses.
+ */
+export function orderPhaseRows(parts: {
+  pre?: readonly ProgressPhase[]
+  steps: readonly ProgressPhase[]
+  goal?: readonly ProgressPhase[]
+  post?: readonly ProgressPhase[]
+}): ProgressPhase[] {
+  return [...(parts.pre ?? []), ...parts.steps, ...(parts.goal ?? []), compactRunRow(), ...(parts.post ?? [])]
+}
+
+/**
+ * Inserts goal invocation rows ahead of the `Compact run` row, preserving the
+ * canonical order around them (steps above, post-hooks below). A list missing
+ * the lifecycle row gains it before its post-hook rows (or at the end).
+ */
+export function withGoalPhases(rows: readonly ProgressPhase[], goalRows: readonly ProgressPhase[]): ProgressPhase[] {
+  const normalized = ensureCompactRow(rows)
+  if (goalRows.length === 0) return normalized
+  const index = normalized.findIndex((row) => row.name === compactRunRowName)
+  if (index === -1) return [...normalized, ...goalRows]
+  return [...normalized.slice(0, index), ...goalRows, ...normalized.slice(index)]
+}
+
+/** Guarantees the lifecycle row exists, placing it before any post-hook rows. */
+function ensureCompactRow(rows: readonly ProgressPhase[]): ProgressPhase[] {
+  if (rows.some((row) => row.name === compactRunRowName)) return [...rows]
+  const firstPost = rows.findIndex((row) => row.kind === "hook" && row.name.startsWith("post-hook"))
+  if (firstPost === -1) return [...rows, compactRunRow()]
+  return [...rows.slice(0, firstPost), compactRunRow(), ...rows.slice(firstPost)]
 }
 
 /** The goal-cycle section embedded in SUMMARY.md: policy, trajectory, verdict, and restore status. */

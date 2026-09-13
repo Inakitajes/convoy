@@ -16,7 +16,17 @@ const remoteProbeTimeoutMs = 60_000
 
 export type PublicationVerdict =
   | { ok: true; checkedRemotes: string[] }
-  | { ok: false; reason: string }
+  | {
+      ok: false
+      /**
+       * `unverifiable`: the probe itself could not answer (timeout, transport,
+       * auth lookup) — transient, so a bounded retry may succeed. `published`:
+       * a replaced commit is advertised. `unknown-object`: a remote head is not
+       * present locally, so reachability cannot be proven until a fetch.
+       */
+      kind: "unverifiable" | "published" | "unknown-object"
+      reason: string
+    }
 
 /** The repository's configured remotes, in config order. */
 export async function listRemotes(cwd: string): Promise<string[]> {
@@ -43,6 +53,7 @@ export async function verifyNotPublished(commitShas: readonly string[], cwd: str
     } catch (error) {
       return {
         ok: false,
+        kind: "unverifiable",
         reason:
           `couldn't verify publication state on remote "${remote}": ${error instanceof Error ? error.message : String(error)}. ` +
           `Fetch or fix remote access, then retry; compacting without verification could require a force-push.`,
@@ -51,7 +62,11 @@ export async function verifyNotPublished(commitShas: readonly string[], cwd: str
 
     for (const [headRef, headSha] of advertised) {
       if (commitShas.includes(headSha)) {
-        return { ok: false, reason: `${headSha.slice(0, 8)} is published on ${remote} (${headRef}); rewriting it would need a force-push` }
+        return {
+          ok: false,
+          kind: "published",
+          reason: `${headSha.slice(0, 8)} is published on ${remote} (${headRef}); rewriting it would need a force-push`,
+        }
       }
       // A head descendant of a replaced commit carries it too. This needs the
       // head's object locally; if it is missing we cannot prove reachability,
@@ -60,12 +75,13 @@ export async function verifyNotPublished(commitShas: readonly string[], cwd: str
       if (!known) {
         return {
           ok: false,
+          kind: "unknown-object",
           reason: `remote "${remote}" advertises ${headRef} at ${headSha.slice(0, 8)}, which is not present locally; fetch first so publication can be verified`,
         }
       }
       for (const sha of commitShas) {
         if (await isAncestor(sha, headSha, cwd)) {
-          return { ok: false, reason: `${sha.slice(0, 8)} is reachable from ${remote}/${headRef}; rewriting it would need a force-push` }
+          return { ok: false, kind: "published", reason: `${sha.slice(0, 8)} is reachable from ${remote}/${headRef}; rewriting it would need a force-push` }
         }
       }
     }
