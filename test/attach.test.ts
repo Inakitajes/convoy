@@ -5,6 +5,7 @@ import { join } from "node:path"
 
 import { reconstructedPhases } from "../src/attach"
 import { goalLoopViewFrom, overallStatus, reconcileAdvisorJournal, replayHistory } from "../src/attach-runtime"
+import { compactRunRowName } from "../src/runner"
 import { noopProgress } from "../src/progress"
 import { builtInAgents, builtInPipelines, resolvePipeline } from "../src/pipeline"
 import { qualifyInvocation } from "../src/goal-scheduler"
@@ -225,5 +226,36 @@ describe("reconstructedPhases", () => {
       // The lifecycle row still closes the list even for a legacy pipeline.
       "Compact run",
     ])
+  })
+
+  test("renders the run's persisted plan with hook rows in execution order", () => {
+    const planned = [
+      { name: "pre-hook: fetch", description: "git fetch", kind: "hook" as const },
+      { name: "sync", description: "sync", kind: "step" as const },
+      { name: compactRunRowName, description: "compact", kind: "lifecycle" as const },
+      { name: "post-hook: open PR", description: "convoy publish", kind: "hook" as const },
+    ]
+    const meta = runMetadata({})
+    meta.plannedPhases = planned
+    // The plan is authoritative: hook rows exist before they run, the lifecycle
+    // row precedes them, and the post-hook row is terminal.
+    expect(reconstructedPhases(meta, false).map((row) => row.name)).toEqual([
+      "pre-hook: fetch",
+      "sync",
+      compactRunRowName,
+      "post-hook: open PR",
+    ])
+  })
+})
+
+describe("replayHistory", () => {
+  test("replays a hook's durable output tail into the feed", () => {
+    const calls: string[] = []
+    const tui: ProgressUI = {
+      ...noopProgress,
+      phaseActivity: (name, detail, kind) => void calls.push(`${name}:${kind}:${detail}`),
+    }
+    replayHistory(tui, metadata({ "post-hook: open PR": { status: "completed", outputTail: [{ text: "pull request: https://x/1", kind: "info" }] } }))
+    expect(calls).toEqual(["post-hook: open PR:info:pull request: https://x/1"])
   })
 })

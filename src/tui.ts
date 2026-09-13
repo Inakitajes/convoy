@@ -23,7 +23,6 @@ import { log } from "./log"
 import { markdownInlineChunks, markdownLines, parseMarkdown, renderMarkdownDoc, type MarkdownDoc } from "./markdown-render"
 import { openIterateOpencodeWindow, openOpencodeSessionWindow, openStoredSessionWindow, type SessionWindowBackend } from "./opencode"
 import { formatTerminalTitle } from "./run-status"
-import { compactRunRowName } from "./runner"
 import { stepRunnerFor, type StepRunnerId } from "./step-runners"
 import { autoAcceptModeLabel, comparePaletteActions, dashboardActions, shortcutGroupOrder, shortcutGroupTitle } from "./tui-actions"
 import { PhaseUsage, addTokens, emptyTokens } from "./usage"
@@ -1622,37 +1621,26 @@ export class TuiProgress implements ProgressUI {
   }
 
   /**
-   * Grows the panel additively to match the expected rows an attach poller
-   * derives from durable run state (the goal scheduler's next invocation
-   * starting under qualified phase ids). Merge is strictly by phase name:
-   * existing rows — with their status, durations, costs, transcripts, reports
-   * — are left untouched, missing rows are appended in the given order as
-   * pending, and nothing is cleared. The terminal `Compact run` lifecycle row
-   * always closes the merged list: the initial reset registered it before any
-   * goal row existed, so when a sync appends rows that would sit below it, the
-   * row object moves to the terminal position — never rebuilt, so its state
-   * survives. Idempotent: re-syncing the same list is a no-op. Unlike
-   * `resetPipeline` this never rebuilds or destroys anything; destructive view
-   * swaps remain resetPipeline's exclusive job.
+   * Aligns the panel with the expected rows an attach poller derives from
+   * durable run state (the run's canonical plan plus the goal scheduler's
+   * next invocation rows). Merge is by phase name and order-preserving:
+   * existing rows keep their state, transcripts, costs, and reports — only
+   * their position follows the canonical execution order — missing rows are
+   * created pending, and a row the poller did not mention is kept after the
+   * canonical rows rather than dropped. Idempotent: re-syncing the same list
+   * is a no-op. Unlike `resetPipeline` this never rebuilds or destroys
+   * anything; destructive view swaps remain resetPipeline's exclusive job.
    */
   syncPhases(rows: readonly ProgressPhase[]): void {
-    const known = new Set(this.phases.map((phase) => phase.name))
-    const additions = rows.filter((row) => !known.has(row.name))
-    if (additions.length === 0) return
-    this.phases.push(...pendingPhases(additions))
-    // Terminal-row invariant (capability run-finalization): the lifecycle row
-    // closes the phase list. On the tick that appends the first goal rows it
-    // is the only row that shifts, so the only selection that needs
-    // repointing is one resting on the row itself — selections before it are
-    // unaffected, and the appended rows are still-pending additions that
-    // cannot be selected within this tick.
-    const compactIndex = this.phases.findIndex((phase) => phase.name === compactRunRowName)
-    if (compactIndex >= 0 && compactIndex !== this.phases.length - 1) {
-      const compact = this.phases[compactIndex]!
-      this.phases.splice(compactIndex, 1)
-      this.phases.push(compact)
-      if (this.selected === compactIndex) this.selected = this.phases.length - 1
-    }
+    const existing = new Map(this.phases.map((phase) => [phase.name, phase]))
+    const incoming = new Set(rows.map((row) => row.name))
+    const merged: PhaseState[] = rows.map((row) => existing.get(row.name) ?? pendingPhases([row])[0]!)
+    for (const phase of this.phases) if (!incoming.has(phase.name)) merged.push(phase)
+    if (merged.length === this.phases.length && merged.every((phase, index) => phase === this.phases[index])) return
+    const selectedName = this.phases[this.selected]?.name
+    this.phases = merged
+    const selectedIndex = selectedName ? merged.findIndex((phase) => phase.name === selectedName) : -1
+    this.selected = selectedIndex >= 0 ? selectedIndex : Math.min(this.selected, Math.max(0, merged.length - 1))
     this.scheduleRender()
   }
 

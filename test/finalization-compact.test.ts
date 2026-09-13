@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { currentHead, execFile, resolveCommit } from "../src/git"
-import { finalizeNetZeroInterval, isNetZeroInterval, runFinalization, type FinalizationJournal } from "../src/finalization/compact"
+import { finalizeNetZeroInterval, isNetZeroInterval, runFinalization, runFinalizationWithRetry, type FinalizationJournal } from "../src/finalization/compact"
 import { boundedCommitAsOperator, BoundedCommitError } from "../src/finalization/executor"
 import { verifyRunInterval } from "../src/finalization/interval"
 import { acquireMutationLease, LeaseUnavailableError, mutationLeaseHeld } from "../src/finalization/lease"
@@ -689,5 +689,124 @@ describe("automatic compaction", () => {
     // twice on one branch never replaces the preceding run's product.
     const subjects = await git(["log", "--format=%s", `${firstStart}..HEAD`], dir)
     expect(subjects.stdout.split("\n").filter(Boolean)).toEqual(["feat: add the thing", "feat: add the thing"])
+  })
+
+  test("verifyNotPublished distinguishes an unverifiable probe from a published commit", async () => {
+    const dir = await repo()
+    const head = (await currentHead(dir))!
+    const missing = await mkdtemp(join(tmpdir(), "convoy-missing-remote-"))
+    dirs.push(missing)
+    await git(["remote", "add", "origin", join(missing, "absent.git")], dir)
+    // A probe that cannot answer is reported as transient, never as a refusal.
+    expect(await verifyNotPublished([head], dir)).toMatchObject({ ok: false, kind: "unverifiable" })
+
+    const bare = await mkdtemp(join(tmpdir(), "convoy-bare-remote-"))
+    dirs.push(bare)
+    await git(["init", "-q", "--bare", bare], dir)
+    await git(["remote", "set-url", "origin", bare], dir)
+    await git(["push", "-q", "origin", "main"], dir)
+    // An advertised head that is one of the replacement commits is terminal.
+    expect(await verifyNotPublished([head], dir)).toMatchObject({ ok: false, kind: "published" })
+  })
+
+  test("runFinalizationWithRetry retries a transient publication probe and then compacts", async () => {
+    const dir = await repo()
+    const startHead = (await currentHead(dir))!
+    await runCommit(dir, "a.txt", "a\n", "design")
+    const remoteDir = await mkdtemp(join(tmpdir(), "convoy-flaky-remote-"))
+    dirs.push(remoteDir)
+    const remotePath = join(remoteDir, "remote.git")
+    await git(["remote", "add", "origin", remotePath], dir)
+
+    const delays: number[] = []
+    const activity: string[] = []
+    const record = await runFinalizationWithRetry(
+      {
+        runID,
+        targetDir: dir,
+        boundary: boundaryFor(dir, startHead),
+        ledger: await ledgerFor(dir, startHead),
+        branch: "main",
+        composeMessage: compose,
+        progress: { activity: (detail) => activity.push(detail) },
+      },
+      {
+        maxRetries: 3,
+        baseDelayMs: 10,
+        capDelayMs: 40,
+        totalWindowMs: 10_000,
+        sleep: async (ms) => {
+          delays.push(ms)
+          // The remote appears after the failed probe: the retry then verifies.
+          await git(["init", "-q", "--bare", remotePath], dir)
+        },
+      },
+    )
+
+    expect(record.state).toBe("completed")
+    expect(delays).toEqual([10])
+    expect(activity.join(" ")).toContain("transient")
+  })
+
+  test("runFinalizationWithRetry does not retry a published replacement commit", async () => {
+    const dir = await repo()
+    const startHead = (await currentHead(dir))!
+    await runCommit(dir, "a.txt", "a\n", "design")
+    const bare = await mkdtemp(join(tmpdir(), "convoy-published-remote-"))
+    dirs.push(bare)
+    await git(["init", "-q", "--bare", bare], dir)
+    await git(["remote", "add", "origin", bare], dir)
+    await git(["push", "-q", "origin", "main"], dir)
+
+    let sleeps = 0
+    const record = await runFinalizationWithRetry(
+      { runID, targetDir: dir, boundary: boundaryFor(dir, startHead), ledger: await ledgerFor(dir, startHead), branch: "main", composeMessage: compose },
+      {
+        baseDelayMs: 1,
+        sleep: async () => {
+          sleeps++
+        },
+      },
+    )
+    expect(record.state).toBe("blocked")
+    expect(record.reason).toMatch(/published/)
+    expect(sleeps).toBe(0)
+  })
+
+  test("runFinalizationWithRetry reconciles a stopped transaction before retrying", async () => {
+    const dir = await repo()
+    const startHead = (await currentHead(dir))!
+    await runCommit(dir, "a.txt", "a\n", "design")
+    const originalHead = (await currentHead(dir))!
+    const common = (await gitCommonDir(dir))!
+    const journalPath = join(common, "convoy", "finalization", `${runID}.json`)
+    await mkdir(join(common, "convoy", "finalization"), { recursive: true })
+    await writeFile(
+      journalPath,
+      JSON.stringify({
+        schemaVersion: 1,
+        runID,
+        branch: "main",
+        originalHead,
+        startHead,
+        headTree: (await git(["rev-parse", `${originalHead}^{tree}`], dir)).stdout.trim(),
+        phase: "prepared",
+        updatedAt: 1,
+      }),
+    )
+
+    const record = await runFinalizationWithRetry(
+      { runID, targetDir: dir, boundary: boundaryFor(dir, startHead), ledger: await ledgerFor(dir, startHead), branch: "main", composeMessage: compose },
+      { sleep: async () => {} },
+    )
+    // The stale prepared attempt was reconciled first, then exactly one new
+    // transaction ran: the journal advanced to committed with the produced
+    // commit, and the branch tip is that single commit.
+    expect(record.state).toBe("completed")
+    expect(record.producedSha).toBeTruthy()
+    const journal = JSON.parse(await Bun.file(journalPath).text())
+    expect(journal.phase).toBe("committed")
+    expect(journal.producedSha).toBe(record.producedSha)
+    expect(await currentHead(dir)).toBe(record.producedSha)
   })
 })

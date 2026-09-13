@@ -276,7 +276,7 @@ describe("HN-002: metadata lifecycle methods", () => {
     // The interface should now declare Promise<void> so callers must await
     expect(source).toContain("serverStopped(): Promise<void>")
     expect(source).toContain("phaseStarted(name: string): Promise<void>")
-    expect(source).toContain('phaseEnded(name: string, status: "completed" | "skipped" | "failed"): Promise<void>')
+    expect(source).toContain('phaseEnded(name: string, status: "completed" | "skipped" | "failed", detail?: string): Promise<void>')
   })
 
   test("direct call sites in runner.ts await the store methods (HN-002 fix)", async () => {
@@ -302,13 +302,13 @@ describe("HN-002: metadata lifecycle methods", () => {
     expect(source).toContain("await store.phaseStarted(name).catch(")
     // phaseCompleted callback should be async and await store.phaseEnded with .catch()
     expect(source).toContain("async phaseCompleted(name, detail)")
-    expect(source).toContain('await store.phaseEnded(name, "completed").catch(')
+    expect(source).toContain('await store.phaseEnded(name, "completed", detail).catch(')
     // phaseSkipped callback should be async and await store.phaseEnded with .catch()
     expect(source).toContain("async phaseSkipped(name)")
     expect(source).toContain('await store.phaseEnded(name, "skipped").catch(')
     // phaseFailed callback should be async and await store.phaseEnded with .catch()
     expect(source).toContain("async phaseFailed(name, detail)")
-    expect(source).toContain('await store.phaseEnded(name, "failed").catch(')
+    expect(source).toContain('await store.phaseEnded(name, "failed", detail).catch(')
   })
 })
 

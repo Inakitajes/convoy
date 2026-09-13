@@ -6,6 +6,8 @@ import { isSafeStepName } from "./pipeline"
 
 import type { RepoSnapshot } from "./git"
 import type {
+  PhaseOutputLine,
+  ProgressPhase,
   ProgressPhaseSnapshot,
   ProgressStepUsage,
   ProgressTokens,
@@ -30,6 +32,14 @@ export type PhaseMetadata = {
   startedAt?: number
   endedAt?: number
   durationMs?: number
+  /** The terminal detail a phase reported (e.g. a hook's `exit 0` or failure reason). */
+  detail?: string
+  /**
+   * A bounded tail of the phase's captured output, most recent lines last
+   * (hook stdout/stderr). Persisted so a completion screen or historical view
+   * shows what the phase printed after the live feed is gone.
+   */
+  outputTail?: PhaseOutputLine[]
   cost?: number
   tokens?: ProgressTokens
   model?: string
@@ -83,6 +93,13 @@ export type RunMetadata = {
   updatedAt: number
   /** The resolved pipeline this run executes; resume replays it even if the project config changed since. */
   pipeline?: Pipeline
+  /**
+   * The canonical ordered phase plan persisted once at open (pipeline rows,
+   * hook rows, and the lifecycle row). Attach and history render from it so a
+   * hook row exists before the hook runs and the row order reflects execution
+   * order. Optional: legacy records fall back to deriving the prefix list.
+   */
+  plannedPhases?: ProgressPhase[]
   modelRouting?: { gateway: ModelGateway }
   /** The live opencode server for this run while it executes; cleared on shutdown, so a lingering entry means the run process died mid-flight. Lets `convoy runs` attach to a running run. */
   server?: { url: string; pid: number; startedAt: number; controlUrl?: string }
@@ -121,6 +138,12 @@ export type RunMetadataStore = {
   goalState(): GoalRunState | undefined
   /** Persists a goal checkpoint after a stage boundary, score promotion, or settlement. */
   checkpointGoal(state: GoalRunState): Promise<void>
+  /** The canonical ordered phase plan persisted at open, when the record carries one. */
+  plannedPhases(): ProgressPhase[] | undefined
+  /** Persists the canonical ordered phase plan once at open; a resume keeps the recorded one. */
+  recordPlannedPhases(phases: readonly ProgressPhase[]): Promise<void>
+  /** Retains a bounded output tail for a phase (best-effort; consumed by history reconstruction). */
+  phaseOutput(name: string, lines: readonly PhaseOutputLine[]): void
   /** The run boundary persisted before any run-owned mutation; undefined on legacy runs. */
   boundary(): RunBoundary | undefined
   /** Persists the run boundary once, before pre-hooks and writable execution; a resume never replaces it. */
@@ -143,7 +166,7 @@ export type RunMetadataStore = {
   phaseAdvisorEvent(name: string, event: AdvisorEvent): void
   repositoryBaseline(name: string): RepoSnapshot | undefined
   phaseRepositoryBaseline(name: string, baseline: RepoSnapshot): Promise<void>
-  phaseEnded(name: string, status: "completed" | "skipped" | "failed"): Promise<void>
+  phaseEnded(name: string, status: "completed" | "skipped" | "failed", detail?: string): Promise<void>
   controlState(): RunControlState
   setControlState(state: RunControlState): Promise<void>
   flush(): Promise<void>
@@ -323,6 +346,20 @@ export async function openRunMetadata(
       data.goal = state
       await persist({ throwOnError: true })
     },
+    plannedPhases() {
+      return data.plannedPhases
+    },
+    async recordPlannedPhases(phases) {
+      // The plan is written once at open; a resume replays exactly what the run
+      // started with, never a freshly resolved hook set.
+      if (data.plannedPhases) return
+      data.plannedPhases = phases.map((phase) => ({ ...phase }))
+      await persist({ throwOnError: true })
+    },
+    phaseOutput(name, lines) {
+      phase(name).outputTail = lines.map((line) => ({ ...line }))
+      scheduleSave()
+    },
     boundary() {
       return readRunBoundary(data.boundary)
     },
@@ -395,10 +432,11 @@ export async function openRunMetadata(
       phase(name).repositoryBaseline = baseline
       await persist({ throwOnError: true })
     },
-    async phaseEnded(name, status) {
+    async phaseEnded(name, status, detail) {
       const entry = phase(name)
       entry.status = status
       entry.endedAt = Date.now()
+      if (detail) entry.detail = detail
       if (entry.startedAt !== undefined) entry.durationMs = entry.endedAt - entry.startedAt
       await persist({ throwOnError: true })
     },
@@ -461,6 +499,16 @@ export function recordProgress(progress: ProgressUI, store: RunMetadataStore): P
       progress.phaseSession(name, sessionID)
     },
     phaseActivity: (name, detail, kind, pulse) => progress.phaseActivity(name, detail, kind, pulse),
+    phaseOutput(name, lines) {
+      // Best-effort: a storage failure must not change the hook's exit-status
+      // semantics, and the failure is disclosed rather than silently dropped.
+      try {
+        store.phaseOutput(name, lines)
+      } catch (error) {
+        log.warn(`couldn't persist phase output: ${String(error)}`)
+      }
+      progress.phaseOutput?.(name, lines)
+    },
     // The live transcript is UI-only (never persisted): just forward it.
     phaseMessage: (name, message) => progress.phaseMessage(name, message),
     phaseStepUsage(name, usage) {
@@ -478,7 +526,7 @@ export function recordProgress(progress: ProgressUI, store: RunMetadataStore): P
     phaseTodos: (name, todos) => progress.phaseTodos(name, todos),
     phaseDiff: (name, summary) => progress.phaseDiff(name, summary),
     async phaseCompleted(name, detail) {
-      await store.phaseEnded(name, "completed").catch((error) => log.warn(`couldn't persist phase-completed metadata: ${String(error)}`))
+      await store.phaseEnded(name, "completed", detail).catch((error) => log.warn(`couldn't persist phase-completed metadata: ${String(error)}`))
       progress.phaseCompleted(name, detail)
     },
     async phaseSkipped(name) {
@@ -486,7 +534,7 @@ export function recordProgress(progress: ProgressUI, store: RunMetadataStore): P
       progress.phaseSkipped(name)
     },
     async phaseFailed(name, detail) {
-      await store.phaseEnded(name, "failed").catch((error) => log.warn(`couldn't persist phase-failed metadata: ${String(error)}`))
+      await store.phaseEnded(name, "failed", detail).catch((error) => log.warn(`couldn't persist phase-failed metadata: ${String(error)}`))
       progress.phaseFailed(name, detail)
     },
     phaseRestored: (name, snapshot) => progress.phaseRestored(name, snapshot),

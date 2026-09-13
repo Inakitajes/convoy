@@ -858,33 +858,39 @@ describe("automatic run finalization lifecycle", () => {
     }
   })
 
-  test("a success post-hook that mutates the repository blocks compaction but keeps the run successful", async () => {
-    // Design D1 ordering: finalization runs after success hooks, so a hook
-    // that mutates/publishes the tree must make the compaction refuse (the
-    // dirty-tree guard fires before any rewrite) without failing the run.
+  test("a success post-hook runs after compaction and observes its outcome", async () => {
+    // Design D1 ordering (delta): finalization runs BEFORE success hooks, so a
+    // hook that mutates or publishes the tree acts on the already-recorded
+    // compaction outcome, and its mutation can no longer block compaction.
     const repo = await cleanRepo()
     const tracking = finalizationTrackingProgress()
     try {
       const result = await run(
         makeOptions(repo, {
           progress: tracking.progress,
-          hooks: { pre: [], post: [{ name: "publish-artifact", command: "printf 'hook\n' >> hook.txt" }], pipelines: {} },
+          hooks: {
+            pre: [],
+            post: [{ name: "publish-artifact", command: "printf '%s' \"$CONVOY_FINALIZATION_STATE\" > hook.state; printf 'hook\\n' >> hook.txt" }],
+            pipelines: {},
+          },
         }),
       )
       try {
-        expect((await waitForEvents(tracking.finalizationEvents, 1))[0]).toBe("started:compacting this run's commits")
+        const events = await waitForEvents(tracking.finalizationEvents, 2)
+        expect(events[0]).toBe("started:compacting this run's commits")
 
         const metadata = JSON.parse(await readFile(join(result.dir, "metadata.json"), "utf8"))
-        // Blocked (not skipped): the hook left an uncommitted change, and the
-        // lifecycle row must not present that as a clean no-commit skip.
-        expect(metadata.finalization).toMatchObject({ state: "blocked" })
-        expect(metadata.finalization.reason).toMatch(/uncommitted changes|working tree/)
+        // The hook observed the outcome compaction had already recorded, and its
+        // own mutation of the tree neither changed nor blocked it.
+        expect(await readFile(join(repo, "hook.state"), "utf8")).toBe(metadata.finalization.state)
+        expect(metadata.finalization.state).toBe("skipped")
+        expect((await git(["status", "--porcelain"], repo)).trim()).toContain("hook.txt")
 
         const summary = await readFile(join(result.dir, "SUMMARY.md"), "utf8")
         expect(summary).toContain("## Run finalization")
-        expect(summary).toContain("- State: blocked")
+        expect(summary).toContain("- State: skipped")
 
-        // The run itself remained successful despite the blocked compaction.
+        // The run itself remained successful.
         expect(result.dir).toBeTruthy()
       } finally {
         await result.release?.()
@@ -894,9 +900,10 @@ describe("automatic run finalization lifecycle", () => {
     }
   })
 
-  test("a failing run never reaches finalization and persists no compaction outcome", async () => {
-    // A fatal success-hook failure must still count as failed execution and
-    // must prevent automatic compaction entirely (design D1).
+  test("a failing success post-hook fails the run after compaction without erasing its outcome", async () => {
+    // A fatal success-hook failure now happens after compaction: the run is
+    // reported failed with the hook's error, while the recorded finalization
+    // outcome stands (spec: Success hook fails after compaction).
     const repo = await cleanRepo()
     const tracking = finalizationTrackingProgress()
     try {
@@ -913,15 +920,102 @@ describe("automatic run finalization lifecycle", () => {
         failure = error
       }
       expect(String(failure)).toContain("exited with code 1")
-      expect(tracking.finalizationEvents).toEqual([])
+      expect(await waitForEvents(tracking.finalizationEvents, 2)).toContain("started:compacting this run's commits")
 
       const teardown = hostedTeardownFromError(failure)
       expect(teardown).toBeDefined()
       if (!teardown) return
       expect(teardown.runDir).not.toBe("")
       const metadata = JSON.parse(await readFile(join(teardown.runDir, "metadata.json"), "utf8"))
+      expect(metadata.finalization).toMatchObject({ state: "skipped" })
+      await teardown.release()
+    } finally {
+      await rm(repo, { recursive: true, force: true })
+    }
+  })
+
+  test("a run that fails before the epilogue never compacts and still runs its failure post-hook", async () => {
+    // Failed execution never reaches the `Compact run` epilogue (it runs only
+    // after phases and goal settlement), and the failure post-hook still runs
+    // exactly once without a preceding compaction.
+    const repo = await cleanRepo()
+    const dashboard: ProgressUI = { ...noopProgress }
+    try {
+      throwPrimitiveFromStart = true
+      let failure: unknown
+      try {
+        await run(
+          makeOptions(repo, {
+            progress: dashboard,
+            hooks: { pre: [], post: [{ name: "on-failure", command: "printf 'fail\\n' > failure-hook.out", when: "failure" }], pipelines: {} },
+          }),
+        )
+        throw new Error("the failing run should have rejected")
+      } catch (error) {
+        failure = error
+      }
+      expect(String(failure)).toContain("primitive boom")
+      expect(await readFile(join(repo, "failure-hook.out"), "utf8")).toContain("fail")
+
+      const teardown = hostedTeardownFromError(failure)
+      expect(teardown).toBeDefined()
+      if (!teardown) return
+      const metadata = JSON.parse(await readFile(join(teardown.runDir, "metadata.json"), "utf8"))
       expect(metadata.finalization).toBeUndefined()
       await teardown.release()
+    } finally {
+      throwPrimitiveFromStart = false
+      await rm(repo, { recursive: true, force: true })
+    }
+  })
+
+  test("persists the canonical planned phase list including hook rows", async () => {
+    const repo = await cleanRepo()
+    try {
+      const result = await run(
+        makeOptions(repo, {
+          hooks: { pre: [{ name: "fetch", command: "true" }], post: [{ name: "open PR", command: "true" }], pipelines: {} },
+        }),
+      )
+      try {
+        const metadata = JSON.parse(await readFile(join(result.dir, "metadata.json"), "utf8"))
+        // The plan is durable from open: pre-hook, lifecycle, then post-hook.
+        expect(metadata.plannedPhases.map((phase: { name: string }) => phase.name)).toEqual([
+          "pre-hook: fetch",
+          compactRunRowName,
+          "post-hook: open PR",
+        ])
+        expect(metadata.plannedPhases.at(-1).kind).toBe("hook")
+      } finally {
+        await result.release?.()
+      }
+    } finally {
+      await rm(repo, { recursive: true, force: true })
+    }
+  })
+
+  test("threads the injected finalization retry policy through the epilogue", async () => {
+    const repo = await cleanRepo()
+    let sleeps = 0
+    try {
+      const result = await realRun(makeOptions(repo, {}), {
+        startOpencode: fakeStartOpencode,
+        finalizationRetry: {
+          maxRetries: 1,
+          baseDelayMs: 1,
+          sleep: async () => {
+            sleeps++
+          },
+        },
+      })
+      try {
+        const metadata = JSON.parse(await readFile(join(result.dir, "metadata.json"), "utf8"))
+        // A non-retryable outcome (no commits) never sleeps the retry loop.
+        expect(metadata.finalization.state).toBe("skipped")
+        expect(sleeps).toBe(0)
+      } finally {
+        await result.release?.()
+      }
     } finally {
       await rm(repo, { recursive: true, force: true })
     }
