@@ -1,7 +1,10 @@
 import { join } from "node:path"
 
+import type { CheckoutFingerprints } from "./board-cache"
+import { mapBounded } from "./concurrency"
 import { detectBaseRef, execFile } from "./git"
-import { listWorktrees } from "./worktree-inventory"
+import { listRuns, type RunEntry } from "./runs"
+import { listWorktrees, type WorktreeInventory } from "./worktree-inventory"
 import { readCheckoutActiveChanges, readCheckoutArchives, readCheckoutCanonicalSpecs, type LocalActiveChange } from "./checkout-openspec"
 import { observeBaseDivergence, observeDirt, observeExecutionActivity, observeUpstreamDivergence, observeWriterClaim, type ManagedWriter, type Observed } from "./worktree-observations"
 import { PrCache, type PrAdapter, type PrFacts, type PrObservation } from "./pr-observations"
@@ -81,6 +84,35 @@ export type ControlBoard = {
 
 export type BoardTasks = { done: number; total: number }
 
+/** The prior board plus its per-checkout fingerprints, for gated reuse. */
+export type BoardReuse = {
+  board: ControlBoard
+  fingerprints: CheckoutFingerprints
+}
+
+/** Injected seams and cycle inputs for one assembly (change `live-board-cache-and-refresh`). */
+export type AssembleBoardOptions = {
+  base?: string
+  /** A pre-built inventory; a refresh cycle reads it once for fingerprinting too. */
+  inventory?: WorktreeInventory
+  /** Per-checkout change-content fingerprints for this cycle. */
+  fingerprints?: CheckoutFingerprints
+  /** The prior board whose unchanged checkouts reuse artifact/activity facts. */
+  reuse?: BoardReuse
+  /** The cycle's shared run-history read; called at most once. */
+  listRuns?: () => Promise<RunEntry[]>
+  /** Reuse prior activity and issue no run-history read (unchanged fingerprint). */
+  skipRunHistory?: boolean
+  /** Bounded checkout observation (default 4); independent facts per checkout. */
+  concurrency?: number
+  /** Injectable base detection and task-count reads for hermetic callers/tests. */
+  detectBase?: (dir: string) => Promise<{ ref?: string } | undefined>
+  taskCounts?: (checkout: string) => Promise<ReadonlyMap<string, BoardTasks>>
+}
+
+/** The default checkout-observation concurrency. */
+export const defaultBoardConcurrency = 4
+
 /**
  * The one assembly. Inventory first, then per-checkout detail (local
  * artifacts, dirt, activity) so a usable list never waits on a giant global
@@ -88,17 +120,27 @@ export type BoardTasks = { done: number; total: number }
  * on demand per selected row (observeWorktreePr), bounded, cached, and
  * advisory there. Nothing here writes domain state, fetches, or consults
  * legacy feature records.
+ *
+ * Work is bounded by what changed (change `live-board-cache-and-refresh`,
+ * design D4/D5): checkouts with no active changes skip the task query, a
+ * checkout whose change content is unchanged reuses its prior artifact facts,
+ * the shared run history is read at most once per cycle, and checkouts are
+ * observed concurrently under a bounded limit.
  */
-export async function assembleControlBoard(targetDir: string, options: { base?: string } = {}): Promise<ControlBoard> {
-  const inventory = await listWorktrees(targetDir)
-  const detectedBase = options.base ?? (await detectBaseRef(targetDir).catch(() => undefined))?.ref
+export async function assembleControlBoard(targetDir: string, options: AssembleBoardOptions = {}): Promise<ControlBoard> {
+  const inventory = options.inventory ?? (await listWorktrees(targetDir))
+  const detectedBase = options.base ?? ((await (options.detectBase ?? detectBaseRef)(targetDir).catch(() => undefined))?.ref)
+  // One shared run-history read for the whole cycle, unless the caller proved
+  // the run-history fingerprint unchanged and wants prior activity reused.
+  let sharedRuns: Promise<RunEntry[]> | undefined
+  const runReader =
+    options.listRuns !== undefined
+      ? () => (sharedRuns ??= options.listRuns!())
+      : options.skipRunHistory
+        ? undefined
+        : () => (sharedRuns ??= listRuns())
 
-  const worktrees: BoardWorktree[] = []
-  // PR evidence is deliberately absent from the assembly: the home fires one
-  // on-demand observation per checkout when the operator's selection lands on
-  // its row (see observeWorktreePr), so the list load never fans out a `gh`
-  // subprocess per worktree and never stalls on a hosting round-trip.
-  for (const [index, entry] of inventory.entries.entries()) {
+  const worktrees = await mapBounded(inventory.entries, options.concurrency ?? defaultBoardConcurrency, async (entry, index) => {
     const row: BoardWorktree = {
       path: entry.path,
       ...(entry.branch ? { branch: entry.branch } : {}),
@@ -111,37 +153,64 @@ export async function assembleControlBoard(targetDir: string, options: { base?: 
       ...(entry.prunable ? { prunable: entry.prunable } : {}),
       changes: [],
     }
-    if (entry.accessible && !entry.bare) {
-      const [changes, archives, specs, dirt, activity, writer] = await Promise.all([
-        readCheckoutActiveChanges(entry.path),
+    if (!entry.accessible || entry.bare) return row
+
+    // Reuse only when the prior cycle's fingerprint for this checkout is
+    // identical: unchanged change content means the OpenSpec readers (and the
+    // CLI task query behind them) are not run at all.
+    const reusable = reusableWorktree(options, entry.path)
+    if (reusable) {
+      row.changes = reusable.changes
+      if (reusable.changesUnknown) row.changesUnknown = reusable.changesUnknown
+      if (reusable.archiveCount !== undefined) row.archiveCount = reusable.archiveCount
+      if (reusable.specCount !== undefined) row.specCount = reusable.specCount
+    } else {
+      const [changes, archives, specs] = await Promise.all([
+        readCheckoutActiveChanges(entry.path, options.taskCounts ? { taskCounts: options.taskCounts } : {}),
         readCheckoutArchives(entry.path),
         readCheckoutCanonicalSpecs(entry.path),
-        observeDirt(entry.path),
-        observeExecutionActivity(entry.path),
-        observeWriterClaim({ commonDir: inventory.commonDir, branch: entry.branch }),
       ])
       if (changes.kind === "known") row.changes = changes.value
       else row.changesUnknown = changes.reason
       if (archives.kind === "known" && archives.value.length > 0) row.archiveCount = archives.value.length
       if (specs.kind === "known" && specs.value.length > 0) row.specCount = specs.value.length
-      row.dirt = dirt
-      row.activity = activity
-      row.writer = writer
-      if (row.branch && detectedBase) {
-        row.baseDivergence = await observeBaseDivergence(entry.path, detectedBase)
-        row.upstream = await observeUpstreamDivergence(entry.path, row.branch)
-      } else if (row.branch) {
-        row.upstream = await observeUpstreamDivergence(entry.path, row.branch)
-      }
     }
-    worktrees.push(row)
-  }
+
+    // The cheap tier always runs: dirt, activity, and the writer claim stay
+    // live even on an idle poll.
+    const [dirt, writer] = await Promise.all([
+      observeDirt(entry.path),
+      observeWriterClaim({ commonDir: inventory.commonDir, branch: entry.branch }),
+    ])
+    row.dirt = dirt
+    row.writer = writer
+    if (reusable && options.skipRunHistory) row.activity = reusable.activity
+    else row.activity = await observeExecutionActivity(entry.path, runReader ? { listRuns: runReader } : {})
+
+    if (row.branch && detectedBase) {
+      row.baseDivergence = await observeBaseDivergence(entry.path, detectedBase)
+      row.upstream = await observeUpstreamDivergence(entry.path, row.branch)
+    } else if (row.branch) {
+      row.upstream = await observeUpstreamDivergence(entry.path, row.branch)
+    }
+    return row
+  })
 
   return {
     ...(inventory.commonDir ? { commonDir: inventory.commonDir } : {}),
     ...(detectedBase ? { baseBranch: detectedBase } : {}),
     worktrees,
   }
+}
+
+/** The prior row for a checkout whose change content is provably unchanged this cycle. */
+function reusableWorktree(options: AssembleBoardOptions, path: string): BoardWorktree | undefined {
+  const prior = options.reuse
+  if (!prior || !options.fingerprints) return undefined
+  const before = prior.fingerprints[path]
+  const now = options.fingerprints[path]
+  if (before === undefined || now === undefined || before !== now) return undefined
+  return prior.board.worktrees.find((worktree) => worktree.path === path)
 }
 
 /**
