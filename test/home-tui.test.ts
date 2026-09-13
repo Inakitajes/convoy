@@ -1634,4 +1634,81 @@ describe("cache-first board and refresh (live-board-cache-and-refresh)", () => {
     expect(calls()).toBeGreaterThan(before)
     closeLauncher(session.instance)
   })
+
+  test("a refresh preserves an auxiliary selection instead of snapping to New worktree", async () => {
+    const { source, calls } = fakeSource([snapshotWith(baseRows()), snapshotWith(baseRows()), snapshotWith(baseRows())])
+    const session = await openWithSource({ worktrees: baseRows(), source, pollMs: 20 })
+    try {
+      // Rows: New worktree, main, add-widget, Pipelines, Specs, Runs, Config.
+      session.press("down")
+      session.press("down")
+      session.press("down")
+      await session.renderOnce()
+      expect(highlightedLines(session).join("\n")).toContain("Pipelines")
+      await Bun.sleep(60)
+      await session.renderOnce()
+      // A refresh really ran while parked on the destination row.
+      expect(calls()).toBeGreaterThanOrEqual(2)
+      const selected = highlightedLines(session).join("\n")
+      expect(selected).toContain("Pipelines")
+      expect(selected).not.toContain("New worktree")
+    } finally {
+      closeLauncher(session.instance)
+    }
+  })
+
+  test("a failed refresh discloses both the failure and the retained snapshot's age", async () => {
+    const builtAt = Date.now() - 60_000
+    const source = {
+      refresh: async () => ({ snapshot: snapshotWith(baseRows(), builtAt), refreshed: false, error: "git exploded" }),
+      cached: async () => undefined,
+      current: () => undefined,
+      lastError: () => "git exploded",
+      lastRunEntries: () => undefined,
+    } as unknown as BoardSource
+    const session = await openWithSource({ worktrees: baseRows(), source, builtAt })
+    try {
+      await Bun.sleep(10)
+      await session.renderOnce()
+      const frame = session.captureCharFrame()
+      expect(frame).toContain("stale")
+      expect(frame).toContain("git exploded")
+      expect(frame).toMatch(/as of \d+s/)
+    } finally {
+      closeLauncher(session.instance)
+    }
+  })
+
+  test("an explicit refresh during an in-flight cycle is replayed as one trailing forced cycle", async () => {
+    const resolvers: Array<() => void> = []
+    let calls = 0
+    const source = {
+      refresh: () => {
+        calls += 1
+        return new Promise<{ snapshot: BoardSnapshot; refreshed: boolean }>((resolve) => {
+          resolvers.push(() => resolve({ snapshot: snapshotWith(baseRows()), refreshed: true }))
+        })
+      },
+      cached: async () => undefined,
+      current: () => undefined,
+      lastError: () => undefined,
+      lastRunEntries: () => undefined,
+    } as unknown as BoardSource
+    const session = await openWithSource({ worktrees: baseRows(), source, pollMs: 100_000 })
+    try {
+      expect(calls).toBe(1)
+      session.press("r", { ctrl: true })
+      session.press("r", { ctrl: true })
+      await Bun.sleep(5)
+      // Still the single in-flight cycle; the requests are coalesced.
+      expect(calls).toBe(1)
+      resolvers[0]!()
+      await Bun.sleep(10)
+      expect(calls).toBe(2)
+      resolvers[1]!()
+      await Bun.sleep(5)
+    } finally {
+      closeLauncher(session.instance)
+    }
+  })
 })

@@ -96,6 +96,12 @@ export class SpecsBrowser {
   private readonly pollMs: number
   private pollTimer?: ReturnType<typeof setInterval>
   private refreshing = false
+  /**
+   * A forced refresh requested while one was in flight, replayed as one
+   * trailing forced cycle when it settles (the gated in-flight cycle cannot
+   * honor the forced recompute itself). Coalesced, never a queue.
+   */
+  private pendingForce = false
   /** "root": the worktree-rooted entity list; "detail": one subject's reading pane. */
   private level: "root" | "detail" = "root"
   /** Set while the immersive reader replaces the chrome (detail level only). */
@@ -844,7 +850,13 @@ export class SpecsBrowser {
    * being presented as current.
    */
   private async refresh(force = false) {
-    if (this.finished || this.refreshing) return
+    if (this.finished) return
+    // An explicit refresh arriving mid-cycle is remembered (coalesced) and
+    // replayed as one trailing forced cycle once the in-flight one settles.
+    if (this.refreshing) {
+      if (force) this.pendingForce = true
+      return
+    }
     const previous = this.rows[this.selectedRow]
     const identity =
       previous?.kind === "change"
@@ -868,6 +880,7 @@ export class SpecsBrowser {
       // board or present stale readiness as current. The next refresh retries.
       this.refreshing = false
       this.render()
+      this.runPendingRefresh()
       return
     }
     this.refreshing = false
@@ -886,6 +899,15 @@ export class SpecsBrowser {
       if (firstSelectable >= 0) this.selectedRow = Math.min(firstSelectable, this.selectedRow)
     }
     this.render()
+    this.runPendingRefresh()
+  }
+
+  /** Replays an explicit refresh that arrived mid-cycle, coalesced to one trailing run. */
+  private runPendingRefresh() {
+    if (this.pendingForce && !this.finished) {
+      this.pendingForce = false
+      void this.refresh(true)
+    }
   }
 
   /** The registered checkout containing this change copy — its only action target. */

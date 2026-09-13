@@ -176,6 +176,17 @@ type ListRow =
   | { kind: "new" }
   | { kind: "auxiliary"; destination: HomeDestination; label: string; shortcut: string; kicker: string; description: string }
 
+/**
+ * The selected row's kind identity, used to restore the selection across an
+ * in-place refresh. Worktrees match by verified path plus branch/detached
+ * state (never list position, change id, or a replacement checkout); the New
+ * worktree entry and each auxiliary destination match by their own kind.
+ */
+type RowIdentity =
+  | { kind: "worktree"; path: string; branch?: string }
+  | { kind: "new" }
+  | { kind: "auxiliary"; destination: HomeDestination }
+
 /** The worktree detail's action rows: distinct labels per action, grouped by section. */
 type DetailAction = {
   id: HomeWorkAction
@@ -322,6 +333,12 @@ export class HomeLauncher {
   private readonly pollMs: number
   private snapshotBuiltAt?: number
   private refreshing = false
+  /**
+   * A forced refresh requested while one was in flight. The gated in-flight
+   * cycle cannot honor the forced recompute, so it is replayed as one trailing
+   * forced cycle when that cycle settles (never a queue).
+   */
+  private pendingForce = false
   /** A failed refresh's reason: the retained evidence is disclosed as stale. */
   private refreshError?: string
   /**
@@ -560,12 +577,42 @@ export class HomeLauncher {
   }
 
   /**
+   * The selected row's kind identity — worktree, New worktree, or a specific
+   * auxiliary destination — so a refresh keeps the operator where they were
+   * instead of snapping any non-worktree row back to New worktree.
+   */
+  private selectedRowIdentity(): RowIdentity | undefined {
+    const row = this.rows[this.selectedRow]
+    if (!row) return undefined
+    if (row.kind === "new") return { kind: "new" }
+    if (row.kind === "auxiliary") return { kind: "auxiliary", destination: row.destination }
+    return { path: row.worktree.path, ...(row.worktree.branch !== undefined ? { branch: row.worktree.branch } : {}), kind: "worktree" }
+  }
+
+  /** The row index matching a kind identity, or undefined when that row kind disappeared. */
+  private rowIndexForRowIdentity(identity: RowIdentity | undefined): number | undefined {
+    if (!identity) return undefined
+    if (identity.kind === "worktree") return this.rowIndexForIdentity(identity)
+    const index = this.rows.findIndex((row) =>
+      identity.kind === "new" ? row.kind === "new" : row.kind === "auxiliary" && row.destination === identity.destination,
+    )
+    return index >= 0 ? index : undefined
+  }
+
+  /**
    * One background refresh: paint the in-flight indicator, refresh the
    * source, then re-render in place without remounting, losing the operator's
    * selection, or (on failure) discarding the last usable snapshot.
    */
   private async runRefresh(force = false): Promise<void> {
-    if (this.finished || !this.boardSource || this.refreshing) return
+    if (this.finished || !this.boardSource) return
+    // An explicit refresh arriving mid-cycle is remembered (coalesced) and
+    // replayed as one trailing forced cycle when the in-flight one settles:
+    // the gated cycle it interrupted cannot honor the forced recompute itself.
+    if (this.refreshing) {
+      if (force) this.pendingForce = true
+      return
+    }
     this.refreshing = true
     this.render()
     try {
@@ -581,6 +628,10 @@ export class HomeLauncher {
       this.refreshing = false
       if (!this.finished) this.render()
     }
+    if (this.pendingForce && !this.finished) {
+      this.pendingForce = false
+      void this.runRefresh(true)
+    }
   }
 
   /**
@@ -595,13 +646,16 @@ export class HomeLauncher {
     error: string | undefined,
     runs: RunEntry[] | undefined,
   ): void {
-    const selected = this.selectionIdentity()
+    const selected = this.selectedRowIdentity()
     const detail = this.detailWorktree
     this.rows = this.buildRows(worktrees)
     this.snapshotBuiltAt = builtAt
     this.refreshError = error
     this.selectionNote = undefined
-    const restored = this.rowIndexForIdentity(selected)
+    // Restore by row kind: a worktree by verified identity, an auxiliary
+    // destination by its destination, and New worktree as itself. Only a row
+    // kind that vanished falls back to New worktree — never a replacement.
+    const restored = this.rowIndexForRowIdentity(selected)
     this.selectedRow = restored ?? 0
     if (this.level === "detail" && detail) {
       const next = this.rows.find((row) => row.kind === "worktree" && row.worktree.path === detail.path)
@@ -1608,16 +1662,24 @@ export class HomeLauncher {
   }
 
   private refreshStatus(): { text: string; stale: boolean } | undefined {
-    if (this.refreshing) return { text: "⟳", stale: false }
+    // The snapshot age is composed into every status that has a snapshot to
+    // describe — in flight, failed, or dropped-selection — so a failed refresh
+    // never discloses the failure while hiding how old the retained board is.
+    const ageMs = this.snapshotBuiltAt === undefined ? undefined : Math.max(0, Date.now() - this.snapshotBuiltAt)
+    const age = ageMs === undefined ? undefined : `as of ${Math.round(ageMs / 1000)}s`
+    if (this.refreshing) return { text: age ? `⟳ · ${age}` : "⟳", stale: false }
     // A subprocess failure message can be long and multiline; `truncate`
     // keeps it one bounded line and `padBetween` clips the rest.
-    if (this.refreshError) return { text: `stale · ${truncate(this.refreshError, 64)}`, stale: true }
-    if (this.selectionNote) return { text: this.selectionNote, stale: true }
-    if (this.snapshotBuiltAt === undefined) return undefined
-    const ageMs = Math.max(0, Date.now() - this.snapshotBuiltAt)
-    const age = Math.round(ageMs / 1000)
-    if (ageMs > defaultFreshnessBoundMs) return { text: `stale · as of ${age}s`, stale: true }
-    return { text: `as of ${age}s`, stale: false }
+    if (this.refreshError) {
+      const reason = `stale · ${truncate(this.refreshError, 64)}`
+      return { text: age ? `${reason} · ${age}` : reason, stale: true }
+    }
+    // Not a staleness claim, so it keeps no `stale ·` prefix, but the age still
+    // rides along.
+    if (this.selectionNote) return { text: age ? `${this.selectionNote} · ${age}` : this.selectionNote, stale: true }
+    if (ageMs === undefined) return undefined
+    if (ageMs > defaultFreshnessBoundMs) return { text: `stale · as of ${Math.round(ageMs / 1000)}s`, stale: true }
+    return { text: `as of ${Math.round(ageMs / 1000)}s`, stale: false }
   }
 
   /**

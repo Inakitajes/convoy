@@ -237,19 +237,23 @@ export class BoardSource {
       const priorForReuse = !force && prior ? { board: prior.board, fingerprints: prior.fingerprints } : undefined
       const runReader = this.options.listRuns ?? listRuns
       // One shared read for the cycle: the same promise serves both the
-      // assembly's activity probes and an open detail's recent runs.
+      // assembly's activity probes and an open detail's recent runs. It is
+      // threaded even on a runs-unchanged cycle so a checkout whose change
+      // content did change still observes activity from that one shared read
+      // instead of falling back to an unshared, per-checkout run-history scan.
+      // Unchanged checkouts reuse prior activity when `skipRunHistory` is set.
       let sharedRuns: Promise<RunEntry[]> | undefined
       const onceRuns = () => (sharedRuns ??= runReader())
       const board: ControlBoard = await (this.options.assemble ?? assembleControlBoard)(this.targetDir, {
         inventory,
         fingerprints,
         ...(priorForReuse ? { reuse: priorForReuse } : {}),
-        ...(runsUnchanged ? { skipRunHistory: true } : { listRuns: onceRuns }),
+        listRuns: onceRuns,
+        ...(runsUnchanged ? { skipRunHistory: true } : {}),
       })
-      if (!runsUnchanged) {
-        // Read once and share the same entries with the detail surface.
-        this.lastRuns = await onceRuns()
-      }
+      // Consume the cycle's read before deciding the winner: on a
+      // runs-unchanged cycle it exists only if a changed checkout requested it.
+      const cycleRuns = !runsUnchanged ? await onceRuns() : sharedRuns !== undefined ? await sharedRuns : undefined
 
       const snapshot: BoardSnapshot = {
         schemaVersion: boardCacheSchemaVersion,
@@ -261,7 +265,8 @@ export class BoardSource {
         ...(runsFingerprint ? { runsFingerprint } : {}),
       }
 
-      // A newer cycle already landed: keep its snapshot, discard this one.
+      // A newer cycle already landed: keep its snapshot and state, and discard
+      // this cycle's results without clobbering the newer cycle's runs.
       if (generation !== this.generation) {
         return { snapshot: this.snapshot ?? snapshot, refreshed: false }
       }
@@ -269,6 +274,7 @@ export class BoardSource {
       const save = this.options.save ?? saveBoardSnapshot
       const changed = !this.snapshot || snapshotMateriallyChanged(snapshot, this.snapshot)
       this.snapshot = snapshot
+      if (cycleRuns !== undefined) this.lastRuns = cycleRuns
       this.failure = undefined
       if (changed) {
         await save(snapshot, prior).catch(() => {
@@ -278,6 +284,13 @@ export class BoardSource {
       return { snapshot, refreshed: true, ...(this.lastRuns ? { runs: this.lastRuns } : {}) }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
+      // A superseded cycle must not mark the newer snapshot stale or hand the
+      // surface an obsolete error: the winning cycle owns that state.
+      if (generation !== this.generation) {
+        const current = this.snapshot ?? prior
+        if (current) return { snapshot: current, refreshed: false }
+        throw error
+      }
       this.failure = message
       if (prior) return { snapshot: prior, refreshed: false, error: message }
       throw error

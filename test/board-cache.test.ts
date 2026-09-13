@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import { boardCacheKey, boardCachePath, loadBoardSnapshot, saveBoardSnapshot, snapshotMateriallyChanged, type BoardSnapshot } from "../src/board-cache"
+import { boardCacheDir, boardCacheKey, boardCachePath, loadBoardSnapshot, saveBoardSnapshot, snapshotMateriallyChanged, type BoardSnapshot } from "../src/board-cache"
 import { repoCommonDir } from "../src/repo-store"
 import { createFixtureRepo, type FixtureRepo } from "./helpers/multi-worktree"
 
@@ -86,6 +86,37 @@ describe("loadBoardSnapshot", () => {
     expect(await saveBoardSnapshot(saved)).toBe(true)
     expect(await loadBoardSnapshot(commonDir)).toEqual(saved)
   })
+
+  test("shape-invalid worktree rows and a non-finite builtAt load as no cache", async () => {
+    const commonDir = join(home, "clone-invalid", ".git")
+    const path = boardCachePath(commonDir)
+    await mkdir(join(path, ".."), { recursive: true })
+    const doc = (extra: Record<string, unknown>) => ({
+      schemaVersion: 1,
+      repoKey: "k",
+      commonDir,
+      builtAt: 1_000,
+      board: { worktrees: [] },
+      fingerprints: {},
+      ...extra,
+    })
+    const cases: Array<[string, Record<string, unknown>]> = [
+      ["null row", doc({ board: { worktrees: [null] } })],
+      ["row missing path", doc({ board: { worktrees: [{ changes: [] }] } })],
+      ["row with non-string path", doc({ board: { worktrees: [{ path: 7, changes: [] }] } })],
+      ["row missing changes", doc({ board: { worktrees: [{ path: "/wt" }] } })],
+      ["row with non-array changes", doc({ board: { worktrees: [{ path: "/wt", changes: "none" }] } })],
+      ["non-finite builtAt", doc({ builtAt: Number.NaN })],
+    ]
+    for (const [name, value] of cases) {
+      await writeFile(path, JSON.stringify(value))
+      // A malformed cache is `corrupt` → no cache: it must never be admitted
+      // as `found` and then throw while Home or the specs path dereferences it.
+      expect(await loadBoardSnapshot(commonDir), name).toBeUndefined()
+    }
+    await writeFile(path, JSON.stringify(doc({ board: { worktrees: [{ path: "/wt", changes: [] }] } })))
+    expect(await loadBoardSnapshot(commonDir)).toBeDefined()
+  })
 })
 
 describe("saveBoardSnapshot", () => {
@@ -148,6 +179,16 @@ describe("saveBoardSnapshot", () => {
     expect(loaded?.board.worktrees[0]?.dirt).toEqual({ kind: "unknown", reason: "git status timed out", collectedAt: 1_000 })
     expect(loaded?.board.worktrees[0]?.upstream).toEqual({ kind: "unknown", reason: "no upstream configured", collectedAt: 1_000 })
     expect(loaded?.board.worktrees[0]?.dirt?.kind).toBe("unknown")
+  })
+
+  test("the cache directory is created owner-only", async () => {
+    // Start from a removed directory so this measures the creation path, not a
+    // directory an earlier test happened to create.
+    await rm(boardCacheDir(), { recursive: true, force: true })
+    const commonDir = join(home, "clone-mode", ".git")
+    await saveBoardSnapshot(snapshot(commonDir))
+    const info = await stat(boardCacheDir())
+    expect(info.mode & 0o777).toBe(0o700)
   })
 
   test("a crash mid-write leaves the previous cache intact", async () => {

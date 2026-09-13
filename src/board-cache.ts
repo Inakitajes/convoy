@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto"
+import { mkdir } from "node:fs/promises"
 import { join } from "node:path"
 
 import { realpathSafe } from "./git"
@@ -63,13 +64,26 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
+/**
+ * A stored worktree row must carry the shape the warm paths assume: an object
+ * with a string `path` and an array `changes`. Home row-building and the specs
+ * path iterate and dereference both, so a shape-invalid row must be rejected
+ * as `corrupt` (and cold-loaded) rather than admitted as `found` and thrown on.
+ */
+function isStoredWorktree(value: unknown): boolean {
+  if (!isRecord(value)) return false
+  if (typeof value.path !== "string") return false
+  return Array.isArray(value.changes)
+}
+
 function validateSnapshot(value: unknown): BoardSnapshot | undefined {
   if (!isRecord(value)) return undefined
   if (value.schemaVersion !== boardCacheSchemaVersion) return undefined
   if (typeof value.repoKey !== "string" || typeof value.commonDir !== "string") return undefined
-  if (typeof value.builtAt !== "number") return undefined
+  if (typeof value.builtAt !== "number" || !Number.isFinite(value.builtAt)) return undefined
   const board = value.board
   if (!isRecord(board) || !Array.isArray(board.worktrees)) return undefined
+  if (!board.worktrees.every(isStoredWorktree)) return undefined
   const fingerprints = value.fingerprints
   if (fingerprints !== undefined && !isRecord(fingerprints)) return undefined
   return value as unknown as BoardSnapshot
@@ -130,6 +144,10 @@ function sameFingerprints(a: CheckoutFingerprints, b: CheckoutFingerprints): boo
  */
 export async function saveBoardSnapshot(snapshot: BoardSnapshot, prior?: BoardSnapshot): Promise<boolean> {
   if (!snapshotMateriallyChanged(snapshot, prior)) return false
+  // The cache is private state: create its directory owner-only here, like the
+  // rest of Convoy's state (workspace.ts), instead of letting the mode-less
+  // mkdir inside writeJsonFile create it world-readable.
+  await mkdir(boardCacheDir(), { recursive: true, mode: 0o700 })
   await writeJsonFile(boardCachePath(snapshot.commonDir), snapshot, { mode: 0o600 })
   return true
 }

@@ -310,6 +310,42 @@ describe("assembleControlBoard work bounding", () => {
     expect(accessible.every((worktree) => worktree.activity?.kind === "known")).toBe(true)
   })
 
+  test("a runs-unchanged cycle with one changed checkout still reads run history once", async () => {
+    const fixture = await createFixtureRepo({
+      worktrees: [
+        { name: "a", branch: "feat/a" },
+        { name: "b", branch: "feat/b" },
+      ],
+    })
+    fixtures.push(fixture)
+    const aPath = await physical(fixture.worktrees["a"]!)
+    const bPath = await physical(fixture.worktrees["b"]!)
+    let reads = 0
+    const first = await assembleControlBoard(fixture.root, {
+      listRuns: async () => {
+        reads++
+        return []
+      },
+    })
+    expect(reads).toBe(1)
+
+    reads = 0
+    const second = await assembleControlBoard(fixture.root, {
+      listRuns: async () => {
+        reads++
+        return []
+      },
+      // The run-history fingerprint is unchanged, so unchanged checkouts reuse
+      // prior activity; only the changed checkout requests the shared read.
+      skipRunHistory: true,
+      fingerprints: { [aPath]: "a-2", [bPath]: "b-1" },
+      reuse: { board: first, fingerprints: { [aPath]: "a-1", [bPath]: "b-1" } },
+    })
+    expect(reads).toBe(1)
+    expect(second.worktrees.find((worktree) => worktree.path === aPath)?.activity?.kind).toBe("known")
+    expect(second.worktrees.find((worktree) => worktree.path === bPath)?.activity?.kind).toBe("known")
+  })
+
   test("checkouts are observed concurrently under the configured bound", async () => {
     const fixture = await createFixtureRepo({
       worktrees: [

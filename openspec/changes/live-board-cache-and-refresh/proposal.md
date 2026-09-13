@@ -26,5 +26,5 @@ Opening Home recomputes every observation synchronously and blocks the first pai
 ## Impact
 
 - Code: new `src/board-cache.ts` (storage + refresh source) and `src/board-refresh.ts` (fingerprint + scheduler), plus changes to `src/control-board.ts`, `src/task-counts.ts`, `src/checkout-openspec.ts`, `src/worktree-observations.ts`, `src/home-tui.ts`, and the Home session/loop in `src/cli.ts`. `src/repo-store.ts` supplies the atomic/typed storage primitives; `src/session-hints.ts` informs within-session selection continuity.
-- New persisted state: a disposable board cache under `~/.convoy/cache/<repo-key>/`, versioned and safely ignorable. No dependency changes.
+- New persisted state: a disposable board cache under `~/.convoy/cache/board/<repo-key>.json`, versioned and safely ignorable. No dependency changes.
 - Tests: `test/control-board.test.ts`, `test/home-tui.test.ts`, and new coverage for the cache, fingerprint, scheduler, and refresh indicator.

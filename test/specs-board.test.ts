@@ -474,4 +474,48 @@ describe("specs board background refresh", () => {
       await rm(home, { recursive: true, force: true })
     }
   })
+
+  test("an explicit refresh during an in-flight cycle is replayed as a trailing forced cycle", async () => {
+    const rows = [worktree({ path: mainDir, branch: "main", main: true })]
+    const snapshot = {
+      schemaVersion: 1,
+      repoKey: "k",
+      commonDir: "/common",
+      builtAt: Date.now(),
+      board: board(rows),
+      fingerprints: {},
+    }
+    const resolvers: Array<() => void> = []
+    let calls = 0
+    const source = {
+      refresh() {
+        calls += 1
+        return new Promise((resolve) => {
+          resolvers.push(() => resolve({ snapshot, refreshed: true }))
+        })
+      },
+      cached: async () => undefined,
+      current: () => undefined,
+      lastError: () => undefined,
+      lastRunEntries: () => undefined,
+    } as unknown as BoardSource
+    const testRenderer = await createTestRenderer({ width: 120, height: 40 })
+    const instance = new SpecsBrowser(testRenderer.renderer, viewWith(rows), async () => "copied-native", undefined, undefined, {
+      source,
+      pollMs: 100_000,
+    })
+    await testRenderer.renderOnce()
+    expect(calls).toBe(1)
+    testRenderer.renderer.keyInput.emit("keypress", keyEvent("r"))
+    await Bun.sleep(5)
+    // The explicit refresh is remembered, not dropped, while the cycle runs.
+    expect(calls).toBe(1)
+    resolvers[0]!()
+    await Bun.sleep(10)
+    await testRenderer.renderOnce()
+    expect(calls).toBe(2)
+    testRenderer.renderer.keyInput.emit("keypress", keyEvent("c", { ctrl: true }))
+    await instance.result.catch(() => {})
+    resolvers[1]?.()
+  })
 })
