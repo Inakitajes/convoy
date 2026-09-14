@@ -108,6 +108,15 @@ export type ProgressDiffSummary = {
   deletions: number
 }
 
+/** Harness classification retained for a session error without changing activity text. */
+export type SessionErrorSignal = {
+  name: string
+  message: string
+  statusCode?: number
+  isRetryable?: boolean
+  providerID?: string
+}
+
 export type PermissionReply = "once" | "always" | "reject"
 
 /**
@@ -356,7 +365,7 @@ export type ProgressUI = {
   phaseDiff(name: string, summary: ProgressDiffSummary): void
   phaseCompleted(name: string, detail?: string): void
   phaseSkipped(name: string): void
-  phaseFailed(name: string, detail?: string): void
+  phaseFailed(name: string, detail?: string, failure?: SessionErrorSignal): void
   /** Replays a phase finished in a previous run (--resume) with its real duration, cost, and session. */
   phaseRestored(name: string, snapshot: ProgressPhaseSnapshot): void
   /** When present, the UI resolves permission prompts itself (no terminal fallback). */
