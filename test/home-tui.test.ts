@@ -636,6 +636,43 @@ describe("selection surface", () => {
     }
   })
 
+  test.each(["MERGED", "merged"])("a linked %s PR turns the live worktree marker violet after observation", async (state) => {
+    let answer: ((pr: PrObservation) => void) | undefined
+    const session = await openHome({
+      observePr: (entry) => entry.path === wtPath
+        ? new Promise<PrObservation>((resolve) => { answer = resolve })
+        : Promise.resolve({ availability: "known", observedAt: 0 }),
+    })
+    const marker = () => {
+      const row = session.captureSpans().lines.find((line) => line.spans.some((span) => span.text.includes("add-widget")))!
+      return row.spans.find((span) => span.text.includes("◇"))!
+    }
+    try {
+      session.press("down")
+      session.press("down")
+      await session.renderOnce()
+      expect(sameColor(marker().bg, paletteColor(theme.green))).toBe(true)
+      answer!({ availability: "known", pr: { number: 12, state, title: "Widget", url: "https://example.test/pr/12" }, observedAt: 0 })
+      await Bun.sleep(10)
+      await session.renderOnce()
+      expect(sameColor(marker().bg, paletteColor(theme.magenta))).toBe(true)
+      expect(frameOf(session)).toContain(`#12 ${state}`)
+      session.press("up")
+      await session.renderOnce()
+      expect(sameColor(marker().fg, paletteColor(theme.magenta))).toBe(true)
+      // A fresh landing is checking, not proof that the previous PR is still merged.
+      session.press("down")
+      await session.renderOnce()
+      expect(sameColor(marker().bg, paletteColor(theme.green))).toBe(true)
+      answer!({ availability: "unknown", reason: "query failed", observedAt: 1 })
+      await Bun.sleep(10)
+      await session.renderOnce()
+      expect(sameColor(marker().bg, paletteColor(theme.green))).toBe(true)
+    } finally {
+      await closeHome(session)
+    }
+  })
+
   test("the detail's selected action rides the accent fill behind an inverted navy marker", async () => {
     const session = await openHome({ height: 60 })
     try {

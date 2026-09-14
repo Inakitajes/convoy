@@ -30,7 +30,6 @@ import { loadAgentPrompt } from "../src/agents"
 import {
   builtInAgents,
   builtInPipelines,
-  defaultAdversarialModel,
   defaultGptModel,
   defaultGptVariant,
   defaultImplementAuditModel,
@@ -498,7 +497,7 @@ describe("pipeline selection", () => {
     expect(selectPipelineSpec(config, "implement").steps).toEqual(["tests"])
     expect(selectPipelineSpec(undefined, "implement").steps.length).toBeGreaterThan(1)
     expect(() => selectPipelineSpec(config, "ghost")).toThrow(
-      'unknown pipeline "ghost" (available: astra, fixer, full-cycle, hunter, hunter-max, implement, implement-lite, quick, review, review-cc, review-lite, ship)',
+      'unknown pipeline "ghost" (available: fixer, full-cycle, hunter, implement, quick, review, ship)',
     )
     expect(() => selectPipelineSpec(config, "ghost")).toThrow(ConfigError)
   })
@@ -1060,8 +1059,8 @@ describe("serialization", () => {
     const template = defaultConfigTemplate()
     expect(template.defaults.model).toBe(`${defaultGptModel}#${defaultGptVariant}`)
     const steps = template.pipelines["full-cycle"]!.steps
-    expect(steps.find((step) => typeof step !== "string" && !isParallelSpec(step) && !isHumanStepSpec(step) && !isGoalStepSpec(step) && step.agent === "design")).toEqual({ agent: "design", model: defaultImplementReviewModel, advisor: false })
-    expect(steps.find((step) => typeof step !== "string" && !isParallelSpec(step) && !isHumanStepSpec(step) && !isGoalStepSpec(step) && step.agent === "implementer")).toEqual({ agent: "implementer", model: "openrouter/z-ai/glm-5.3-flash#high", advisor: "openrouter/x-ai/grok-4.6#high", reports: "none" })
+    expect(steps.find((step) => typeof step !== "string" && !isParallelSpec(step) && !isHumanStepSpec(step) && !isGoalStepSpec(step) && step.agent === "design")).toEqual({ agent: "design", model: defaultImplementReviewModel, advisor: "openai/gpt-6-astra#xhigh" })
+    expect(steps.find((step) => typeof step !== "string" && !isParallelSpec(step) && !isHumanStepSpec(step) && !isGoalStepSpec(step) && step.agent === "implementer")).toEqual({ agent: "implementer", model: defaultImplementerModel, advisor: defaultImplementAdvisorModel, reports: "none" })
     const reparsed = parse(serializeConvoyConfig(template))
     expect(reparsed.defaults).toEqual(template.defaults)
     expect(reparsed.pipelines).toEqual(template.pipelines)
@@ -1156,7 +1155,7 @@ describe("default config init", () => {
 
     expect(body).toContain("# maxConcurrentAgents: 30")
     expect(body).toContain("# baseRef: main")
-    expect(body).toContain("# pipeline: implement")
+    expect(body).toContain("# pipeline: full-cycle")
     expect(body).toContain("# branchNameModel: openrouter/deepseek/deepseek-v4-flash-0731")
     expect(body).toContain("# hooks:")
     expect(body).toContain("#           command: gh pr create --fill")
@@ -1177,10 +1176,9 @@ describe("default config init", () => {
     expect(config.pipelines.implement?.steps).toEqual([
       { agent: "implementer", model: defaultImplementerModel, advisor: defaultImplementAdvisorModel, reports: "none" },
       { agent: "patterns", model: defaultImplementAuditModel, advisor: false },
-      { agent: "security", model: defaultImplementAuditModel, advisor: false },
+      { agent: "security", model: defaultImplementReviewModel, advisor: false },
       { agent: "design", model: defaultImplementReviewModel, advisor: false },
       { agent: "tests", model: defaultImplementAuditModel, advisor: false, reports: "none" },
-      { agent: "adversarial", model: defaultAdversarialModel, advisor: false, reports: "all" },
       { agent: "run-report", model: defaultRunReportModel, advisor: false, reports: "all", diff: false },
     ])
     expect(config.permissions).toEqual({ allow: [], deny: [] })

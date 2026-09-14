@@ -8,39 +8,36 @@ export const defaultOpusModel = "anthropic/claude-opus-5"
 
 const fallbackModel = `${defaultGptModel}#${defaultGptVariant}`
 
-/** Lower-case replacement: GLM 5.2 remains the hunter pipeline's cheap track; the audits of `implement` now run on GLM 5.3 high. */
-const glmModel = "openrouter/z-ai/glm-5.2"
-/** GLM 5.3 with reasoning raised: the audit phases of `implement`, the cheap scorer legs, and the low-cost tracks of `hunter`/`hunter-max`. */
+/** GLM 5.3 with reasoning raised: the advisors, scorer legs, and hunter audit tracks. */
 const glm53HighModel = "openrouter/z-ai/glm-5.3#high"
-/** Opus reached through OpenRouter, so the hunter fan-outs share one provider across every track. */
+/** Opus reached through OpenRouter for shared agent defaults and hunter audits. */
 const opusViaOpenRouter = "openrouter/anthropic/claude-opus-5"
-/** Grok 4.6 high: the default design and adversarial pass, and the second leg of every review/ship fan-out. */
+/** Grok 4.6 high: the review and ship scoring, plus one hunter audit track. */
 const grokModel = "openrouter/x-ai/grok-4.6#high"
 const kimiModel = "openrouter/moonshotai/kimi-k3"
-/** DeepSeek V4 Flash 0731 on OpenRouter: the cheap implementer for `implement-lite`, review-lite's report, and ship's goal fixer. */
+/** DeepSeek V4 Flash 0731 on OpenRouter: the writer for `implement`, review's report, and the goal fixers. */
 const deepseekModel = "openrouter/deepseek/deepseek-v4-flash-0731"
-/** DeepSeek V4 Flash on OpenRouter with reasoning raised: same model the user's `modelRouting.overrides` maps local NaN to. */
+/** DeepSeek V4 Flash on OpenRouter with reasoning raised: used for writing, flash audits and run recaps. */
 const deepseekHighModel = `${deepseekModel}#high`
-/** GPT 5.6 Sol: the advisor `implement` consults, and at xhigh the consensus reporter for the review/ship/hunter pipelines. */
+/** GPT 5.6 Sol: the consensus reporter for full-cycle and the hunter pipelines at xhigh. */
 const solModel = "openai/gpt-5.6-sol"
 const solXhighModel = `${solModel}#xhigh`
-/** GLM 5.3 Flash with reasoning raised: the low-cost code-writer for `implement-lite` and the design/fixer legs of the goal pipelines. */
+/** GLM 5.3 Flash with reasoning raised: the security and design model for the implementation pipelines. */
 const glm53FlashHighModel = "openrouter/z-ai/glm-5.3-flash#high"
-/** GPT 6 Astra at extra high: the advisor the goal pipelines (full-cycle/astra) and the fixer consult where Grok or Sol used to advise. */
+/** GPT 6 Astra at extra high: the advisor the goal pipelines and the fixer consult where Grok or Sol used to advise. */
 const astraXhighModel = "openai/gpt-6-astra#xhigh"
 
 // Per-step models the built-in `implement` pipeline pins. Exported so `convoy init`'s
 // inlined copy of that pipeline stays in sync with the built-in it claims to mirror.
-export const defaultImplementerModel = fallbackModel
-/** The model `implement`'s implementer consults at its decision points. */
-export const defaultImplementAdvisorModel = solXhighModel
-export const defaultImplementAuditModel = glm53HighModel
-export const defaultImplementReviewModel = grokModel
-export const defaultAdversarialModel = grokModel
+export const defaultImplementerModel = deepseekHighModel
+/** The model the implementation step consults at its decision points. */
+export const defaultImplementAdvisorModel = astraXhighModel
+export const defaultImplementAuditModel = deepseekHighModel
+export const defaultImplementReviewModel = glm53FlashHighModel
 /** The model the implement pipelines' closing run recap runs on. */
 export const defaultRunReportModel = deepseekHighModel
 
-/** The six specialty audit tracks shared by `hunter` and `hunter-max`; each maps to a `hunter-<track>` agent. */
+/** The six specialty audit tracks of `hunter`; each maps to a `hunter-<track>` agent. */
 const hunterTracks = ["correctness", "memory", "performance", "security", "reliability", "supply-chain"] as const
 
 /** Legacy reserved step keyword: pauses the pipeline for a manual human gate. */
@@ -84,7 +81,7 @@ export const builtInAgents: readonly AgentSpec[] = [
   {
     name: "adversarial-reviewer",
     description: "Final adversarial reviewer before PR creation",
-    defaultModel: defaultOpusModel,
+    defaultModel: opusViaOpenRouter,
     temperature: 0.1,
     builtIn: true,
   },
@@ -98,7 +95,7 @@ export const builtInAgents: readonly AgentSpec[] = [
     temperature: 0.1,
     readOnly: true,
     // Pipelines that want this step to run the repo's checks set verify: true
-    // on the step (review / review-lite / review-cc), not on this catalogue entry.
+    // on the step (review / ship), not on this catalogue entry.
     builtIn: true,
   },
   {
@@ -128,7 +125,7 @@ export const builtInAgents: readonly AgentSpec[] = [
   {
     name: "review-adversary",
     description: "Adversarial reviewer that validates and filters audit findings before fixes",
-    defaultModel: defaultOpusModel,
+    defaultModel: opusViaOpenRouter,
     temperature: 0.1,
     readOnly: true,
     builtIn: true,
@@ -151,7 +148,7 @@ export const builtInAgents: readonly AgentSpec[] = [
   {
     name: "review-report",
     description: "Synthesizes parallel audits into one prioritized, report-only findings summary",
-    defaultModel: defaultOpusModel,
+    defaultModel: grokModel,
     temperature: 0.1,
     readOnly: true,
     builtIn: true,
@@ -161,7 +158,7 @@ export const builtInAgents: readonly AgentSpec[] = [
     name: "sync-with-base",
     description:
       "Merges the advanced base branch into the current branch, resolving real and semantic conflicts while preserving both the branch's behaviour and the incoming base changes",
-    defaultModel: defaultOpusModel,
+    defaultModel: opusViaOpenRouter,
     temperature: 0.1,
     builtIn: true,
   },
@@ -170,7 +167,7 @@ export const builtInAgents: readonly AgentSpec[] = [
   {
     name: "implementation-triage",
     description: "Synthesizes parallel pattern/security/adversarial findings into one action plan",
-    defaultModel: defaultOpusModel,
+    defaultModel: opusViaOpenRouter,
     temperature: 0.1,
     readOnly: true,
     builtIn: true,
@@ -178,7 +175,7 @@ export const builtInAgents: readonly AgentSpec[] = [
   {
     name: "implementation-final-review",
     description: "Final audit-only adversarial review of the whole PR; classifies blocking vs non-blocking findings",
-    defaultModel: defaultOpusModel,
+    defaultModel: opusViaOpenRouter,
     temperature: 0.1,
     readOnly: true,
     builtIn: true,
@@ -193,7 +190,7 @@ export const builtInAgents: readonly AgentSpec[] = [
   {
     name: "implementation-validator",
     description: "Final no-edit validator for applied blocking-finding fixes",
-    defaultModel: defaultOpusModel,
+    defaultModel: opusViaOpenRouter,
     temperature: 0.1,
     readOnly: true,
     builtIn: true,
@@ -221,7 +218,7 @@ export const builtInAgents: readonly AgentSpec[] = [
     readOnly: true,
     builtIn: true,
   },
-  // hunter / hunter-max: six specialty audit tracks fanned across models, then one consensus report.
+  // Hunter: six specialty audit tracks fanned across models, then one consensus report.
   {
     name: "hunter-correctness",
     description: "Finds concrete functional, logic, state-management, and concurrency defects",
@@ -293,7 +290,7 @@ export const builtInAgents: readonly AgentSpec[] = [
   {
     name: "quality-scorer",
     description: "Scores an implementation against the quality rubric: six weighted dimensions, absolute severity, evidence-cited, machine-readable output",
-    defaultModel: defaultOpusModel,
+    defaultModel: grokModel,
     temperature: 0.1,
     readOnly: true,
     builtIn: true,
@@ -301,7 +298,7 @@ export const builtInAgents: readonly AgentSpec[] = [
   {
     name: "quality-score-report",
     description: "Consolidates independent quality-scorer reports into one consensus score, verifies the load-bearing claims by running the checks, and emits the authoritative machine-readable score",
-    defaultModel: defaultOpusModel,
+    defaultModel: grokModel,
     temperature: 0.1,
     readOnly: true,
     builtIn: true,
@@ -462,114 +459,27 @@ export const verifyAgentSuffix = "__verify"
 export const defaultPipelineName = "full-cycle"
 
 export const builtInPipelines: Record<string, PipelineSpec> = {
-  // The audits are pinned to GLM 5.3 high rather than left to inherit the run's
-  // model: they read a diff that already exists, which is the work GLM does at
-  // parity with the expensive models, so the budget belongs in the phase that
-  // writes (Terra xhigh, advised) and the one that judges (Grok 4.6 high).
-  //
-  // The advisor←executor pattern is the default, aimed at the one phase that
-  // earns it: Terra xhigh writes the code and consults Sol xhigh at its decision
-  // points, pairing the two GPT 5.6 variants that disagree most usefully. Every
-  // other phase runs unadvised, so the implementation step is where the second
-  // opinion is spent. Measurement deliberately lives in `ship`, not here: this
-  // pipeline's job is a first draft worth shaping by hand, and grading a draft
-  // you already intend to rework buys nothing.
+  // Implementation follows the same model choices as full-cycle, but closes
+  // with a recap instead of running the quality loop. Only the writer is advised.
   implement: {
-    description: "Advised implementation on Terra xhigh consulting Sol, then pattern/security audits, design polish, tests, adversarial review, and a one-page run recap",
+    description: "Advised implementation on DeepSeek V4 Flash consulting Astra 6, then pattern/security audits, design polish, tests, and a one-page run recap",
     steps: [
       { agent: "implementer", model: defaultImplementerModel, advisor: defaultImplementAdvisorModel, reports: "none" },
-      // `false` rather than an absent key: absent would inherit a project's
-      // defaults.advisor and quietly re-advise these phases.
       { agent: "patterns", model: defaultImplementAuditModel, advisor: false },
-      { agent: "security", model: defaultImplementAuditModel, advisor: false },
+      { agent: "security", model: glm53FlashHighModel, advisor: false },
       { agent: "design", model: defaultImplementReviewModel, advisor: false },
       { agent: "tests", model: defaultImplementAuditModel, advisor: false, reports: "none" },
-      { agent: "adversarial", model: defaultAdversarialModel, advisor: false, reports: "all" },
-      // The recap is an index, not an audit: read-only, no diff (the diff is
-      // what tempts a summarizer into re-reviewing), every report attached, and
-      // the cheapest model in the roster — all the substance already exists in
-      // the reports it distills.
       { agent: "run-report", model: defaultRunReportModel, advisor: false, reports: "all", diff: false },
     ],
   },
-  // implement's shape on low-cost models, advisor included: the second opinion
-  // is what makes a cheap implementer worth running, so it is the last thing to
-  // drop. DeepSeek V4 Flash (OpenRouter) writes instead of GLM, and Grok advises
-  // rather than a second GLM: the cross-vendor disagreement costs no new provider.
-  "implement-lite": {
-    description:
-      "Advised lite: GLM 5.3 Flash implements consulting Grok 4.6; patterns, security and tests audit on DeepSeek V4 Flash advised by GLM 5.3 high. Design stays on Grok 4.6 unadvised and adversarial on GLM 5.3. Closes with an extractive one-page run recap (run-report).",
-    steps: [
-      { agent: "implementer", model: glm53FlashHighModel, advisor: grokModel, reports: "none" },
-      { agent: "patterns", model: deepseekHighModel, advisor: glm53HighModel },
-      { agent: "security", model: deepseekHighModel, advisor: glm53HighModel },
-      { agent: "design", model: grokModel, advisor: false },
-      { agent: "tests", model: deepseekHighModel, advisor: glm53HighModel, reports: "none" },
-      { agent: "adversarial", model: glm53HighModel, advisor: false, reports: "all" },
-      { agent: "run-report", model: deepseekHighModel, advisor: false, reports: "all", diff: false },
-    ],
-  },
-  // Full Cycle: implement-lite's writing phases (implementer, patterns, security,
-  // design, tests), closed by the terminal goal step that owns the whole loop:
-  // it measures FIRST (two independent quality-scorers + a verified consensus),
-  // and only under 90 does it iterate — the fixer applies exactly the reported
-  // gaps, re-scores, and stops at 90, after 3 fix iterations, or on a 3-round
-  // score plateau. All scoring lives inside the goal step's measure fragment, so
-  // the initial score and every re-score run through the same declared panel.
+  // The default combines implementation with a terminal, independently scored goal loop.
   "full-cycle": {
     description:
-      "Full Cycle: implement-lite's writing phases, then a terminal goal step that measures with two independent quality-scorers and a verified consensus, and drives fix iterations until the score clears 90.",
+      "Implement with DeepSeek V4 Flash and GLM 5.3 Flash, advised by Astra 6 and GLM 5.3, then measure with Grok and GLM and a verified Sol consensus; fix gaps up to five times to reach 90/100.",
     steps: [
-      { agent: "implementer", model: glm53FlashHighModel, advisor: grokModel, reports: "none" },
+      { agent: "implementer", model: deepseekHighModel, advisor: astraXhighModel, reports: "none" },
       { agent: "patterns", model: deepseekHighModel, advisor: glm53HighModel },
-      { agent: "security", model: deepseekHighModel, advisor: glm53HighModel },
-      { agent: "design", model: grokModel, advisor: false },
-      { agent: "tests", model: deepseekHighModel, advisor: glm53HighModel, reports: "none" },
-      {
-        goal: {
-          target: 90,
-          improve: {
-            briefStep: "fix",
-            steps: [
-              // The directed fixer: applies exactly the gaps the previous
-              // scoring round reported, which arrive as its per-step brief.
-              { agent: "goal-fixer", name: "fix", model: deepseekHighModel, advisor: grokModel, reports: "none", diff: true, prdHistory: true },
-            ],
-          },
-          measure: {
-            steps: [
-              {
-                parallel: [
-                  // The re-scorers stay blind to the previous score: no reports
-                  // at all (they grade the artifact, not the run's history), but
-                  // they still get the original PRD via prdHistory and the
-                  // current diff for the rubric's `prd` dimension.
-                  { agent: "quality-scorer", name: "score", models: [grokModel, glm53HighModel], reports: "none", diff: true, prdHistory: true },
-                ],
-              },
-              // The consensus sees only the fresh scorer reports, never the
-              // fixer's, so its measurement cannot anchor on the number it is
-              // reconciling; the original PRD is attached so disagreements on
-              // the `prd` dimension can be judged against the requirements.
-              { agent: "quality-score-report", name: "score-report", model: glm53HighModel, reports: ["score"], verify: true, diff: true, prdHistory: true },
-            ],
-          },
-        },
-      },
-    ],
-  },
-  // Astra: full-cycle's shape, but the advisor is Astra 6 (GPT-6) in extra-high
-  // mode wherever full-cycle used Grok 4.6 (implementer and goal fixer), and the
-  // design phase joins the advised set on GLM 5.3 Flash. The fixer runs on GLM
-  // 5.3 Flash (instead of DeepSeek) advised by Astra 6, with up to 5 fix rounds.
-  // Scoring (measure fragment) is unchanged.
-  astra: {
-    description:
-      "Astra: full-cycle's writing phases, then a terminal goal step that measures with two independent quality-scorers and a verified consensus, and drives fix iterations until the score clears 90. Advisor is Astra 6 (extra high) wherever full-cycle used Grok 4.6; design is advised on GLM 5.3 Flash; the fixer runs on GLM 5.3 Flash advised by Astra 6 with up to 5 fix rounds.",
-    steps: [
-      { agent: "implementer", model: glm53FlashHighModel, advisor: astraXhighModel, reports: "none" },
-      { agent: "patterns", model: deepseekHighModel, advisor: glm53HighModel },
-      { agent: "security", model: deepseekHighModel, advisor: glm53HighModel },
+      { agent: "security", model: glm53FlashHighModel, advisor: glm53HighModel },
       { agent: "design", model: glm53FlashHighModel, advisor: astraXhighModel },
       { agent: "tests", model: deepseekHighModel, advisor: glm53HighModel, reports: "none" },
       {
@@ -579,11 +489,11 @@ export const builtInPipelines: Record<string, PipelineSpec> = {
           improve: {
             briefStep: "fix",
             steps: [
-              // The directed fixer, on GLM 5.3 Flash advised by Astra 6 (extra
+              // The directed fixer, on DeepSeek V4 Flash advised by Astra 6 (extra
               // high). It alone receives the score brief (by step name). diff:
               // true is load-bearing: as the fragment's first step it would
               // otherwise default to no diff.
-              { agent: "goal-fixer", name: "fix", model: glm53FlashHighModel, advisor: astraXhighModel, reports: "none", diff: true, prdHistory: true },
+              { agent: "goal-fixer", name: "fix", model: deepseekHighModel, advisor: astraXhighModel, reports: "none", diff: true, prdHistory: true },
             ],
           },
           measure: {
@@ -600,47 +510,15 @@ export const builtInPipelines: Record<string, PipelineSpec> = {
               // The consensus sees only the fresh scorer reports, never the
               // fixer's, so its measurement cannot anchor on the number it is
               // reconciling.
-              { agent: "quality-score-report", name: "score-report", model: glm53HighModel, reports: ["score"], verify: true, diff: true, prdHistory: true },
+              { agent: "quality-score-report", name: "score-report", model: solXhighModel, reports: ["score"], verify: true, diff: true, prdHistory: true },
             ],
           },
         },
       },
     ],
   },
-  // Report-only review + the measurement layer: after the parallel audits, two
-  // independent quality-scorers grade the same diff against the rubric and a
-  // consensus step reconciles and verifies. The score block is the deliverable
-  // alongside the findings report — a review that ends in a findings list ends
-  // in an open-ended question, so every review here also ends in a number.
+  // Report-only audits on two flash models, followed by independent scoring.
   review: {
-    description:
-      "Report-only PR review plus a verified quality score: scope, parallel bug/clean-code/security audits across two models, a prioritized findings report, then two independent quality-scorers and a consensus step. Makes no changes.",
-    defaultPrompt: "Review the current branch against its base and report prioritized findings with a verified quality score.",
-    suggestedPrompts: ["Review the open PR for this branch", "Review only the last commit's diff"],
-    steps: [
-      { agent: "review-scope", name: "scope", model: grokModel, reports: "none", diff: true, verify: true, prdHistory: true },
-      {
-        parallel: [
-          { agent: "clean-code-auditor", name: "clean-code", models: [fallbackModel, grokModel], reports: ["scope"] },
-          { agent: "security-reviewer", name: "security", models: [fallbackModel, grokModel], reports: ["scope"] },
-          { agent: "bug-auditor", name: "bugs", models: [fallbackModel, grokModel], reports: ["scope"] },
-        ],
-      },
-      { agent: "review-report", name: "report", model: grokModel, reports: "all" },
-      {
-        parallel: [
-          { agent: "quality-scorer", name: "score", models: [solXhighModel, grokModel], reports: "all", prdHistory: true },
-        ],
-      },
-      { agent: "quality-score-report", name: "score-report", model: solXhighModel, reports: "all", verify: true, prdHistory: true },
-    ],
-  },
-  // review's shape on low-cost models. The scorer models are pinned rather
-  // than left to the agent defaults precisely because those defaults are Opus:
-  // omitting them here would quietly reintroduce the cost this pipeline exists
-  // to avoid. GLM 5.3 scopes and reconciles the score, DeepSeek V4 Flash 0731
-  // writes the report, and the fan-outs pair GLM 5.3 with Grok 4.6.
-  "review-lite": {
     description:
       "Report-only PR review on ultra-cheap models: scope, parallel audits (DeepSeek V4 Flash + GLM 5.3 Flash) and report on flash models; the scoring uses GLM 5.3 high + Grok 4.6 high and the score consensus stays on GLM 5.3 high. Makes no changes.",
     defaultPrompt: "Review the current branch against its base and report prioritized findings with a verified quality score.",
@@ -680,8 +558,7 @@ export const builtInPipelines: Record<string, PipelineSpec> = {
   // selectable, and resolved with an empty report namespace so every
   // measurement is independent of the round before it.
   //
-  // Every phase runs on OpenRouter models (never a machine-local provider
-  // alias like `nan/…`), so the built-in works on any authenticated install.
+  // Models use public OpenRouter and OpenAI provider IDs.
   //
   // Two things it expects from config rather than shipping itself, because both
   // are machine-local. Conflict resolution needs `git merge*`, `git add*` and
@@ -770,46 +647,7 @@ export const builtInPipelines: Record<string, PipelineSpec> = {
       { agent: "fixer-validator", name: "validation", model: fallbackModel, reports: ["reproduction", "fixes"], verify: true },
     ],
   },
-  "review-cc": {
-    description:
-      "Report-only PR review: Terra scope, parallel audits on Terra + Claude Code (subscription), then one prioritized findings report. Makes no changes.",
-    defaultPrompt: "Review the current branch against its base and report prioritized findings.",
-    suggestedPrompts: ["Review the open PR for this branch", "Review only the last commit's diff"],
-    steps: [
-      { agent: "review-scope", name: "scope", model: fallbackModel, reports: "none", diff: true, verify: true, prdHistory: true },
-      {
-        parallel: [
-          { agent: "clean-code-auditor", name: "clean-code", model: fallbackModel, reports: ["scope"] },
-          { agent: "clean-code-auditor", name: "clean-code-cc", model: "opus", runner: "claude-code", reports: ["scope"] },
-          { agent: "security-reviewer", name: "security", model: fallbackModel, reports: ["scope"] },
-          { agent: "security-reviewer", name: "security-cc", model: "opus", runner: "claude-code", reports: ["scope"] },
-          { agent: "bug-auditor", name: "bugs", model: fallbackModel, reports: ["scope"] },
-          { agent: "bug-auditor", name: "bugs-cc", model: "opus", runner: "claude-code", reports: ["scope"] },
-        ],
-      },
-      { agent: "review-report", name: "report", model: solXhighModel, reports: "all" },
-    ],
-  },
   hunter: {
-    description:
-      "Balanced report-only audit: Terra plus one specialty model on each of six audit tracks, followed by a Sol xhigh consensus report. Makes no changes.",
-    defaultPrompt: "Audit this branch across correctness, memory, performance, security, reliability, and supply-chain tracks.",
-    suggestedPrompts: ["Audit the entire repository", "Audit only files changed since the base"],
-    steps: [
-      {
-        parallel: [
-          { agent: "hunter-correctness", models: [fallbackModel, glm53HighModel], reports: "none", diff: true },
-          { agent: "hunter-memory", models: [fallbackModel, grokModel], reports: "none", diff: true },
-          { agent: "hunter-performance", models: [fallbackModel, grokModel], reports: "none", diff: true },
-          { agent: "hunter-security", models: [fallbackModel, kimiModel], reports: "none", diff: true },
-          { agent: "hunter-reliability", models: [fallbackModel, glmModel], reports: "none", diff: true },
-          { agent: "hunter-supply-chain", models: [fallbackModel, glmModel], reports: "none", diff: true },
-        ],
-      },
-      { agent: "hunter-report", model: solXhighModel, reports: "previous", diff: true },
-    ],
-  },
-  "hunter-max": {
     description:
       "Maximum-coverage report-only audit: all five API models on each of six audit tracks, followed by a Sol xhigh consensus report. Makes no changes.",
     defaultPrompt: "Audit this branch across correctness, memory, performance, security, reliability, and supply-chain tracks with maximum coverage.",
@@ -821,7 +659,7 @@ export const builtInPipelines: Record<string, PipelineSpec> = {
   },
 }
 
-/** Every hunter-max track runs the same five-model fan-out, so build the six steps instead of repeating the list. */
+/** Every hunter track runs the same five-model fan-out, so build the six steps instead of repeating the list. */
 function hunterMaxTracks(): AgentStepSpec[] {
   return hunterTracks.map((track) => ({
     agent: `hunter-${track}`,

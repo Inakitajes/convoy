@@ -93,7 +93,7 @@ describe("proposeCommitMessage", () => {
     expect(calls.prompts[0]).toMatchObject({
       sessionID: "session-1",
       directory: "/repo",
-      model: { providerID: "openrouter", modelID: "z-ai/glm-5.3-flash" },
+      model: { providerID: "openai", modelID: "gpt-5.6-luna" },
       agent: "convoy-commit-writer",
       tools: { read: true, list: true, glob: true, grep: true, webfetch: false, write: false, edit: false, bash: false },
     })
@@ -559,8 +559,8 @@ describe("defaultCommitMessageModel", () => {
   // Task 1.1: the id must survive the same parsing/resolution path any run
   // model takes, so `finish` (and close) inherit it without a special case.
   test("the pinned writer model parses through the run model path", () => {
-    expect(defaultCommitMessageModel).toBe("openrouter/z-ai/glm-5.3-flash")
-    expect(parseModel(defaultCommitMessageModel)).toEqual({ providerID: "openrouter", modelID: "z-ai/glm-5.3-flash" })
+    expect(defaultCommitMessageModel).toBe("openai/gpt-5.6-luna")
+    expect(parseModel(defaultCommitMessageModel)).toEqual({ providerID: "openai", modelID: "gpt-5.6-luna" })
   })
 })
 

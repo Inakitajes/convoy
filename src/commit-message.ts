@@ -51,7 +51,7 @@ export type CommitMessageProposal = {
 }
 
 /** Cheap, fast model used to write the squashed commit message (run compaction and `close` share it). */
-export const defaultCommitMessageModel = "openrouter/z-ai/glm-5.3-flash"
+export const defaultCommitMessageModel = "openai/gpt-5.6-luna"
 
 /** Registered so the writer replaces opencode's default coding agent instead of merely appending to it. */
 const writerAgentName = "convoy-commit-writer"

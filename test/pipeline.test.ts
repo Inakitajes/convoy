@@ -3,7 +3,6 @@ import { describe, expect, test } from "bun:test"
 import {
   builtInAgents,
   builtInPipelines,
-  defaultAdversarialModel,
   defaultImplementAuditModel,
   defaultImplementerModel,
   defaultImplementReviewModel,
@@ -48,10 +47,10 @@ describe("model shorthand", () => {
 })
 
 describe("built-in implement pipeline", () => {
-  test("matches the historical six phases plus the closing run recap", () => {
+  test("runs five writing phases and the closing run recap", () => {
     const pipeline = implement()
 
-    expect(stepNames(pipeline)).toEqual(["implementer", "patterns", "security", "design", "tests", "adversarial", "run-report"])
+    expect(stepNames(pipeline)).toEqual(["implementer", "patterns", "security", "design", "tests", "run-report"])
     expect(pipeline.steps.some((step) => step.type === "human")).toBe(false)
   })
 
@@ -70,40 +69,32 @@ describe("built-in implement pipeline", () => {
     expect(steps.design?.inputFiles).toEqual(["prd.md", "reports/security.md"])
     expect(steps.tests?.inputFiles).toEqual(["prd.md"])
     expect(steps.tests?.inputDiff).toBe(true)
-    expect(steps.adversarial?.inputFiles).toEqual([
-      "prd.md",
-      "reports/implementer.md",
-      "reports/patterns.md",
-      "reports/security.md",
-      "reports/design.md",
-      "reports/tests.md",
-    ])
+
   })
 
-  test("pins Terra xhigh for implementation, GLM 5.3 high for the audits, and Grok 4.6 high for design and adversarial", () => {
+  test("pins the public DeepSeek and GLM Flash models for implementation and audits", () => {
     const byName = Object.fromEntries(
       implement()
         .steps.filter((step): step is AgentStep => step.type === "agent")
         .map((step) => [step.name, step]),
     )
 
-    expect(byName.implementer).toMatchObject({ model: "openai/gpt-5.6-terra", variant: "xhigh" })
-    expect(byName.patterns).toMatchObject({ model: "openrouter/z-ai/glm-5.3", variant: "high" })
-    expect(byName.security).toMatchObject({ model: "openrouter/z-ai/glm-5.3", variant: "high" })
-    expect(byName.design).toMatchObject({ model: "openrouter/x-ai/grok-4.6", variant: "high" })
-    expect(byName.tests).toMatchObject({ model: "openrouter/z-ai/glm-5.3", variant: "high" })
-    expect(byName.adversarial).toMatchObject({ model: "openrouter/x-ai/grok-4.6", variant: "high" })
+    expect(byName.implementer).toMatchObject({ model: "openrouter/deepseek/deepseek-v4-flash-0731", variant: "high" })
+    expect(byName.patterns).toMatchObject({ model: "openrouter/deepseek/deepseek-v4-flash-0731", variant: "high" })
+    expect(byName.security).toMatchObject({ model: "openrouter/z-ai/glm-5.3-flash", variant: "high" })
+    expect(byName.design).toMatchObject({ model: "openrouter/z-ai/glm-5.3-flash", variant: "high" })
+    expect(byName.tests).toMatchObject({ model: "openrouter/deepseek/deepseek-v4-flash-0731", variant: "high" })
   })
 
-  test("advises the implementation phase only: Sol xhigh at Terra's decision points", () => {
+  test("advises only the implementation phase with Astra xhigh", () => {
     const byName = Object.fromEntries(
       implement()
         .steps.filter((step): step is AgentStep => step.type === "agent")
         .map((step) => [step.name, step]),
     )
 
-    expect(byName.implementer).toMatchObject({ advisor: "openai/gpt-5.6-sol", advisorVariant: "xhigh" })
-    for (const name of ["patterns", "security", "design", "tests", "adversarial"]) {
+    expect(byName.implementer).toMatchObject({ advisor: "openai/gpt-6-astra", advisorVariant: "xhigh" })
+    for (const name of ["patterns", "security", "design", "tests"]) {
       expect(byName[name]?.advisor).toBeUndefined()
     }
     // Exactly one step carries the advisor cost.
@@ -124,8 +115,8 @@ describe("built-in implement pipeline", () => {
         .map((step) => [step.name, step]),
     )
 
-    expect(byName.implementer).toMatchObject({ advisor: "openai/gpt-5.6-sol", advisorVariant: "xhigh" })
-    for (const name of ["patterns", "security", "design", "tests", "adversarial"]) {
+    expect(byName.implementer).toMatchObject({ advisor: "openai/gpt-6-astra", advisorVariant: "xhigh" })
+    for (const name of ["patterns", "security", "design", "tests"]) {
       expect(byName[name]?.advisor).toBeUndefined()
     }
   })
@@ -150,7 +141,7 @@ describe("built-in implement pipeline", () => {
       reportPath: "reports/run-report.md",
     })
     expect(recap?.advisor).toBeUndefined()
-    // The recap indexes every phase report — the adversarial verdict included.
+    // The recap indexes every writing phase report.
     expect(recap?.inputFiles).toEqual([
       "prd.md",
       "reports/implementer.md",
@@ -158,7 +149,6 @@ describe("built-in implement pipeline", () => {
       "reports/security.md",
       "reports/design.md",
       "reports/tests.md",
-      "reports/adversarial.md",
     ])
   })
 
@@ -182,7 +172,16 @@ describe("built-in implement pipeline", () => {
     expect(byName.implementer).toMatchObject(pinned(defaultImplementerModel))
     expect(byName.patterns).toMatchObject(pinned(defaultImplementAuditModel))
     expect(byName.design).toMatchObject(pinned(defaultImplementReviewModel))
-    expect(byName.adversarial).toMatchObject(pinned(defaultAdversarialModel))
+  })
+})
+
+describe("built-in pipeline catalog", () => {
+  test("offers the six consolidated pipelines without private model providers", () => {
+    expect(Object.keys(builtInPipelines).sort()).toEqual(["fixer", "full-cycle", "hunter", "implement", "review", "ship"])
+    expect(JSON.stringify(builtInPipelines)).not.toMatch(/nan\//i)
+    for (const [name, spec] of Object.entries(builtInPipelines)) {
+      expect(() => resolvePipeline({ name, spec, agents: builtInAgents })).not.toThrow()
+    }
   })
 })
 
@@ -193,7 +192,7 @@ describe("default pipeline", () => {
     expect(pipeline.name).toBe("full-cycle")
     expect(pipeline.goalPlan).toBeDefined()
     expect(pipeline.goalPlan?.target).toBe(90)
-    expect(pipeline.goalPlan?.maxIterations).toBe(3)
+    expect(pipeline.goalPlan?.maxIterations).toBe(5)
     expect(pipeline.goalPlan?.plateau).toBe(3)
     expect(pipeline.goalPlan?.briefRecipient).toBe("fix")
     expect(pipeline.goalPlan?.scoreProducer).toBe("score-report")
@@ -212,110 +211,33 @@ describe("default pipeline", () => {
     expect(pipeline.steps.some((step) => step.type === "agent" && step.stepName === "run-report")).toBe(false)
   })
 
-  test("advises the implementer with Grok 4.6, leaves design unadvised, and advises the fixer with Grok 4.6", () => {
+  test("advises implementation, design and goal fixes with Astra xhigh", () => {
     const prefix = Object.fromEntries(
       defaultPipeline()
         .steps.filter((step): step is AgentStep => step.type === "agent")
         .map((step) => [step.name, step]),
     )
-    expect(prefix.implementer).toMatchObject({ advisor: "openrouter/x-ai/grok-4.6", advisorVariant: "high" })
-    expect(prefix.design?.advisor).toBeUndefined()
+    expect(prefix.implementer).toMatchObject({ advisor: "openai/gpt-6-astra", advisorVariant: "xhigh" })
+    expect(prefix.design).toMatchObject({ advisor: "openai/gpt-6-astra", advisorVariant: "xhigh" })
     const [fix] = defaultPipeline().goalPlan!.improve.steps
-    expect(fix).toMatchObject({ advisor: "openrouter/x-ai/grok-4.6", advisorVariant: "high" })
+    expect(fix).toMatchObject({ advisor: "openai/gpt-6-astra", advisorVariant: "xhigh" })
   })
 
-  test("runs the whole cycle on cheap models with DeepSeek V4 Flash on the audits and fixer", () => {
+  test("uses DeepSeek for implementation and fixes, GLM Flash for security and design", () => {
     const prefix = Object.fromEntries(
       defaultPipeline()
         .steps.filter((step): step is AgentStep => step.type === "agent")
         .map((step) => [step.name, step]),
     )
-    expect(prefix.implementer).toMatchObject({ model: "openrouter/z-ai/glm-5.3-flash", variant: "high" })
+    expect(prefix.implementer).toMatchObject({ model: "openrouter/deepseek/deepseek-v4-flash-0731", variant: "high" })
     expect(prefix.patterns).toMatchObject({ model: "openrouter/deepseek/deepseek-v4-flash-0731", variant: "high" })
+    expect(prefix.security).toMatchObject({ model: "openrouter/z-ai/glm-5.3-flash", variant: "high" })
+    const consensus = defaultPipeline().goalPlan!.measure.steps.find((step) => step.name === "score-report")
+    expect(consensus).toMatchObject({ model: "openai/gpt-5.6-sol", variant: "xhigh", verify: true })
     const [fix] = defaultPipeline().goalPlan!.improve.steps
     expect(fix).toMatchObject({ model: "openrouter/deepseek/deepseek-v4-flash-0731", variant: "high" })
   })
 })
-
-describe("built-in implement-lite pipeline", () => {
-  const implementLite = (defaultModel?: string) =>
-    resolvePipeline({ name: "implement-lite", spec: builtInPipelines["implement-lite"]!, agents: builtInAgents, defaultModel })
-
-  test("keeps the implement workflow and agents while writing on GLM 5.3 Flash and auditing on DeepSeek V4 Flash advised by GLM 5.3", () => {
-    const lite = implementLite().steps.filter((step): step is AgentStep => step.type === "agent")
-    const standard = implement().steps.filter((step): step is AgentStep => step.type === "agent")
-
-    const workflowShape = (step: AgentStep) => ({
-      name: step.name,
-      stepName: step.stepName,
-      agentName: step.agentName,
-      inputFiles: step.inputFiles,
-      inputDiff: step.inputDiff,
-      reportPath: step.reportPath,
-    })
-    expect(lite.map(workflowShape)).toEqual(standard.map(workflowShape))
-
-    const byName = Object.fromEntries(lite.map((step) => [step.name, step]))
-    expect(byName.implementer?.model).toBe("openrouter/z-ai/glm-5.3-flash")
-    expect(byName.implementer?.variant).toBe("high")
-    expect(byName.patterns?.model).toBe("openrouter/deepseek/deepseek-v4-flash-0731")
-    expect(byName.security?.model).toBe("openrouter/deepseek/deepseek-v4-flash-0731")
-    expect(byName.tests?.model).toBe("openrouter/deepseek/deepseek-v4-flash-0731")
-    expect(byName.design?.model).toBe("openrouter/x-ai/grok-4.6")
-    expect(byName.adversarial?.model).toBe("openrouter/z-ai/glm-5.3")
-  })
-
-  test("does not reintroduce GPT through defaults.model", () => {
-    const byName = Object.fromEntries(
-      implementLite("openai/gpt-5.5#xhigh")
-        .steps.filter((step): step is AgentStep => step.type === "agent")
-        .map((step) => [step.name, step]),
-    )
-
-    expect(byName.implementer).toMatchObject({ model: "openrouter/z-ai/glm-5.3-flash", variant: "high" })
-    expect(byName.patterns).toMatchObject({ model: "openrouter/deepseek/deepseek-v4-flash-0731", variant: "high" })
-    expect(byName.security).toMatchObject({ model: "openrouter/deepseek/deepseek-v4-flash-0731", variant: "high" })
-    expect(byName.tests).toMatchObject({ model: "openrouter/deepseek/deepseek-v4-flash-0731", variant: "high" })
-    expect(byName.design).toMatchObject({ model: "openrouter/x-ai/grok-4.6", variant: "high" })
-    expect(byName.adversarial).toMatchObject({ model: "openrouter/z-ai/glm-5.3", variant: "high" })
-  })
-
-  test("distinguishes itself from implement by the phases that write, audit, and judge", () => {
-    const lite = Object.fromEntries(implementLite().steps.filter((s): s is AgentStep => s.type === "agent").map((step) => [step.name, step]))
-    const standard = Object.fromEntries(implement().steps.filter((s): s is AgentStep => s.type === "agent").map((step) => [step.name, step]))
-
-    // Lite writes on GLM 5.3 Flash and audits on DeepSeek advised by GLM 5.3 high;
-    // implement writes on Terra and audits unadvised on GLM 5.3 high.
-    expect(lite.implementer?.model).not.toBe(standard.implementer?.model)
-    expect(lite.patterns?.model).not.toBe(standard.patterns?.model)
-    expect(lite.patterns?.advisor).toBe("openrouter/z-ai/glm-5.3")
-    expect(standard.patterns?.advisor).toBeUndefined()
-    expect(lite.adversarial?.model).not.toBe(standard.adversarial?.model)
-    // The run recap is the same cheap model on both.
-    expect(lite["run-report"]?.model).toBe(standard["run-report"]?.model)
-  })
-
-  test("closes with the same read-only run recap as implement", () => {
-    const lite = implementLite().steps.filter((step): step is AgentStep => step.type === "agent")
-    const standard = implement().steps.filter((step): step is AgentStep => step.type === "agent")
-    const liteRecap = lite.find((step) => step.stepName === "run-report")
-    const standardRecap = standard.find((step) => step.stepName === "run-report")
-
-    expect(liteRecap).toMatchObject({
-      agentName: "run-reporter",
-      model: "openrouter/deepseek/deepseek-v4-flash-0731",
-      variant: "high",
-      readOnly: true,
-      inputDiff: false,
-      reportPath: "reports/run-report.md",
-    })
-    // Identical wiring on both variants: the recap is cheap on purpose, so the
-    // low-cost pipeline has no reason to drop it.
-    expect(liteRecap?.inputFiles).toEqual(standardRecap?.inputFiles)
-    expect(liteRecap?.advisor).toBeUndefined()
-  })
-})
-
 
 describe("built-in ship pipeline", () => {
   const ship = () => resolvePipeline({ name: "ship", spec: builtInPipelines.ship!, agents: builtInAgents })
@@ -442,7 +364,7 @@ describe("built-in ship pipeline", () => {
     ])
   })
 
-  test("runs on OpenRouter only: no machine-local provider alias in the built-in", () => {
+  test("contains no machine-local provider alias", () => {
     expect(JSON.stringify(builtInPipelines.ship)).not.toContain("nan/")
   })
 })
@@ -483,14 +405,14 @@ describe("built-in review pipeline", () => {
   test("scopes, runs the three audits fanned across two models, synthesizes a findings report, then scores", () => {
     expect(stepNames(scored())).toEqual([
       "scope",
-      "clean-code__openai-gpt-5-6-terra-xhigh",
-      "clean-code__openrouter-x-ai-grok-4-6-high",
-      "security__openai-gpt-5-6-terra-xhigh",
-      "security__openrouter-x-ai-grok-4-6-high",
-      "bugs__openai-gpt-5-6-terra-xhigh",
-      "bugs__openrouter-x-ai-grok-4-6-high",
+      "clean-code__openrouter-deepseek-deepseek-v4-flash-0731-high",
+      "clean-code__openrouter-z-ai-glm-5-3-flash-high",
+      "security__openrouter-deepseek-deepseek-v4-flash-0731-high",
+      "security__openrouter-z-ai-glm-5-3-flash-high",
+      "bugs__openrouter-deepseek-deepseek-v4-flash-0731-high",
+      "bugs__openrouter-z-ai-glm-5-3-flash-high",
       "report",
-      "score__openai-gpt-5-6-sol-xhigh",
+      "score__openrouter-z-ai-glm-5-3-high",
       "score__openrouter-x-ai-grok-4-6-high",
       "score-report",
     ])
@@ -502,12 +424,12 @@ describe("built-in review pipeline", () => {
     expect(findings?.inputFiles).toEqual([
       "prd.md",
       "reports/scope.md",
-      "reports/clean-code__openai-gpt-5-6-terra-xhigh.md",
-      "reports/clean-code__openrouter-x-ai-grok-4-6-high.md",
-      "reports/security__openai-gpt-5-6-terra-xhigh.md",
-      "reports/security__openrouter-x-ai-grok-4-6-high.md",
-      "reports/bugs__openai-gpt-5-6-terra-xhigh.md",
-      "reports/bugs__openrouter-x-ai-grok-4-6-high.md",
+      "reports/clean-code__openrouter-deepseek-deepseek-v4-flash-0731-high.md",
+      "reports/clean-code__openrouter-z-ai-glm-5-3-flash-high.md",
+      "reports/security__openrouter-deepseek-deepseek-v4-flash-0731-high.md",
+      "reports/security__openrouter-z-ai-glm-5-3-flash-high.md",
+      "reports/bugs__openrouter-deepseek-deepseek-v4-flash-0731-high.md",
+      "reports/bugs__openrouter-z-ai-glm-5-3-flash-high.md",
     ])
 
     const report = scored().steps.find((step): step is AgentStep => step.type === "agent" && step.name === "score-report")
@@ -516,14 +438,14 @@ describe("built-in review pipeline", () => {
     expect(report?.inputFiles).toEqual([
       "prd.md",
       "reports/scope.md",
-      "reports/clean-code__openai-gpt-5-6-terra-xhigh.md",
-      "reports/clean-code__openrouter-x-ai-grok-4-6-high.md",
-      "reports/security__openai-gpt-5-6-terra-xhigh.md",
-      "reports/security__openrouter-x-ai-grok-4-6-high.md",
-      "reports/bugs__openai-gpt-5-6-terra-xhigh.md",
-      "reports/bugs__openrouter-x-ai-grok-4-6-high.md",
+      "reports/clean-code__openrouter-deepseek-deepseek-v4-flash-0731-high.md",
+      "reports/clean-code__openrouter-z-ai-glm-5-3-flash-high.md",
+      "reports/security__openrouter-deepseek-deepseek-v4-flash-0731-high.md",
+      "reports/security__openrouter-z-ai-glm-5-3-flash-high.md",
+      "reports/bugs__openrouter-deepseek-deepseek-v4-flash-0731-high.md",
+      "reports/bugs__openrouter-z-ai-glm-5-3-flash-high.md",
       "reports/report.md",
-      "reports/score__openai-gpt-5-6-sol-xhigh.md",
+      "reports/score__openrouter-z-ai-glm-5-3-high.md",
       "reports/score__openrouter-x-ai-grok-4-6-high.md",
     ])
   })
@@ -535,7 +457,7 @@ describe("PRD history pipeline plumbing", () => {
     // scoring step (the fan-out scorers and the consensus), because the
     // rubric's `prd` dimension (30% of the score) can only be graded against
     // the original PRD.
-    for (const name of ["review", "review-lite"] as const) {
+    for (const name of ["review"] as const) {
       const steps = resolvePipeline({ name, spec: builtInPipelines[name]!, agents: builtInAgents }).steps
       const scope = steps.find((step): step is AgentStep => step.type === "agent" && step.name === "scope")
       const scorers = steps.filter((step): step is AgentStep => step.type === "agent" && step.name === "score")
@@ -543,15 +465,6 @@ describe("PRD history pipeline plumbing", () => {
       expect(scope?.prdHistory).toBe(true)
       expect(scorers.every((step) => step.prdHistory === true)).toBe(true)
       expect(consensus?.prdHistory).toBe(true)
-    }
-
-    // review-cc ends at the findings report — it has no scoring steps — so it
-    // attaches the PRD only on its scope step.
-    {
-      const steps = resolvePipeline({ name: "review-cc", spec: builtInPipelines["review-cc"]!, agents: builtInAgents }).steps
-      const scope = steps.find((step): step is AgentStep => step.type === "agent" && step.name === "scope")
-      expect(scope?.prdHistory).toBe(true)
-      expect(steps.filter((step): step is AgentStep => step.type === "agent" && step.name !== "scope").every((step) => step.prdHistory === undefined)).toBe(true)
     }
 
     // ship's measurement lives in its goal step: the fragment's scorers and
@@ -578,11 +491,11 @@ describe("PRD history pipeline plumbing", () => {
   })
 })
 
-describe("built-in review-lite pipeline", () => {
-  const reviewLite = () => resolvePipeline({ name: "review-lite", spec: builtInPipelines["review-lite"]!, agents: builtInAgents })
+describe("review model choices", () => {
+  const review = () => resolvePipeline({ name: "review", spec: builtInPipelines.review!, agents: builtInAgents })
 
-  test("carries the same defaultPrompt and suggestedPrompts as review", () => {
-    const pipeline = reviewLite()
+  test("carries a review prompt and suggestions", () => {
+    const pipeline = review()
     expect(pipeline.defaultPrompt).toBe(
       "Review the current branch against its base and report prioritized findings with a verified quality score.",
     )
@@ -590,7 +503,7 @@ describe("built-in review-lite pipeline", () => {
   })
 
   test("is report-only: every step is read-only and there is no human gate", () => {
-    const pipeline = reviewLite()
+    const pipeline = review()
     const agents = pipeline.steps.filter((step): step is AgentStep => step.type === "agent")
     expect(agents.length).toBeGreaterThan(0)
     expect(agents.every((step) => step.readOnly)).toBe(true)
@@ -598,12 +511,12 @@ describe("built-in review-lite pipeline", () => {
   })
 
   test("scope verifies on the cheap model too, so the checks run once per review", () => {
-    const scope = reviewLite().steps.find((step): step is AgentStep => step.type === "agent" && step.name === "scope")
+    const scope = review().steps.find((step): step is AgentStep => step.type === "agent" && step.name === "scope")
     expect(scope).toMatchObject({ agentName: "review-scope", readOnly: true, verify: true })
   })
 
   test("runs entirely on low-cost models: DeepSeek V4 Flash scopes, audits, and reports, and the scoring stays on GLM 5.3 + Grok 4.6", () => {
-    const pipeline = reviewLite()
+    const pipeline = review()
     expect(stepNames(pipeline)).toEqual([
       "scope",
       "clean-code__openrouter-deepseek-deepseek-v4-flash-0731-high",
@@ -635,20 +548,20 @@ describe("built-in review-lite pipeline", () => {
     ])
   })
 
-  test("never reaches for Opus, which is what separates it from review", () => {
+  test("pins the scorer models independently of agent defaults", () => {
     // The scorer agents default to Opus, so the scorer steps have to pin their
     // models explicitly; an omitted `models:` would reintroduce exactly the cost
     // this pipeline exists to avoid.
-    expect(JSON.stringify(builtInPipelines["review-lite"])).not.toContain("opus")
-    const scorers = reviewLite().steps.filter((step): step is AgentStep => step.type === "agent" && step.stepName === "score")
+    expect(JSON.stringify(builtInPipelines.review)).not.toContain("opus")
+    const scorers = review().steps.filter((step): step is AgentStep => step.type === "agent" && step.stepName === "score")
     expect(scorers).toHaveLength(2)
     for (const step of scorers) {
       expect(step.model).not.toContain("opus")
     }
   })
 
-  test("measures like review does, on its own models", () => {
-    const report = reviewLite().steps.find((step): step is AgentStep => step.type === "agent" && step.name === "score-report")
+  test("verifies the consensus on GLM", () => {
+    const report = review().steps.find((step): step is AgentStep => step.type === "agent" && step.name === "score-report")
     expect(report).toMatchObject({ agentName: "quality-score-report", model: "openrouter/z-ai/glm-5.3", variant: "high", readOnly: true, verify: true })
   })
 })
@@ -701,58 +614,11 @@ describe("built-in fixer pipeline", () => {
   })
 })
 
-describe("built-in review-cc pipeline", () => {
-  test("carries a defaultPrompt and suggestedPrompts for zero-friction review runs", () => {
-    const pipeline = resolvePipeline({ name: "review-cc", spec: builtInPipelines["review-cc"]!, agents: builtInAgents })
-    expect(pipeline.defaultPrompt).toBe("Review the current branch against its base and report prioritized findings.")
-    expect(pipeline.suggestedPrompts).toEqual(["Review the open PR for this branch", "Review only the last commit's diff"])
-  })
-  const reviewCc = () => resolvePipeline({ name: "review-cc", spec: builtInPipelines["review-cc"]!, agents: builtInAgents })
-
-  test("is report-only: every step is read-only and there is no human gate", () => {
-    const pipeline = reviewCc()
-    const agents = pipeline.steps.filter((step): step is AgentStep => step.type === "agent")
-    expect(agents.length).toBeGreaterThan(0)
-    expect(agents.every((step) => step.readOnly)).toBe(true)
-    expect(pipeline.steps.some((step) => step.type === "human")).toBe(false)
-  })
-
-  test("scope verifies on the Terra leg too, and the claude-code audits stay bash-less", () => {
-    const scope = reviewCc().steps.find((step): step is AgentStep => step.type === "agent" && step.name === "scope")
-    expect(scope).toMatchObject({ agentName: "review-scope", readOnly: true, verify: true })
-  })
-
-  test("pairs each Terra audit with a Claude Code audit and feeds every report to one Sol report step", () => {
-    const pipeline = reviewCc()
-    expect(stepNames(pipeline)).toEqual(["scope", "clean-code", "clean-code-cc", "security", "security-cc", "bugs", "bugs-cc", "report"])
-
-    const byName = Object.fromEntries(
-      pipeline.steps.filter((step): step is AgentStep => step.type === "agent").map((step) => [step.name, step]),
-    )
-    // The `-cc` slots run the local Claude Code CLI, so they carry its bare alias rather than provider/model.
-    for (const name of ["clean-code-cc", "security-cc", "bugs-cc"]) {
-      expect(byName[name]).toMatchObject({ runner: "claude-code", model: "opus" })
-    }
-    expect(byName.report).toMatchObject({ model: "openai/gpt-5.6-sol", variant: "xhigh" })
-    expect(byName.report?.inputFiles).toEqual([
-      "prd.md",
-      "reports/scope.md",
-      "reports/clean-code.md",
-      "reports/clean-code-cc.md",
-      "reports/security.md",
-      "reports/security-cc.md",
-      "reports/bugs.md",
-      "reports/bugs-cc.md",
-    ])
-  })
-})
-
 describe("built-in hunter pipelines", () => {
   const hunter = () => resolvePipeline({ name: "hunter", spec: builtInPipelines.hunter!, agents: builtInAgents })
-  const hunterMax = () => resolvePipeline({ name: "hunter-max", spec: builtInPipelines["hunter-max"]!, agents: builtInAgents })
 
-  test("both are report-only with no human gate", () => {
-    for (const pipeline of [hunter(), hunterMax()]) {
+  test("is report-only with no human gate", () => {
+    for (const pipeline of [hunter()]) {
       const agents = pipeline.steps.filter((step): step is AgentStep => step.type === "agent")
       expect(agents.length).toBeGreaterThan(0)
       expect(agents.every((step) => step.readOnly)).toBe(true)
@@ -760,32 +626,8 @@ describe("built-in hunter pipelines", () => {
     }
   })
 
-  test("hunter pairs Terra with one specialty model per track and reconciles them on Sol", () => {
+  test("hunter fans all six tracks across the same five models", () => {
     const pipeline = hunter()
-    expect(stepNames(pipeline)).toEqual([
-      "hunter-correctness__openai-gpt-5-6-terra-xhigh",
-      "hunter-correctness__openrouter-z-ai-glm-5-3-high",
-      "hunter-memory__openai-gpt-5-6-terra-xhigh",
-      "hunter-memory__openrouter-x-ai-grok-4-6-high",
-      "hunter-performance__openai-gpt-5-6-terra-xhigh",
-      "hunter-performance__openrouter-x-ai-grok-4-6-high",
-      "hunter-security__openai-gpt-5-6-terra-xhigh",
-      "hunter-security__openrouter-moonshotai-kimi-k3",
-      "hunter-reliability__openai-gpt-5-6-terra-xhigh",
-      "hunter-reliability__openrouter-z-ai-glm-5-2",
-      "hunter-supply-chain__openai-gpt-5-6-terra-xhigh",
-      "hunter-supply-chain__openrouter-z-ai-glm-5-2",
-      "hunter-report",
-    ])
-
-    const report = pipeline.steps.find((step): step is AgentStep => step.type === "agent" && step.stepName === "hunter-report")
-    expect(report).toMatchObject({ model: "openai/gpt-5.6-sol", variant: "xhigh" })
-    // `reports: previous` pulls in the whole parallel group: 6 tracks x 2 models.
-    expect(report?.inputFiles.filter((file) => file.startsWith("reports/"))).toHaveLength(12)
-  })
-
-  test("hunter-max fans all six tracks across the same five models", () => {
-    const pipeline = hunterMax()
     const agents = pipeline.steps.filter((step): step is AgentStep => step.type === "agent")
     const tracks = agents.filter((step) => step.stepName !== "hunter-max-report")
 
@@ -808,7 +650,7 @@ describe("built-in hunter pipelines", () => {
   })
 
   test("every track step attaches the diff and reads no earlier report", () => {
-    for (const pipeline of [hunter(), hunterMax()]) {
+    for (const pipeline of [hunter()]) {
       const tracks = pipeline.steps.filter(
         (step): step is AgentStep => step.type === "agent" && !step.stepName.endsWith("-report"),
       )
@@ -820,18 +662,18 @@ describe("built-in hunter pipelines", () => {
 
 describe("built-in default prompts", () => {
   test("concrete-action pipelines carry a non-empty defaultPrompt and suggestions", () => {
-    for (const name of ["review", "review-lite", "review-cc", "hunter", "hunter-max", "ship"]) {
+    for (const name of ["review", "hunter", "ship"]) {
       const pipeline = resolvePipeline({ name, spec: builtInPipelines[name]!, agents: builtInAgents })
       expect(pipeline.defaultPrompt, `${name} should have a defaultPrompt`).toBeTruthy()
     }
-    for (const name of ["review", "review-lite", "review-cc", "hunter", "hunter-max"]) {
+    for (const name of ["review", "hunter"]) {
       const pipeline = resolvePipeline({ name, spec: builtInPipelines[name]!, agents: builtInAgents })
       expect(pipeline.suggestedPrompts?.length, `${name} should have suggestions`).toBeGreaterThan(0)
     }
   })
 
   test("pipelines where the prompt IS the description carry no defaultPrompt", () => {
-    for (const name of ["implement", "implement-lite", "fixer"]) {
+    for (const name of ["implement", "full-cycle", "fixer"]) {
       const pipeline = resolvePipeline({ name, spec: builtInPipelines[name]!, agents: builtInAgents })
       expect(pipeline.defaultPrompt, `${name} should not have a defaultPrompt`).toBeUndefined()
       expect(pipeline.suggestedPrompts, `${name} should not have suggestions`).toBeUndefined()
@@ -1505,7 +1347,7 @@ describe("terminal goal step", () => {
 
   const goalMeasure = (): GoalMeasureSpec => ({
     steps: [
-      { parallel: [{ agent: "quality-scorer", name: "score", models: [defaultAdversarialModel, "openrouter/z-ai/glm-5.3#high"], reports: "none" }] },
+      { parallel: [{ agent: "quality-scorer", name: "score", models: ["openrouter/x-ai/grok-4.6#high", "openrouter/z-ai/glm-5.3#high"], reports: "none" }] },
       { agent: "quality-score-report", name: "score-report", reports: ["score"] },
     ],
   })
@@ -1640,7 +1482,7 @@ describe("terminal goal step", () => {
         steps: [
           ...prefix(),
           goalNode({
-            improve: { briefStep: "fix", steps: [{ agent: "review-fixer", name: "fix", models: [defaultAdversarialModel, "openrouter/z-ai/glm-5.3#high"] }] },
+            improve: { briefStep: "fix", steps: [{ agent: "review-fixer", name: "fix", models: ["openrouter/x-ai/grok-4.6#high", "openrouter/z-ai/glm-5.3#high"] }] },
           }),
         ],
       }),
@@ -1702,7 +1544,7 @@ describe("terminal goal step", () => {
             },
             measure: {
               steps: [
-                { parallel: [{ agent: "quality-scorer", name: "grade", models: [defaultAdversarialModel, "openrouter/z-ai/glm-5.3#high"], reports: "none" }] },
+                { parallel: [{ agent: "quality-scorer", name: "grade", models: ["openrouter/x-ai/grok-4.6#high", "openrouter/z-ai/glm-5.3#high"], reports: "none" }] },
                 { agent: "review-report", name: "arbiter", model: "openai/gpt-5.6-sol#xhigh", reports: ["grade"], deliverable: "quality-score" },
               ],
             },

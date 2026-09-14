@@ -5,6 +5,7 @@ import { bg, BoxRenderable, StyledText, TextRenderable, bold, createCliRenderer,
 import { copyReportToClipboard, writeClipboardOSC52, type ClipboardResult } from "./clipboard"
 import { BoardSource, defaultRefreshCadenceMs } from "./board-refresh"
 import type { BoardWorktree } from "./control-board"
+import type { PrObservation } from "./pr-observations"
 import { parseMarkdown, renderMarkdownDoc, type MarkdownDoc } from "./markdown-render"
 import { stripYamlFrontmatter } from "./openspec"
 import { groupChangeArtifacts, loadSpecsView, specGroupSource, worktreeDisplayName, type SpecGroup, type SpecsChangeEntry, type SpecsResolution, type SpecsView } from "./specs"
@@ -1556,10 +1557,12 @@ export async function browseSpecsTui(view: SpecsView, route?: TuiRoute, resume?:
 
 /**
  * A worktree row's dot color, speaking independent facts rather than a
- * lifecycle stage: live execution in green, dirt or a lock in yellow, and
- * everything else informational teal. Shared with Home's work list.
+ * lifecycle stage: a known merged PR in violet, otherwise live execution
+ * in green, dirt or a lock in yellow, and everything else informational teal.
+ * A merged PR is not a completion or cleanup claim. Shared with Home.
  */
-export function worktreeDotColor(worktree: BoardWorktree): string {
+export function worktreeDotColor(worktree: BoardWorktree, pr: PrObservation | "checking" | undefined = worktree.pr): string {
+  if (pr && pr !== "checking" && pr.availability === "known" && pr.pr?.state.toLowerCase() === "merged") return theme.magenta
   if (worktree.activity?.kind === "known" && worktree.activity.value.total > 0) return theme.green
   if ((worktree.dirt?.kind === "known" && worktree.dirt.value.dirty) || worktree.locked || !worktree.accessible) return theme.yellow
   return theme.teal

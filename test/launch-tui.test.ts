@@ -1501,7 +1501,8 @@ describe("launch TUI goal classification", () => {
 
     expect(hasGoal("ship")).toBe(true)
     expect(hasGoal("review")).toBe(false)
-    expect(hasGoal("review-lite")).toBe(false)
+    expect(hasGoal("hunter")).toBe(false)
+    expect(hasGoal("full-cycle")).toBe(true)
     expect(hasGoal("implement")).toBe(false)
   })
 

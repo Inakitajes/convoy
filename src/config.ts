@@ -12,7 +12,6 @@ import {
   builtInPipelines,
   defaultGptModel,
   defaultGptVariant,
-  defaultAdversarialModel,
   defaultImplementAdvisorModel,
   defaultImplementAuditModel,
   defaultImplementerModel,
@@ -287,9 +286,9 @@ defaults:
   # model: openai/gpt-5.6-terra#xhigh # optional: uncomment to force every agent unless a step/agent overrides it
   # maxConcurrentAgents: 30 # optional: cap agents running at once within a parallel group
   # baseRef: main # optional: when unset, convoy auto-detects (origin default branch, else main/master/develop/trunk, else current branch)
-  # pipeline: implement
+  # pipeline: full-cycle
   # branchNameModel: openrouter/deepseek/deepseek-v4-flash-0731 # optional: model that names worktree branches
-  # commitMessageModel: anthropic/claude-haiku-4-5 # optional: model that writes the conventional commit message for automatic run compaction and close's squash-merge commit
+  # commitMessageModel: openai/gpt-5.6-luna # optional: model that writes the conventional commit message for automatic run compaction and close's squash-merge commit
   # worktree: true # optional: force a fresh branch + worktree for every run; false always runs in the current tree. Unset decides per branch: isolate on a trunk (main/master/develop/trunk or the detected base), run in place on any other branch
   # worktreeLocation: ~/dev/worktrees/{repo}/{branch} # optional: where isolated worktrees are created ({repo}/{branch} placeholders, ~ = home; the branch slug is appended when {branch} is missing). A marker in the repo's AGENTS.md/README.md outranks this; unusable locations fall back to ~/.convoy/worktrees
   # prdHistory: true # optional: store a git-ignored copy of each run's prompt in .convoy/prd-history; false disables history writes and scope attachments
@@ -333,25 +332,22 @@ defaults:
 #     model: openai/gpt-5.6-terra#xhigh
 
 # Convoy ships these pipelines built in; pick one with -p/--pipeline without redeclaring it here:
-#   implement            the default: advised implementation, then audit, polish, test, adversarial review,
+#   full-cycle           the default: advised implementation, then a verified quality loop to 90/100
+#   implement            advised implementation, then audit, polish, test,
 #                        and a one-page extractive recap of the whole run (reports/run-report.md)
-#   implement-lite       like implement, but the code-writing phase drops to DeepSeek V4 Flash 0731 (Grok 4.6 advises)
 #   ship                 the close: merge the advanced base in (resolving conflicts), score the merged
-#                        result against the rubric, and loop until it clears 85/100 (its terminal
+#                        result against the rubric, and loop until it clears 90/100 (its terminal
 #                        goal step owns the improve/re-score cycle)
 #                        wants permissions.allow: git merge*, git add*, git checkout --ours*|--theirs*
 #                        and, optionally, hooks.pipelines.ship to fetch the base first / open the PR after
 #                        (post-hooks get CONVOY_GOAL_REACHED, so the PR step can require the bar was met)
 #   fixer                turn a list of findings into proven regression tests, minimal fixes, and a verdict each
 #   review               report-only: parallel audits across two models, one prioritized report, then a verified score
-#   review-lite          like review, but every phase runs on GLM 5.3 / DeepSeek V4 Flash 0731 / Grok 4.6 instead of Opus
-#   review-cc            like review, but pairs each audit with a Claude Code run (needs the \`claude\` CLI on PATH)
-#   hunter               report-only repo audit: six specialty tracks on two models each, then one consensus report
-#   hunter-max           like hunter, with every track fanned across all five models (30 audits — slow and expensive)
-# The default \`implement\` pipeline is inlined below as an editable starting point; redefining a name here overrides the built-in.
+#   hunter               report-only repo audit: six tracks on five models each (30 audits), then consensus
+# The \`implement\` pipeline is inlined below as an editable starting point; redefining a name here overrides the built-in.
 pipelines:
   implement:
-    description: Advised implementation, pattern/security audits, design polish, tests, adversarial review, and a one-page run recap
+    description: Advised implementation on DeepSeek V4 Flash consulting Astra 6, then pattern/security audits, design polish, tests, and a one-page run recap
     # defaultPrompt and suggestedPrompts are optional. A defaultPrompt is used
     # when the pipeline runs without an explicit prompt — the launcher prefills
     # its field and \`convoy -p <pipeline>\` falls back to it — and the
@@ -373,7 +369,7 @@ pipelines:
         model: ${defaultImplementAuditModel}
         advisor: false
       - agent: security
-        model: ${defaultImplementAuditModel}
+        model: ${defaultImplementReviewModel}
         advisor: false
       - agent: design
         model: ${defaultImplementReviewModel}
@@ -382,10 +378,6 @@ pipelines:
         model: ${defaultImplementAuditModel}
         advisor: false
         reports: none
-      - agent: adversarial
-        model: ${defaultAdversarialModel}
-        advisor: false
-        reports: all
       - agent: run-report
         model: ${defaultRunReportModel}
         advisor: false
@@ -1134,7 +1126,7 @@ export function buildAgentRegistry(config?: ConvoyConfig): AgentSpec[] {
   return registry
 }
 
-/** Project pipelines shadow built-ins of the same name (including "implement", the default). */
+/** Project pipelines shadow built-ins of the same name (including "full-cycle", the default). */
 export function selectPipelineSpec(config: ConvoyConfig | undefined, name: string): PipelineSpec {
   const spec = config?.pipelines[name] ?? builtInPipelines[name]
   if (spec) return spec

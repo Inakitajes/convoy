@@ -1790,7 +1790,7 @@ export class HomeLauncher {
       const worktree = row.worktree
       // Selected, the marker inverts: a dark glyph on its own state color —
       // the rail cell the block hangs from. Unselected, the plain diamond.
-      const dot = selected ? bg(worktreeDotColor(worktree))(fg(theme.chipText)("◇")) : fg(worktreeDotColor(worktree))("◇")
+      const dot = selected ? bg(worktreeDotColor(worktree, this.prEvidence.get(worktree.path)))(fg(theme.chipText)("◇")) : fg(worktreeDotColor(worktree, this.prEvidence.get(worktree.path)))("◇")
       // The main checkout carries a `base` tag: it is the repository's own
       // checkout, not one more feature branch, and the row says so.
       const tag = worktree.main ? 7 : 0 // " · base"
@@ -1860,7 +1860,7 @@ export class HomeLauncher {
     const w = Math.max(8, width - INLINE_INDENT)
     // The block's left rail: the marker's column carries the marker's state
     // color down the whole block — the antagonist to the accent fill.
-    const railColor = row.kind === "worktree" ? worktreeDotColor(row.worktree) : row.kind === "new" ? theme.navy : theme.teal
+    const railColor = row.kind === "worktree" ? worktreeDotColor(row.worktree, this.prEvidence.get(row.worktree.path)) : row.kind === "new" ? theme.navy : theme.teal
     const rail = bg(railColor)(" ")
     const indent = " ".repeat(Math.max(1, INLINE_INDENT - 1))
     const line = (chunks: TextChunk[]) => this.highlighted([rail, ...chunks], width)
@@ -2075,7 +2075,7 @@ export class HomeLauncher {
         // The specs browser's own change-row shape: the diamond rides the
         // containing worktree's state color, one cell of the same color on
         // either side; selected, the block inverts on the marker color.
-        const markerColor = worktreeDotColor(worktree)
+        const markerColor = worktreeDotColor(worktree, this.prEvidence.get(worktree.path))
         const marker: TextChunk[] = selected
           ? [bg(markerColor)(" "), bg(markerColor)(fg(theme.chipText)("◆")), bg(markerColor)(" ")]
           : [raw(" "), fg(markerColor)("◆"), raw(" ")]

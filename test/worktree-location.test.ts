@@ -403,13 +403,18 @@ describe("config validation for defaults.worktreeLocation", () => {
   })
 })
 
-describe("README marker against this repo's own docs", () => {
-  test("convoy's README config example is not misread as a convention", async () => {
-    // The documented-config example line `worktree: true …` must not become a
-    // location; the value is neither a template nor a path.
+describe("documented configuration is not a worktree convention", () => {
+  test("the wiki config example is not misread when included in a repository README", async () => {
     const repoRoot = resolve(import.meta.dir, "..")
-    const readme = await readFile(join(repoRoot, "README.md"), "utf8")
-    expect(readme).toContain("worktree: true")
-    expect(await documentedWorktreeConvention(repoRoot)).toBeUndefined()
+    const guide = await readFile(join(repoRoot, "docs", "configuration.md"), "utf8")
+    expect(guide).toContain("worktree: true")
+    const dir = await tempDir("convoy-wt-doc-example-")
+    try {
+      await writeFile(join(dir, "README.md"), guide)
+      expect(await documentedWorktreeConvention(dir)).toBeUndefined()
+      expect(await documentedWorktreeConvention(repoRoot)).toBeUndefined()
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 })
