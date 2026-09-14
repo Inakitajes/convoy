@@ -107,6 +107,10 @@ describe("goalProgressPhases", () => {
       "measure-2",
       "improve-3",
       "measure-3",
+      "improve-4",
+      "measure-4",
+      "improve-5",
+      "measure-5",
     ])
   })
 

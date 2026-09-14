@@ -40,6 +40,8 @@ function releaseEnsureFreeBranchName(branch: string, value: string): void {
 import { HomeLauncher } from "../src/home-tui"
 import type { DetailRun, HomeResolution, HomeWorkAction } from "../src/home-tui"
 import type { PrObservation } from "../src/pr-observations"
+import type { BoardSource } from "../src/board-refresh"
+import type { BoardSnapshot } from "../src/board-cache"
 import type { LocalActiveChange } from "../src/checkout-openspec"
 import { theme } from "../src/tui-theme"
 import { versionDetails } from "../src/version"
@@ -681,18 +683,15 @@ describe("worktree detail sections and observations", () => {
     try {
       await openDetail(session)
       const frame = frameOf(session)
-      // Four labeled action sections in order — Sessions, Runs, OpenSpec, git —
-      // with the Linked Specs observation last.
+      // Four labeled action sections in order: Sessions, Runs, OpenSpec, git.
       const sessionsAt = frame.indexOf("\u2500\u2500 Sessions ")
       const runsAt = frame.indexOf("\u2500\u2500 Runs ")
       const openspecAt = frame.indexOf("\u2500\u2500 OpenSpec ")
       const gitAt = frame.indexOf("\u2500\u2500 git ")
-      const linkedAt = frame.indexOf("\u2500\u2500 Linked Specs ")
       expect(sessionsAt).toBeGreaterThanOrEqual(0)
       expect(runsAt).toBeGreaterThan(sessionsAt)
       expect(openspecAt).toBeGreaterThan(runsAt)
       expect(gitAt).toBeGreaterThan(openspecAt)
-      expect(linkedAt).toBeGreaterThan(gitAt)
       // Sessions holds the OpenCode authoring surfaces.
       const conversationAt = frame.indexOf("Open conversation")
       const windowAt = frame.indexOf("Open in window")
@@ -717,11 +716,77 @@ describe("worktree detail sections and observations", () => {
       expect(fetchAt).toBeGreaterThan(gitAt)
       expect(squashAt).toBeGreaterThan(fetchAt)
       expect(removeAt).toBeGreaterThan(squashAt)
-      expect(removeAt).toBeLessThan(linkedAt)
       expect(frame).not.toContain("destructive")
-      // The Runs and Linked Specs observations stay honest when empty.
+      // The Runs observation stays honest when empty; the Linked Specs section
+      // is omitted entirely when the checkout has nothing to link.
       expect(frame).toContain("no runs recorded for this checkout")
-      expect(frame).toContain("no active changes in this checkout")
+      expect(frame).not.toContain("Linked Specs")
+      expect(frame).not.toContain("no active changes in this checkout")
+    } finally {
+      await closeHome(session)
+    }
+  })
+
+  test("the detail fills only the identity, path, branch, and PR as one accent zone", async () => {
+    const session = await openHome({ height: 60 })
+    try {
+      await openDetail(session)
+      const spans = session.captureSpans()
+      // The folder basename, path, branch, and the linked PR share one accent
+      // fill; the rest of the observed facts stay plain.
+      for (const needle of ["add-widget", "/wt/add-widget", "feat/add-widget", "pr"]) {
+        const row = spans.lines.find((line) => line.spans.some((span) => span.text.includes(needle)))!
+        expect(row).toBeDefined()
+        const filled = row.spans.filter((span) => span.bg.a > 0 && sameColor(span.bg, accentBg()))
+        const filledWidth = filled.reduce((total, span) => total + span.text.length, 0)
+        expect(filledWidth).toBeGreaterThan(60)
+      }
+      for (const needle of ["dirt", "activity", "changes"]) {
+        const row = spans.lines.find((line) => line.spans.some((span) => span.text.includes(needle)))!
+        expect(row).toBeDefined()
+        expect(row.spans.every((span) => span.bg.a === 0)).toBe(true)
+      }
+      // A selectable action below the zone stays transparent too.
+      const idle = spans.lines.find((line) => line.spans.some((span) => span.text.includes("Fetch remote")))!
+      expect(idle.spans.every((span) => span.bg.a === 0)).toBe(true)
+    } finally {
+      await closeHome(session)
+    }
+  })
+
+  test("the zone's PR warning stays yellow on the accent fill", async () => {
+    const session = await openHome({ height: 60 })
+    try {
+      await openDetail(session)
+      const spans = session.captureSpans()
+      const reason = "unknown (no PR observation requested by this test)"
+      const row = spans.lines.find((line) => line.spans.some((span) => span.text.includes(reason)))!
+      expect(row).toBeDefined()
+      const warning = row.spans.find((span) => span.text.includes(reason))!
+      // The warning keeps its own color on the accent fill, and the row still
+      // rides the zone.
+      expect(sameColor(warning.fg, paletteColor(theme.yellow))).toBe(true)
+      expect(row.spans.some((span) => span.bg.a > 0 && sameColor(span.bg, accentBg()))).toBe(true)
+      const label = row.spans.find((span) => span.text.trimEnd() === "pr")!
+      expect(sameColor(label.fg, paletteColor(theme.chipText))).toBe(true)
+    } finally {
+      await closeHome(session)
+    }
+  })
+
+  test("the Runs empty line sits flush with its section heading", async () => {
+    const session = await openHome({ height: 60 })
+    try {
+      await openDetail(session)
+      const spans = session.captureSpans()
+      const prefix = (row: { spans: Array<{ text: string }> }, needle: string): string => {
+        const index = row.spans.findIndex((span) => span.text.includes(needle))
+        return row.spans.slice(0, index).map((span) => span.text).join("")
+      }
+      const heading = spans.lines.find((line) => line.spans.some((span) => span.text.includes("\u2500\u2500 Runs ")))!
+      const empty = spans.lines.find((line) => line.spans.some((span) => span.text.includes("no runs recorded for this checkout")))!
+      // Same content column as the section rule above it: no phantom indent.
+      expect(prefix(empty, "no runs recorded for this checkout")).toBe(prefix(heading, "\u2500\u2500 Runs "))
     } finally {
       await closeHome(session)
     }
@@ -773,7 +838,7 @@ describe("worktree detail sections and observations", () => {
     }
   })
 
-  test("the detail lists its linked changes and opens the focused one", async () => {
+  test("the detail lists its linked changes under OpenSpec and opens the focused one", async () => {
     const change: LocalActiveChange = {
       checkout: wtPath,
       changeId: "add-login",
@@ -793,21 +858,27 @@ describe("worktree detail sections and observations", () => {
       await openDetail(session)
       const frame = frameOf(session)
       expect(frame).toContain("Linked Specs")
+      // Linked Specs rides immediately after the OpenSpec section, before git.
+      const openspecAt = frame.indexOf("\u2500\u2500 OpenSpec ")
+      const linkedAt = frame.indexOf("\u2500\u2500 Linked Specs ")
+      const gitAt = frame.indexOf("\u2500\u2500 git ")
+      expect(linkedAt).toBeGreaterThan(openspecAt)
+      expect(gitAt).toBeGreaterThan(linkedAt)
       // The row speaks the specs browser's vocabulary: the change diamond.
       expect(frame).toContain("◆")
       expect(frame).toContain("add-login")
       expect(frame).toContain("tasks 2/5")
-      // The change row follows the twelve actions (no runs recorded).
-      for (let i = 0; i < 12; i++) {
+      // The change row follows Sessions (2), Runs (1), and OpenSpec (3).
+      for (let i = 0; i < 6; i++) {
         session.press("down")
         await session.renderOnce()
       }
       session.press("return")
       const resolution = (await session.instance.result) as HomeResolution
       expect(resolution).toEqual({ type: "work-change", worktree: wtPath, changeId: "add-login" })
-    } catch {
+    } catch (error) {
       await closeHome(session)
-      throw new Error("test failed")
+      throw error
     }
   })
 
@@ -822,8 +893,15 @@ describe("worktree detail sections and observations", () => {
     try {
       await openDetail(session)
       const frame = frameOf(session)
+      // Unknown is not none: the section renders, with its reason, between the
+      // OpenSpec and git sections.
       expect(frame).toContain("Linked Specs")
       expect(frame).toContain("unknown — the openspec directory is unreadable")
+      const openspecAt = frame.indexOf("\u2500\u2500 OpenSpec ")
+      const linkedAt = frame.indexOf("\u2500\u2500 Linked Specs ")
+      const gitAt = frame.indexOf("\u2500\u2500 git ")
+      expect(linkedAt).toBeGreaterThan(openspecAt)
+      expect(gitAt).toBeGreaterThan(linkedAt)
     } finally {
       await closeHome(session)
     }
@@ -1365,5 +1443,272 @@ describe("typical action coverage (used by tests above)", () => {
       "remove",
     ]
     expect(ids).toHaveLength(12)
+  })
+})
+
+/**
+ * Cache-first rendering, continuous refresh, selection identity, and freshness
+ * disclosure (change `live-board-cache-and-refresh`, tasks 4.1–4.6/5.1): a
+ * fake `BoardSource` lets these stay hermetic while exercising the launcher's
+ * real paint → poll → re-render loop.
+ */
+function snapshotWith(rows: BoardWorktree[], builtAt = Date.now()): BoardSnapshot {
+  return { schemaVersion: 1, repoKey: "k", commonDir: "/repo/.git", builtAt, board: { worktrees: rows }, fingerprints: {} }
+}
+
+function fakeSource(snapshots: BoardSnapshot[]): { source: BoardSource; calls: () => number } {
+  let calls = 0
+  const fake = {
+    async refresh() {
+      const snapshot = snapshots[Math.min(calls, snapshots.length - 1)]!
+      calls += 1
+      return { snapshot, refreshed: true }
+    },
+    async cached() {
+      return undefined
+    },
+    current() {
+      return snapshots[Math.min(Math.max(calls - 1, 0), snapshots.length - 1)]
+    },
+    lastError() {
+      return undefined
+    },
+    lastRunEntries() {
+      return undefined
+    },
+  }
+  return { source: fake as unknown as BoardSource, calls: () => calls }
+}
+
+async function openWithSource(options: {
+  worktrees: BoardWorktree[]
+  source?: BoardSource
+  builtAt?: number
+  initialWorktree?: { path: string; branch?: string }
+  pollMs?: number
+  width?: number
+}) {
+  const testRenderer = await createTestRenderer({ width: options.width ?? 110, height: 30 })
+  const instance = new HomeLauncher(testRenderer.renderer, viewDir(), {
+    worktrees: options.worktrees,
+    source: options.source,
+    builtAt: options.builtAt,
+    initialWorktree: options.initialWorktree,
+    pollMs: options.pollMs ?? 100_000,
+    observePr: async () => ({ availability: "unknown", reason: "test", observedAt: 0 }),
+    listRunsForWorktree: async () => [],
+  })
+  await testRenderer.renderOnce()
+  return {
+    ...testRenderer,
+    instance,
+    press(key: string, keyOptions: { ctrl?: boolean; shift?: boolean; sequence?: string } = {}) {
+      testRenderer.renderer.keyInput.emit("keypress", keyEvent(key, keyOptions))
+    },
+  }
+}
+
+/** Closes a launcher directly (its `finish` is the private resolution path tests exercise). */
+function closeLauncher(instance: HomeLauncher): void {
+  ;(instance as unknown as { finish: (value: undefined) => void }).finish(undefined)
+}
+
+describe("cache-first board and refresh (live-board-cache-and-refresh)", () => {
+  const baseRows = (): BoardWorktree[] => [
+    worktree({ path: mainPath, branch: "main", main: true }),
+    worktree({ path: wtPath, branch: "feat/add-widget" }),
+  ]
+
+  test("a refresh updates the board in place and preserves the selected checkout by identity", async () => {
+    const changed = worktree({
+      path: wtPath,
+      branch: "feat/add-widget",
+      dirt: { kind: "known", value: { dirty: true, fileCount: 9 }, collectedAt: 0 },
+    })
+    const { source, calls } = fakeSource([snapshotWith(baseRows()), snapshotWith([baseRows()[0]!, changed])])
+    const session = await openWithSource({ worktrees: baseRows(), source, pollMs: 20 })
+    try {
+      await Bun.sleep(5)
+      // rows are [New worktree, main, add-widget…]: move to the feature checkout.
+      session.press("down")
+      session.press("down")
+      await session.renderOnce()
+      await Bun.sleep(50)
+      await session.renderOnce()
+      expect(calls()).toBeGreaterThanOrEqual(2)
+      const selected = highlightedLines(session).join("\n")
+      expect(selected).toContain("add-widget")
+      expect(selected).toContain("9")
+      // No remount: the same instance is still rendering its own tree.
+      expect(session.instance.result).toBeDefined()
+    } finally {
+      closeLauncher(session.instance)
+    }
+  })
+
+  test("initialWorktree reopens the viewed checkout; a disappeared one falls back to New worktree", async () => {
+    const { source } = fakeSource([snapshotWith(baseRows())])
+    const session = await openWithSource({ worktrees: baseRows(), source, initialWorktree: { path: wtPath, branch: "feat/add-widget" } })
+    expect(highlightedLines(session).join("\n")).toContain("add-widget")
+    closeLauncher(session.instance)
+
+    const gone = fakeSource([snapshotWith(baseRows())])
+    const fallback = await openWithSource({ worktrees: baseRows(), source: gone.source, initialWorktree: { path: "/gone", branch: "feat/gone" } })
+    expect(highlightedLines(fallback).join("\n")).toContain("New worktree")
+    closeLauncher(fallback.instance)
+  })
+
+  test("the refresh indicator shows while in flight and clears when it settles", async () => {
+    let resolveRefresh!: (value: { snapshot: BoardSnapshot; refreshed: boolean }) => void
+    const source = {
+      refresh: () => new Promise<{ snapshot: BoardSnapshot; refreshed: boolean }>((resolve) => (resolveRefresh = resolve)),
+      cached: async () => undefined,
+      current: () => undefined,
+      lastError: () => undefined,
+      lastRunEntries: () => undefined,
+    } as unknown as BoardSource
+    const session = await openWithSource({ worktrees: baseRows(), source })
+    expect(session.captureCharFrame()).toContain("⟳")
+    resolveRefresh({ snapshot: snapshotWith(baseRows()), refreshed: true })
+    await Bun.sleep(5)
+    await session.renderOnce()
+    expect(session.captureCharFrame()).not.toContain("⟳")
+    closeLauncher(session.instance)
+  })
+
+  test("the top-right refresh indicator degrades on a narrow terminal without overflowing", async () => {
+    let resolveRefresh!: (value: { snapshot: BoardSnapshot; refreshed: boolean }) => void
+    const source = {
+      refresh: () => new Promise<{ snapshot: BoardSnapshot; refreshed: boolean }>((resolve) => (resolveRefresh = resolve)),
+      cached: async () => undefined,
+      current: () => undefined,
+      lastError: () => undefined,
+      lastRunEntries: () => undefined,
+    } as unknown as BoardSource
+    const session = await openWithSource({ worktrees: baseRows(), source, width: 40 })
+    try {
+      const frame = session.captureSpans()
+      // No line exceeds the terminal width: the status clips rather than
+      // overflowing, and the worktree list stays on screen.
+      const overflow = frame.lines.filter((line) => line.spans.reduce((total, span) => total + span.width, 0) > frame.cols)
+      expect(overflow).toEqual([])
+      const chars = session.captureCharFrame()
+      expect(chars).toContain("⟳")
+      expect(chars).toContain("New worktree")
+      resolveRefresh({ snapshot: snapshotWith(baseRows()), refreshed: true })
+      await Bun.sleep(5)
+      await session.renderOnce()
+      expect(session.captureCharFrame()).not.toContain("⟳")
+    } finally {
+      closeLauncher(session.instance)
+    }
+  })
+
+  test("aged evidence is marked stale and a fresh snapshot shows its age", async () => {
+    const stale = await openWithSource({ worktrees: baseRows(), builtAt: Date.now() - 60_000 })
+    expect(stale.captureCharFrame()).toContain("stale")
+    closeLauncher(stale.instance)
+    const fresh = await openWithSource({ worktrees: baseRows(), builtAt: Date.now() })
+    expect(fresh.captureCharFrame()).toContain("as of 0s")
+    closeLauncher(fresh.instance)
+  })
+
+  test("finish() clears the poll timer", async () => {
+    const { source, calls } = fakeSource([snapshotWith(baseRows())])
+    const session = await openWithSource({ worktrees: baseRows(), source, pollMs: 20 })
+    await Bun.sleep(60)
+    const before = calls()
+    closeLauncher(session.instance)
+    await Bun.sleep(80)
+    expect(calls()).toBe(before)
+  })
+
+  test("ctrl+r triggers an explicit refresh off the poll cadence", async () => {
+    const { source, calls } = fakeSource([snapshotWith(baseRows())])
+    const session = await openWithSource({ worktrees: baseRows(), source, pollMs: 100_000 })
+    await Bun.sleep(5)
+    const before = calls()
+    session.press("r", { ctrl: true })
+    await Bun.sleep(5)
+    await session.renderOnce()
+    expect(calls()).toBeGreaterThan(before)
+    closeLauncher(session.instance)
+  })
+
+  test("a refresh preserves an auxiliary selection instead of snapping to New worktree", async () => {
+    const { source, calls } = fakeSource([snapshotWith(baseRows()), snapshotWith(baseRows()), snapshotWith(baseRows())])
+    const session = await openWithSource({ worktrees: baseRows(), source, pollMs: 20 })
+    try {
+      // Rows: New worktree, main, add-widget, Pipelines, Specs, Runs, Config.
+      session.press("down")
+      session.press("down")
+      session.press("down")
+      await session.renderOnce()
+      expect(highlightedLines(session).join("\n")).toContain("Pipelines")
+      await Bun.sleep(60)
+      await session.renderOnce()
+      // A refresh really ran while parked on the destination row.
+      expect(calls()).toBeGreaterThanOrEqual(2)
+      const selected = highlightedLines(session).join("\n")
+      expect(selected).toContain("Pipelines")
+      expect(selected).not.toContain("New worktree")
+    } finally {
+      closeLauncher(session.instance)
+    }
+  })
+
+  test("a failed refresh discloses both the failure and the retained snapshot's age", async () => {
+    const builtAt = Date.now() - 60_000
+    const source = {
+      refresh: async () => ({ snapshot: snapshotWith(baseRows(), builtAt), refreshed: false, error: "git exploded" }),
+      cached: async () => undefined,
+      current: () => undefined,
+      lastError: () => "git exploded",
+      lastRunEntries: () => undefined,
+    } as unknown as BoardSource
+    const session = await openWithSource({ worktrees: baseRows(), source, builtAt })
+    try {
+      await Bun.sleep(10)
+      await session.renderOnce()
+      const frame = session.captureCharFrame()
+      expect(frame).toContain("stale")
+      expect(frame).toContain("git exploded")
+      expect(frame).toMatch(/as of \d+s/)
+    } finally {
+      closeLauncher(session.instance)
+    }
+  })
+
+  test("an explicit refresh during an in-flight cycle is replayed as one trailing forced cycle", async () => {
+    const resolvers: Array<() => void> = []
+    let calls = 0
+    const source = {
+      refresh: () => {
+        calls += 1
+        return new Promise<{ snapshot: BoardSnapshot; refreshed: boolean }>((resolve) => {
+          resolvers.push(() => resolve({ snapshot: snapshotWith(baseRows()), refreshed: true }))
+        })
+      },
+      cached: async () => undefined,
+      current: () => undefined,
+      lastError: () => undefined,
+      lastRunEntries: () => undefined,
+    } as unknown as BoardSource
+    const session = await openWithSource({ worktrees: baseRows(), source, pollMs: 100_000 })
+    try {
+      expect(calls).toBe(1)
+      session.press("r", { ctrl: true })
+      session.press("r", { ctrl: true })
+      await Bun.sleep(5)
+      // Still the single in-flight cycle; the requests are coalesced.
+      expect(calls).toBe(1)
+      resolvers[0]!()
+      await Bun.sleep(10)
+      expect(calls).toBe(2)
+      resolvers[1]!()
+      await Bun.sleep(5)
+    } finally {
+      closeLauncher(session.instance)
+    }
   })
 })

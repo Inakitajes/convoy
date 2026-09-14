@@ -391,7 +391,7 @@ describe("openRunMetadata", () => {
     const failure: SessionErrorSignal = { name: "ProviderAuthError", message: "expired key", providerID: "anthropic" }
     const store = await openRunMetadata(ws, "/target", validPipeline([validAgentStep("design"), validAgentStep("code")]))
     try {
-      await store.phaseEnded("design", "failed", failure)
+      await store.phaseEnded("design", "failed", undefined, failure)
       await store.phaseEnded("code", "failed")
       await store.flush()
       const metadata = (await readRunMetadata(`${dir}/metadata.json`))!
@@ -404,7 +404,7 @@ describe("openRunMetadata", () => {
       expect(restarted.phases.design?.status).toBe("running")
       expect(restarted.phases.design?.error).toBeUndefined()
 
-      await store.phaseEnded("design", "failed", failure)
+      await store.phaseEnded("design", "failed", undefined, failure)
       await store.phaseEnded("design", "completed")
       await store.flush()
       const recovered = (await readRunMetadata(`${dir}/metadata.json`))!
@@ -884,6 +884,47 @@ describe("openRunMetadata", () => {
       await cleanup()
     }
   })
+
+  test("persists the canonical planned phase list once and keeps it on reopen", async () => {
+    const { dir, ws, cleanup } = await withDir("planned")
+    const store = await openRunMetadata(ws, "/target", validPipeline([validAgentStep("design")]))
+    try {
+      const planned = [
+        { name: "pre-hook: fetch", description: "git fetch", kind: "hook" as const },
+        { name: "design", description: "design", kind: "step" as const },
+        { name: "Compact run", description: "compact", kind: "lifecycle" as const },
+        { name: "post-hook: open PR", description: "convoy publish", kind: "hook" as const },
+      ]
+      await store.recordPlannedPhases(planned)
+      await store.flush()
+
+      const raw = await readRunMetadata(`${dir}/metadata.json`)
+      expect(raw!.plannedPhases?.map((phase) => phase.name)).toEqual(["pre-hook: fetch", "design", "Compact run", "post-hook: open PR"])
+      expect(raw!.plannedPhases?.find((phase) => phase.name === "post-hook: open PR")?.kind).toBe("hook")
+
+      // A resume keeps the recorded plan instead of replacing it with the
+      // freshly resolved hook set.
+      const reopened = await openRunMetadata(ws, "/target", validPipeline([validAgentStep("design")]))
+      await reopened.recordPlannedPhases([{ name: "different", description: "", kind: "step" }])
+      await reopened.flush()
+      const after = await readRunMetadata(`${dir}/metadata.json`)
+      expect(after!.plannedPhases?.map((phase) => phase.name)).toContain("post-hook: open PR")
+    } finally {
+      await cleanup()
+    }
+  })
+
+  test("a legacy record without a planned phase list still opens", async () => {
+    const { dir, ws, cleanup } = await withDir("planned-legacy")
+    await writeFile(join(dir, "metadata.json"), JSON.stringify({ ...baseV3 }))
+    const store = await openRunMetadata(ws, "/target", validPipeline([validAgentStep("design")]))
+    try {
+      expect(store.plannedPhases()).toBeUndefined()
+    } finally {
+      await store.flush()
+      await cleanup()
+    }
+  })
 })
 
 describe("recordProgress", () => {
@@ -896,6 +937,7 @@ describe("recordProgress", () => {
       phaseAttempt: (name: string, ..._: unknown[]) => { calls.push(`phaseAttempt(${name})`) },
       phaseSession: (name: string, ..._: unknown[]) => { calls.push(`phaseSession(${name})`) },
       phaseActivity: (name: string, ..._: unknown[]) => { calls.push(`phaseActivity(${name})`) },
+      phaseOutput: (name: string, ..._: unknown[]) => { calls.push(`phaseOutput(${name})`) },
       phaseMessage: (name: string, ..._: unknown[]) => { calls.push(`phaseMessage(${name})`) },
       phaseStepUsage: (name: string, ..._: unknown[]) => { calls.push(`phaseStepUsage(${name})`) },
       phaseUsageTotal: (name: string, ..._: unknown[]) => { calls.push(`phaseUsageTotal(${name})`) },
@@ -926,6 +968,9 @@ describe("recordProgress", () => {
       appendLedgerEntry: () => Promise.resolve(),
       finalization: () => undefined,
       setFinalization: () => Promise.resolve(),
+      plannedPhases: () => undefined,
+      recordPlannedPhases: () => Promise.resolve(),
+      phaseOutput: (name: string) => { storeCalls.push(`phaseOutput(${name})`) },
       serverStarted: (url: string) => { storeCalls.push(`serverStarted(${url})`) },
       serverStopped: () => Promise.resolve(),
       phaseStarted: (name: string) => { storeCalls.push(`phaseStarted(${name})`); return Promise.resolve() },
@@ -1035,7 +1080,7 @@ describe("recordProgress", () => {
       if (failure) uiFailures.push(failure)
     }
     const mockStore = makeMockStore([])
-    mockStore.phaseEnded = (_name, _status, failure) => {
+    mockStore.phaseEnded = (_name, _status, _detail, failure) => {
       if (failure) failures.push(failure)
       return Promise.resolve()
     }
@@ -1210,5 +1255,35 @@ describe("recordProgress", () => {
     expect(recorder.resetPipeline).toBeUndefined()
     expect(recorder.setAbortHandler).toBeUndefined()
     expect(recorder.setHostControls).toBeUndefined()
+  })
+
+  test("records a hook phase's output and detail through to the store and the UI", async () => {
+    const calls: string[] = []
+    const fakeUI = makeFakeUI(calls)
+    const storeCalls: string[] = []
+    const recorder = recordProgress(fakeUI, makeMockStore(storeCalls))
+
+    recorder.phaseOutput?.("post-hook: open PR", [{ text: "pull request: https://x/1", kind: "info" }])
+    expect(storeCalls).toContain("phaseOutput(post-hook: open PR)")
+    expect(calls).toContain("phaseOutput(post-hook: open PR)")
+
+    await recorder.phaseCompleted("post-hook: open PR", "exit 0")
+    expect(storeCalls).toContain("phaseEnded(post-hook: open PR, completed)")
+    expect(calls).toContain("phaseCompleted(post-hook: open PR)")
+  })
+
+  test("a store failure while ending a hook phase is disclosed and never rejects", async () => {
+    const calls: string[] = []
+    const fakeUI = makeFakeUI(calls)
+    const store = makeMockStore([])
+    store.phaseEnded = () => Promise.reject(new Error("read-only filesystem"))
+    store.phaseOutput = () => {
+      throw new Error("read-only filesystem")
+    }
+    const recorder = recordProgress(fakeUI, store)
+
+    await expect(recorder.phaseFailed("post-hook: open PR", "exited with code 3")).resolves.toBeUndefined()
+    expect(calls).toContain("phaseFailed(post-hook: open PR)")
+    expect(() => recorder.phaseOutput?.("post-hook: open PR", [])).not.toThrow()
   })
 })

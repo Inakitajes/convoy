@@ -5,7 +5,9 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import { describeHomeCloseArchiveSet, goalModeFor, parseArgs, parseCommand, resolveRunOptions, runHomeNavigationLoop, shouldLaunchHome } from "../src/cli"
+import { describeHomeCloseArchiveSet, goalModeFor, homeWorkContext, parseArgs, parseCommand, resolveRunOptions, runHomeNavigationLoop, shouldLaunchHome } from "../src/cli"
+import type { BoardSnapshot } from "../src/board-cache"
+import type { BoardSource } from "../src/board-refresh"
 import { modelGateways } from "../src/model-routing"
 import { builtInAgents, builtInPipelines, resolvePipeline } from "../src/pipeline"
 import type { LocalActiveChange } from "../src/checkout-openspec"
@@ -150,6 +152,51 @@ describe("home navigation loop", () => {
 
     expect(loads).toBe(2)
     expect(homeOpens).toBe(2)
+  })
+})
+
+describe("cache-first home context (live-board-cache-and-refresh)", () => {
+  const snapshotAt = (builtAt: number): BoardSnapshot => ({
+    schemaVersion: 1,
+    repoKey: "k",
+    commonDir: "/repo/.git",
+    builtAt,
+    board: { worktrees: [{ path: "/wt", detached: false, main: false, bare: false, accessible: true, changes: [] }] },
+    fingerprints: {},
+  })
+
+  test("a warm cache paints from the cached board without assembling", async () => {
+    let refreshes = 0
+    const source = {
+      cached: async () => snapshotAt(1_234),
+      refresh: async () => {
+        refreshes += 1
+        throw new Error("a warm paint must not run the first load")
+      },
+    } as unknown as BoardSource
+
+    const context = await homeWorkContext("/repo", source)
+
+    expect(context.worktrees[0]?.path).toBe("/wt")
+    expect(context.builtAt).toBe(1_234)
+    expect(refreshes).toBe(0)
+  })
+
+  test("a cold cache performs the first load and carries its freshness", async () => {
+    let refreshes = 0
+    const source = {
+      cached: async () => undefined,
+      refresh: async () => {
+        refreshes += 1
+        return { snapshot: snapshotAt(99), refreshed: true }
+      },
+    } as unknown as BoardSource
+
+    const context = await homeWorkContext("/repo", source)
+
+    expect(refreshes).toBe(1)
+    expect(context.builtAt).toBe(99)
+    expect(context.worktrees[0]?.path).toBe("/wt")
   })
 })
 
@@ -822,8 +869,8 @@ describe("goalModeFor", () => {
     expect(goalModeFor(planWith(review))).toEqual({ mode: "off" })
   })
 
-  test("is on for ship, whose terminal goal step declares target 85 with defaults", () => {
-    expect(goalModeFor(planWith(ship))).toEqual({ mode: "on", goal: 85, maxIterations: 3, plateau: 3 })
+  test("is on for ship, whose terminal goal step declares target 90 with 5 improve rounds", () => {
+    expect(goalModeFor(planWith(ship))).toEqual({ mode: "on", goal: 90, maxIterations: 5, plateau: 3 })
   })
 
   test("is off for a pipeline whose goal step is absent even when it ends in a score", () => {

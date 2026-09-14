@@ -22,7 +22,7 @@ Convoy takes a PRD and turns it into a structured, reviewable implementation: a 
 Typical uses:
 
 - **Build a feature from a PRD.** `convoy --prompt-file prd.md` runs the default `implement` pipeline; the implementation phase writes with an advisor model at its shoulder, and what lands has already been pattern-aligned, security-audited, design-polished, tested, and adversarially reviewed — one commit per phase, so you review a story, not a blob.
-- **Close a branch out.** `convoy -p ship "what this branch does"` merges the advanced base in and resolves the conflicts, grades the merged result against the quality rubric, and keeps fixing and re-scoring until it clears 85/100 — so the pull request you open has a number behind it, not a vibe.
+- **Close a branch out.** `convoy -p ship "what this branch does"` merges the advanced base in and resolves the conflicts, reviews the merged result (clean-code, security, and bug audits), triages and fixes the accepted findings, then grades it against the quality rubric and keeps fixing and re-scoring until it clears 90/100 — so the pull request you open has a number behind it, not a vibe.
 - **Get a second opinion before merging.** `convoy -p review "pre-merge check"` changes no code: each audit runs in parallel on two different models, everything is synthesized into one prioritized findings report at `reports/report.md`, and the run ends with a verified score.
 - **Turn a findings list into fixes.** `convoy -p fixer` takes a report and proves each finding with a focused regression test *before* touching production code, then reports a per-finding verdict.
 - **Encode your team's actual workflow.** Pipelines are YAML in `.convoy/config.yaml`: define your own steps, agents, and models, with named human gates anywhere, and run `convoy -p <name>`.
@@ -72,7 +72,7 @@ They are built around one cycle. Two of its four steps are Convoy's:
 ```
    plan            build              shape            close
 (your editor) ──► convoy ──► (your editor, by hand) ──► convoy -p ship ──► PR
-                 implement                              sync · score · loop
+                 implement                              sync · review · fix · loop
 ```
 
 You write the plan, `implement` turns it into something functional, you shape it by hand until you like it, and `ship` proves it merges and clears the quality bar before the pull request exists. Everything else in the table serves that cycle from the side: `review` and the `hunter`s tell you where you stand without changing anything, and `fixer` turns a findings list into proven fixes.
@@ -81,7 +81,7 @@ You write the plan, `implement` turns it into something functional, you shape it
 |---|---|---|
 | `implement` | yes | **The default** (runs with no `-p`). Implement a PRD with an **advised** implementation phase — Terra xhigh writes and consults Sol xhigh at its decision points — then audit, polish, test, and adversarial review (the table above), and close with a one-page extractive recap of the whole run (`reports/run-report.md`). Does not score: that is `ship`'s job. |
 | `implement-lite` | yes | `implement`'s shape on low-cost models: DeepSeek V4 Flash 0731 writes, Grok 4.6 advises the implementer and polishes design, GLM 5.3 runs the audits, and `adversarial` runs on GLM 5.3. The advisor is the last thing to go, because it is what makes a cheap implementer worth running. Ends with the same run recap — the recap is already the cheapest step in the pipeline. |
-| `ship` | yes | **The close of the cycle.** A `sync` phase merges the advanced base branch in and resolves the conflicts — real and semantic — so what gets graded is the branch as it will actually merge. Then two independent quality-scorers grade it against the rubric and a consensus step reconciles and verifies. `ship` ends in a terminal `goal` step that declares `target: 85` and embeds its own improve/measure fragments, so the improve/re-score loop runs **without any flag**: it keeps closing gaps until the score clears 85, plateaus, or hits the iteration cap. See [Quality scoring](#quality-scoring) and [Goal mode](#goal-mode). Two things it expects from your config, because both are machine-local: `permissions.allow` entries for `git merge*`, `git add*` and `git checkout --ours*`/`--theirs*` (without them those commands fall through to "ask" rather than failing), and, optionally, `hooks.pipelines.ship` to fetch the base beforehand and open the PR afterwards — Convoy never runs remote git itself. Post-hooks receive `CONVOY_GOAL_REACHED`, so the PR step can require the bar was actually met. |
+| `ship` | yes | **The close of the cycle, with a review-and-fix pass built in.** A `sync` phase merges the advanced base branch in and resolves the conflicts — real and semantic — so what gets graded is the branch as it will actually merge. Then a report-only review scopes the diff and runs the clean-code/security/bug audits across two cheap models, a prioritized report feeds an adversarial triage and a fixer that applies only the accepted findings, and `run-report` recaps the prefix. `ship` ends in a terminal `goal` step that declares `target: 90` and embeds its own improve/measure fragments, so the improve/re-score loop runs **without any flag**: two independent quality-scorers grade against the rubric, a consensus step reconciles and verifies, and the loop keeps closing gaps until the score clears 90, plateaus, or hits the 5-round iteration cap. Every phase runs on OpenRouter models, never a machine-local provider alias. See [Quality scoring](#quality-scoring) and [Goal mode](#goal-mode). Two things it expects from your config, because both are machine-local: `permissions.allow` entries for `git merge*`, `git add*` and `git checkout --ours*`/`--theirs*` (without them those commands fall through to "ask" rather than failing), and, optionally, `hooks.pipelines.ship` to fetch the base beforehand and open the PR afterwards (a post-hook can call `convoy publish` for the run-aware PR text) — Convoy never runs remote git itself. Post-hooks receive `CONVOY_GOAL_REACHED`, so the PR step can require the bar was actually met. |
 | `fixer` | yes | The follow-up to a report-only run. Give it a set of findings (as the prompt or an attachment) and it proves each one with a focused regression test **before** touching production code, applies minimal fixes only for the findings that actually went red, then independently reruns those proofs and the surrounding checks to report a final per-finding verdict (`fixed`, `already-resolved`, `not-reproducible`, `not-automatable`, `blocked`, `not-fixed`). The validation phase runs the commands itself (see [verifying steps](#project-configuration-convoyconfigyaml)) rather than taking the fix phase's word for it, and never promotes an unproven finding to fixed. |
 | `review` | **no — report only** | Scope the diff (attaching the branch's original PRD when Convoy has one), run the bug / clean-code(+patterns) / security audits **in parallel across two models each**, synthesize one prioritized findings report, then **measure**: two independent quality-scorers grade the same diff against the rubric and a consensus step reconciles and verifies. The deliverables are `reports/report.md` and the machine-readable score in `reports/score-report.md`. Makes no changes. |
 | `review-lite` | **no — report only** | Same shape as `review`, but nothing runs on Opus: `openrouter/z-ai/glm-5.3#high` scopes and reconciles the score, DeepSeek V4 Flash 0731 writes the report, and the audit and scorer fan-outs pair GLM 5.3 with `openrouter/x-ai/grok-4.6#high`. The cheap way to get a full review and a number. |
@@ -97,7 +97,7 @@ You write the plan, `implement` turns it into something functional, you shape it
 
 `ship`, `review` and `review-lite` end the run with a **measurement**, not just a findings list. The problem with open-ended review is that it is open-ended: an agent asked to "find problems" will always find one more, and its severities are ranked against whatever it happened to find — so a cosmetic nit can come back labeled `critical`. Scoring inverts that: the agent grades against a **fixed, closed contract** — the rubric — and every number must carry evidence a maintainer can check.
 
-This is why `ship` has no separate audit phases. The scorer already grades bugs, security, maintainability and scope against the rubric; an open-ended audit in front of it only produces findings the score then has to re-weigh.
+`ship` runs a bounded review-and-fix prefix first — a report-only scan, an adversarial triage, and a single fix pass — so obvious gaps are closed before measurement rather than left for the scorer to re-weigh as an open-ended audit. Measurement is still independent: the prefix's fixes are graded by fresh scorers, and the goal loop then closes only what the score still reports.
 
 ### The rubric
 
@@ -305,8 +305,8 @@ pipelines:
         reports: none
 
       - goal:
-          target: 85          # required, 1–100
-          maxIterations: 3    # default 3: improvement rounds after iteration zero
+          target: 90          # required, 1–100
+          maxIterations: 5    # default 3: improvement rounds after iteration zero
           plateau: 3          # default 3: stop when an improvement adds fewer points
 
           improve:            # writable directed-fix subflow
@@ -333,10 +333,10 @@ pipelines:
                 prdHistory: true
 ```
 
-This is the whole embedded shape of the built-in `ship`, so with `ship` this is simply what happens — no flag required:
+This is the terminal goal step of the built-in `ship`, whose prefix syncs, reviews, triages, fixes, and recaps before it — so with `ship` this is simply what happens, no flag required:
 
 ```bash
-convoy -p ship "what this branch does"          # measure, improve, re-measure until 85
+convoy -p ship "what this branch does"          # measure, improve, re-measure until 90
 ```
 
 Execution is measure-first and bounded:
@@ -359,7 +359,7 @@ Legacy goal configuration — pipeline-level scalar `goal:`, `goalMaxIterations:
 
 Goal mode is a bounded loop, not an open cheque: the plateau and the iteration cap exist precisely so the loop cannot chase a score forever. If it stops below the target, the branch is left at the best measured state and the final score report tells you what is still missing.
 
-**The loop finishing is not the same as the goal being met.** A run that plateaus or exhausts its iterations below the target still ends successfully — it did what it was asked, it just could not get there. Post-hooks are therefore run **once, after the whole cycle**, and receive `CONVOY_GOAL_REACHED` (`true`/`false`), `CONVOY_GOAL_SCORE` and `CONVOY_GOAL_TARGET`, so a hook that opens a pull request can require the bar was actually cleared:
+**The loop finishing is not the same as the goal being met.** A run that plateaus or exhausts its iterations below the target still ends successfully — it did what it was asked, it just could not get there. Post-hooks are therefore run **once, after the whole cycle and after automatic compaction**, and receive `CONVOY_GOAL_REACHED` (`true`/`false`), `CONVOY_GOAL_SCORE` and `CONVOY_GOAL_TARGET`, so a hook that opens a pull request can require the bar was actually cleared:
 
 ```yaml
 hooks:
@@ -369,10 +369,22 @@ hooks:
         - name: open PR
           command: |
             if [ "$CONVOY_GOAL_REACHED" = "true" ]; then
-              git push -u origin HEAD && gh pr create --fill
+              convoy publish --run-dir "$CONVOY_RUN_DIR" --worktree "$CONVOY_TARGET_DIR" --yes
             else
               echo "scored $CONVOY_GOAL_SCORE, needed $CONVOY_GOAL_TARGET — no PR opened"
             fi
+```
+
+Success post-hooks also receive the compaction outcome — `CONVOY_FINALIZATION_STATE` plus the produced commit (`CONVOY_FINALIZATION_SHA`, `CONVOY_FINALIZATION_SUBJECT`) and `CONVOY_FINALIZATION_REASON` when it did not complete — so a publish hook can require `completed` before pushing.
+
+`convoy publish` is the explicit headless publication request. It composes the same run-aware title and Why / What / How-tested body the dashboard's **Create PR** action composes — the branch's conventional prefix plus the OpenSpec proposal title, grounded in the proposal, the run recap (`reports/run-report.md`), and the validation reports — prints the disclosed branch/remote/base and the exact text, and pushes and creates the PR **only under explicit `--yes`**. Without `--yes`, or with `--dry-run`, it prints the review and performs no effect, so a run completing never publishes on its own. It is deliberately distinct from `convoy worktrees pr`, which is worktree-only and composes a generic body from the branch slug and commit subjects.
+
+```bash
+# compose and inspect without any effect
+convoy publish --run-dir ~/.convoy/runs/<id> --worktree . --dry-run
+
+# compose, push, and create/report the PR
+convoy publish --run-dir ~/.convoy/runs/<id> --worktree . --yes
 ```
 
 The dashboard shows the goal, the current iteration, and the trajectory (`◆ convoy · goal 90 · iter 2/4 · 71 → …`), and when the cycle ends — goal met, plateau, iteration cap, no score, or a failure — the dashboard holds its finish screen **once**, with the verdict in place of the live goal readout (`✓ goal 92/100`, `plateau 86/100`, `cap 88/100`, `no score`, or `✗ run failed`) and the full trajectory (`71 → 84 → 92`); the terminal prints the trajectory and why it stopped after the dashboard closes. Goal fragment phases appear under the parent pipeline with their iteration-qualified names (for example `goal-measure-1-score-report`); the whole cycle runs in one run, so the dashboard never remounts between rounds.
@@ -689,12 +701,13 @@ Convoy-Run: <complete run ID>
 
 ### Finishing a run
 
-A successful run used to leave a stack of `convoy(<step>): …` commits: accurate, but not a story, and none of them yours. Now **compaction is automatic**: after the pipeline finishes, any goal settlement has settled, and the success hooks have run, Convoy collapses the run's own commits into a single conventional commit created with your git identity — no command, no confirmation, nothing to forget.
+A successful run used to leave a stack of `convoy(<step>): …` commits: accurate, but not a story, and none of them yours. Now **compaction is automatic**: after the pipeline finishes and any goal settlement has settled — and **before the success post-hooks run**, so a hook that publishes acts on the compacted branch rather than on un-compacted history — Convoy collapses the run's own commits into a single conventional commit created with your git identity. No command, no confirmation, nothing to forget.
 
 - **What it replaces.** Only the commits Convoy recorded for this run, verified against the run's durable start boundary and per-commit provenance — never authorship alone. Your own commits, other runs' commits (including failed ones), and unexpected merges are never rewritten; if anything unaccounted-for sits inside the interval, compaction refuses the whole rewrite and reports why instead of silently squashing a partial range. Commits already published on a remote branch are refused outright rather than requiring a force-push, and unverifiable remote state blocks compaction rather than assuming it is safe.
 - **The message.** `defaults.commitMessageModel` reads the run's reports, the PRD, the step commits, and the diffstat, and proposes a conventional commit — subject plus a short bullet body. Compaction is unattended: there is nothing to confirm or edit. A model failure degrades to a message derived from the branch name and step commits; it never blocks the commit.
 - **Undo.** Before anything is rewritten, the original commits are protected behind create-only refs under `refs/convoy/runs/<run-id>/…` plus a recovery manifest in the repository's Git common dir, and run history quotes the exact `git diff`/`git show` inspection commands. Recovery is a new branch from the protected tip (`git branch recover/<run-id> refs/convoy/runs/<run-id>/pre-compaction`) — never an automatic reset of a branch that may have advanced.
-- **Signing and hooks.** The compacted commit is created with your normal configuration and signing, non-interactively and with bounded deadlines. A signature or hook that requires interaction fails visibly; compaction reports `failed` and keeps the recoverable original history rather than creating an unsigned substitute. A hook that publishes the branch's commits can therefore block compaction — publish deliberately instead.
+- **Signing and hooks.** The compacted commit is created with your normal configuration and signing, non-interactively and with bounded deadlines. A signature or hook that requires interaction fails visibly; compaction reports `failed` and keeps the recoverable original history rather than creating an unsigned substitute. Because compaction runs before the success post-hooks, a hook that publishes the branch now pushes the compacted commit; its environment carries the compaction outcome (`CONVOY_FINALIZATION_STATE` and the produced commit) so it can gate on a completed compaction.
+- **Transient failures retry.** A remote probe that times out or fails at the transport, authentication, or lookup level is retried with bounded exponential backoff — up to three retries after the initial attempt — before compaction records a terminal outcome. A definite safety refusal (a published replacement commit, a dirty tree, missing boundary or recovery evidence, an unreconciled transaction) is reported immediately and never retried.
 - **The outcome is separate.** A safely blocked or failed compaction never turns the run into a failure: the dashboard and summary say `execution succeeded; compaction blocked/failed` with the reason, alongside the pipeline result. Nothing is pushed, no branch is deleted, and no worktree is removed by compaction.
 
 `convoy finish` was removed; invoking it fails with a pointer to automatic compaction and `convoy close`. To land a whole feature's content as one commit on the base branch, run `convoy close`.
@@ -837,7 +850,7 @@ The rules:
 - **Resume is frozen**: the resolved pipeline is persisted in the run's `metadata.json`; `--resume` replays it even if the config changed since.
 - **Dirty-tree recovery**: a writable phase interrupted before its commit (Ctrl+C, a failed commit step, a killed process) leaves uncommitted work in the tree, which normally blocks `--resume`. In an interactive terminal, resume offers to commit that work as the interrupted phase (`convoy(<phase>): …` with the resumed run's `Convoy-Run` trailer), mark it done, and continue with the following phases. If the interrupted phase had already accepted a structured commit description through `write_report`, recovery reuses it; otherwise the message describes the staged paths or says plainly what happened. Read-only phases are never recoverable as agent output: preserved changes must be resolved manually, and resume also verifies their recorded HEAD/branch baseline. Decline (or a non-TTY resume) keeps the old "commit/stash first" behavior.
 - **Permissions are additive**: `permissions.deny` extends the hard denylist, `permissions.allow` extends the allowlist, deny always wins, and there is deliberately no way for a repo to grant itself `--yolo`.
-- **Hooks are trusted local shell commands**: `hooks.pre` runs after the run workspace/dashboard is initialized and before the pipeline starts (pre-hooks are skipped on `--resume`); `hooks.post` runs at the end according to `when`. Top-level hooks apply to every pipeline, and `hooks.pipelines.<name>` entries are appended for that pipeline. Hooks run via `$SHELL -lc` from the target repo by default, receive `CONVOY_RUN_ID`, `CONVOY_RUN_DIR`, `CONVOY_TARGET_DIR`, `CONVOY_PIPELINE`, `CONVOY_PROMPT_FILE`, and post-hooks also receive `CONVOY_RUN_STATUS`, plus `CONVOY_RUN_SCORE` on a scored pipeline and `CONVOY_GOAL_REACHED`/`CONVOY_GOAL_SCORE`/`CONVOY_GOAL_TARGET` when a [goal loop](#goal-mode) ran (in which case post-hooks run once, after the loop, not once per iteration). A failing hook fails the run unless `continueOnError: true` is set. Each hook is also a row in the dashboard pipeline — pre-hooks ahead of the steps, post-hooks after — with live running/✓/✗/skipped status, and the tail of its output lands in that row's `logs` tab; the rows are recorded in the run metadata, so re-opened runs show them too.
+- **Hooks are trusted local shell commands**: `hooks.pre` runs after the run workspace/dashboard is initialized and before the pipeline starts (pre-hooks are skipped on `--resume`); `hooks.post` runs at the end according to `when`. Top-level hooks apply to every pipeline, and `hooks.pipelines.<name>` entries are appended for that pipeline. Hooks run via `$SHELL -lc` from the target repo by default, receive `CONVOY_RUN_ID`, `CONVOY_RUN_DIR`, `CONVOY_TARGET_DIR`, `CONVOY_PIPELINE`, `CONVOY_PROMPT_FILE`, and post-hooks also receive `CONVOY_RUN_STATUS`, plus `CONVOY_RUN_SCORE` on a scored pipeline and `CONVOY_GOAL_REACHED`/`CONVOY_GOAL_SCORE`/`CONVOY_GOAL_TARGET` when a [goal loop](#goal-mode) ran (in which case post-hooks run once, after the loop, not once per iteration). Success post-hooks run **after** automatic compaction and receive its outcome as `CONVOY_FINALIZATION_STATE` (plus `CONVOY_FINALIZATION_SHA`, `CONVOY_FINALIZATION_SUBJECT`, and `CONVOY_FINALIZATION_REASON` when set), so a publish hook can gate on a completed compaction. A failing hook fails the run unless `continueOnError: true` is set. Each hook is also a row in the dashboard pipeline — pre-hooks ahead of the steps and post-hooks after the `Compact run` row — with live running/✓/✗/skipped status, and the tail of its output lands in that row's `logs` tab; the rows and their captured output are recorded in the run metadata, so re-opened runs show them too.
 
 ## Global configuration
 

@@ -5,6 +5,13 @@ import type { AdvisorEvent, AdvisorPhaseAggregate } from "./advisor-events"
 export type ProgressPhase = {
   name: string
   description: string
+  /**
+   * Row role for canonical ordering and reconstruction: a pipeline step (the
+   * default when absent), a hook row, or the `Compact run` lifecycle row.
+   * Persisted with the planned phase list so attach and history place rows in
+   * execution order without re-deriving the hook set.
+   */
+  kind?: "step" | "hook" | "lifecycle"
   /** Shared by every member of a concurrent group (a `parallel:` block, or a step fanned out across `models:`); absent on human gates. */
   groupId?: string
   /** Pre-fan-out logical name; equals `name` unless this step was produced by a `models:` fan-out. Absent on human gates. */
@@ -68,6 +75,12 @@ export type ActivityKind =
   | "error"
   | "info"
   | "system"
+
+/** One retained line of a phase's captured output (hook stdout/stderr). */
+export type PhaseOutputLine = {
+  text: string
+  kind: "info" | "error"
+}
 
 export type ProgressTodo = {
   content: string
@@ -335,6 +348,13 @@ export type ProgressUI = {
   phaseSession(name: string, sessionID: string): void
   /** `pulse` marks heartbeat noise (provider busy, streaming…) that updates the live status line but stays out of the activity feed. */
   phaseActivity(name: string, detail: string, kind?: ActivityKind, pulse?: boolean): void
+  /**
+   * Retains a bounded tail of a phase's captured output (hook stdout/stderr)
+   * in durable run state so history reconstruction can show what the phase
+   * printed. Optional: only the recording wrapper implements it, and no UI is
+   * required to.
+   */
+  phaseOutput?(name: string, lines: readonly PhaseOutputLine[]): void
   /** Streams the model's real output into the phase's live session transcript: verbatim reasoning/response deltas plus one-line tool/bash action markers. Unlike phaseActivity, this is the raw stream, not a summarized log line. */
   phaseMessage(name: string, message: ProgressMessage): void
   phaseStepUsage(name: string, usage: ProgressStepUsage): void
@@ -430,6 +450,7 @@ export const noopProgress: ProgressUI = {
   phaseAttempt() {},
   phaseSession() {},
   phaseActivity() {},
+  phaseOutput() {},
   phaseMessage() {},
   phaseStepUsage() {},
   phaseUsageTotal() {},

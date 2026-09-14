@@ -471,6 +471,7 @@ export function trackRunStatus(progress: ProgressUI, tracker: RunStatusTracker):
     },
     phaseSession: (name, sessionID) => progress.phaseSession(name, sessionID),
     phaseActivity: (name, detail, kind, pulse) => progress.phaseActivity(name, detail, kind, pulse),
+    phaseOutput: (name, lines) => progress.phaseOutput?.(name, lines),
     phaseMessage: (name, message) => progress.phaseMessage(name, message),
     phaseStepUsage: (name, usage) => progress.phaseStepUsage(name, usage),
     phaseUsageTotal: (name, usage) => progress.phaseUsageTotal(name, usage),

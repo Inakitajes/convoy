@@ -8,7 +8,7 @@ Defines a clear, responsive Home launcher that communicates product identity, pr
 
 ### Requirement: Home presents a unified masthead
 
-Home SHALL show Convoy's identity and the complete build version including prerelease/build metadata above the Worktrees list; the project path is implied by the session the operator already sits in and SHALL NOT be repeated in the chrome. It SHALL NOT separately append commit or platform information. Compact layouts SHALL preserve identity, version, and usable worktree navigation without overflowing terminal width. Worktree detail SHALL visibly identify the selected checkout by folder basename, actual branch or detached status, and path, without another persisted display-name record. Human titles SHALL allow whitespace; the vocabulary restriction against Spaces branding SHALL NOT impose whitespace restrictions on titles. Decorative graphics SHALL NOT displace the primary worktree list or its actions. Home SHALL keep its chrome lean without a dedicated footer; actionable labels and relevant shortcuts SHALL remain visible with their worktree-list or auxiliary actions.
+Home SHALL show Convoy's identity and the complete build version including prerelease/build metadata above the Worktrees list; the project path is implied by the session the operator already sits in and SHALL NOT be repeated in the chrome. It SHALL NOT separately append commit or platform information. Compact layouts SHALL preserve identity, version, and usable worktree navigation without overflowing terminal width. Worktree detail SHALL visibly identify the selected checkout by folder basename, actual branch or detached status, and path, without another persisted display-name record. The selected checkout's identity, path, branch, and linked pull request SHALL render as one distinctly filled zone above its remaining observations and action sections, so the checkout the operator is acting on reads as the working context rather than another plain block. Human titles SHALL allow whitespace; the vocabulary restriction against Spaces branding SHALL NOT impose whitespace restrictions on titles. Decorative graphics SHALL NOT displace the primary worktree list or its actions. Home SHALL keep its chrome lean without a dedicated footer; actionable labels and relevant shortcuts SHALL remain visible with their worktree-list or auxiliary actions.
 
 #### Scenario: Wide masthead
 
@@ -40,6 +40,11 @@ Home SHALL show Convoy's identity and the complete build version including prere
 - **WHEN** the operator describes work as `Improve review navigation`
 - **THEN** Home preserves that readable title while using Worktrees, not Spaces, for navigation branding
 
+#### Scenario: Checkout identity and branch read as one zone
+
+- **WHEN** a worktree detail renders for the selected checkout
+- **THEN** its folder basename, path, branch, and linked PR share one distinctly filled zone, visually separate from the remaining plain facts and the selectable action sections
+
 ### Requirement: Home starts with work and its next actions
 
 Interactive zero-argument Convoy SHALL open a Worktrees list derived from the complete current Git inventory and offer New worktree. Main, external, detached, locked, missing-path, and spec-less registered checkouts SHALL remain visible, including those with no runs. Selecting a worktree SHALL open detail with distinct conversation/resume, propose/revise, pipeline, local specs/runs, and contextual Git actions as applicable. Its active changes and tasks SHALL be local children; archived changes SHALL be collapsed or loaded on demand and canonical specs SHALL be local to an explicitly selected checkout. Same-id copies SHALL remain independent, and file presence SHALL NOT confer ownership or automatically select run or archive inputs. Pipelines, checkout-scoped canonical specs, global run history, and configuration SHALL remain reachable as auxiliary views. An empty inventory SHALL still offer New worktree and auxiliary navigation. Home SHALL NOT expose feature registration, adoption, binding, lifecycle summaries, or Completed feature history.
@@ -66,21 +71,26 @@ Interactive zero-argument Convoy SHALL open a Worktrees list derived from the co
 
 ### Requirement: Navigation preserves the selected work
 
-Returning from a conversation, launcher, dashboard, spec reader, or cancelled action SHALL return to Home with refreshed independent Git, spec, publication, and activity observations. Home SHALL open with its New worktree entry selected rather than restoring a previous worktree selection; persisted last-selection hints SHALL remain optional, non-authoritative diagnostics that never drive automatic selection and SHALL NOT start an agent. Convoy SHALL NOT restore selection by list position, change id, branch spelling, or a reused path. Only explicitly leaving Convoy SHALL end the surrounding Home workflow.
+Returning from a conversation, launcher, dashboard, spec reader, or cancelled action SHALL return to Home with refreshed independent Git, spec, publication, and activity observations. Within one Home session, returning SHALL reopen on the checkout the operator was viewing, selected by its verified identity (path plus branch or detached state) rather than by list position; if that checkout is no longer registered, Home SHALL open on the New worktree entry. The first Home open of a process SHALL select the New worktree entry. Persisted last-selection hints SHALL remain optional, non-authoritative diagnostics that never drive selection on the first open and SHALL NOT start an agent. Convoy SHALL NOT restore selection by list position, change id, branch spelling, or a reused path. Only explicitly leaving Convoy SHALL end the surrounding Home workflow.
 
 #### Scenario: Reopen from another worktree
 
 - **WHEN** an operator restarts Convoy from another checkout of the same repository
 - **THEN** Home opens with the New worktree entry selected and starts no session or action
 
+#### Scenario: Return within a session restores the viewed checkout
+
+- **WHEN** the operator returns to Home from a destination and the checkout they were viewing is still registered
+- **THEN** Home opens with that checkout selected by its verified identity and starts no session or action
+
 #### Scenario: Last selected checkout disappeared
 
-- **WHEN** the remembered worktree is no longer registered
-- **THEN** Home still opens with the New worktree entry selected, retains no tombstone for the missing checkout, and starts no action on a replacement checkout
+- **WHEN** the checkout the operator was viewing is no longer registered on return
+- **THEN** Home opens with the New worktree entry selected, retains no tombstone for the missing checkout, and starts no action on a replacement checkout
 
 #### Scenario: A recorded hint never chooses a target
 
-- **WHEN** a persisted last-selection hint names a worktree, whether still registered or not
+- **WHEN** a persisted last-selection hint names a worktree, whether still registered or not, and Convoy has just started
 - **THEN** nothing is automatically selected, restored, or started from the hint
 
 #### Scenario: No navigation hint is retained
@@ -133,17 +143,27 @@ Home SHALL expose contextual fetch, sync-with-detected-base (explicit bases thro
 
 ### Requirement: Worktree detail groups actions by toolchain
 
-Worktree detail SHALL group its actions into four labeled sections in order: Sessions (Open conversation, Open in window), Runs, OpenSpec (Propose a change, Archive change, Close (archive & merge)), and git (the guarded Git/publication operations, ending with worktree removal); the Linked Specs observation SHALL follow the git section. The Runs section SHALL always list a New run action as its first row, rendered whether or not the checkout has recent runs, with the checkout's recent runs listed beneath it; section headings SHALL remain plain headings. Archive change SHALL open an explicit selection of the checkout's active changes and SHALL archive only the chosen change, never by discovery. Every action SHALL keep its shared per-action guard and remain visible with its blocker when disabled.
+Worktree detail SHALL group its actions into four labeled sections in order: Sessions (Open conversation, Open in window), Runs, OpenSpec (Propose a change, Archive change, Close (archive & merge)), and git (the guarded Git/publication operations, ending with worktree removal); the Linked Specs observation SHALL immediately follow the OpenSpec section, before the git section, and SHALL render only when the checkout has linked changes. An unreadable change list SHALL still render the Linked Specs observation as unknown with its reason, because unknown is not none. The Runs section SHALL always list a New run action as its first row, rendered whether or not the checkout has recent runs, with the checkout's recent runs listed beneath it; section headings SHALL remain plain headings. Archive change SHALL open an explicit selection of the checkout's active changes and SHALL archive only the chosen change, never by discovery. Every action SHALL keep its shared per-action guard and remain visible with its blocker when disabled.
 
 #### Scenario: Sections render in order
 
-- **WHEN** a worktree detail with recent runs renders
-- **THEN** it shows Sessions, Runs, OpenSpec, and git sections in that order, followed by Linked Specs
+- **WHEN** a worktree detail with recent runs and linked changes renders
+- **THEN** it shows Sessions, Runs, OpenSpec, Linked Specs, and git in that order
 
 #### Scenario: New run is present without runs
 
 - **WHEN** the checkout has no recent runs
 - **THEN** the Runs section still lists the New run action as its first row
+
+#### Scenario: Linked Specs is absent without linked changes
+
+- **WHEN** the checkout has no linked changes and its change list was read successfully
+- **THEN** the detail omits the Linked Specs section entirely rather than rendering an empty section
+
+#### Scenario: Unreadable change list stays visible
+
+- **WHEN** the checkout's change list cannot be read
+- **THEN** the Linked Specs section renders the unknown observation with its reason
 
 #### Scenario: Archive selects one change
 
@@ -178,3 +198,22 @@ Worktree detail SHALL show the same independently observed Git state as the row 
 
 - **WHEN** the checkout's branch has no configured upstream
 - **THEN** the detail reports no upstream as a distinct condition, not as zero ahead/behind
+
+### Requirement: Home paints from the cached board before refreshing
+
+Home SHALL render the last cached board for the repository immediately when a usable cache exists, and SHALL NOT show the loading transition in that case; it SHALL start a background refresh in parallel. When no usable cache exists, Home SHALL show the shared loading transition while the first load runs. A completed refresh SHALL update the rendered board in place, without remounting Home, resetting its scroll, or interrupting the operator.
+
+#### Scenario: Warm open paints the cached board
+
+- **WHEN** Home opens and a usable cached board exists
+- **THEN** the board renders immediately, no loading transition is shown, and a background refresh is already in flight
+
+#### Scenario: Cold open falls back to the loading transition
+
+- **WHEN** Home opens and no usable cached board exists
+- **THEN** the shared loading transition covers the first load and the board replaces it when ready
+
+#### Scenario: Refresh updates in place
+
+- **WHEN** a background refresh completes while Home is open
+- **THEN** the rendered board reflects the refreshed observations without a remount and without losing the current selection

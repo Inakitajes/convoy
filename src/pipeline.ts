@@ -663,42 +663,69 @@ export const builtInPipelines: Record<string, PipelineSpec> = {
       { agent: "quality-score-report", name: "score-report", model: glm53HighModel, reports: "all", verify: true, prdHistory: true },
     ],
   },
-  // The close of the process: the branch is already shaped the way you want it,
-  // and what is left is proving it merges and clears the bar. Sync lands the
-  // advanced base first, so the scorers grade the branch as it will actually
-  // merge rather than a diff that no longer describes what lands. Then the
-  // terminal goal step owns the whole loop: measure first, and — because the
-  // goal is declared here rather than left to the caller — the improve/re-score
-  // cycle runs on its own until the score clears 85.
+  // The close of the process: the branch is synced with its base, reviewed and
+  // fixed, recapped, then driven to the quality bar. Sync lands the advanced
+  // base first, so the review and the scorers grade the branch as it will
+  // actually merge rather than a diff that no longer describes what lands.
+  //
+  // The review prefix is report-only (scope, clean-code/security/bugs audits
+  // across two cheap models, and a prioritized report), then an adversarial
+  // triage validates the findings and a fixer applies only the accepted ones;
+  // run-report distills the prefix into the recap the PR body reads. The
+  // terminal goal step owns the measurement loop: measure first, and — because
+  // the goal is declared here rather than left to the caller — the
+  // improve/re-score cycle runs on its own until the score clears 90.
   //
   // The improve/measure fragments are internal to this pipeline: never
   // selectable, and resolved with an empty report namespace so every
-  // measurement is independent of the round before it. There are no separate
-  // audit phases: the scorer already grades bugs, security, maintainability
-  // and scope against the rubric, and an open-ended audit in front of it only
-  // produces findings the score then has to re-weigh.
+  // measurement is independent of the round before it.
+  //
+  // Every phase runs on OpenRouter models (never a machine-local provider
+  // alias like `nan/…`), so the built-in works on any authenticated install.
   //
   // Two things it expects from config rather than shipping itself, because both
   // are machine-local. Conflict resolution needs `git merge*`, `git add*` and
   // `git checkout --ours*|--theirs*` in `permissions.allow` — without them those
   // commands fall through to "ask" rather than failing. And fetching the base
-  // beforehand or opening the PR afterwards belongs in `hooks.pipelines.ship`,
-  // since Convoy never runs remote git itself; post-hooks receive
-  // CONVOY_GOAL_REACHED so the PR step can require the bar to have been met.
+  // beforehand or opening the PR afterwards belongs in `hooks.pipelines.ship`
+  // (the post-hook can call `convoy publish` for the run-aware PR text), since
+  // Convoy never runs remote git itself.
   ship: {
-    description: "Sync the branch with its base (merge + conflict resolution), measure the merged result against the quality rubric, and iterate until it clears 85/100",
-    defaultPrompt: "Sync this branch with its base and iterate until it clears the quality bar.",
+    description:
+      "Sync the branch with its base, review it (clean-code/security/bugs audits plus a prioritized report), adversarially triage and fix the accepted findings, then measure and iterate until it clears 90/100",
+    defaultPrompt: "Sync this branch with its base, review and fix it to the quality bar, then open the pull request.",
+    suggestedPrompts: ["Review and fix the open PR for this branch", "Review and fix only the last commit's diff"],
     steps: [
-      { agent: "sync-with-base", name: "sync", model: glm53HighModel, reports: "none" },
+      { agent: "sync-with-base", name: "sync", model: deepseekHighModel, reports: "none" },
+      // Report-only review prefix: scope the diff, run the three audits across
+      // two cheap models each, and synthesize one prioritized findings report.
+      { agent: "review-scope", name: "scope", model: deepseekHighModel, reports: "none", diff: true, verify: true, prdHistory: true },
+      {
+        parallel: [
+          { agent: "clean-code-auditor", name: "clean-code", models: [deepseekHighModel, glm53FlashHighModel], reports: ["scope"] },
+          { agent: "security-reviewer", name: "security", models: [deepseekHighModel, glm53FlashHighModel], reports: ["scope"] },
+          { agent: "bug-auditor", name: "bugs", models: [deepseekHighModel, glm53FlashHighModel], reports: ["scope"] },
+        ],
+      },
+      { agent: "review-report", name: "report", model: deepseekHighModel, reports: "all" },
+      // Audit-then-apply: the adversary validates the findings and produces the
+      // correction plan; the fixer is the only prefix phase that writes.
+      { agent: "review-adversary", name: "triage", model: glm53HighModel, reports: "all", diff: true },
+      { agent: "review-fixer", name: "fixes", model: deepseekHighModel, advisor: astraXhighModel, reports: ["triage"], diff: true },
+      // The recap the PR body reads; read-only and extractive by contract.
+      { agent: "run-report", name: "run-report", model: defaultRunReportModel, advisor: false, reports: "all", diff: false },
+      // The terminal goal step owns the measurement loop: measure first and
+      // only iterate below target, closing exactly the reported gaps.
       {
         goal: {
-          target: 85,
+          target: 90,
+          maxIterations: 5,
           improve: {
             briefStep: "fix",
             steps: [
               // The directed fixer: applies exactly the gaps the previous
               // scoring round reported, which arrive as its per-step brief.
-              { agent: "goal-fixer", name: "fix", model: deepseekHighModel, advisor: grokModel, reports: "none", diff: true, prdHistory: true },
+              { agent: "goal-fixer", name: "fix", model: deepseekHighModel, advisor: astraXhighModel, reports: "none", diff: true, prdHistory: true },
             ],
           },
           measure: {
@@ -719,7 +746,7 @@ export const builtInPipelines: Record<string, PipelineSpec> = {
               // reconciling; the original PRD is attached so disagreements on
               // the `prd` dimension can be judged against the actual
               // requirements.
-              { agent: "quality-score-report", name: "score-report", model: grokModel, reports: ["score"], verify: true, diff: true, prdHistory: true },
+              { agent: "quality-score-report", name: "score-report", model: glm53HighModel, reports: ["score"], verify: true, diff: true, prdHistory: true },
             ],
           },
         },

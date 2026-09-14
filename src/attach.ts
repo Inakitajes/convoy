@@ -5,7 +5,7 @@ import { LiveAttach, goalLoopViewFrom, overallStatus, reconcileAdvisorJournal, r
 import { createControlClient, readControlFile, type ControlClient } from "./control-client"
 import type { ControlReset, ControlRole, PendingSnapshot } from "./control-server"
 import { goalProgressPhases } from "./goal-phases"
-import { compactRunRowName } from "./runner"
+import { compactRunRow, compactRunRowName, withGoalPhases } from "./runner"
 import { readRunMetadata, type RunMetadata } from "./metadata"
 import { connectOpencode } from "./opencode"
 import type { AutoAccept, PermissionPromptInfo, ProgressPhase, ProgressUI, RunFinalizationView } from "./progress"
@@ -69,31 +69,52 @@ function finalizationViewFrom(metadata: RunMetadata): RunFinalizationView | unde
 }
 
 /**
- * The phase list a dashboard opens with: the pipeline prefix, then the goal
- * cycle's invocations reconstructed structurally from the frozen plan
- * (`goalProgressPhases`), then any other recorded phase neither could place
- * (legacy shapes, hook rows) as today's bare extras. Pre-hook rows stay ahead
- * of the pipeline. (Exported pure so reconstruction can be tested without a
- * terminal.)
+ * The phase list a dashboard opens with: the run's persisted canonical plan
+ * when it has one — pipeline steps, hook rows, and the lifecycle row, with the
+ * goal cycle's invocations reconstructed structurally from the frozen plan and
+ * inserted ahead of `Compact run` (so post-hook rows stay terminal). Legacy
+ * records without a plan fall back to deriving the prefix and placing recorded
+ * hook extras in canonical positions. Either way, anything recorded that could
+ * not be placed keeps a bare row rather than disappearing. (Exported pure so
+ * reconstruction can be tested without a terminal.)
  */
 export function reconstructedPhases(metadata: RunMetadata, live: boolean): ProgressPhase[] {
   const pipeline = metadata.pipeline
   if (!pipeline) return []
-  const phases = progressPhases(pipeline)
-  const known = new Set(phases.map((phase) => phase.name))
-  const extras = Object.keys(metadata.phases).filter((name) => !known.has(name))
-  phases.unshift(...extras.filter((name) => name.startsWith("pre-hook")).map((name) => ({ name, description: "" })))
-  phases.push(...goalProgressPhases(pipeline, new Set(Object.keys(metadata.phases)), { live, goal: metadata.goal }))
-  // Reconstruction is best-effort: anything recorded that neither the prefix
-  // nor the reconstruction placed keeps today's bare row instead of
-  // disappearing, so unknown or legacy names degrade rather than fail.
-  const placed = new Set(phases.map((phase) => phase.name))
-  phases.push(...extras.filter((name) => !placed.has(name)).map((name) => ({ name, description: "" })))
-  // The terminal lifecycle row always closes the reconstructed list, exactly
-  // as the live runner's phase list does (SC-2): progressPhases emits it with
-  // the prefix rows, but its execution position is the run's epilogue.
-  const compact = phases.filter((phase) => phase.name === compactRunRowName)
-  return [...phases.filter((phase) => phase.name !== compactRunRowName), ...compact]
+  const recorded = Object.keys(metadata.phases)
+  const goalRows = goalProgressPhases(pipeline, new Set(recorded), { live, goal: metadata.goal })
+  const planned = metadata.plannedPhases
+  if (planned && planned.length > 0) {
+    const rows = withGoalPhases(planned, goalRows)
+    const placed = new Set(rows.map((row) => row.name))
+    return [...rows, ...recorded.filter((name) => !placed.has(name)).map(barePhaseRow)]
+  }
+  return legacyReconstructedPhases(pipeline, recorded, goalRows)
+}
+
+/** Pre-plan reconstruction: derive the prefix and slot recorded hook extras around it. */
+function legacyReconstructedPhases(
+  pipeline: NonNullable<RunMetadata["pipeline"]>,
+  recorded: readonly string[],
+  goalRows: readonly ProgressPhase[],
+): ProgressPhase[] {
+  const base = progressPhases(pipeline)
+  const compact = base.find((row) => row.name === compactRunRowName) ?? compactRunRow()
+  const steps = base.filter((row) => row.name !== compactRunRowName)
+  const goalNames = new Set(goalRows.map((row) => row.name))
+  const known = new Set([...steps.map((row) => row.name), compactRunRowName, ...goalNames])
+  const extras = recorded.filter((name) => !known.has(name))
+  const pre = extras.filter((name) => name.startsWith("pre-hook"))
+  const post = extras.filter((name) => name.startsWith("post-hook"))
+  const other = extras.filter((name) => !name.startsWith("pre-hook") && !name.startsWith("post-hook"))
+  // Recorded rows with no planned counterpart sit like steps above the
+  // lifecycle row; only post-hook rows follow it.
+  return [...pre.map(barePhaseRow), ...steps, ...goalRows, ...other.map(barePhaseRow), compact, ...post.map(barePhaseRow)]
+}
+
+/** A recorded row with no planned counterpart: rendered, but with no plan metadata. */
+function barePhaseRow(name: string): ProgressPhase {
+  return { name, description: "", kind: name.startsWith("pre-hook") || name.startsWith("post-hook") ? "hook" : "step" }
 }
 
 /**

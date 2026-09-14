@@ -76,7 +76,10 @@ async function dirExists(path: string): Promise<boolean> {
  * read (permissions, I/O); an absent `openspec/` is a known empty list — a
  * checkout without OpenSpec is a fact, not an error.
  */
-export async function readCheckoutActiveChanges(checkout: string): Promise<ReadResult<LocalActiveChange[]>> {
+export async function readCheckoutActiveChanges(
+  checkout: string,
+  options: { taskCounts?: (checkout: string) => Promise<ReadonlyMap<string, { done: number; total: number }>> } = {},
+): Promise<ReadResult<LocalActiveChange[]>> {
   const changesDir = join(checkout, openspecDirName, "changes")
   if (!(await dirExists(changesDir))) return { kind: "known", value: [] }
   let ids: string[]
@@ -85,7 +88,11 @@ export async function readCheckoutActiveChanges(checkout: string): Promise<ReadR
   } catch (error) {
     return { kind: "unknown", reason: error instanceof Error ? error.message : String(error) }
   }
-  const countsRead = await observeCheckoutTaskCounts(checkout)
+  // No active changes means no task counts are needed: the OpenSpec CLI must
+  // not be spawned for an empty change set (change `live-board-cache-and-refresh`,
+  // task 3.1).
+  if (ids.length === 0) return { kind: "known", value: [] }
+  const countsRead = await observeCheckoutTaskCounts(checkout, options.taskCounts)
   const countsByChange = countsRead.kind === "known" ? countsRead.value : undefined
   const changes: LocalActiveChange[] = []
   for (const changeId of ids) {
@@ -106,10 +113,18 @@ export async function readCheckoutActiveChanges(checkout: string): Promise<ReadR
  * the checkout, checkbox fallback otherwise), keyed by change id. "unknown"
  * when neither source can read the checkout — a failed read is never 0/0.
  */
-async function observeCheckoutTaskCounts(checkout: string): Promise<ReadResult<ReadonlyMap<string, { done: number; total: number }>>> {
-  const { openspecTaskCounts } = await import("./task-counts")
+async function observeCheckoutTaskCounts(
+  checkout: string,
+  read?: (checkout: string) => Promise<ReadonlyMap<string, { done: number; total: number }>>,
+): Promise<ReadResult<ReadonlyMap<string, { done: number; total: number }>>> {
+  const taskCounts =
+    read ??
+    (async (dir: string) => {
+      const { openspecTaskCounts } = await import("./task-counts")
+      return openspecTaskCounts(dir)
+    })
   try {
-    return { kind: "known", value: await openspecTaskCounts(checkout) }
+    return { kind: "known", value: await taskCounts(checkout) }
   } catch (error) {
     return { kind: "unknown", reason: error instanceof Error ? error.message : String(error) }
   }

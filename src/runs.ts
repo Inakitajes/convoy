@@ -309,7 +309,23 @@ function runEntryFromIndexRecord(record: RunIndexRecord, root: string): RunEntry
 
 /** Interactive run-history browser: pick a run, then resume it, read its reports, or open a subshell in its dir. */
 export async function browseRuns(initialRunID?: string, route?: TuiRoute): Promise<RunsResolution> {
-  const runs = await listRuns()
+  let runs: RunEntry[]
+  if (route && stdin.isTTY && stdout.isTTY) {
+    // The home session's handoff: cover a genuinely slow history load with the
+    // shared loading transition, named RUNS. Fast loads and non-interactive
+    // paths never see it.
+    const { withLoadingTransition, isLoadingInterrupted } = await import("./loading-transition")
+    const loaded = await withLoadingTransition(route, "runs", () => listRuns()).catch((error: unknown) => {
+      // Ctrl+C during the transition already flagged the home session as
+      // interrupted; exit quietly instead of opening the browser.
+      if (!isLoadingInterrupted(error)) throw error
+      return undefined
+    })
+    if (!loaded) return { type: "exit" }
+    runs = loaded
+  } else {
+    runs = await listRuns()
+  }
   if (runs.length === 0) {
     if (route) {
       const { showNoticeTui } = await import("./notice-tui")

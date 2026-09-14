@@ -1,7 +1,7 @@
 import { resolve } from "node:path"
 
 import { currentBranch, execFile, isAncestor, realpathSafe as physical, resolveCommit, statusPorcelain, treeOf } from "./git"
-import { listRuns } from "./runs"
+import { listRuns, type RunEntry } from "./runs"
 import { claimLiveness, readWriterClaim, type WriterClaimKind } from "./writer-claims"
 
 /**
@@ -10,10 +10,13 @@ import { claimLiveness, readWriterClaim, type WriterClaimKind } from "./writer-c
  * feature-lifecycle adapters): a run-discovery failure is `unknown`, never an
  * empty live-run set.
  */
-async function observeLiveRunsAt(targetDir: string): Promise<{ kind: "known"; value: string[] } | { kind: "unknown"; reason: string }> {
+async function observeLiveRunsAt(
+  targetDir: string,
+  readRuns: () => Promise<RunEntry[]>,
+): Promise<{ kind: "known"; value: string[] } | { kind: "unknown"; reason: string }> {
   let entries: Awaited<ReturnType<typeof listRuns>>
   try {
-    entries = await listRuns()
+    entries = await readRuns()
   } catch (error) {
     return { kind: "unknown", reason: error instanceof Error ? error.message : String(error) }
   }
@@ -192,8 +195,12 @@ export type ExecutionActivity = {
  * activity; only actual live runs count. Unknown when run history cannot be
  * read — never reported as "no live runs".
  */
-export async function observeExecutionActivity(checkout: string): Promise<Observed<ExecutionActivity>> {
-  const live = await observeLiveRunsAt(checkout)
+export async function observeExecutionActivity(
+  checkout: string,
+  options: { listRuns?: () => Promise<RunEntry[]> } = {},
+): Promise<Observed<ExecutionActivity>> {
+  const readRuns = options.listRuns ?? (async () => listRuns())
+  const live = await observeLiveRunsAt(checkout, readRuns)
   if (live.kind === "unknown") return unknown(live.reason)
   return known({ liveRunIds: live.value, total: live.value.length })
 }
