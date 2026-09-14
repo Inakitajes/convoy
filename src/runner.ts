@@ -934,6 +934,7 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
     // alone cannot). The compaction outcome rides along too, so a publishing
     // hook can gate on a completed compaction instead of re-deriving it.
     postHooksStarted = true
+    const usage = metadata.runUsage()
     await runHooks("post", hookSet.post, {
       workspace,
       targetDir: options.targetDir,
@@ -952,6 +953,7 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
             },
           }
         : {}),
+      ...(usage ? { usage } : {}),
       finalization: {
         state: finalizationRecord.state,
         ...(finalizationRecord.producedSha ? { producedSha: finalizationRecord.producedSha } : {}),
@@ -1013,6 +1015,7 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
     // gates on CONVOY_GOAL_REACHED correctly stays inert.
     if (!postHooksStarted && !isUserAbortError(failure)) {
       postHooksStarted = true
+      const usage = metadata?.runUsage()
       try {
         await runHooks("post", hookSet.post, {
           workspace,
@@ -1022,6 +1025,7 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
           status: "failure",
           progress,
           signal: shutdown.signal,
+          ...(usage ? { usage } : {}),
         })
       } catch (hookError) {
         failure = new Error(`${formatSdkError(error)}; post-hook failed: ${formatSdkError(hookError)}`)

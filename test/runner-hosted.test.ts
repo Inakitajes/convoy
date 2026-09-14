@@ -343,6 +343,30 @@ describe("run() with a hosted progress", () => {
     }
   })
 
+  test("failure post-hooks omit cost and tokens when no phase recorded usage", async () => {
+    const repo = await cleanRepo()
+    try {
+      let failure: unknown
+      try {
+        await run(makeOptions(repo, {
+          hooks: {
+            pre: [{ name: "fail-before-session", command: "exit 1" }],
+            post: [{ name: "record-usage", when: "always", command: 'printf "%s:%s:%s:%s" "$CONVOY_RUN_STATUS" "${CONVOY_RUN_COST-unset}" "${CONVOY_RUN_TOKENS_TOTAL-unset}" "$CONVOY_RUN_DURATION_MS" > hook-usage.out' }],
+            pipelines: {},
+          },
+        }))
+      } catch (error) {
+        failure = error
+      }
+      expect(String(failure)).toContain("exited with code 1")
+      const values = (await readFile(join(repo, "hook-usage.out"), "utf8")).split(":")
+      expect(values.slice(0, 3)).toEqual(["failure", "unset", "unset"])
+      expect(values[3]).toMatch(/^\d+$/)
+    } finally {
+      await rm(repo, { recursive: true, force: true })
+    }
+  })
+
   test("a hosted askPermission is honoured without a TTY — the run never auto-rejects it", async () => {
     const repo = await cleanRepo()
     // A coordinated run has no TTY on the coordinator: "interactive" there
