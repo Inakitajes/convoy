@@ -574,6 +574,15 @@ convoy --resume 20260519-103045-x7q2
 convoy runs
 convoy runs 20260519-103045-x7q2
 
+# export durable run history as JSON (newest first), optionally filtered
+convoy runs --json --since 7d | jq 'map({runID, pipeline, tokens: ([.phases[].tokens.total // 0] | add)})'
+
+# summarize phase usage; group by pipeline (default), model, step, or day
+convoy runs stats --since 7d
+convoy runs stats --pipeline implement --group-by step
+
+# Subscription-billed models record a cost of 0; compare their token totals.
+
 # view and edit the global (~/.convoy) and current project config in a TUI:
 # two tabs (Global / Project), pick models with autocomplete, edit pipelines
 # and steps, or initialize a starter config when none exists.

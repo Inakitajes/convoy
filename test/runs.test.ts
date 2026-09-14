@@ -5,8 +5,9 @@ import { join } from "node:path"
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 
-import { isServerLive, listRuns, probeRunWaiting, refreshRunWaiting } from "../src/runs"
+import { isServerLive, listRuns, probeRunWaiting, refreshRunWaiting, runHistoryRecord } from "../src/runs"
 import { startControlServer, type ControlServer } from "../src/control-server"
+import type { ProgressTokens } from "../src/progress"
 
 function listen(): Promise<{ port: number; close: () => void }> {
   return new Promise((resolve, reject) => {
@@ -69,6 +70,64 @@ afterAll(async () => {
 })
 
 describe("run history listing", () => {
+  test("projects only durable phase facts for JSON history", () => {
+    const record = runHistoryRecord({
+      runID: "20260912-120000-proj", dir: "/private", title: "Projection", pipeline: "implement", status: "completed", statusKind: "completed", live: true, waiting: "review", serverUrl: "http://private", cost: 0,
+      phases: [{ name: "implementer", status: "completed", cost: 0, tokens: { input: 1, output: 2, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 3 }, logicalModel: "gpt", startedAt: 1, endedAt: 2 }],
+    })
+    expect(record).toMatchObject({ cost: 0, phases: [{ cost: 0, logicalModel: "gpt", startedAt: 1, endedAt: 2 }] })
+    expect(record).not.toHaveProperty("dir")
+    expect(record).not.toHaveProperty("live")
+    expect(record).not.toHaveProperty("waiting")
+    expect(record).not.toHaveProperty("serverUrl")
+  })
+
+  test("omits unrecorded usage facts while preserving recorded zero cost", () => {
+    const record = runHistoryRecord({
+      runID: "20260912-120001-proj",
+      dir: "/private",
+      title: "Projection",
+      status: "completed",
+      statusKind: "completed",
+      live: false,
+      phases: [
+        { name: "Compact run", status: "skipped", durationMs: 25 },
+        { name: "implementer", status: "completed", cost: 0, tokens: { input: 1, output: 2, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 3 } },
+      ],
+    })
+
+    expect(record.phases[0]).toEqual({ name: "Compact run", status: "skipped", durationMs: 25 })
+    expect(record.phases[1]).toMatchObject({ name: "implementer", cost: 0, tokens: { total: 3 } })
+    expect(JSON.stringify(record)).not.toContain("null")
+  })
+
+  test("omits malformed optional numeric facts instead of serializing null", () => {
+    const record = runHistoryRecord({
+      runID: "20260912-120002-proj",
+      dir: "/private",
+      title: "Projection",
+      status: "completed",
+      statusKind: "completed",
+      live: false,
+      cost: null as unknown as number,
+      createdAt: Number.NaN,
+      phases: [{
+        name: "implementer",
+        status: "completed",
+        durationMs: Number.NaN,
+        model: null as unknown as string,
+        tokens: null as unknown as ProgressTokens,
+      }],
+    })
+
+    expect(record).not.toHaveProperty("cost")
+    expect(record).not.toHaveProperty("createdAt")
+    expect(record.phases[0]).not.toHaveProperty("durationMs")
+    expect(record.phases[0]).not.toHaveProperty("model")
+    expect(record.phases[0]).not.toHaveProperty("tokens")
+    expect(JSON.stringify(record)).not.toContain("null")
+  })
+
   test("lists valid runs newest first with metadata details", async () => {
     const runs = await listRuns(root)
 

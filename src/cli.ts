@@ -14,7 +14,9 @@ import { confirmRunPlan, renderRunPlan } from "./run-review"
 import { loadPrdHistoryPreview } from "./prd-history"
 import { loadOpenSpecBundle, openSpecPromptFor } from "./openspec"
 import { isModelGateway, modelGatewayChoices, modelGateways, type ModelGateway } from "./model-routing"
-import { browseRuns, isControlLive, isServerLive } from "./runs"
+import { browseRuns, isControlLive, isServerLive, listRuns, runHistoryRecord } from "./runs"
+import { filterRunHistory, parseSince, usageReport, type RunHistoryFilter, type UsageReportDimension } from "./run-history-report"
+import { renderJson, renderUsageReportTable } from "./run-history-render"
 import { browseSpecs, buildIterateSessionInput, loadSpecsView, type SpecsResolution, type SpecsResumeSelection } from "./specs"
 import { deleteKeychainSecret, keychainAvailable, storeKeychainSecret } from "./secrets"
 import type { Pipeline, RunOptions, RunPlan } from "./types"
@@ -90,7 +92,9 @@ export type InitOptions = {
 export type CliCommand =
   | { type: "help"; text: string }
   | { type: "run"; options: RunOptions }
-  | { type: "runs"; runID?: string }
+  | { type: "runs"; mode: "browse"; runID?: string }
+  | { type: "runs"; mode: "json"; runID?: undefined; filter: RunHistoryFilter }
+  | { type: "runs"; mode: "stats"; runID?: undefined; filter: RunHistoryFilter; dimension: UsageReportDimension; json: boolean }
   | { type: "specs"; targetDir: string }
   | { type: "spin"; options: SpinOptions }
   | { type: "opencode-install" }
@@ -137,7 +141,15 @@ export async function parseAndRun(argv: string[]) {
     return
   }
   if (command.type === "runs") {
-    await openRunsBrowser(command.runID)
+    if (command.mode === "browse") await openRunsBrowser(command.runID)
+    else {
+      const history = filterRunHistory((await listRuns()).map(runHistoryRecord), command.filter)
+      if (command.mode === "json") process.stdout.write(renderJson(history))
+      else {
+        const report = usageReport(history, command.dimension)
+        process.stdout.write(command.json ? renderJson(report.rows) : renderUsageReportTable(report))
+      }
+    }
     return
   }
   if (command.type === "specs") {
@@ -1943,10 +1955,7 @@ export async function parseCommand(argv: string[]): Promise<CliCommand> {
     throw new Error("usage: convoy auth [status] | convoy auth openrouter [--remove]")
   }
   if (argv[0] === "runs") {
-    const rest = argv.slice(1)
-    if (rest.length > 1) throw new Error("usage: convoy runs [run-id]")
-    if (rest[0] !== undefined && !isValidRunID(rest[0])) throw new Error(`invalid run id: ${rest[0]}`)
-    return { type: "runs", runID: rest[0] }
+    return parseRunsArgs(argv.slice(1))
   }
   if (argv[0] === "specs") {
     // No positionals or flags yet — the viewer reads the whole OpenSpec state.
@@ -2111,6 +2120,61 @@ export async function parseCommand(argv: string[]): Promise<CliCommand> {
     ...(resumeGateway ? { resumeGateway } : {}),
   })
   return { type: "run", options }
+}
+
+const runsUsage = "usage: convoy runs [run-id]\n       convoy runs --json [--since <n>d|<n>h|YYYY-MM-DD] [--pipeline <name>]\n       convoy runs stats [--group-by pipeline|model|step|day] [--since <value>] [--pipeline <name>] [--json]"
+const runsFlags = new Set(["--json", "--since", "--pipeline", "--group-by"])
+const usageReportDimensions = new Set<UsageReportDimension>(["pipeline", "model", "step", "day"])
+
+function parseRunsArgs(rest: string[]): Extract<CliCommand, { type: "runs" }> {
+  if (rest.length === 0) return { type: "runs", mode: "browse" }
+  if (rest[0] !== "stats" && !rest[0]!.startsWith("-")) {
+    if (rest.length !== 1) throw new Error(runsUsage)
+    if (!isValidRunID(rest[0]!)) throw new Error(`invalid run id: ${rest[0]}`)
+    return { type: "runs", mode: "browse", runID: rest[0] }
+  }
+
+  const stats = rest[0] === "stats"
+  const args = stats ? rest.slice(1) : rest
+  if (!stats && !args.includes("--json")) throw new Error(runsUsage)
+  const values = new Map<string, string>()
+  let json = false
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!
+    if (!runsFlags.has(arg)) throw new Error(runsUsage)
+    if (arg === "--json") {
+      if (json) throw new Error(runsUsage)
+      json = true
+      continue
+    }
+    const value = args[index + 1]
+    if (value === undefined || value.startsWith("-") || values.has(arg)) throw new Error(runsUsage)
+    values.set(arg, value)
+    index += 1
+  }
+  if (!stats && values.has("--group-by")) throw new Error(runsUsage)
+  const since = values.get("--since")
+  const filter: RunHistoryFilter = {
+    ...(since !== undefined ? { since: parseRunsSince(since) } : {}),
+    ...(values.get("--pipeline") !== undefined ? { pipeline: values.get("--pipeline") } : {}),
+  }
+  if (!stats) return { type: "runs", mode: "json", filter }
+  const rawDimension = values.get("--group-by") ?? "pipeline"
+  if (!isUsageReportDimension(rawDimension)) throw new Error(`unknown --group-by dimension "${rawDimension}"; use pipeline, model, step, or day\n${runsUsage}`)
+  return { type: "runs", mode: "stats", filter, dimension: rawDimension, json }
+}
+
+/** Every `convoy runs` usage error names the accepted forms, the `--since` reason included. */
+function parseRunsSince(value: string): number {
+  try {
+    return parseSince(value, Date.now())
+  } catch (error) {
+    throw new Error(`${error instanceof Error ? error.message : String(error)}\n${runsUsage}`)
+  }
+}
+
+function isUsageReportDimension(value: string): value is UsageReportDimension {
+  return usageReportDimensions.has(value as UsageReportDimension)
 }
 
 type ParsedInitArgs = InitOptions & { help?: boolean }
@@ -2630,6 +2694,8 @@ Usage:
   convoy agents eject <agent>
   convoy update [--check]
   convoy runs [run-id]
+  convoy runs --json [--since <n>d|<n>h|YYYY-MM-DD] [--pipeline <name>]
+  convoy runs stats [--group-by pipeline|model|step|day] [--since <value>] [--pipeline <name>] [--json]
   convoy specs
   convoy worktrees [--help]
   convoy publish [--yes] [--dry-run]
@@ -2648,8 +2714,8 @@ Commands:
                            override it ("convoy agents" lists the available ones)
   update [--check]         Check GitHub Releases for a newer official binary, or install it
                            (source checkouts are never modified)
-  runs [run-id]            Browse run history: resume a run, read its summary/reports,
-                           or open a subshell in its run dir (under ~/.convoy/runs)
+  runs [run-id]            Browse run history; --json emits durable records and
+                           stats reports usage by pipeline, model, step, or day
   worktrees                The worktree control center: every registered checkout with
                            its independent Git/OpenSpec facts, plus guarded fetch, sync,
                            push, archive, remove, delete-branch, and recover actions

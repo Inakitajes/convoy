@@ -411,3 +411,71 @@ describe("parseAndRun init and agents effects", () => {
     expect(await readFile(prompt, "utf8")).toContain("# Implementer")
   })
 })
+
+// `convoy runs --json` and `convoy runs stats` read the history under
+// CONVOY_HOME (relocated by beforeEach) and print to stdout without opening
+// the runs browser, so the dispatch is observable headlessly.
+describe("parseAndRun run history outputs", () => {
+  async function writeRun(runID: string, metadata: Omit<RunMetadata, "runID" | "control" | "updatedAt">): Promise<void> {
+    const dir = join(process.env.CONVOY_HOME!, ".convoy", "runs", runID)
+    await mkdir(dir, { recursive: true })
+    await writeFile(join(dir, "prd.md"), `# ${runID}\n`)
+    await writeFile(join(dir, "metadata.json"), JSON.stringify({ ...metadata, runID, updatedAt: metadata.createdAt, control: { state: "running" } }))
+  }
+
+  async function captureStdout(run: () => Promise<void>): Promise<string> {
+    const chunks: string[] = []
+    const original = process.stdout.write
+    process.stdout.write = ((chunk: string | Uint8Array) => {
+      chunks.push(String(chunk))
+      return true
+    }) as typeof process.stdout.write
+    try {
+      await run()
+    } finally {
+      process.stdout.write = original
+    }
+    return chunks.join("")
+  }
+
+  const tokens = { input: 10, output: 5, reasoning: 0, cacheRead: 100, cacheWrite: 0, total: 115 }
+
+  beforeEach(async () => {
+    await writeRun("20260910-090000-old1", {
+      schemaVersion: 3,
+      targetDir: "/tmp/repo",
+      createdAt: new Date(2026, 8, 10, 9).getTime(),
+      pipeline: { name: "review", steps: [] },
+      phases: { reviewer: { status: "failed", cost: 0.5, model: "gpt", tokens, durationMs: 1_000 } },
+    })
+    await writeRun("20260912-090000-new1", {
+      schemaVersion: 3,
+      targetDir: "/tmp/repo",
+      createdAt: new Date(2026, 8, 12, 9).getTime(),
+      pipeline: { name: "implement", steps: [] },
+      phases: { implementer: { status: "completed", cost: 0, model: "gpt", tokens, durationMs: 263_135 } },
+    })
+  })
+
+  test("runs --json prints durable records newest first and honors the filters", async () => {
+    const all = JSON.parse(await captureStdout(() => parseAndRun(["runs", "--json"])))
+    expect(all.map((entry: { runID: string }) => entry.runID)).toEqual(["20260912-090000-new1", "20260910-090000-old1"])
+    expect(all[0]).toMatchObject({ pipeline: "implement", statusKind: "completed", cost: 0, phases: [{ name: "implementer", status: "completed", cost: 0, tokens, model: "gpt" }] })
+    expect(all[0]).not.toHaveProperty("live")
+    expect(all[0]).not.toHaveProperty("dir")
+
+    const filtered = JSON.parse(await captureStdout(() => parseAndRun(["runs", "--json", "--pipeline", "review", "--since", "2026-09-10"])))
+    expect(filtered.map((entry: { runID: string }) => entry.runID)).toEqual(["20260910-090000-old1"])
+    expect(JSON.parse(await captureStdout(() => parseAndRun(["runs", "--json", "--since", "2026-09-13"])))).toEqual([])
+  })
+
+  test("runs stats prints a table with a total row, or raw rows as JSON", async () => {
+    const table = await captureStdout(() => parseAndRun(["runs", "stats"]))
+    expect(table).toMatch(/^pipeline\s+\| runs \| phases \| ok \| failed \| tokens/)
+    expect(table).toMatch(/^implement\s+\|\s+1\s+\|\s+1\s+\|\s+1\s+\|\s+0\s+\|\s+115\s+\|\s+100\s+\|\s+\$0\.0000\s+\|\s+\$0\.0000\s+\|\s+4m23s$/m)
+    expect(table).toMatch(/^total\s+\|\s+2\s+\|\s+2\s+\|\s+1\s+\|\s+1\s+\|\s+230\s+\|\s+200\s+\|\s+\$0\.5000\s+\|\s+\$0\.0000\s+\|\s+4m24s$/m)
+
+    const rows = JSON.parse(await captureStdout(() => parseAndRun(["runs", "stats", "--group-by", "model", "--json"])))
+    expect(rows).toEqual([{ key: "gpt", runs: 2, phases: 2, completed: 1, failed: 1, tokens: { ...tokens, input: 20, output: 10, cacheRead: 200, total: 230 }, cost: 0.5, advisorCost: 0, durationMs: 264_135 }])
+  })
+})
