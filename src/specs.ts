@@ -4,6 +4,7 @@ import { stdin, stdout } from "node:process"
 
 import { assembleControlBoard, worktreeDisplayName, type ControlBoard, type BoardWorktree } from "./control-board"
 import { readCheckoutActiveChanges } from "./checkout-openspec"
+import type { BoardSource } from "./board-refresh"
 import type { TuiRoute } from "./tui-session"
 import {
   collectDirRelativeMarkdown,
@@ -129,7 +130,7 @@ export function specArtifactLabel(section: SpecArtifactSection, capability?: str
  * canonical specs. A checkout without `openspec/` is a fact, not an error;
  * unreadable evidence stays unknown and never suppresses the inventory.
  */
-export async function loadSpecsView(targetDir: string): Promise<SpecsView> {
+export async function loadSpecsView(targetDir: string, prebuiltBoard?: ControlBoard): Promise<SpecsView> {
   targetDir = resolve(targetDir)
   const openspecRoot = join(targetDir, openspecDirName)
   const present = await dirExists(openspecRoot)
@@ -140,12 +141,18 @@ export async function loadSpecsView(targetDir: string): Promise<SpecsView> {
 
   // The board join is additive: a failure (git missing, unreadable inventory)
   // degrades to an empty inventory instead of failing the browser — the
-  // launch checkout's own artifact reads still serve.
+  // launch checkout's own artifact reads still serve. A caller with a
+  // refreshed `BoardSource` snapshot supplies it so the fingerprint-gated
+  // refresh work is not repeated here.
   let board: ControlBoard
-  try {
-    board = await assembleControlBoard(targetDir)
-  } catch {
-    board = { worktrees: [] }
+  if (prebuiltBoard) {
+    board = prebuiltBoard
+  } else {
+    try {
+      board = await assembleControlBoard(targetDir)
+    } catch {
+      board = { worktrees: [] }
+    }
   }
   const changes: SpecsChangeEntry[] = []
   for (const worktree of board.worktrees) {
@@ -279,13 +286,29 @@ export type SpecsResumeSelection = {
  * after an action; the caller reloads the view each round so restored state is
  * freshly assessed.
  */
-export async function browseSpecs(targetDir: string, route?: TuiRoute, resume?: SpecsResumeSelection): Promise<SpecsResolution> {
+export async function browseSpecs(targetDir: string, route?: TuiRoute, resume?: SpecsResumeSelection, source?: BoardSource): Promise<SpecsResolution> {
+  // With a repository-scoped source, a usable cache paints immediately and a
+  // cold load stores the fresh assembly the browser's background cadence then
+  // keeps current (change `live-board-cache-and-refresh`).
+  const loadView = async (): Promise<SpecsView> => {
+    if (!source) return loadSpecsView(targetDir)
+    const cached = await source.cached().catch(() => undefined)
+    if (cached) return loadSpecsView(targetDir, cached.board)
+    try {
+      const result = await source.refresh()
+      return loadSpecsView(targetDir, result.snapshot.board)
+    } catch {
+      // No repository/source evidence (or the first load failed): the loader's
+      // own degraded path still serves the launch checkout's artifacts.
+      return loadSpecsView(targetDir)
+    }
+  }
   let view: SpecsView
   if (route && stdin.isTTY && stdout.isTTY) {
     // The home session's handoff: the loading transition covers a genuinely
     // slow board load; fast loads and non-interactive paths never see it.
     const { withLoadingTransition, isLoadingInterrupted } = await import("./loading-transition")
-    const loaded = await withLoadingTransition(route, "specs", () => loadSpecsView(targetDir), { targetDir }).catch((error: unknown) => {
+    const loaded = await withLoadingTransition(route, "specs", loadView, { targetDir }).catch((error: unknown) => {
       // Ctrl+C during the transition already flagged the home session as
       // interrupted; exit quietly instead of opening the destination.
       if (!isLoadingInterrupted(error)) throw error
@@ -293,6 +316,10 @@ export async function browseSpecs(targetDir: string, route?: TuiRoute, resume?: 
     })
     if (!loaded) return { type: "exit" }
     view = loaded
+  } else if (source && stdin.isTTY && stdout.isTTY) {
+    // An interactive standalone board: cache-first paint, then the browser's
+    // own cadence. Non-interactive listings never touch the disposable cache.
+    view = await loadView()
   } else {
     view = await loadSpecsView(targetDir)
   }
@@ -321,6 +348,7 @@ export async function browseSpecs(targetDir: string, route?: TuiRoute, resume?: 
           ...(resume.specPath ? { specPath: resume.specPath } : {}),
         }
       : undefined,
+    source,
   )
 }
 

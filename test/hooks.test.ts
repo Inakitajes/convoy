@@ -231,4 +231,44 @@ describe("hooks", () => {
       "failed post-hook: broken: exited with code 3",
     ])
   })
+
+  test("retains a bounded tail of the hook's output for durable history", async () => {
+    const context = await hookContext()
+    const tails: Array<{ name: string; lines: { text: string; kind: string }[] }> = []
+    const progress: ProgressUI = {
+      ...noopProgress,
+      phaseOutput: (name, lines) => void tails.push({ name, lines: lines.map((line) => ({ ...line })) }),
+    }
+
+    await runHooks("pre", [{ name: "noisy", command: 'for i in $(seq 1 25); do echo "line $i"; done; echo "boom" 1>&2' }], { ...context, progress })
+
+    expect(tails).toHaveLength(1)
+    expect(tails[0]!.name).toBe("pre-hook: noisy")
+    // Most recent 20 lines only, stdout before stderr, stderr marked as error.
+    expect(tails[0]!.lines).toHaveLength(20)
+    expect(tails[0]!.lines.at(-1)).toEqual({ text: "boom", kind: "error" })
+    expect(tails[0]!.lines.some((line) => line.text === "line 1")).toBe(false)
+    expect(tails[0]!.lines.some((line) => line.text === "line 25")).toBe(true)
+  })
+
+  test("success post-hooks receive the compaction outcome in their environment", async () => {
+    const context = await hookContext()
+    await runHooks(
+      "post",
+      [{ command: 'printf "%s:%s:%s" "$CONVOY_FINALIZATION_STATE" "$CONVOY_FINALIZATION_SHA" "$CONVOY_FINALIZATION_SUBJECT" > fin.out', when: "always" }],
+      {
+        ...context,
+        status: "success",
+        finalization: { state: "completed", producedSha: "abc1234", producedMessage: "feat: land it\n\nbody" },
+      },
+    )
+    expect(await readFile(join(context.targetDir, "fin.out"), "utf8")).toBe("completed:abc1234:feat: land it")
+
+    await runHooks("post", [{ command: 'printf "%s:%s" "$CONVOY_FINALIZATION_STATE" "$CONVOY_FINALIZATION_REASON" > fin2.out', when: "always" }], {
+      ...context,
+      status: "success",
+      finalization: { state: "blocked", reason: "published replacement commit" },
+    })
+    expect(await readFile(join(context.targetDir, "fin2.out"), "utf8")).toBe("blocked:published replacement commit")
+  })
 })

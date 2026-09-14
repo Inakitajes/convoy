@@ -543,3 +543,43 @@ describe("observer dashboard follows a goal cycle", () => {
     }
   })
 })
+
+describe("LiveAttach renders a persisted phase plan", () => {
+  test("syncs hook rows from the planned list before they run", async () => {
+    // A dashboard attaching to a run that recorded its canonical plan sees
+    // every hook row — including post-hooks — before the hooks execute, in
+    // execution order (the post-hook row lands after `Compact run`).
+    const dir = await scratch()
+    const pipeline = resolvePipeline({ name: "fixer", spec: builtInPipelines.fixer!, agents: builtInAgents })
+    const planned = [
+      { name: "pre-hook: fetch base", description: "git fetch origin", kind: "hook" as const },
+      ...pipeline.steps.map((step) => ({ name: step.name, description: step.description, kind: "step" as const })),
+      { name: compactRunRowName, description: "compact", kind: "lifecycle" as const },
+      { name: "post-hook: open PR", description: "convoy publish --yes", kind: "hook" as const },
+    ]
+    await writeFile(
+      join(dir, "metadata.json"),
+      JSON.stringify({
+        schemaVersion: 5,
+        runID: "20260905-000000-hooks",
+        targetDir: "/repo",
+        createdAt: 0,
+        updatedAt: 0,
+        control: { state: "running" },
+        pipeline,
+        phases: {},
+        plannedPhases: planned,
+      }),
+    )
+
+    const state = fakeTui()
+    const attach = new LiveAttach(historyClient([]), state.tui, "/repo", join(dir, "metadata.json"), new Set(["everything"]), 10)
+    try {
+      await attach.start()
+      expect(state.synced[0]).toEqual(planned.map((row) => row.name))
+      expect(state.synced[0]!.indexOf("post-hook: open PR")).toBeGreaterThan(state.synced[0]!.indexOf(compactRunRowName))
+    } finally {
+      await attach.stop()
+    }
+  })
+})

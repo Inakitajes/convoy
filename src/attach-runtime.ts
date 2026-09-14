@@ -3,7 +3,7 @@ import { dirname } from "node:path"
 import { aggregateAdvisorEvents, readAdvisorEvents } from "./advisor-events"
 import { goalProgressPhases } from "./goal-phases"
 import { readRunMetadata, type PhaseMetadata, type RunMetadata } from "./metadata"
-import { compactRunRowName, progressPhases, watchSession, backfillSessionTranscript, type SessionWatcher } from "./runner"
+import { progressPhases, watchSession, backfillSessionTranscript, withGoalPhases, type SessionWatcher } from "./runner"
 
 import type { OpencodeClient } from "@opencode-ai/sdk/v2"
 import type { GoalLoopView, ProgressPhaseSnapshot, ProgressUI } from "./progress"
@@ -78,23 +78,20 @@ export class LiveAttach {
   }
 
   /**
-   * Grows the dashboard's panel to the rows durable state expects: the
-   * pipeline prefix plus the goal cycle's reconstructed invocations (recorded
-   * ones and, while the run is live, the in-flight one). Additive and
-   * idempotent — the TUI appends only what it is missing, so rows that already
-   * rendered keep their state and a non-goal pipeline's sync is a no-op.
+   * Grows the dashboard's panel to the rows durable state expects: the run's
+   * persisted canonical plan (pipeline, hook, and lifecycle rows) when it has
+   * one, or the derived prefix otherwise, plus the goal cycle's reconstructed
+   * invocations inserted ahead of the `Compact run` row. Additive and
+   * idempotent — the TUI merges by phase name, so rows that already rendered
+   * keep their state and a non-goal pipeline's sync is a no-op.
    */
   private syncPhases(metadata: RunMetadata) {
     const pipeline = metadata.pipeline
     if (!pipeline) return
     const recorded = new Set(Object.keys(metadata.phases))
-    const rows = [...progressPhases(pipeline), ...goalProgressPhases(pipeline, recorded, { live: true, goal: metadata.goal })]
-    // Canonical display order (SC-2): the terminal `Compact run` lifecycle row
-    // closes the payload — after the prefix and every goal invocation row —
-    // mirroring `reconstructedPhases`, so the contract the dashboard merges
-    // against describes one canonical order.
-    const compact = rows.filter((row) => row.name === compactRunRowName)
-    this.tui.syncPhases?.([...rows.filter((row) => row.name !== compactRunRowName), ...compact])
+    const goalRows = goalProgressPhases(pipeline, recorded, { live: true, goal: metadata.goal })
+    const base = metadata.plannedPhases && metadata.plannedPhases.length > 0 ? metadata.plannedPhases : progressPhases(pipeline)
+    this.tui.syncPhases?.(withGoalPhases(base, goalRows))
   }
 
   /** Derives the header's goal segments from the durable record each poll. */
@@ -190,6 +187,9 @@ export function replayHistory(tui: ProgressUI, metadata: RunMetadata) {
     if (phase.status === "pending") continue
     const status = phase.status === "running" ? "failed" : phase.status
     tui.phaseRestored(name, snapshotOf(phase, status))
+    // A hook's captured output is durable: replay it so a reopened run shows
+    // what the hook printed after the live feed is gone.
+    if (phase.outputTail) for (const line of phase.outputTail) tui.phaseActivity(name, line.text, line.kind)
   }
 }
 

@@ -23,6 +23,7 @@ import { readRunMetadata, type RunMetadata } from "./metadata"
 import { preflightRunPlan } from "./preflight"
 import type { LaunchBranchCheck, LaunchBranchProposal, LaunchFeaturePreset, LaunchRunPreparation, LaunchRunSelection } from "./launch-tui"
 import type { SpinOptions } from "./spin"
+import type { PublishCommandOptions } from "./publish-command"
 import { formatVersion } from "./version"
 import type { UpdateResult } from "./update"
 import type { TuiRoute } from "./tui-session"
@@ -95,6 +96,7 @@ export type CliCommand =
   | { type: "opencode-install" }
   | { type: "close"; args: string[] }
   | { type: "worktrees"; args: string[] }
+  | { type: "publish"; options: PublishCommandOptions }
   | { type: "retired-feature"; args: string[] }
   | { type: "config"; targetDir: string }
   | { type: "init"; options: InitOptions }
@@ -178,6 +180,14 @@ export async function parseAndRun(argv: string[]) {
       return
     }
     await runWorktreesCommand(parsed)
+    return
+  }
+  if (command.type === "publish") {
+    // The explicit headless publication request (capability run-finalization):
+    // the only way a non-interactive run is published. The seam it wraps keeps
+    // every current-target/provenance/recovery guard the dashboard has.
+    const { runPublishCommand } = await import("./publish-command")
+    process.exitCode = await runPublishCommand(command.options)
     return
   }
   if (command.type === "retired-feature") {
@@ -283,6 +293,22 @@ export function shouldLaunchHome(argv: readonly string[], stdinTTY: boolean | un
   return argv.length === 0 && stdinTTY === true && stdoutTTY === true
 }
 
+/**
+ * The Home worktree actions that mutate the checkout's evidence. After one of
+ * these, the session invalidates that checkout's cached fingerprint so the next
+ * gated refresh recomputes it instead of trusting a possibly stale token.
+ */
+const mutatingHomeActions: ReadonlySet<HomeWorkAction> = new Set<HomeWorkAction>([
+  "fetch",
+  "sync",
+  "push",
+  "pr",
+  "squash",
+  "archive",
+  "close",
+  "remove",
+])
+
 /** One alternate-screen owner routes every destination until Home itself quits. */
 async function runHomeSession(targetDir: string): Promise<void> {
   // Probe the Kitty graphics protocol before the session renderer takes
@@ -292,6 +318,12 @@ async function runHomeSession(targetDir: string): Promise<void> {
   const kittyGraphics = await probeKittyGraphics()
   const [{ launchHomeTui }, { createTuiSession }] = await Promise.all([import("./home-tui"), import("./tui-session")])
   const session = await createTuiSession(kittyGraphics)
+  // One repository-scoped board source per Home session (change
+  // `live-board-cache-and-refresh`, design D3): cache-first paints and the
+  // continuous background refresh both ride it, and it outlives individual
+  // Home opens so returning is instant.
+  const { BoardSource } = await import("./board-refresh")
+  const boardSource = new BoardSource({ targetDir })
   let interrupted = false
   const route: TuiRoute = {
     session,
@@ -299,6 +331,10 @@ async function runHomeSession(targetDir: string): Promise<void> {
       interrupted = true
     },
   }
+  // Within one session, returning to Home reopens on the checkout the operator
+  // was viewing, by verified identity; the first open passes none and selects
+  // New worktree. Persisted hints stay non-authoritative and never drive this.
+  let lastSelection: { path: string; branch?: string } | undefined
 
   try {
     await runHomeNavigationLoop({
@@ -307,10 +343,26 @@ async function runHomeSession(targetDir: string): Promise<void> {
       targetDir,
       // Every Home open — the first launch and each return from a destination —
       // covers a genuinely slow context load with the shared loading transition.
-      loadHome: () => loadHomeWithTransition(route, targetDir),
-      openHome: (context) => launchHomeTui(targetDir, { route, kittyGraphics, ...context }),
+      loadHome: () => loadHomeWithTransition(route, targetDir, () => homeWorkContext(targetDir, boardSource)),
+      openHome: (context) =>
+        launchHomeTui(targetDir, {
+          route,
+          kittyGraphics,
+          source: boardSource,
+          worktrees: context.worktrees,
+          builtAt: context.builtAt,
+          initialWorktree: lastSelection,
+          onWorktreeSelected: (selection) => {
+            lastSelection = selection
+          },
+        }),
       openWork: async (worktree, action) => {
         await dispatchWorkAction(targetDir, route, worktree, action)
+        // A mutating action changed this checkout's evidence; invalidating its
+        // fingerprint makes the next gated Home refresh recompute it even if a
+        // same-size, mtime-preserving edit would look unchanged (change
+        // `live-board-cache-and-refresh`).
+        if (mutatingHomeActions.has(action)) boardSource.invalidate(worktree)
       },
       openRun: async (worktree, runId) => {
         // A run entry opens the runs browser on that run: the dashboard
@@ -319,15 +371,16 @@ async function runHomeSession(targetDir: string): Promise<void> {
       },
       openChange: async (worktree, changeId) => {
         // A linked change opens the specs browser restored on that change's
-        // row — the identity-keyed resume, never a position guess.
-        await openSpecsBrowser(targetDir, route, { changeId, checkout: worktree })
+        // row — the identity-keyed resume, never a position guess. The home
+        // session's board source is shared so the specs board is cache-warm.
+        await openSpecsBrowser(targetDir, route, { changeId, checkout: worktree }, boardSource)
       },
       createWork: async (draft) => {
         await createWorkFromDraft(targetDir, route, draft)
       },
       openDestination: async (selection) => {
         if (selection === "pipelines") await launchInteractiveRun(targetDir, undefined, undefined, route)
-        else if (selection === "specs") await openSpecsBrowser(targetDir, route)
+        else if (selection === "specs") await openSpecsBrowser(targetDir, route, undefined, boardSource)
         else if (selection === "runs") await openRunsBrowser(undefined, route)
         else await openConfigEditor(targetDir, route)
       },
@@ -337,20 +390,30 @@ async function runHomeSession(targetDir: string): Promise<void> {
   }
 }
 
-/** The resolved context Home opens with: the refreshed worktree inventory. */
+/** The resolved context Home opens with: the worktree rows and their freshness. */
 export type HomeContext = {
   worktrees: import("./control-board").BoardWorktree[]
+  /** When the displayed board was assembled (the age Home discloses). */
+  builtAt?: number
 }
 
 /**
- * The resolved context Home opens with: the refreshed worktree inventory
- * (task 3.1). Home's default selection is always the New worktree entry —
- * the primary action — so no last-selection hint is restored here.
+ * The context Home opens with (task 3.1): a warm cache paints immediately and
+ * kicks a background refresh through the launcher's own poll timer; a cold or
+ * unusable cache performs the first assembly (which the loading transition
+ * covers) and stores it. Without a source (tests, non-session callers) this is
+ * the original one-shot assembly.
  */
-async function homeWorkContext(targetDir: string): Promise<HomeContext> {
-  const { assembleControlBoard } = await import("./control-board")
-  const board = await assembleControlBoard(targetDir)
-  return { worktrees: board.worktrees }
+export async function homeWorkContext(targetDir: string, source?: import("./board-refresh").BoardSource): Promise<HomeContext> {
+  if (!source) {
+    const { assembleControlBoard } = await import("./control-board")
+    const board = await assembleControlBoard(targetDir)
+    return { worktrees: board.worktrees }
+  }
+  const cached = await source.cached()
+  if (cached) return { worktrees: cached.board.worktrees, builtAt: cached.builtAt }
+  const result = await source.refresh()
+  return { worktrees: result.snapshot.board.worktrees, builtAt: result.snapshot.builtAt }
 }
 
 /**
@@ -1268,12 +1331,27 @@ async function openConfigEditor(targetDir: string, route?: TuiRoute) {
  * assessment after a cancelled launcher, a closed dashboard, or authoring
  * (tasks 1.2/1.4) — only an explicit exit ends the browser.
  */
-export async function openSpecsBrowser(targetDir: string, route?: TuiRoute, initialResume?: SpecsResumeSelection): Promise<void> {
+export async function openSpecsBrowser(
+  targetDir: string,
+  route?: TuiRoute,
+  initialResume?: SpecsResumeSelection,
+  source?: import("./board-refresh").BoardSource,
+): Promise<void> {
+  // One repository-scoped source for this specs session (cache-first load plus
+  // the browser's background refresh cadence); the home session shares its own.
+  const boardSource = source ?? new (await import("./board-refresh")).BoardSource({ targetDir })
   let resume = initialResume
   for (;;) {
-    const resolution = await browseSpecs(targetDir, route, resume)
+    const resolution = await browseSpecs(targetDir, route, resume, boardSource)
     resume = await dispatchSpecsResolution(targetDir, resolution, route)
     if (!resume) return
+    // Archive/close mutated the checkout: invalidate its cached fingerprint and
+    // refresh so the reopened board shows the changed artifacts, not a token
+    // that a same-size, mtime-preserving edit could leave unchanged.
+    if (resolution.type === "archive-change" || resolution.type === "close-change") {
+      boardSource.invalidate(resume.checkout)
+      await boardSource.refresh().catch(() => {})
+    }
   }
 }
 
@@ -1905,6 +1983,12 @@ export async function parseCommand(argv: string[]): Promise<CliCommand> {
     // by the worktree-commands module.
     return { type: "worktrees", args: argv.slice(1) }
   }
+  if (argv[0] === "publish") {
+    // The explicit headless publication request: effects require --yes; without
+    // it (or with --dry-run) the command only prints the reviewed plan and text.
+    if (argv.slice(1).some((arg) => arg === "--help" || arg === "-h")) return { type: "help", text: publishHelp() }
+    return { type: "publish", options: parsePublishArgs(argv.slice(1)) }
+  }
   if (argv[0] === "feature") {
     // The feature lifecycle is retired (capability feature-lifecycle): the
     // command is recognized by spelling alone — before any subcommand or flag
@@ -2058,6 +2142,60 @@ export function parseSpinArgs(argv: string[]): SpinOptions {
     }
     throw new Error(`usage: convoy spin [--change <id>] [--prefix <type>] (unexpected argument: ${arg})`)
   }
+  return options
+}
+
+/**
+ * Parses `convoy publish`'s flags. `--yes` authorizes the push + PR effects and
+ * `--dry-run` inspects without them; neither given is also safe (review only).
+ * A run context is optional and accepts one of `--run-dir` or `--run`.
+ */
+export function parsePublishArgs(argv: string[]): PublishCommandOptions {
+  const options: PublishCommandOptions = { yes: false, dryRun: false }
+  for (let i = 0; i < argv.length; i++) {
+    const { flag, value } = splitFlag(argv[i]!)
+    const takeValue = (): string => {
+      if (value !== undefined) return value
+      const next = argv[++i]
+      if (next === undefined || (next.startsWith("-") && next !== "-")) throw new Error(`${flag} requires a value`)
+      return next
+    }
+
+    switch (flag) {
+      case "--worktree":
+        options.worktree = takeValue()
+        break
+      case "--run-dir":
+        options.runDir = takeValue()
+        break
+      case "--run": {
+        const runId = takeValue()
+        if (!isValidRunID(runId)) throw new Error(`invalid run id: ${runId}`)
+        options.runId = runId
+        break
+      }
+      case "--title":
+        options.title = takeValue()
+        break
+      case "--body":
+        options.body = takeValue()
+        break
+      case "--yes":
+        if (value !== undefined) throw new Error("--yes does not take a value")
+        options.yes = true
+        break
+      case "--dry-run":
+        if (value !== undefined) throw new Error("--dry-run does not take a value")
+        options.dryRun = true
+        break
+      default:
+        throw new Error(`usage: convoy publish [--worktree <path>] [--run-dir <path> | --run <id>] [--title <text> --body <text>] [--yes] [--dry-run] (unexpected argument: ${argv[i]})`)
+    }
+  }
+
+  if (options.yes && options.dryRun) throw new Error("use either --yes (publish) or --dry-run (inspect), not both")
+  if ((options.title === undefined) !== (options.body === undefined)) throw new Error("--title and --body must be provided together")
+  if (options.runDir !== undefined && options.runId !== undefined) throw new Error("use either --run-dir or --run, not both")
   return options
 }
 
@@ -2494,6 +2632,7 @@ Usage:
   convoy runs [run-id]
   convoy specs
   convoy worktrees [--help]
+  convoy publish [--yes] [--dry-run]
   convoy spin
   convoy close
   convoy opencode install
@@ -2526,6 +2665,10 @@ Commands:
                              explicit checkout and base, sync as needed, archive the explicitly
                              selected local changes, then squash the whole branch onto the base
                              ("convoy close --help" for options)
+  publish                  The explicit headless publication request: compose the run-aware PR
+                             title/body, print the reviewed plan and text, and push + create the
+                             PR only with --yes (--dry-run inspects without effect)
+                             ("convoy publish --help" for options)
   opencode install          Install the global /convoy-spin OpenCode command — a thin wrapper at
                              ~/.config/opencode/commands/convoy-spin.md that runs convoy spin
                              from a session (opt-in, idempotent; touches no other command file)
@@ -2605,6 +2748,36 @@ Config keys:
   attachments:             files attached to every step
   The same schema lives globally at ~/.convoy/config.yaml; project config merges on top.
   Precedence: CLI flags > project config > global config > built-in defaults.
+`
+}
+
+function publishHelp() {
+  return `convoy publish
+
+The explicit headless publication request for a run (capability run-finalization):
+compose the run-aware pull-request title and body, print the reviewed plan and
+text, and push + create the PR only under explicit authorization. Run completion
+alone never publishes.
+
+Usage:
+  convoy publish [--worktree <path>] [--run-dir <path> | --run <id>]
+                 [--title <text> --body <text>] [--yes] [--dry-run]
+
+Flags:
+  --worktree <path>        Target checkout (default: the current directory)
+  --run-dir <path>         Run workspace whose recap and metadata seed the PR body and
+                           enable the run's current-target and recovery gates
+  --run <id>               Run id under ~/.convoy/runs, when no --run-dir is given
+  --title <text>           Explicit title, provided together with --body
+  --body <text>            Explicit body, provided together with --title
+  --yes                    Authorize the normal push and the PR creation
+  --dry-run                Compose and print only; never a push or PR
+
+Without --yes (or with --dry-run) the command only prints the disclosed branch,
+remote, base, title, and body, so the default is safe. Unlike
+\`convoy worktrees pr\`, it uses the run-aware composer: the branch's conventional
+prefix and the OpenSpec proposal title, and a Why / What / How-tested body
+grounded in the proposal, the run recap, and validation reports.
 `
 }
 

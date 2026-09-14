@@ -1404,13 +1404,14 @@ describe("materializing built-in pipelines", () => {
 
   test("carries the terminal goal step into the copy, so customizing ship does not disable its loop", () => {
     const materialized = materializePipelineSpec(builtInPipelines.ship!)
-    const node = materialized.steps[1] as { goal?: { target: number; improve: unknown; measure: unknown } }
-    expect(node.goal?.target).toBe(85)
+    const goalIndex = materialized.steps.length - 1
+    const node = materialized.steps[goalIndex] as { goal?: { target: number; improve: unknown; measure: unknown } }
+    expect(node.goal?.target).toBe(90)
     // The fragments travel with the copy, deep-cloned: editing the copy can
     // never touch the built-in's goal definition.
     expect(node.goal?.improve).toBeDefined()
     expect(node.goal?.measure).toBeDefined()
-    expect(builtInPipelines.ship!.steps[1]).not.toBe(materialized.steps[1])
+    expect(builtInPipelines.ship!.steps[goalIndex]).not.toBe(materialized.steps[goalIndex])
   })
 
   test("inlines built-in agent model preferences only when a default model would shadow them", () => {

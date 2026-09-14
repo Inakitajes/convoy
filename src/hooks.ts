@@ -3,7 +3,8 @@ import { join } from "node:path"
 import { advisorTokenEnv, advisorUrlEnv } from "./advisor-bridge"
 import { log } from "./log"
 
-import type { ProgressUI } from "./progress"
+import type { FinalizationState } from "./finalization/types"
+import type { PhaseOutputLine, ProgressUI } from "./progress"
 import type { HookSet, HookSpec, HookWhen, HooksConfig } from "./types"
 import type { RunUsage } from "./usage"
 import type { Workspace } from "./workspace"
@@ -25,6 +26,23 @@ export type RunHookContext = {
   goal?: GoalHookOutcome
   /** Aggregated phase facts available only to post-hooks. */
   usage?: RunUsage
+  /**
+   * The run's compaction outcome, when these are success post-hooks that ran
+   * after finalization. Lets a publishing hook gate on a completed compaction
+   * or adapt when it was blocked, without re-deriving the state.
+   */
+  finalization?: FinalizationHookOutcome
+}
+
+/** The finalization outcome a success post-hook can observe in its environment. */
+export type FinalizationHookOutcome = {
+  state: FinalizationState
+  /** The produced operator-authored commit, when compaction completed with content. */
+  producedSha?: string
+  /** The produced commit's full message, when any. */
+  producedMessage?: string
+  /** Why compaction did not complete, when it did not. */
+  reason?: string
 }
 
 /**
@@ -88,6 +106,9 @@ export async function runHooks(stage: HookStage, hooks: readonly HookSpec[], con
     const result = await runHookCommand(stage, hook, context)
     logHookOutput(stage, label, result)
     surfaceHookOutput(context.progress, phase, result)
+    // Retain a bounded tail durably so history shows what the hook printed
+    // after the live feed and the coordinator log are gone.
+    context.progress.phaseOutput?.(phase, retainedHookOutput(result))
 
     if (result.exitCode === 0 && !result.timedOut) {
       context.progress.phaseCompleted(phase, "exit 0")
@@ -126,6 +147,15 @@ export function hookPhaseNames(stage: HookStage, hooks: readonly HookSpec[]): st
 // The tail of the hook's output lands in its phase feed, so the dashboard's
 // logs tab shows what the command did without leaving the run.
 const hookFeedLines = 20
+
+/** The bounded durable tail of a hook's output: stdout, then stderr, most recent lines last. */
+function retainedHookOutput(result: HookCommandResult): PhaseOutputLine[] {
+  const lines: PhaseOutputLine[] = [
+    ...result.stdout.split("\n").map((line) => line.trimEnd()).filter(Boolean).map((text) => ({ text, kind: "info" as const })),
+    ...result.stderr.split("\n").map((line) => line.trimEnd()).filter(Boolean).map((text) => ({ text, kind: "error" as const })),
+  ]
+  return lines.slice(-hookFeedLines)
+}
 
 function surfaceHookOutput(progress: ProgressUI, phase: string, result: HookCommandResult) {
   const emit = (text: string, kind: "info" | "error") => {
@@ -184,6 +214,16 @@ async function runHookCommand(stage: HookStage, hook: HookSpec, context: RunHook
         }
       : {}),
     ...(stage === "post" ? usageEnv(context.usage) : {}),
+    ...(context.finalization
+      ? {
+          CONVOY_FINALIZATION_STATE: context.finalization.state,
+          ...(context.finalization.producedSha ? { CONVOY_FINALIZATION_SHA: context.finalization.producedSha } : {}),
+          ...(context.finalization.producedMessage
+            ? { CONVOY_FINALIZATION_SUBJECT: context.finalization.producedMessage.split("\n")[0]!.trim() }
+            : {}),
+          ...(context.finalization.reason ? { CONVOY_FINALIZATION_REASON: context.finalization.reason } : {}),
+        }
+      : {}),
   }
 
   const proc = Bun.spawn([shell, "-lc", hook.command], {
