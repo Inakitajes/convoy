@@ -5,26 +5,70 @@ import { createServer } from "node:net"
 import { homedir } from "node:os"
 import { isAbsolute, join } from "node:path"
 
-import { createOpencodeClient, createOpencodeServer } from "@opencode-ai/sdk/v2"
+import { createOpencodeClient } from "@opencode-ai/sdk/v2"
 
 import type { Config, OpencodeClient } from "@opencode-ai/sdk/v2"
 
+import { launchManagedServer, type ManagedServer } from "./managed-server"
+import type { IdentityProbe, LifetimeClass, ProcessIdentity } from "./process-identity"
+import type { ProcessRecordStore } from "./process-records"
+import type { StopOutcome, StopPolicy } from "./process-stop"
 import { openSessionCommand, sessionShellCommand, shellQuote, type SessionWindowBackend } from "./terminal-host"
 import { withoutHerdrEnv } from "./herdr"
 
 export { openSessionCommand, sessionShellCommand, shellQuote }
 export type { SessionWindowBackend }
 
+/**
+ * A live Convoy-owned OpenCode server. `stop()` is the only way to release it:
+ * it is idempotent, bounded, and resolves with an observed outcome (or an
+ * honest `unresolved`), never with "the signal was delivered". `close()` is
+ * the historical spelling of the same call, kept so existing call sites read
+ * naturally while every owned `finally` now awaits it.
+ */
 export type OpencodeHandle = {
   client: OpencodeClient
   url: string
-  close(): void
+  pid: number
+  /** Recorded child incarnation when the platform could observe one. */
+  identity?: ProcessIdentity
+  /** Id of the durable run/helper record that owns this child (design D6). */
+  recordId?: string
+  stop(): Promise<StopOutcome>
+  /** Last-resort synchronous SIGKILL edge used by a repeated abort/deadline. */
+  forceStop(): void
+  close(): Promise<StopOutcome>
+}
+
+/** A bounded per-call server boot (conversation helpers, CLI discovery). */
+export type BootedOpencodeServer = {
+  url: string
+  pid: number
+  identity?: ProcessIdentity
+  /** Id of the durable helper record that owns this child (design D6). */
+  recordId?: string
+  stop(): Promise<StopOutcome>
+  forceStop(): void
+  close(): Promise<StopOutcome>
 }
 
 type StartOpencodeDeps = {
   getFreePort(): Promise<number>
-  createServer(options: Parameters<typeof createOpencodeServer>[0]): Promise<{ url: string; close(): void }>
   createClient(options: Parameters<typeof createOpencodeClient>[0]): OpencodeClient
+  /** Test seam: replaces the real owned spawn. */
+  launch(options: Parameters<typeof launchManagedServer>[0]): Promise<ManagedServer>
+  /** Lifetime class; the executor's run server is `run`, helpers default to `helper`. */
+  lifetime?: LifetimeClass
+  /** Run id recorded on the lifetime record so an orphan can be tied to its run (design D6). */
+  runId?: string
+  probe?: IdentityProbe
+  store?: ProcessRecordStore
+  /**
+   * Stop policy for the owned helper. A resolver lets a helper under a
+   * coordinator draw from that coordinator's remaining shutdown budget (design
+   * D2) instead of a fresh standalone allowance.
+   */
+  stopPolicy?: StopPolicy | (() => StopPolicy)
 }
 
 // Async on purpose: this is called from the TUI's render path, and a sync
@@ -133,49 +177,44 @@ async function freePort() {
 
 /**
  * Boots a bounded OpenCode server rooted at an explicit checkout (capability
- * work-conversations, design D5): unlike `startOpencode`, which inherits
+ * work-conversations, design D5). Unlike `startOpencode`, which inherits
  * Convoy's cwd, this spawns the CLI with an explicit cwd so the server's
  * project scope is that checkout's repository. The URL is parsed from the
- * server's own startup output, and `close()` terminates the child; a boot
- * that fails or stalls within the timeout rejects instead of hanging.
+ * server's own startup output, ownership is published before readiness, and
+ * `close()` performs a bounded observed stop; a boot that fails or stalls
+ * within the timeout rejects instead of hanging.
+ *
+ * Lifetime defaults to `helper` (a short-lived per-call server). An
+ * independently persistent authoring service passes `authoring-service`, which
+ * is deliberately excluded from orphan reconciliation.
  */
-export async function bootOpencodeServerFrom(checkout: string, timeoutMs = 30_000): Promise<{ url: string; close(): void; pid: number }> {
-  const { spawn } = await import("node:child_process")
-  const port = await freePort()
-  const child = spawn("opencode", ["serve", "--hostname=127.0.0.1", `--port=${port}`], {
+export async function bootOpencodeServerFrom(
+  checkout: string,
+  timeoutMs = 30_000,
+  options: { lifetime?: LifetimeClass; deps?: Partial<StartOpencodeDeps> } = {},
+): Promise<BootedOpencodeServer> {
+  const lifetime = options.lifetime ?? "helper"
+  const server = await (options.deps?.launch ?? launchManagedServer)({
+    command: "opencode",
+    args: ["serve", "--hostname=127.0.0.1", `--port=${await (options.deps?.getFreePort ?? freePort)()}`],
     cwd: checkout,
-    stdio: ["ignore", "pipe", "pipe"],
-  })
-  const url = await new Promise<string>((resolve, reject) => {
-    let stdout = ""
-    let stderr = ""
-    const timer = setTimeout(() => {
-      child.kill("SIGTERM")
-      reject(new Error(`opencode server did not report a URL within ${timeoutMs}ms (stderr: ${stderr.trim().slice(0, 300)})`))
-    }, timeoutMs)
-    child.stdout!.on("data", (chunk: Buffer) => {
-      stdout += chunk.toString()
-      const match = stdout.match(/http:\/\/[^\s]+/)
-      if (match) {
-        clearTimeout(timer)
-        resolve(match[0])
-      }
-    })
-    child.stderr!.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString()
-    })
-    child.on("exit", (code) => {
-      clearTimeout(timer)
-      reject(new Error(`opencode server exited with code ${code}${stderr.trim() ? `: ${stderr.trim().slice(0, 300)}` : ""}`))
-    })
+    env: withoutHerdrEnv(process.env),
+    lifetime,
+    label: lifetime === "authoring-service" ? "opencode authoring service" : "opencode helper",
+    timeoutMs,
+    deps: {
+      ...(options.deps?.probe ? { probe: options.deps.probe } : {}),
+      ...(options.deps?.stopPolicy ? { policy: options.deps.stopPolicy } : {}),
+    },
   })
   return {
-    url,
-    close() {
-      child.kill("SIGTERM")
-    },
-    // The spawned server process — the conversation service's liveness anchor.
-    pid: child.pid ?? 0,
+    url: server.url,
+    pid: server.pid,
+    ...(server.identity ? { identity: server.identity } : {}),
+    ...(server.recordId ? { recordId: server.recordId } : {}),
+    stop: server.stop,
+    forceStop: server.forceStop,
+    close: server.stop,
   }
 }
 
@@ -185,60 +224,52 @@ export async function startOpencode(
   deps?: Partial<StartOpencodeDeps>,
 ): Promise<OpencodeHandle> {
   const port = await (deps?.getFreePort ?? freePort)()
-  // The SDK hands the server child Convoy's environment at spawn time, and
-  // ServerOptions has no env override (confirmed against @opencode-ai/sdk).
-  // A global `herdr integration install opencode` plugin would otherwise
-  // inherit HERDR_PANE_ID and claim the pane as an "opencode" agent.
-  //
-  // This wrapper is synchronous: `finally` restores process.env when `fn`
-  // returns, which for an async createOpencodeServer is when the Promise is
-  // *created*, not when it settles. That is enough because @opencode-ai/sdk
-  // spreads `{...process.env}` in launch()/cross-spawn before its first
-  // `await`. Re-verify that on SDK upgrades — if spawn moves past an await,
-  // the child would inherit the restored HERDR_* keys. Do not make this
-  // helper async: awaiting would widen the global-mutation window.
-  const server = await withProcessHerdrEnvStripped(() =>
-    (deps?.createServer ?? createOpencodeServer)({
-      hostname: "127.0.0.1",
-      port,
-      timeout: 30_000,
-      signal,
-      config,
-    }),
-  )
-  const client = (deps?.createClient ?? createOpencodeClient)({ baseUrl: server.url, fetch: fetchWithoutIdleTimeout as typeof fetch })
+  const lifetime = deps?.lifetime ?? "helper"
+  const args = ["serve", "--hostname=127.0.0.1", `--port=${port}`]
+  const logLevel = (config as { logLevel?: unknown } | undefined)?.logLevel
+  if (typeof logLevel === "string" && logLevel) args.push(`--log-level=${logLevel}`)
 
-  return {
-    client,
-    url: server.url,
-    close: server.close,
-  }
-}
+  // The child's environment is built explicitly per launch (design D1): HERDR_*
+  // keys are stripped from the copy handed to the child instead of mutating —
+  // and restoring — the parent's process.env around an SDK call. A herdr
+  // integration plugin would otherwise inherit HERDR_PANE_ID and claim the
+  // pane as an "opencode" agent. OPENCODE_CONFIG_CONTENT matches the SDK's own
+  // injection so project/global config keeps deep-merging identically.
+  const server = await (deps?.launch ?? launchManagedServer)({
+    command: "opencode",
+    args,
+    cwd: process.cwd(),
+    env: { ...withoutHerdrEnv(process.env), OPENCODE_CONFIG_CONTENT: JSON.stringify(config ?? {}) },
+    lifetime,
+    label: lifetime === "run" ? "opencode run server" : "opencode helper",
+    timeoutMs: 30_000,
+    ...(signal ? { signal } : {}),
+    ...(deps?.runId ? { runId: deps.runId } : {}),
+    deps: {
+      ...(deps?.probe ? { probe: deps.probe } : {}),
+      ...(deps?.store ? { store: deps.store } : {}),
+      ...(deps?.stopPolicy ? { policy: deps.stopPolicy } : {}),
+    },
+  })
 
-/**
- * Runs `fn` with every `HERDR_*` key removed from `process.env`, then restores
- * them when `fn` returns (not when a returned Promise settles). See the
- * call-site comment: the strip only covers the SDK's synchronous spawn.
- */
-function withProcessHerdrEnvStripped<T>(fn: () => T): T {
-  // Reuses the same filter as the reporter's env injection so the set of
-  // stripped keys stays in one place. The kept object is a shallow copy of the
-  // non-HERDR entries; any key absent from it is a HERDR_* key to save/delete.
-  const kept = withoutHerdrEnv(process.env)
-  const saved = new Map<string, string | undefined>()
-  for (const key of Object.keys(process.env)) {
-    if (!(key in kept)) {
-      saved.set(key, process.env[key])
-      delete process.env[key]
-    }
-  }
   try {
-    return fn()
-  } finally {
-    for (const [key, value] of saved) {
-      if (value === undefined) delete process.env[key]
-      else process.env[key] = value
+    const client = (deps?.createClient ?? createOpencodeClient)({ baseUrl: server.url, fetch: fetchWithoutIdleTimeout as typeof fetch })
+    return {
+      client,
+      url: server.url,
+      pid: server.pid,
+      ...(server.identity ? { identity: server.identity } : {}),
+      ...(server.recordId ? { recordId: server.recordId } : {}),
+      stop: server.stop,
+      forceStop: server.forceStop,
+      close: server.stop,
     }
+  } catch (error) {
+    // Never hand out a live child without a client: fail closed and confirm
+    // the bounded stop before surfacing the construction failure.
+    const cleanup = await server.stop()
+    const reason = error instanceof Error ? error.message : String(error)
+    throw new Error(`opencode server client construction failed: ${reason} (cleanup: ${cleanup.status === "stopped" ? cleanup.via : `unresolved — ${cleanup.reason}`})`)
   }
 }
 

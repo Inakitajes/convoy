@@ -26,7 +26,7 @@ export type AuthoringSessionRef = {
  * is stopped only through the service's explicit, guarded stop. Adapters
  * never close an injected handle.
  */
-type ServerHandle = { url: string; close?(): void }
+type ServerHandle = { url: string; close?(): void | Promise<unknown> }
 
 /**
  * Boots a bounded server rooted at the checkout, creates a session, and
@@ -53,7 +53,7 @@ export async function createAuthoringConversation(input: {
     return { harness: "opencode", sessionId: created.data.id }
   } finally {
     // Only close servers this call booted; an injected one belongs to its owner.
-    if (!input.server) server.close?.()
+    if (!input.server) await server.close?.()
   }
 }
 
@@ -80,7 +80,7 @@ export async function validateAuthoringSession(input: {
     }
     return { status: "available", ...(got.data.title ? { title: got.data.title } : {}) }
   } finally {
-    if (!input.server) server.close?.()
+    if (!input.server) await server.close?.()
   }
 }
 
@@ -180,7 +180,7 @@ export async function sessionActivity(input: {
   } catch {
     return "unknown"
   } finally {
-    if (!input.server) server.close?.()
+    if (!input.server) await server.close?.()
   }
 }
 
@@ -203,7 +203,7 @@ export async function listAuthoringCommands(input: {
   } catch {
     return "unknown"
   } finally {
-    if (!input.server) server.close?.()
+    if (!input.server) await server.close?.()
   }
 }
 

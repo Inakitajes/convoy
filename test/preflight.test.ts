@@ -1,7 +1,7 @@
 import { describe, expect, test, mock } from "bun:test"
 
 import { preflightTargets, validatePreflightTargets } from "../src/preflight-validation"
-import { preflightRunPlan } from "../src/preflight"
+import { preflightRunPlan, withinPreflightTimeout } from "../src/preflight"
 import type { ResolvedModel } from "../src/model-routing"
 import type { RunPlan } from "../src/types"
 
@@ -472,5 +472,38 @@ describe("withinPreflightTimeout edge cases (through preflightRunPlan)", () => {
         throw new Error("discovery failure")
       }),
     ).rejects.toThrow("discovery failure")
+  })
+})
+describe("withinPreflightTimeout cleanup ownership (design D2)", () => {
+  test("awaits the cancel hook before the timeout rejection settles", async () => {
+    const controller = new AbortController()
+    let cancelled = false
+    const settled = withinPreflightTimeout(new Promise<never>(() => {}), controller.signal, async () => {
+      await Bun.sleep(20)
+      cancelled = true
+    }).then(
+      () => "resolved",
+      (error: Error) => error.message,
+    )
+    controller.abort()
+    expect(await settled).toBe("OpenCode preflight timed out")
+    // The caller never returns ahead of the bounded owned-server stop.
+    expect(cancelled).toBe(true)
+  })
+
+  test("never waits for the original request to settle", async () => {
+    const controller = new AbortController()
+    const pending = withinPreflightTimeout(new Promise<never>(() => {}), controller.signal, async () => {})
+    controller.abort()
+    await expect(pending).rejects.toThrow("OpenCode preflight timed out")
+  })
+
+  test("a failing cancel hook never masks the timeout itself", async () => {
+    const controller = new AbortController()
+    const pending = withinPreflightTimeout(new Promise<never>(() => {}), controller.signal, async () => {
+      throw new Error("cancel exploded")
+    })
+    controller.abort()
+    await expect(pending).rejects.toThrow("OpenCode preflight timed out")
   })
 })

@@ -104,12 +104,23 @@ function viewDir(): string {
   return "/work/acme"
 }
 
+/**
+ * Hermetic default for the branch-name proposal. The production proposer boots
+ * a real `opencode serve`, so an unprompted fallback to it would start a server
+ * from inside the test runner — exactly the child this file must never leak.
+ * Tests that assert a model-derived name inject their own `proposeBranchName`.
+ */
+const hermeticProposeBranchName = async ({ prompt }: { prompt: string }): Promise<{ branch: string }> => ({
+  branch: `feat/${prompt.trim().toLowerCase().replace(/\s+/g, "-") || "work"}`,
+})
+
 async function openHome(options: { worktrees?: BoardWorktree[]; width?: number; height?: number; targetDir?: string; proposeBranchName?: (input: { prompt: string }) => Promise<{ branch: string }>; observePr?: (worktree: BoardWorktree) => Promise<PrObservation>; listRunsForWorktree?: (worktree: BoardWorktree) => Promise<DetailRun[]> } = {}) {
   const testRenderer = await createTestRenderer({ width: options.width ?? 110, height: options.height ?? 30 })
   const instance = new HomeLauncher(testRenderer.renderer, options.targetDir ?? viewDir(), {
     scene: undefined,
     worktrees: options.worktrees ?? worktrees,
-    proposeBranchName: options.proposeBranchName,
+    // Hermetic default: never let an omitted proposal reach the real namer.
+    proposeBranchName: options.proposeBranchName ?? hermeticProposeBranchName,
     // Hermetic default: no test talks to `gh` unless it injects its own observer.
     observePr: options.observePr ?? (async () => ({ availability: "unknown", reason: "no PR observation requested by this test", observedAt: 0 })),
     // Hermetic default: no test reads run history unless it injects its own source.

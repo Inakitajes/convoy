@@ -23,6 +23,7 @@ import {
   describeSessionActivity,
   extractAssistantText,
   finalizePhaseRepository,
+  installShutdownSignals,
   isIgnorableRejection,
   isMessageAbortedError,
   isUserAbortError,
@@ -3294,6 +3295,37 @@ describe("isIgnorableRejection", () => {
   })
 })
 
+describe("installShutdownSignals owner scope", () => {
+  test("registers and removes one handler for SIGINT, SIGTERM, and SIGHUP", () => {
+    const signals = ["SIGHUP", "SIGINT", "SIGTERM"] as const
+    // Erase the per-signal listener type so identity deltas compare cleanly.
+    const listenersOf = (signal: string) => process.listeners(signal as never) as unknown as Array<(...args: unknown[]) => unknown>
+
+    const shutdown = trackedShutdown()
+    const before = new Map(signals.map((signal) => [signal, new Set(listenersOf(signal))]))
+
+    const remove = installShutdownSignals(shutdown)
+    for (const signal of signals) {
+      const added = listenersOf(signal).filter((listener) => !before.get(signal)!.has(listener))
+      expect(added).toHaveLength(1)
+    }
+
+    // Invoke the captured SIGHUP handler directly instead of emitting a
+    // process-wide signal: a detached coordinator only ever sees a HUP
+    // delivered to its own process, and emitting here would abort unrelated
+    // in-flight runs sharing the test process.
+    const hup = listenersOf("SIGHUP").find((listener) => !before.get("SIGHUP")!.has(listener)) as (signal: number) => void
+    hup(1)
+    expect(shutdown.aborted).toBe(true)
+
+    remove()
+    for (const signal of signals) {
+      expect(listenersOf(signal).filter((listener) => !before.get(signal)!.has(listener))).toHaveLength(0)
+    }
+    shutdown.dispose()
+  })
+})
+
 describe("RunShutdown methods", () => {
   test("signal returns an AbortSignal", () => {
     const shutdown = trackedShutdown()
@@ -3821,4 +3853,87 @@ describe("watchSession transcript backfill", () => {
       await watcher.stop()
     }
   })
+})
+
+describe("RunShutdown force path", () => {
+  test("repeated requests force the owned server once and exit after the bounded observation", async () => {
+    const exits: number[] = []
+    let forced = 0
+    const shutdown = new RunShutdown({ exit: (code) => void exits.push(code) })
+    shutdown.setForceHandler(() => {
+      forced++
+    })
+    shutdown.request("SIGINT")
+    shutdown.request("SIGINT")
+    shutdown.request("SIGINT")
+    // Idempotent: a burst of signals never repeats the destructive edge or
+    // exits immediately.
+    expect(forced).toBe(1)
+    expect(exits).toEqual([])
+    await Bun.sleep(1_100)
+    expect(exits).toEqual([130])
+    shutdown.dispose()
+  }, 10_000)
+
+  test("the shared helper budget clamps to the coordinator's remaining deadline", () => {
+    let now = 0
+    const shutdown = new RunShutdown({ exit: () => {}, graceMs: 10_000, forceObservationMs: 1_000, now: () => now })
+    // Before any request there is no coordinator shutdown in progress, so a
+    // helper keeps the standalone defaults.
+    expect(shutdown.stopBudget()).toEqual({})
+
+    shutdown.request("SIGINT")
+    // At the instant of the request the full standalone allowance fits inside
+    // the remaining deadline.
+    expect(shutdown.stopBudget()).toEqual({ graceMs: 2_000, forceObservationMs: 1_000 })
+
+    // Near the deadline the windows shrink so their sum never exceeds what is
+    // left — cleanup cannot restart a fresh budget or run past the deadline.
+    now = 9_000
+    expect(shutdown.stopBudget()).toEqual({ graceMs: 1_000, forceObservationMs: 0 })
+    now = 10_000
+    expect(shutdown.stopBudget()).toEqual({ graceMs: 0, forceObservationMs: 0 })
+    now = 12_000
+    expect(shutdown.stopBudget()).toEqual({ graceMs: 0, forceObservationMs: 0 })
+    shutdown.dispose()
+  })
+
+  test("a hung session cancellation still yields bounded termination via the deadline force path", async () => {
+    const exits: number[] = []
+    let forced = 0
+    // Injected timers (design D2): the production 15s deadline and 1s
+    // observation are compressed so the test never waits them out.
+    const shutdown = new RunShutdown({ exit: (code) => void exits.push(code), graceMs: 25, forceObservationMs: 25 })
+    shutdown.setForceHandler(() => {
+      forced++
+    })
+    // An explicitly aborted run whose session-cancellation request never
+    // answers (spec R4: "Session cancellation does not answer").
+    shutdown.setActiveSession({
+      client: { session: { abort: () => new Promise(() => {}) } } as never,
+      sessionID: "ses_hung",
+      directory: "/tmp",
+      phaseName: "implementer",
+    })
+    const hung = shutdown.abortActiveSessions()
+    shutdown.request("SIGINT")
+    expect(forced).toBe(0)
+    await Bun.sleep(140)
+    // The deadline still delivered the owned-server force edge and exited with
+    // the abort code instead of waiting on the hung session API forever.
+    expect(forced).toBe(1)
+    expect(exits).toEqual([130])
+    shutdown.dispose()
+    void hung
+  }, 10_000)
+
+  test("dispose cancels a pending forced exit", async () => {
+    const exits: number[] = []
+    const shutdown = new RunShutdown({ exit: (code) => void exits.push(code) })
+    shutdown.request("SIGINT")
+    shutdown.request("SIGINT")
+    shutdown.dispose()
+    await Bun.sleep(1_100)
+    expect(exits).toEqual([])
+  }, 10_000)
 })

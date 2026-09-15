@@ -28,6 +28,7 @@ import { log } from "./log"
 import { LoopGuard, LoopGuardError, observationFromSessionEvent, resolveLoopGuard, type LoopGuardConfig } from "./loop-guard"
 import { openRunMetadata, recordProgress, type RunMetadataStore } from "./metadata"
 import { openOpencodeSessionWindow, startOpencode } from "./opencode"
+import { defaultStopPolicy, type StopOutcome, type StopPolicy } from "./process-stop"
 import { HerdrReporter } from "./herdr"
 import { defaultNotificationSettings, Notifier } from "./notifications"
 import { startPermissionGate, type PermissionGate } from "./permissions"
@@ -99,12 +100,36 @@ export function isIgnorableRejection(reason: unknown): boolean {
   return false
 }
 
+/**
+ * Injected seams for the shutdown state machine. `exit` lets tests assert the
+ * force path without killing the runner; `graceMs` and `forceObservationMs`
+ * let a test exercise the deadline/observation timers without waiting the
+ * production 15s + 1s budgets (design D2: tests inject timers and seams).
+ */
+export type RunShutdownDeps = {
+  exit?: (code: number) => void
+  /** Overall cleanup deadline before the forced owned-server edge; default 15s. */
+  graceMs?: number
+  /** Observation window after the forced edge before exiting; default 1s. */
+  forceObservationMs?: number
+  /** Injectable clock so the shared stop budget is deterministically testable. */
+  now?: () => number
+}
+
 export class RunShutdown {
   private readonly controller = new AbortController()
   private readonly activeSessions = new Map<string, ActiveSession>()
   private abortingSessions: Promise<void> | undefined
   private requests = 0
   private forceTimer: ReturnType<typeof setTimeout> | undefined
+  private exitTimer: ReturnType<typeof setTimeout> | undefined
+  private forceHandler?: () => void
+  private forcing = false
+  private readonly exit: (code: number) => void
+  private readonly graceMs: number
+  private readonly forceObservationMs: number
+  private readonly now: () => number
+  private requestedAt: number | undefined
   /**
    * Set by {@link dispose} so a signal routed to a shutdown whose loop already
    * exited (a borrowed dashboard's abort handler still pointing at it) is a
@@ -114,6 +139,13 @@ export class RunShutdown {
    */
   private disposed = false
 
+  constructor(deps: RunShutdownDeps = {}) {
+    this.exit = deps.exit ?? ((code) => process.exit(code))
+    this.graceMs = deps.graceMs ?? 15_000
+    this.forceObservationMs = deps.forceObservationMs ?? 1_000
+    this.now = deps.now ?? Date.now
+  }
+
   get signal() {
     return this.controller.signal
   }
@@ -122,21 +154,68 @@ export class RunShutdown {
     return this.controller.signal.aborted
   }
 
+  /**
+   * Registers the owned-server force edge. It runs synchronously when a
+   * repeated abort or the shutdown deadline arrives, immediately before the
+   * bounded last-resort exit, so a wedged cleanup cannot abandon the child
+   * (design D3).
+   */
+  setForceHandler(handler: (() => void) | undefined) {
+    this.forceHandler = handler
+  }
+
   request(source: string) {
     if (this.disposed) return
     this.requests++
     if (this.requests > 1) {
-      log.warn(`${source} received again; forcing exit`)
-      process.exit(130)
+      log.warn(`${source} received again; forcing owned-server cleanup before exit`)
+      this.forceShutdown()
+      return
     }
 
     log.warn(`${source} received; aborting active OpenCode session(s) and shutting down`)
+    this.requestedAt = this.now()
     this.controller.abort(new UserAbortError(`${source} received`))
     this.forceTimer = setTimeout(() => {
-      log.warn("Shutdown cleanup timed out; forcing exit")
-      process.exit(130)
-    }, 15_000)
+      log.warn("Shutdown cleanup timed out; forcing owned-server cleanup before exit")
+      this.forceShutdown()
+    }, this.graceMs)
     this.forceTimer.unref?.()
+  }
+
+  /**
+   * The shared cleanup budget a helper owned by this shutdown must respect
+   * (design D2): helpers running under a coordinator draw from its remaining
+   * global deadline instead of starting a fresh standalone allowance. Before a
+   * shutdown is requested this returns the standalone defaults; once requested
+   * it clamps the graceful window and the forced-observation window so their
+   * sum never exceeds the time left before the forced edge — and therefore
+   * never restarts or extends the coordinator's budget.
+   */
+  stopBudget(): StopPolicy {
+    if (this.requestedAt === undefined) return {}
+    const remaining = Math.max(0, this.graceMs - (this.now() - this.requestedAt))
+    const graceMs = Math.min(defaultStopPolicy.graceMs, remaining)
+    const forceObservationMs = Math.min(this.forceObservationMs, Math.max(0, remaining - graceMs))
+    return { graceMs, forceObservationMs }
+  }
+
+  /**
+   * Idempotent last resort: deliver the synchronous SIGKILL edge to owned
+   * servers, observe for at most the reserved second, then exit with the
+   * existing abort code. Repeated signals while forcing are no-ops rather than
+   * new immediate exits, so a burst of signals cannot skip the server stop.
+   */
+  private forceShutdown() {
+    if (this.forcing || this.disposed) return
+    this.forcing = true
+    try {
+      this.forceHandler?.()
+    } catch (error) {
+      log.warn(`couldn't force owned-server cleanup: ${String(error)}`)
+    }
+    this.exitTimer = setTimeout(() => this.exit(130), this.forceObservationMs)
+    this.exitTimer.unref?.()
   }
 
   throwIfRequested() {
@@ -185,6 +264,7 @@ export class RunShutdown {
 
   dispose() {
     if (this.forceTimer) clearTimeout(this.forceTimer)
+    if (this.exitTimer) clearTimeout(this.exitTimer)
     this.disposed = true
   }
 }
@@ -385,11 +465,23 @@ export function createGitLock(): GitLock {
 
 export function installShutdownSignals(shutdown: RunShutdown) {
   // Bun delivers the numeric signal value to handlers; normalize for logs.
-  const handler = (signal: NodeJS.Signals | number) =>
-    shutdown.request(typeof signal === "number" ? (signal === 15 ? "SIGTERM" : signal === 2 ? "SIGINT" : `signal ${signal}`) : signal)
+  const nameOf = (signal: NodeJS.Signals | number) => {
+    if (typeof signal !== "number") return signal
+    if (signal === 1) return "SIGHUP"
+    if (signal === 2) return "SIGINT"
+    if (signal === 15) return "SIGTERM"
+    return `signal ${signal}`
+  }
+  const handler = (signal: NodeJS.Signals | number) => shutdown.request(nameOf(signal))
+  // SIGINT/SIGTERM/SIGHUP all route to the one owner shutdown state. The
+  // coordinator is spawned detached and unref'd, so closing the parent terminal
+  // never forwards its SIGHUP here; this handler only answers a HUP delivered
+  // directly to the owning process (design D3).
+  process.on("SIGHUP", handler)
   process.on("SIGINT", handler)
   process.on("SIGTERM", handler)
   return () => {
+    process.off("SIGHUP", handler)
     process.off("SIGINT", handler)
     process.off("SIGTERM", handler)
   }
@@ -510,13 +602,37 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
   // Hosted runs defer the server/lease teardown here; the loop calls it between
   // iterations and after its finish hold.
   let deferredRelease: (() => Promise<void>) | undefined
-  const shutdown = new RunShutdown()
-  const removeSignalHandlers = installShutdownSignals(shutdown)
+  const shutdown = options.shutdown ?? new RunShutdown()
+  // A coordinated run injects the coordinator-owned scope so the process
+  // signal handlers stay installed through the terminal finish hold and final
+  // release; direct runs own their scope locally (design D3).
+  const ownsShutdown = options.shutdown === undefined
+  const removeSignalHandlers = ownsShutdown ? installShutdownSignals(shutdown) : () => {}
 
   const autoAccept: AutoAccept = options.autoAccept ?? options.progress?.autoAccept ?? { mode: options.yolo ? "all" : options.smart ? "smart" : "off" }
   // cli.ts always resolves a concrete model string (--smart-model → config →
   // --model → defaults.model), so smart mode never lacks a judge.
   const judgeModel = parseModel(splitModelVariant(options.smartJudgeModel).model)
+
+  /**
+   * Stops the owned server and only then clears the live-server pointer and
+   * the run's execution ownership. Awaiting `stop()` is not proof of exit: an
+   * `unresolved` outcome keeps both as evidence rather than reporting a clean
+   * shutdown, and the child's identity record survives independently under
+   * `~/.convoy/processes` (design D3).
+   */
+  const stopOwnedServer = async (): Promise<StopOutcome | undefined> => {
+    const stop = await opencode?.stop()
+    if (stop?.status === "unresolved") {
+      log.warn(`run server stop unresolved; keeping live-server metadata and execution ownership: ${stop.reason}`)
+      await metadata?.flush().catch((error) => log.warn(`couldn't flush run metadata: ${String(error)}`))
+      return stop
+    }
+    await metadata?.serverStopped().catch((error) => log.warn(`couldn't persist server-stopped metadata: ${String(error)}`))
+    await metadata?.flush().catch((error) => log.warn(`couldn't flush run metadata: ${String(error)}`))
+    await releaseLease?.().catch((error) => log.warn(`couldn't release run lease: ${String(error)}`))
+    return stop
+  }
 
   try {
     releaseLease = await acquireRunLease(workspace)
@@ -719,11 +835,29 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
           throughputModels,
         }),
         boot.signal,
+        // The run server is owned through the coordinator's release; helpers
+        // default to their own short-lived lifetime class. The run id rides the
+        // lifetime record so a later orphan recovery can tie the child back to
+        // its run (design D6).
+        { lifetime: "run", runId: workspace.runID },
       )
     } finally {
       shutdown.signal.removeEventListener("abort", abortBoot)
     }
+    // A repeated abort or the shutdown deadline forces this owned server
+    // before the process exits; without this edge a wedged cleanup would
+    // abandon the child (design D3).
+    shutdown.setForceHandler(() => opencode?.forceStop())
     progress.serverReady(opencode.url)
+    // Link the live-server block to the actual child identity (design D6): the
+    // historical coordinator `pid` stays, and the record id / child PID/birth
+    // let an operator (or later recovery) identify the `serve` child without
+    // reinterpreting legacy metadata. An unresolved stop keeps this block.
+    metadata.recordServerChild({
+      ...(opencode.recordId ? { recordId: opencode.recordId } : {}),
+      pid: opencode.pid,
+      ...(opencode.identity?.birth ? { birth: opencode.identity.birth } : {}),
+    })
     // serverReady persists asynchronously through the progress adapter. Flush
     // before phases (or a hosted return) can expose this run for [o] attach.
     await metadata.flush()
@@ -897,6 +1031,10 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
             // The reviewed feature link survives workspace cleanup (task 5.1).
             ...(options.plan?.feature ? { feature: options.plan.feature } : {}),
             signal: shutdown.signal,
+            // The commit writer's helper runs under this coordinator, so its
+            // bounded stop draws from the coordinator's remaining shutdown
+            // budget instead of a fresh standalone allowance (design D2).
+            stopPolicy: () => shutdown.stopBudget(),
             progress: {
               activity: (detail, kind) => progress.phaseActivity(compactRunRowName, detail, kind),
             },
@@ -1059,12 +1197,9 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
         // process.env), and they point at a bridge that no longer exists.
         reportBridge?.close()
         advisorBridge?.close()
-        // The server dies at the end of this block; clear its metadata entry now
-        // so `convoy runs` stops offering to attach to a run that's shutting down.
-        await metadata?.serverStopped().catch((error) => log.warn(`couldn't persist server-stopped metadata: ${String(error)}`))
-        await metadata?.flush().catch((error) => log.warn(`couldn't flush run metadata: ${String(error)}`))
-        await releaseLease?.().catch((error) => log.warn(`couldn't release run lease: ${String(error)}`))
-        opencode?.close()
+        // Bridges first, then confirm the owned child exited before clearing
+        // the live-server pointer or releasing execution ownership (design D3).
+        await stopOwnedServer()
         // Hosted teardown runs after the coordinator's finish hold, so an
         // attached [i]/[o] can still flip keepRunDirRequested before we decide
         // whether the workspace may go. In-process runs settle in the finally
@@ -1085,11 +1220,9 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
       // fail with a fetch error, which it handles gracefully.
       reportBridge?.close()
       advisorBridge?.close()
-      // The server dies at the end of this block; clear its metadata entry now so
-      // `convoy runs` stops offering to attach to a run that's shutting down.
-      await metadata?.serverStopped().catch((error) => log.warn(`couldn't persist server-stopped metadata: ${String(error)}`))
-      await metadata?.flush().catch((error) => log.warn(`couldn't flush run metadata: ${String(error)}`))
-      await releaseLease?.().catch((error) => log.warn(`couldn't release run lease: ${String(error)}`))
+      // The owned server stops and its exit is confirmed before the
+      // live-server pointer and execution ownership are cleared (design D3).
+      await stopOwnedServer()
       progress.stop()
     }
     // In-process runs stop the tracker (and publish idle/blocked) above;
@@ -1098,18 +1231,14 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
     // After the renderer is gone: restoring the title while it still owns the
     // alternate screen would be overwritten by its teardown.
     if (titleSaved) popTerminalTitle()
-    shutdown.dispose()
+    // A coordinator-owned scope outlives this run: it stays live through the
+    // finish hold and release, and its caller disposes it (design D3).
+    if (ownsShutdown) shutdown.dispose()
 
     // Hosted runs settle the workspace in release(), after the coordinator
     // (or goal loop) has held the finish screen. Doing it here would delete
     // the run dir before [i] iterate can ask to keep it.
     if (!options.progress) await settleRunWorkspace(workspace, options, progress, runErr)
-
-    // Kill the server last and return immediately: once it dies, any event
-    // stream still held open by the SDK starts failing, and those failures
-    // must not get a chance to surface mid-cleanup. Hosted runs defer this to
-    // their release so the goal loop's finish hold can still serve [o].
-    if (!options.progress) opencode?.close()
   }
 }
 

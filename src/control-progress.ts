@@ -112,11 +112,43 @@ export class ControlProgress implements ProgressUI {
 
   async runFinished(outcome: RunOutcome): Promise<void> {
     if (!this.server.hasController()) return
-    await this.server.pending.holdFinish({
+    const dismissed = this.server.pending.holdFinish({
       status: outcome.status,
       ...(outcome.error !== undefined ? { error: outcome.error } : {}),
       ...(outcome.goalLoop ? { goalLoop: outcome.goalLoop } : {}),
       ...(outcome.finalization ? { finalization: outcome.finalization } : {}),
+    })
+    await this.waitForDismissalOrLeaseLoss(dismissed)
+  }
+
+  /**
+   * A completed run's terminal hold follows controller lifetime (design D4):
+   * an explicit departure or a silent heartbeat expiry resolves it, while a
+   * replacement that has already claimed the slot is never dismissed by the
+   * old lease's timer or a delayed `/bye`. The subscription is registered
+   * before the immediate recheck so a departure in the gap is not missed.
+   */
+  private waitForDismissalOrLeaseLoss(dismissed: Promise<void>): Promise<void> {
+    return new Promise<void>((resolve) => {
+      let settled = false
+      const finish = () => {
+        if (settled) return
+        settled = true
+        unsubscribe()
+        // Clear the hold so a later viewer does not inherit a dismissed
+        // finish screen; a no-op when the hold already resolved.
+        this.server.pending.resolveFinish()
+        resolve()
+      }
+      const unsubscribe = this.server.onControllerLease((event) => {
+        if (event === "claimed") return
+        if (!this.server.hasController()) finish()
+      })
+      if (!this.server.hasController()) {
+        finish()
+        return
+      }
+      void dismissed.then(finish)
     })
   }
 
