@@ -29,9 +29,23 @@ export type Palette = {
   faint: string
   /** Text drawn on top of colored chips (selected permission buttons). */
   chipText: string
+  /**
+   * The warning chip's fill, painted behind a warning value that rides a
+   * filled surface (the selected row's fold, the detail's identity zone).
+   * Deliberately the amber across palettes: a warning fill is a solid block,
+   * so its own hue carries it, and the same amber clears contrast with its
+   * ink in every palette — unlike `yellow`, which is tuned as ink on the
+   * canvas and is too dark to serve as a fill on a light background.
+   */
+  warning: string
+  /**
+   * Text drawn on the warning chip. Never `chipText`: that is near-white on
+   * the light palette and fails against the amber fill.
+   */
+  warningInk: string
 }
 
-export type PaletteColor = Exclude<keyof Palette, "chipText">
+export type PaletteColor = Exclude<keyof Palette, "chipText" | "warningInk">
 
 const darkPalette: Palette = {
   bg: "transparent",
@@ -52,6 +66,8 @@ const darkPalette: Palette = {
   dim: "#565F89",
   faint: "#3B4261",
   chipText: "#0A0E1A",
+  warning: "#E0AF68",
+  warningInk: "#0A0E1A",
 }
 
 const lightPalette: Palette = {
@@ -73,6 +89,8 @@ const lightPalette: Palette = {
   dim: "#6172B0",
   faint: "#9DA3C2",
   chipText: "#E1E2E7",
+  warning: "#E0AF68",
+  warningInk: "#0A0E1A",
 }
 
 // When the terminal never answers the background query there is nothing safe
@@ -97,6 +115,8 @@ const neutralPalette: Palette = {
   dim: "#7A7A7A",
   faint: "#616161",
   chipText: "#000000",
+  warning: "#E0AF68",
+  warningInk: "#0A0E1A",
 }
 
 // Module-level on purpose: one TUI exists per convoy process, and a mutable
