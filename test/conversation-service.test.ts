@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -218,6 +218,51 @@ describe("conversation-service discovery and reuse (task 4.3)", () => {
     expect(read2.status).toBe("missing")
   })
 
+  test("an explicit stop refuses a recycled pid whose recorded birth identity no longer matches (task 2.5)", async () => {
+    const seeded: ConversationServiceRecord = {
+      schemaVersion: schemaVersion,
+      url: "http://127.0.0.1:51006",
+      pid: 123_461,
+      bootCheckout: repoDir,
+      startedAt: Date.now(),
+      childBirth: "boot:original",
+    }
+    const { writeJsonFile } = await import("../src/repo-store")
+    await writeJsonFile(join(commonDir, "convoy", "authoring-server.json"), seeded)
+    let killed = 0
+    // The PID answers (URL liveness "live") but the kernel reports a different
+    // birth: a recycled PID must never be killed as the recorded server.
+    const stopped = await stopConversationService({
+      commonDir,
+      activity: "idle",
+      probe: async () => "live",
+      identityProbe: {
+        observe: async (pid) => ({ status: "alive", identity: { pid, birth: "boot:recycled", uid: 501, executable: "opencode" } }),
+      },
+      kill: async () => {
+        killed += 1
+      },
+    })
+    expect(stopped.status).toBe("kept")
+    expect(killed).toBe(0)
+    expect((await readConversationServiceDiscovery(commonDir)).status).toBe("found")
+
+    // A matching identity still stops normally.
+    const matched = await stopConversationService({
+      commonDir,
+      activity: "idle",
+      probe: async () => "live",
+      identityProbe: {
+        observe: async (pid) => ({ status: "alive", identity: { pid, birth: "boot:original", uid: 501, executable: "opencode" } }),
+      },
+      kill: async () => {
+        killed += 1
+      },
+    })
+    expect(matched.status).toBe("stopped")
+    expect(killed).toBe(1)
+  })
+
   test("an uncertain probe during stop keeps both the process and its record", async () => {
     const seeded: ConversationServiceRecord = {
       schemaVersion: schemaVersion,
@@ -339,5 +384,37 @@ describe("conversation-service shutdown boundaries (task 4.3, real server)", () 
     if (fresh.status !== "live") return
     expect(fresh.reused).toBe(false)
     await stopConversationService({ commonDir: realCommonDir, activity: "idle" })
+  })
+})
+
+describe("conversation-service publication failure (design D6)", () => {
+  test("closes an unpublished child when the discovery record cannot be written", async () => {
+    const repo = await mkdtemp(join(tmpdir(), "convoy-service-fail-"))
+    dirs.push(repo)
+    await Bun.write(join(repo, "README.md"), "# repo\n")
+    await git(repo, ["init", "-q", "-b", "main"])
+    await git(repo, ["add", "."])
+    await git(repo, ["-c", "user.email=t@x", "-c", "user.name=T", "commit", "-q", "-m", "init"])
+    const common = (await repoCommonDir(repo))!
+    const convoyDir = join(common, "convoy")
+    // Pre-create the lock directory, then make its parent read-only so the
+    // discovery record cannot be written while reads still see "missing".
+    await mkdir(join(convoyDir, "authoring-service"), { recursive: true })
+    await chmod(convoyDir, 0o500)
+    let closed = 0
+    const boot = async () => ({
+      url: "http://127.0.0.1:51999",
+      pid: 999_999,
+      close: async () => {
+        closed++
+      },
+    })
+    try {
+      const outcome = await ensureConversationService({ commonDir: common, checkout: repo, boot, probe: async () => "stale" })
+      expect(outcome.status).toBe("unavailable")
+      expect(closed).toBe(1)
+    } finally {
+      await chmod(convoyDir, 0o700)
+    }
   })
 })

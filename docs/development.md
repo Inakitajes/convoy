@@ -25,6 +25,10 @@ convoy/
 │   ├── cli.ts           # flag parsing
 │   ├── runner.ts        # pipeline orchestration
 │   ├── opencode.ts      # startup/control via SDK
+│   ├── managed-server.ts # owned `opencode serve` child launch + bounded observed stop
+│   ├── process-stop.ts  # shared SIGTERM→SIGKILL stop state machine
+│   ├── process-identity.ts # kernel birth/UID/executable probes (Linux /proc, macOS libproc)
+│   ├── process-records.ts # private lifecycle records under ~/.convoy/processes + reconciliation
 │   ├── agents.ts        # prompt loading, agent config, bash policy
 │   ├── project-context.ts # automatic .convoy/rules.md, AGENTS.md, CLAUDE.md discovery
 │   ├── permissions.ts   # live permission gate for tool calls that fall outside the allowlist

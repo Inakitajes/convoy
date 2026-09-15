@@ -396,7 +396,7 @@ export async function proposeBranchName(input: BranchNameInput): Promise<BranchN
       // one failure mode that can't be diagnosed from the message alone.
       error = `the namer's reply had no usable branch name: ${truncate(reply, 160)}`
     } finally {
-      handle.close()
+      await handle.close()
     }
   } catch (cause) {
     error = cause instanceof Error ? cause.message : String(cause)

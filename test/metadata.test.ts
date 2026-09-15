@@ -405,6 +405,51 @@ describe("openRunMetadata", () => {
     }
   })
 
+  test("recordServerChild links the live block to explicit child evidence (task 3.4)", async () => {
+    const { dir, ws, cleanup } = await withDir("srv-child")
+    const store = await openRunMetadata(ws, "/target", validPipeline([validAgentStep("design")]))
+    try {
+      store.serverStarted("http://localhost:8080")
+      store.recordServerChild({ recordId: "rec-123", pid: 4321, birth: "boot:4321" })
+      await store.flush()
+
+      const raw = await readRunMetadata(`${dir}/metadata.json`)
+      // The historical coordinator pid is preserved; the child evidence is
+      // recorded separately so neither is read as the other.
+      expect(raw!.server?.pid).toBeGreaterThan(0)
+      expect(raw!.server?.recordId).toBe("rec-123")
+      expect(raw!.server?.childPid).toBe(4321)
+      expect(raw!.server?.childBirth).toBe("boot:4321")
+
+      // A confirmed stop clears the whole live block, evidence included.
+      await store.serverStopped()
+      expect((await readRunMetadata(`${dir}/metadata.json`))!.server).toBeUndefined()
+    } finally {
+      await cleanup()
+    }
+  })
+
+  test("a legacy live-server block without child evidence stays readable (task 3.4)", async () => {
+    const { dir, cleanup } = await withDir("srv-legacy")
+    try {
+      const legacy = {
+        ...baseV3,
+        schemaVersion: 5,
+        runID: "run-legacy",
+        server: { url: "http://127.0.0.1:4123", pid: process.pid, startedAt: 1_700_000_000_000 },
+      }
+      await Bun.write(`${dir}/metadata.json`, JSON.stringify(legacy))
+      const raw = await readRunMetadata(`${dir}/metadata.json`)
+      expect(raw!.server?.url).toBe("http://127.0.0.1:4123")
+      expect(raw!.server?.pid).toBe(process.pid)
+      // Legacy readers ignore the missing optional fields instead of guessing.
+      expect(raw!.server?.recordId).toBeUndefined()
+      expect(raw!.server?.childPid).toBeUndefined()
+    } finally {
+      await cleanup()
+    }
+  })
+
   test("setControlState from running to pausing to paused", async () => {
     const { dir, ws, cleanup } = await withDir("ctrl")
     const store = await openRunMetadata(ws, "/target", validPipeline([validAgentStep("design")]))
@@ -944,6 +989,9 @@ describe("recordProgress", () => {
       recordPlannedPhases: () => Promise.resolve(),
       phaseOutput: (name: string) => { storeCalls.push(`phaseOutput(${name})`) },
       serverStarted: (url: string) => { storeCalls.push(`serverStarted(${url})`) },
+      recordServerChild: (evidence: { recordId?: string; pid: number; birth?: string }) => {
+        storeCalls.push(`recordServerChild(${evidence.pid})`)
+      },
       serverStopped: () => Promise.resolve(),
       phaseStarted: (name: string) => { storeCalls.push(`phaseStarted(${name})`); return Promise.resolve() },
       phaseSession: (name: string) => { storeCalls.push(`phaseSession(${name})`) },

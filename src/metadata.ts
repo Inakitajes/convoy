@@ -101,8 +101,28 @@ export type RunMetadata = {
    */
   plannedPhases?: ProgressPhase[]
   modelRouting?: { gateway: ModelGateway }
-  /** The live opencode server for this run while it executes; cleared on shutdown, so a lingering entry means the run process died mid-flight. Lets `convoy runs` attach to a running run. */
-  server?: { url: string; pid: number; startedAt: number; controlUrl?: string }
+  /**
+   * The live opencode server for this run while it executes; cleared on
+   * shutdown, so a lingering entry means the run process died mid-flight. Lets
+   * `convoy runs` attach to a running run.
+   *
+   * `pid` keeps its historical meaning: the coordinator/owner anchor, not the
+   * child. New runs add explicit child evidence (design D6) — the managed
+   * server's runtime process-record id and captured child incarnation — while
+   * legacy records simply omit those optional fields and stay readable.
+   */
+  server?: {
+    url: string
+    pid: number
+    startedAt: number
+    controlUrl?: string
+    /** Id of the durable `~/.convoy/processes` record that owns the child. */
+    recordId?: string
+    /** The actual `opencode serve` child PID (distinct from the coordinator pid). */
+    childPid?: number
+    /** Kernel birth identity of the child, so a reused PID is not mistaken for it. */
+    childBirth?: string
+  }
   control: { state: RunControlState; requestedAt?: number; pausedAt?: number }
   phases: Record<string, PhaseMetadata>
   /** The durable goal-cycle record, present when the pipeline declares a terminal goal step (schema v4). */
@@ -158,6 +178,12 @@ export type RunMetadataStore = {
   setFinalization(record: FinalizationRecord): Promise<void>
   /** Records the run's live opencode server URL so `convoy runs` can attach; cleared by serverStopped. */
   serverStarted(url: string): void
+  /**
+   * Attaches explicit child evidence (record id + child PID/birth) to the live
+   * server block so a leftover entry identifies the actual `serve` child
+   * without relabeling the historical coordinator PID (design D6).
+   */
+  recordServerChild(evidence: { recordId?: string; pid: number; birth?: string }): void
   serverStopped(): Promise<void>
   phaseStarted(name: string): Promise<void>
   phaseSession(name: string, sessionID: string): void
@@ -390,6 +416,16 @@ export async function openRunMetadata(
       // liveness/debug can see the control plane without exposing auth.
       const controlUrl = process.env.CONVOY_CONTROL_URL
       data.server = { url, pid: process.pid, startedAt: Date.now(), ...(controlUrl ? { controlUrl } : {}) }
+      void persist()
+    },
+    recordServerChild(evidence) {
+      // Annotates the live block only; `serverStarted` keeps the historical
+      // coordinator `pid`, and a legacy record that never got evidence is
+      // still read by the same history readers (design D6).
+      if (!data.server) return
+      if (evidence.recordId) data.server.recordId = evidence.recordId
+      data.server.childPid = evidence.pid
+      if (evidence.birth) data.server.childBirth = evidence.birth
       void persist()
     },
     async serverStopped() {

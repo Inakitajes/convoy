@@ -14,6 +14,7 @@ import {
   openIterateOpencodeWindow,
   connectOpencode,
   startOpencode,
+  bootOpencodeServerFrom,
 } from "../src/opencode"
 
 import type { OpencodeHandle } from "../src/opencode"
@@ -1332,21 +1333,24 @@ describe("connectOpencode", () => {
 })
 
 describe("startOpencode", () => {
-  test("returns the SDK client and closes the injected server", async () => {
+  test("owns the spawned server and awaits a bounded stop", async () => {
     const client = { session: {} } as unknown as OpencodeHandle["client"]
-    let closed = false
-    let serverOptions: Record<string, unknown> | undefined
+    let stopped = 0
+    let launchOptions: Record<string, unknown> | undefined
     let clientOptions: Record<string, unknown> | undefined
 
     const handle: OpencodeHandle = await startOpencode({}, undefined, {
-      createServer: async (options) => {
-        if (!options) throw new Error("expected server options")
-        serverOptions = options as unknown as Record<string, unknown>
+      getFreePort: async () => 41234,
+      launch: async (options) => {
+        launchOptions = options as unknown as Record<string, unknown>
         return {
-          url: `http://127.0.0.1:${options.port}`,
-          close() {
-            closed = true
+          url: "http://127.0.0.1:41234",
+          pid: 4242,
+          stop: async () => {
+            stopped++
+            return { status: "stopped" as const, via: "graceful" as const }
           },
+          forceStop: () => {},
         }
       },
       createClient: (options) => {
@@ -1356,27 +1360,40 @@ describe("startOpencode", () => {
     })
 
     expect(handle.client).toBe(client)
-    expect(handle.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/)
-    expect(serverOptions).toMatchObject({ hostname: "127.0.0.1", timeout: 30_000, config: {} })
-    expect(serverOptions?.port).toBeGreaterThan(0)
+    expect(handle.url).toBe("http://127.0.0.1:41234")
+    expect(handle.pid).toBe(4242)
+    expect(launchOptions).toMatchObject({ command: "opencode", cwd: process.cwd(), lifetime: "helper" })
+    expect(launchOptions?.args).toContain("serve")
+    expect(launchOptions?.args).toContain("--hostname=127.0.0.1")
+    expect(launchOptions?.args).toContain("--port=41234")
+    expect(launchOptions?.env).toMatchObject({ OPENCODE_CONFIG_CONTENT: "{}" })
     expect(clientOptions?.baseUrl).toBe(handle.url)
     expect(typeof clientOptions?.fetch).toBe("function")
 
-    handle.close()
-    expect(closed).toBe(true)
+    const outcome = await handle.close()
+    expect(outcome.status).toBe("stopped")
+    expect(stopped).toBe(1)
   })
 
-  test("strips HERDR_* from process.env around the server call and restores them after", async () => {
+  test("passes a log level through and strips HERDR_* from the child env only", async () => {
     process.env.HERDR_ENV = "1"
     process.env.HERDR_PANE_ID = "w1:p1"
     const client = { session: {} } as unknown as OpencodeHandle["client"]
     let observed: Record<string, string | undefined> | undefined
+    let observedArgs: string[] | undefined
 
     try {
-      const handle = await startOpencode({}, undefined, {
-        createServer: async () => {
-          observed = { ...process.env }
-          return { url: "http://127.0.0.1:1", close() {} }
+      const handle = await startOpencode({ logLevel: "warn" } as never, undefined, {
+        getFreePort: async () => 1,
+        launch: async (options) => {
+          observed = { ...options.env }
+          observedArgs = options.args
+          return {
+            url: "http://127.0.0.1:1",
+            pid: 1,
+            stop: async () => ({ status: "stopped" as const, via: "already-gone" as const }),
+            forceStop: () => {},
+          }
         },
         createClient: () => client,
       })
@@ -1384,12 +1401,106 @@ describe("startOpencode", () => {
       expect(observed).toBeDefined()
       expect(observed).not.toHaveProperty("HERDR_ENV")
       expect(observed).not.toHaveProperty("HERDR_PANE_ID")
-      // The caller's environment is untouched once the server exists.
+      expect(observed?.OPENCODE_CONFIG_CONTENT).toContain("warn")
+      expect(observedArgs).toContain("--log-level=warn")
+      // The caller's environment is untouched: the strip is per-child now.
       expect(process.env.HERDR_ENV).toBe("1")
       expect(process.env.HERDR_PANE_ID).toBe("w1:p1")
-      handle.close()
+      await handle.close()
     } finally {
+      delete process.env.HERDR_ENV
       delete process.env.HERDR_PANE_ID
     }
+  })
+})
+
+describe("owned-server factory failure and boot", () => {
+  test("a client construction failure stops the owned child before surfacing", async () => {
+    let stopped = 0
+    await expect(
+      startOpencode({}, undefined, {
+        getFreePort: async () => 1,
+        launch: async () => ({
+          url: "http://127.0.0.1:1",
+          pid: 77,
+          stop: async () => {
+            stopped++
+            return { status: "stopped" as const, via: "graceful" as const }
+          },
+          forceStop: () => {},
+        }),
+        createClient: () => {
+          throw new Error("bad base url")
+        },
+      }),
+    ).rejects.toThrow(/client construction failed/)
+    // The live child is never handed out without a client: it is stopped first.
+    expect(stopped).toBe(1)
+  })
+
+  test("a client construction failure reports an unresolved cleanup honestly", async () => {
+    await expect(
+      startOpencode({}, undefined, {
+        getFreePort: async () => 1,
+        launch: async () => ({
+          url: "http://127.0.0.1:1",
+          pid: 78,
+          stop: async () => ({ status: "unresolved" as const, reason: "exit was not observed" }),
+          forceStop: () => {},
+        }),
+        createClient: () => {
+          throw new Error("boom")
+        },
+      }),
+    ).rejects.toThrow(/unresolved — exit was not observed/)
+  })
+
+  test("bootOpencodeServerFrom owns a helper rooted at the explicit checkout", async () => {
+    let launchOptions: Record<string, unknown> | undefined
+    let stopped = 0
+    const handle = await bootOpencodeServerFrom("/tmp/some-checkout", 1_234, {
+      deps: {
+        getFreePort: async () => 4321,
+        launch: async (options) => {
+          launchOptions = options as unknown as Record<string, unknown>
+          return {
+            url: "http://127.0.0.1:4321",
+            pid: 99,
+            stop: async () => {
+              stopped++
+              return { status: "stopped" as const, via: "graceful" as const }
+            },
+            forceStop: () => {},
+          }
+        },
+      },
+    })
+    expect(launchOptions?.cwd).toBe("/tmp/some-checkout")
+    expect(launchOptions?.lifetime).toBe("helper")
+    expect(launchOptions?.args).toContain("--hostname=127.0.0.1")
+    expect(launchOptions?.args).toContain("--port=4321")
+    // A bounded per-call boot closes through the same awaitable stop.
+    expect(await handle.close()).toEqual({ status: "stopped", via: "graceful" })
+    expect(stopped).toBe(1)
+  })
+
+  test("an authoring-service boot is explicitly classified and independently persistent", async () => {
+    let launchOptions: Record<string, unknown> | undefined
+    await bootOpencodeServerFrom("/tmp/checkout", 500, {
+      lifetime: "authoring-service",
+      deps: {
+        getFreePort: async () => 1,
+        launch: async (options) => {
+          launchOptions = options as unknown as Record<string, unknown>
+          return {
+            url: "http://127.0.0.1:1",
+            pid: 1,
+            stop: async () => ({ status: "stopped" as const, via: "already-gone" as const }),
+            forceStop: () => {},
+          }
+        },
+      },
+    })
+    expect(launchOptions?.lifetime).toBe("authoring-service")
   })
 })

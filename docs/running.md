@@ -102,7 +102,7 @@ convoy --prompt-file prd.md --base develop
 convoy --prompt-file prd.md --include-dirty
 ```
 
-In interactive terminals, Convoy shows a full-screen OpenTUI dashboard headed by a compact run summary (clock, elapsed, cost, tokens). The `pipeline` panel on the left is a tab selector: every step — done, running, or still scheduled — is a row you move through with `↑`/`↓` (or `j`/`k`), or by clicking, with `▸` marking the focused one. Focusing a step drives the whole right side to it: a detail panel (name; whether it's ongoing, done, failed, or scheduled; model; cost; tokens; attempt; files changed) over that step's todo list and a three-tab content panel — switched with `←`/`→`, `Tab`, the number keys `1`/`2`/`3`, or by clicking the tab strip. The tabs are `logs` (the step's color-coded activity feed), `reports` (the markdown report that step wrote, if any, scrollable with `PgUp`/`PgDn` — available live the moment a step finishes, not only at the end), and `session` (a read-only "follow along" view of that step's OpenCode session: its live state — reasoning, running a command, editing, applying a diff — model, attempt, cost, diff summary, and a scrolling transcript of what the model is doing, newest at the bottom). A not-yet-started step reads as `scheduled` with its planned model and zeroed usage, so you can inspect what's coming; focus auto-follows the active step until you navigate, and `Esc` hands it back to auto-follow. The dashboard never paints backgrounds: the canvas is your terminal's own background and panels are delineated by borders alone, derived as subtle elevations of the terminal's reported background color, with dark or light accents picked by its brightness (and a neutral fallback when the terminal doesn't answer); floating modals repaint the reported color exactly to mask the content beneath them. It follows live theme changes. For full interactivity, press `o` (or click the detail panel) to open the focused step's OpenCode session in a new terminal window attached to Convoy's running OpenCode server; clicking a pipeline row only focuses that step — it no longer opens the session. Inside Herdr or Zellij that session opens in a sibling pane instead (see below); otherwise Ghostty is preferred when installed and Terminal.app is the fallback (`CONVOY_TERMINAL=herdr|zellij|ghostty|terminal` forces a backend). Press `Shift+Tab` to cycle auto-accept modes — off, auto-accept, smart (see the permission gate below). Press `Ctrl+C` once to abort the active OpenCode session and shut down Convoy cleanly; press it again to force exit if cleanup hangs. Human gates stay inside the dashboard (`c` continue · `o` open OpenCode · `a` abort); without a TTY dashboard they fall back to plain terminal prompts. A step that fails now waits for you instead of retrying: the dashboard shows a `step failed` gate with `r` retry clean (restore the baseline and run again), `o` open the OpenCode session and fix it by hand, `a` abort — no auto-retry, no lost work. Once you open the session (`o`), the gate becomes the interactive one and `c` unlocks; `c` delivers the step's report (including one written in the reopened session), and without any valid report it re-opens the gate instead of advancing to the next step. Use `--no-tui` to fall back to plain logs.
+In interactive terminals, Convoy shows a full-screen OpenTUI dashboard headed by a compact run summary (clock, elapsed, cost, tokens). The `pipeline` panel on the left is a tab selector: every step — done, running, or still scheduled — is a row you move through with `↑`/`↓` (or `j`/`k`), or by clicking, with `▸` marking the focused one. Focusing a step drives the whole right side to it: a detail panel (name; whether it's ongoing, done, failed, or scheduled; model; cost; tokens; attempt; files changed) over that step's todo list and a three-tab content panel — switched with `←`/`→`, `Tab`, the number keys `1`/`2`/`3`, or by clicking the tab strip. The tabs are `logs` (the step's color-coded activity feed), `reports` (the markdown report that step wrote, if any, scrollable with `PgUp`/`PgDn` — available live the moment a step finishes, not only at the end), and `session` (a read-only "follow along" view of that step's OpenCode session: its live state — reasoning, running a command, editing, applying a diff — model, attempt, cost, diff summary, and a scrolling transcript of what the model is doing, newest at the bottom). A not-yet-started step reads as `scheduled` with its planned model and zeroed usage, so you can inspect what's coming; focus auto-follows the active step until you navigate, and `Esc` hands it back to auto-follow. The dashboard never paints backgrounds: the canvas is your terminal's own background and panels are delineated by borders alone, derived as subtle elevations of the terminal's reported background color, with dark or light accents picked by its brightness (and a neutral fallback when the terminal doesn't answer); floating modals repaint the reported color exactly to mask the content beneath them. It follows live theme changes. For full interactivity, press `o` (or click the detail panel) to open the focused step's OpenCode session in a new terminal window attached to Convoy's running OpenCode server; clicking a pipeline row only focuses that step — it no longer opens the session. Inside Herdr or Zellij that session opens in a sibling pane instead (see below); otherwise Ghostty is preferred when installed and Terminal.app is the fallback (`CONVOY_TERMINAL=herdr|zellij|ghostty|terminal` forces a backend). Press `Shift+Tab` to cycle auto-accept modes — off, auto-accept, smart (see the permission gate below). Press `Ctrl+C` once to abort the active OpenCode session and shut down Convoy cleanly; press it again to force-stop the owned OpenCode server (SIGKILL) and exit within a bounded second instead of leaving it behind. Human gates stay inside the dashboard (`c` continue · `o` open OpenCode · `a` abort); without a TTY dashboard they fall back to plain terminal prompts. A step that fails now waits for you instead of retrying: the dashboard shows a `step failed` gate with `r` retry clean (restore the baseline and run again), `o` open the OpenCode session and fix it by hand, `a` abort — no auto-retry, no lost work. Once you open the session (`o`), the gate becomes the interactive one and `c` unlocks; `c` delivers the step's report (including one written in the reopened session), and without any valid report it re-opens the gate instead of advancing to the next step. Use `--no-tui` to fall back to plain logs.
 
 When Convoy runs inside Herdr or Zellij (including over SSH), `o` and `i` open OpenCode in a focused sibling pane rather than a macOS window, named for what it holds (`opencode session`, `opencode iterate`, `claude session`). Inside Herdr the pane splits the current one to the right; inside Zellij it is a new pane. The multiplexer's normal focus shortcut returns to Convoy without closing the pane. When OpenCode exits the pane deliberately stays, showing the exit code — so a session that failed to start is readable instead of vanishing; press `Ctrl+C` there to close the pane, or `Enter` to run it again. Set `CONVOY_TERMINAL=herdr`, `zellij`, `ghostty`, or `terminal` to override automatic backend selection — any other value is rejected with an error rather than silently ignored. When both multiplexers are detected, Herdr wins because the session runs inside it — and a failed Herdr open never falls through to Zellij, which would talk to the outer session and hang or open a pane you cannot see. If Convoy is inside a multiplexer but can't find its binary on its own `PATH`, it falls back to a macOS window rather than losing session opening altogether.
 
@@ -175,6 +175,54 @@ The target repo only sees commits with prefix `convoy(<phase>): ...`, made on th
 ## Reviewing a run before starting
 
 Every interactive manual run now displays its fully resolved plan before repository effects. The launcher has a native **Review** step after Options: use Enter or `s` to start, Escape to return to Options, `q` to cancel, arrow/page keys or the mouse wheel to scroll, and `p` to expand the complete prompt. `--plan` prints that plan and exits without creating a run, running hooks, or starting OpenCode. `--no-confirm` prints a compact plan and starts immediately. Non-TTY environments continue automatically after the compact summary.
+
+---
+
+## OpenCode server lifecycle
+
+Convoy spawns and owns every `opencode serve` it starts — the run's server,
+short-lived helpers (model discovery, commit messages, branch naming,
+conversation session queries), and the repository's independently persistent
+authoring service. It keeps the actual child handle, so shutdown is observed
+rather than assumed.
+
+- **Bounded, observed stop.** Ending an owning operation sends SIGTERM, waits
+  2 seconds, escalates to SIGKILL, then observes for 1 second. A delivered
+  signal is never reported as a confirmed stop; if exit cannot be observed the
+  outcome is reported as unresolved (with the identity retained) instead of
+  claiming success.
+- **Ownership spans startup.** Child ownership is registered at spawn and the
+  child's process identity is published before its URL is exposed, so a boot
+  that fails, exits early, reports a malformed readiness line, times out, or is
+  cancelled still cleans up through the same handle.
+- **Controller departure releases the finish screen.** A completed run parked
+  on its finish screen is released when its controller explicitly leaves or its
+  15-second heartbeat lease expires (detected within about a second without any
+  further request), then the run's server stops. Active, paused, permission,
+  and human-gate runs are unaffected, as are independent authoring services.
+- **Eventual orphan recovery.** Run/helper lifetimes are recorded under
+  `~/.convoy/processes/` (private, versioned, atomically written). A later
+  managed launch inspects a bounded number of records (32 records / 5 seconds
+  per pass, with a fair continuation cursor) and terminates a recorded child
+  only after independently confirming its original owner incarnation is gone
+  and the target still matches the recorded child identity and executable role,
+  revalidated immediately before each signal. A global name, port, or PPID
+  scan is never used. The identity recheck narrows but cannot eliminate the
+  residual POSIX window between the check and the delivered signal (most
+  visible on macOS); recovery is a best-effort lifecycle cleanup, not an atomic
+  security boundary, so do not treat it as authorization to target processes it
+  did not record.
+- **Legacy and uncertain evidence is never a kill target.** Records without a
+  child identity (older runs' coordinator PID metadata), unreadable probes, and
+  reused PIDs are reported as skipped/uncertain and left alone. Confirmed
+  stops remove their record; unresolved ones are retained for a later pass.
+- **Diagnostics.** Unresolved recovery prints the record location under
+  `~/.convoy/processes/`. Records hold only process identity, lifetime class,
+  lifecycle state, and a bounded outcome — never tokens, environment, config,
+  or prompts.
+- **Limitation.** This guarantees the owned `serve` child only. MCP/tool
+  subprocesses can create their own sessions and process groups; stopping the
+  server is not a universal process-tree reaper.
 
 ---
 

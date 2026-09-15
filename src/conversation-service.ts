@@ -1,6 +1,7 @@
 import { join } from "node:path"
 
 import { bootOpencodeServerFrom } from "./opencode"
+import { captureIdentity, defaultIdentityProbe, type IdentityProbe, type ProcessIdentity } from "./process-identity"
 import { readJsonFile, removePath, withExclusiveLock, writeJsonFile, type StoreRead } from "./repo-store"
 
 /** The discovery record's schema version; bumped only for a wire-format change. */
@@ -40,6 +41,14 @@ export type ConversationServiceRecord = {
   pid: number
   bootCheckout: string
   startedAt: number
+  /**
+   * Kernel birth identity of the recorded child for servers booted by this
+   * build (design D6). Optional and additive: legacy records simply omit it,
+   * and an explicit stop only re-verifies it when present so a recycled PID
+   * can never be killed as though it were the recorded server. The probe is
+   * not atomic, so this strengthens — never overstates — the guarded stop.
+   */
+  childBirth?: string
 }
 
 export function validateConversationServiceRecord(value: unknown): ConversationServiceRecord | undefined {
@@ -54,12 +63,14 @@ export function validateConversationServiceRecord(value: unknown): ConversationS
   if (typeof record.pid !== "number" || !Number.isInteger(record.pid) || record.pid <= 0) return undefined
   if (typeof record.bootCheckout !== "string" || record.bootCheckout === "") return undefined
   if (typeof record.startedAt !== "number") return undefined
+  if (record.childBirth !== undefined && typeof record.childBirth !== "string") return undefined
   return {
     schemaVersion: schemaVersion,
     url: record.url,
     pid: record.pid,
     bootCheckout: record.bootCheckout,
     startedAt: record.startedAt,
+    ...(typeof record.childBirth === "string" && record.childBirth !== "" ? { childBirth: record.childBirth } : {}),
   }
 }
 
@@ -148,11 +159,16 @@ export async function ensureConversationService(input: {
   checkout: string
   bootTimeoutMs?: number
   /** Injected boot (tests); defaults to the detached OpenCode server boot. */
-  boot?: (checkout: string, timeoutMs?: number) => Promise<{ url: string; close(): void; pid: number }>
+  boot?: (checkout: string, timeoutMs?: number) => Promise<{ url: string; close(): void | Promise<unknown>; pid: number; identity?: ProcessIdentity }>
   /** Injected probe (tests); defaults to the PID + URL liveness probe. */
   probe?: (record: ConversationServiceRecord) => Promise<"live" | "stale" | "uncertain">
 }): Promise<ConversationServiceOutcome> {
-  const boot = input.boot ?? ((checkout: string, timeoutMs?: number) => bootOpencodeServerFrom(checkout, timeoutMs ?? 30_000))
+  const boot =
+    input.boot ??
+    ((checkout: string, timeoutMs?: number) =>
+      // An independently persistent authoring service: explicitly excluded
+      // from run/helper orphan reconciliation (design D1/D6).
+      bootOpencodeServerFrom(checkout, timeoutMs ?? 30_000, { lifetime: "authoring-service" }))
   const probe = input.probe ?? probeConversationService
   let outcome: ConversationServiceOutcome = { status: "uncertain", reason: "the authoring service lock was lost" }
   await withExclusiveLock(join(input.commonDir, "convoy", "authoring-service"), async () => {
@@ -179,7 +195,7 @@ export async function ensureConversationService(input: {
       outcome = { status: "uncertain", reason: `the authoring service discovery record is ${read.status === "unreadable" ? `unreadable: ${read.reason}` : read.status} — inspect ${discoveryPath(input.commonDir)} before conversation work` }
       return
     }
-    let booted: { url: string; close(): void; pid: number }
+    let booted: { url: string; close(): void | Promise<unknown>; pid: number; identity?: ProcessIdentity }
     try {
       booted = await boot(input.checkout, input.bootTimeoutMs)
     } catch (error) {
@@ -192,8 +208,19 @@ export async function ensureConversationService(input: {
       pid: booted.pid,
       bootCheckout: input.checkout,
       startedAt: Date.now(),
+      // Retain the child's kernel birth identity for newly booted services so
+      // the guarded stop can refuse a recycled PID (design D6).
+      ...(booted.identity?.birth ? { childBirth: booted.identity.birth } : {}),
     }
-    await writeJsonFile(discoveryPath(input.commonDir), record)
+    try {
+      await writeJsonFile(discoveryPath(input.commonDir), record)
+    } catch (error) {
+      // An unpublished child has no discovery record to control its lifetime:
+      // close it rather than leak an unreachable server (design D6).
+      await Promise.resolve(booted.close()).catch(() => {})
+      outcome = { status: "unavailable", reason: `the authoring service discovery record could not be written: ${error instanceof Error ? error.message : String(error)}` }
+      return
+    }
     outcome = { status: "live", url: booted.url, record, reused: false }
   })
   return outcome
@@ -214,6 +241,8 @@ export async function stopConversationService(input: {
   activity: "idle" | "busy" | "unknown"
   /** Injected probe (tests); defaults to the PID + URL liveness probe. */
   probe?: (record: ConversationServiceRecord) => Promise<"live" | "stale" | "uncertain">
+  /** Injected identity probe (tests); defaults to the platform kernel probe. */
+  identityProbe?: IdentityProbe
   /** Injected kill (tests); defaults to SIGTERM on the recorded PID. */
   kill?: (record: ConversationServiceRecord) => Promise<void> | void
 }): Promise<{ status: "stopped" } | { status: "kept"; reason: string } | { status: "missing" }> {
@@ -239,6 +268,19 @@ export async function stopConversationService(input: {
     return { status: "kept", reason: `the authoring server (pid ${record.pid}, ${record.url}) is in an unverified state — it is kept until it answers or its process is gone` }
   }
   if (liveness === "live") {
+    // Newly booted services record their child's kernel birth identity. An
+    // explicit stop re-verifies it where present so a recycled PID behind a
+    // stale URL answer is never killed as though it were the recorded server
+    // (design D6). Legacy records without identity keep the PID+URL intent.
+    if (record.childBirth) {
+      const observed = await captureIdentity(record.pid, input.identityProbe ?? defaultIdentityProbe())
+      if (!observed || observed.birth !== record.childBirth) {
+        return {
+          status: "kept",
+          reason: `the authoring server pid ${record.pid} no longer matches its recorded child identity — it is kept rather than killed`,
+        }
+      }
+    }
     const kill = input.kill ?? (async (target: ConversationServiceRecord) => {
       process.kill(target.pid, "SIGTERM")
     })

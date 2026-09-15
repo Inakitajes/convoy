@@ -20,7 +20,7 @@ import {
   writePendingLaunch,
 } from "../src/coordinate"
 import type { AutoAccept, RunOutcome } from "../src/progress"
-import { UserAbortError } from "../src/runner"
+import { RunShutdown, UserAbortError } from "../src/runner"
 import type { AgentStep, RunOptions, RunPlan } from "../src/types"
 
 const dirs: string[] = []
@@ -434,6 +434,55 @@ describe("runCoordinateBoot", () => {
 
     expect(released).toBe(1)
     expect(finished).toEqual([])
+  })
+
+  test("SC-1: a signal during the finish hold releases it and runs the owned stop", async () => {
+    // The coordinator's shutdown scope must outlive run(): a SIGTERM after
+    // execution finishes but before the owned server stops has to release the
+    // parked terminal wait and fall through to the bounded stop (spec R4). The
+    // scope is injected so the test delivers the signal without killing the
+    // test runner.
+    const root = await scratch()
+    const pending = await writeBootLaunch(root)
+    const order: string[] = []
+    const shutdown = new RunShutdown({ exit: () => {} })
+    let holdRegistered!: () => void
+    const registered = new Promise<void>((resolve) => {
+      holdRegistered = resolve
+    })
+
+    const promise = runCoordinateBoot(pending.launchPath, pending.readyPath, {
+      launchRoot: root,
+      createShutdown: () => shutdown,
+      // The test's manual `request` stands in for the process signal; no real
+      // handler is installed.
+      installSignals: () => () => {},
+      createProgress: (opts) => {
+        const progress = new ControlProgress(opts)
+        progress.runFinished = async () => {
+          order.push("hold")
+          holdRegistered()
+          await new Promise<void>(() => {})
+        }
+        return progress
+      },
+      run: async () => ({
+        runID: "20260101-000000-ab12",
+        dir: "/tmp/run",
+        release: async () => {
+          order.push("release")
+        },
+      }),
+    })
+
+    await registered
+    shutdown.request("SIGTERM")
+    const code = await promise
+    expect(code).toBe(0)
+    expect(order).toEqual(["hold", "release"])
+    // The scope is disposed after release: a later request is inert.
+    shutdown.request("SIGTERM")
+    expect(order).toEqual(["hold", "release"])
   })
 })
 

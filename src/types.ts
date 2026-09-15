@@ -23,6 +23,7 @@ export type FeaturePlanLink = {
   worktreeDir?: string
 }
 import type { AutoAccept, ProgressUI } from "./progress"
+import type { RunShutdown } from "./runner"
 import type { StepRunnerId } from "./step-runners"
 import type { ModelGateway, ModelRoutingOverrides, ResolvedModel } from "./model-routing"
 
@@ -86,6 +87,14 @@ export type RunOptions = {
    * instead of doing it in the finally.
    */
   progress?: ProgressUI
+  /**
+   * The shutdown scope whose process signal handlers span boot through final
+   * release. Set by the coordinator so a SIGTERM during the terminal finish
+   * hold or release resolves that wait and runs the bounded owned-server stop
+   * (design D3). When set, the runner uses it instead of creating and
+   * disposing its own; the caller owns its lifetime.
+   */
+  shutdown?: RunShutdown
   /**
    * The shared auto-accept reference to use for the permission gate. When set,
    * the gate uses exactly this object (so a dashboard shift+tab toggle reaches
