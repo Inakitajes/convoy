@@ -122,6 +122,36 @@ function within(candidate: string, root: string): boolean {
   return rel !== undefined && rel.length > 0
 }
 
+/**
+ * Draft marking helpers for the interactive pickers (change
+ * `openspec-multi-change-selection`): toggling, select-all, and the confirmed
+ * selection. Marking is draft state — a mark only becomes a selection through
+ * an explicit confirm, and a confirmed set is ordered by the picker's
+ * active-change listing rather than by toggle order (design D2/D6). Keeping
+ * these pure lets the multi-select behavior be unit-tested without a renderer.
+ */
+
+/** Toggles a change id in the marked set, adding it once at the end and preserving the rest. */
+export function toggleMarkedChange(marked: readonly string[], changeId: string): string[] {
+  if (marked.includes(changeId)) return marked.filter((id) => id !== changeId)
+  return [...marked.filter((id) => id !== changeId), changeId]
+}
+
+/** Marks every active change in the picker's listing order; an empty listing marks nothing. */
+export function markAllChanges(activeIds: readonly string[]): string[] {
+  return [...activeIds]
+}
+
+/**
+ * The confirmed selection: only ids still present in the active listing,
+ * ordered by that listing so a B-then-A toggle order confirms as A-then-B.
+ * An empty result means nothing was marked (or the marks went stale).
+ */
+export function confirmedChangeSelection(marked: readonly string[], activeIds: readonly string[]): string[] {
+  const markedSet = new Set(marked)
+  return activeIds.filter((id) => markedSet.has(id))
+}
+
 /** A singleton the UI may suggest — never a selection. */
 export type SingletonSuggestion = {
   kind: "singleton"

@@ -24,6 +24,8 @@ const actualLaunchTui = await import("../src/launch-tui")
 const actualOpencode = await import("../src/opencode")
 const actualNotice = await import("../src/notice-tui")
 const actualRemovalConfirm = await import("../src/removal-confirm-tui")
+const actualChangePicker = await import("../src/change-picker-tui")
+const actualWorktreeCommands = await import("../src/worktree-commands")
 
 // Snapshot the real functions BEFORE mock.module: bun patches the module
 // record in place, so the namespace objects above reflect the mock once
@@ -34,13 +36,18 @@ const realLaunchRunTui = actualLaunchTui.launchRunTui
 const realOpenIterateWindow = actualOpencode.openIterateOpencodeWindow
 const realShowNotice = actualNotice.showNoticeTui
 const realShowRemovalConfirm = actualRemovalConfirm.showRemovalConfirmTui
+const realShowChangePicker = actualChangePicker.showChangePickerTui
+const realRunWorktreeArchive = actualWorktreeCommands.runWorktreeArchive
 
 let capturing = false
 let resolutions: SpecsResolution[] = [{ type: "exit" }]
 let confirmResult: "confirm" | "cancel" = "confirm"
+let pickerResult: { kind: "select"; changeIds: string[] } | { kind: "cancel" } = { kind: "cancel" }
 const launchCalls: Record<string, unknown>[] = []
 const iterateCalls: Record<string, unknown>[] = []
 const noticeCalls: Record<string, unknown>[] = []
+const pickerCalls: Record<string, unknown>[] = []
+const archiveCalls: Record<string, unknown>[] = []
 
 mock.module("../src/specs", () => ({
   ...actualSpecs,
@@ -85,6 +92,28 @@ mock.module("../src/removal-confirm-tui", () => ({
   },
 }))
 
+// The Home archive action resolves its batch from the interactive picker and
+// hands it to the guarded archive command. Both are mocked here so the routing
+// test can assert the confirmed ordered batch is passed through verbatim
+// (change `openspec-multi-change-selection`, design D5) rather than re-derived.
+mock.module("../src/change-picker-tui", () => ({
+  ...actualChangePicker,
+  showChangePickerTui: async (route: unknown, options: Record<string, unknown>) => {
+    if (!capturing) return realShowChangePicker(route as never, options as never)
+    pickerCalls.push(options)
+    return pickerResult
+  },
+}))
+
+mock.module("../src/worktree-commands", () => ({
+  ...actualWorktreeCommands,
+  runWorktreeArchive: async (input: Record<string, unknown>) => {
+    if (!capturing) return realRunWorktreeArchive(input as never)
+    archiveCalls.push(input)
+    return undefined
+  },
+}))
+
 const { openSpecsBrowser, dispatchWorkAction } = await import("../src/cli")
 
 let root: string
@@ -94,8 +123,11 @@ beforeEach(async () => {
   launchCalls.length = 0
   iterateCalls.length = 0
   noticeCalls.length = 0
+  pickerCalls.length = 0
+  archiveCalls.length = 0
   resolutions = [{ type: "exit" }]
   confirmResult = "confirm"
+  pickerResult = { kind: "cancel" }
   root = await makeChangeRepo()
 })
 
@@ -302,6 +334,70 @@ describe("blocked close handoffs (task 7.9)", () => {
       expect(noticeCalls).toHaveLength(1)
       expect((noticeCalls[0] as { message: string }).message).toContain("managed writer")
     } finally {
+      await rm(main, { recursive: true, force: true })
+    }
+  })
+})
+
+describe("Home archive action hands the picker's ordered batch to the archive command", () => {
+  /**
+   * A worktree with two active changes, so the confirmed batch is a real
+   * ordered multi-selection (change `openspec-multi-change-selection`,
+   * capability worktree-operations: "the confirmed batch SHALL be handed to
+   * the archive command as the reviewed ordered batch").
+   */
+  async function makeTwoChangeWorktree(label: string) {
+    const repo = await makeWorktreeRepo(label)
+    const second = join(repo.worktreeDir, "openspec", "changes", "add-login")
+    await mkdir(second, { recursive: true })
+    await writeFile(join(second, "proposal.md"), "# Add login\n")
+    return repo
+  }
+
+  test("the confirmed batch is passed through in order, and the picker is offered the checkout's active changes", async () => {
+    const { main, worktreeDir } = await makeTwoChangeWorktree("routing-archive-batch")
+    try {
+      capturing = true
+      pickerResult = { kind: "select", changeIds: ["add-login", "add-widget"] }
+      await dispatchWorkAction(main, {} as never, worktreeDir, "archive")
+      // The picker saw the checkout's own active changes (never by discovery of
+      // another checkout): both are offered, sorted by the local listing.
+      expect(pickerCalls).toHaveLength(1)
+      const offered = (pickerCalls[0] as { changes: { changeId: string }[] }).changes.map((change) => change.changeId)
+      expect(offered).toEqual(["add-login", "add-widget"])
+      // The confirmed ordered batch reaches the guarded archive verbatim,
+      // target and all — it is not re-derived, re-sorted, or narrowed.
+      expect(archiveCalls).toHaveLength(1)
+      expect((archiveCalls[0] as { worktree: string }).worktree).toBe(worktreeDir)
+      expect((archiveCalls[0] as { changes: string[] }).changes).toEqual(["add-login", "add-widget"])
+    } finally {
+      capturing = false
+      await rm(main, { recursive: true, force: true })
+    }
+  })
+
+  test("a confirmed empty batch archives nothing", async () => {
+    const { main, worktreeDir } = await makeTwoChangeWorktree("routing-archive-empty")
+    try {
+      capturing = true
+      pickerResult = { kind: "select", changeIds: [] }
+      await dispatchWorkAction(main, {} as never, worktreeDir, "archive")
+      expect(archiveCalls).toHaveLength(0)
+    } finally {
+      capturing = false
+      await rm(main, { recursive: true, force: true })
+    }
+  })
+
+  test("a cancelled picker archives nothing", async () => {
+    const { main, worktreeDir } = await makeTwoChangeWorktree("routing-archive-cancel")
+    try {
+      capturing = true
+      pickerResult = { kind: "cancel" }
+      await dispatchWorkAction(main, {} as never, worktreeDir, "archive")
+      expect(archiveCalls).toHaveLength(0)
+    } finally {
+      capturing = false
       await rm(main, { recursive: true, force: true })
     }
   })

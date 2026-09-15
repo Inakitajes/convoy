@@ -1,5 +1,6 @@
 import { BoxRenderable, StyledText, TextRenderable, bold, fg } from "@opentui/core"
 
+import { confirmedChangeSelection, markAllChanges, toggleMarkedChange } from "./change-selection"
 import { hintsRow, joinLines, paletteForTerminal, raw, setTheme, terminalBackgroundHex, theme } from "./tui-theme"
 import { sceneForRoute, type TuiRoute, type TuiScene } from "./tui-session"
 
@@ -7,11 +8,14 @@ import type { CliRenderer, KeyEvent } from "@opentui/core"
 
 /**
  * A small change selector for the explicit-selection operations (archive).
- * `openspec archive` acts on one explicitly named change and never by
- * discovery, so the operator picks the change here before the guarded archive
- * runs. Selecting resolves with the change id; every other key cancels.
+ * `openspec archive` acts on explicitly named changes and never by discovery,
+ * so the operator marks the changes here before the guarded archive runs.
+ * Marking is draft state: `space` toggles the highlighted row, `a` marks every
+ * active change, and `enter` confirms the ordered batch. Confirming with
+ * nothing marked archives nothing (change `openspec-multi-change-selection`,
+ * design D2/D5).
  */
-export type ChangePickerResult = { kind: "select"; changeId: string } | { kind: "cancel" }
+export type ChangePickerResult = { kind: "select"; changeIds: string[] } | { kind: "cancel" }
 
 export function showChangePickerTui(
   route: TuiRoute,
@@ -26,6 +30,7 @@ class ChangePickerTui {
   private resolveResult!: (result: ChangePickerResult) => void
   private finished = false
   private index = 0
+  private marked: string[] = []
   private readonly contentText: TextRenderable
   private readonly footerText: TextRenderable
   private readonly footerInnerWidth: number
@@ -59,10 +64,24 @@ class ChangePickerTui {
         this.index = (this.index + 1) % count
         this.render()
         return
+      case " ":
+      case "space": {
+        const change = this.options.changes[this.index]
+        if (change) this.marked = toggleMarkedChange(this.marked, change.changeId)
+        this.render()
+        return
+      }
+      case "a":
+        this.marked = markAllChanges(this.options.changes.map((change) => change.changeId))
+        this.render()
+        return
       case "return":
       case "linefeed": {
-        const change = this.options.changes[this.index]
-        if (change) this.finish({ kind: "select", changeId: change.changeId })
+        // Only explicitly marked changes archive: a bare confirm is not a
+        // selection, so it resolves as a non-selection (cancel) rather than a
+        // success, and the caller archives nothing (design D5).
+        const selected = confirmedChangeSelection(this.marked, this.options.changes.map((change) => change.changeId))
+        this.finish(selected.length > 0 ? { kind: "select", changeIds: selected } : { kind: "cancel" })
         return
       }
       case "escape":
@@ -133,22 +152,29 @@ class ChangePickerTui {
     if (this.finished || this.renderer.isDestroyed || this.scene.isClosed) return
     const width = Math.max(24, Math.min(this.renderer.width - 8, 92))
     const lines: StyledText[] = []
-    lines.push(new StyledText([fg(theme.dim)(`select one of ${this.options.changes.length} active change(s):`)]))
+    lines.push(new StyledText([fg(theme.dim)(`select one or more of ${this.options.changes.length} active change(s):`)]))
     lines.push(new StyledText([raw("")]))
     this.options.changes.forEach((change, index) => {
       const selected = index === this.index
       const marker = selected ? fg(theme.accent)("▸ ") : raw("  ")
+      const mark = this.marked.includes(change.changeId) ? fg(theme.teal)("[x] ") : fg(theme.faint)("[ ] ")
       const label = change.title ? `${change.changeId}  ${change.title}` : change.changeId
-      const text = label.length > width - 2 ? `${label.slice(0, Math.max(1, width - 3))}…` : label
-      lines.push(new StyledText([marker, selected ? bold(fg(theme.chipText)(text)) : fg(theme.text)(text)]))
+      const text = label.length > width - 6 ? `${label.slice(0, Math.max(1, width - 7))}…` : label
+      // Selected rows read as the launcher picker's: theme.text bolded. The
+      // chipText token is reserved for text riding a filled background, which
+      // this picker's rows do not have — on it the highlight would render in
+      // the terminal's own background color and disappear.
+      lines.push(new StyledText([marker, mark, selected ? bold(fg(theme.text)(text)) : fg(theme.text)(text)]))
     })
     this.contentText.content = joinLines(lines)
     this.footerText.content = hintsRow(
       [
+        { keys: "space", label: "mark", priority: 3 },
+        { keys: "a", label: "all", priority: 4 },
         { keys: "enter", label: "archive", priority: 2 },
         { keys: "esc", label: "cancel", priority: 1 },
       ],
-      [],
+      [[fg(theme.faint)(`${this.marked.length}/${this.options.changes.length} marked`)]],
       this.footerInnerWidth,
     )
     this.renderer.requestRender()
