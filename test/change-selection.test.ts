@@ -6,9 +6,12 @@ import { join } from "node:path"
 import { createFixtureRepo, type FixtureRepo } from "./helpers/multi-worktree"
 import {
   acceptSingletonSuggestion,
+  confirmedChangeSelection,
   expectedSourcePath,
   freezeSelectedInputs,
+  markAllChanges,
   suggestSingleton,
+  toggleMarkedChange,
   validateChangeSelection,
   type ChangeSelectionInput,
   type SelectedChangeInput,
@@ -107,6 +110,32 @@ describe("validateChangeSelection", () => {
     const result = await validateChangeSelection(checkout, { mode: "selected", changes: [{ changeId: "change-dup", sourcePath: path }, { changeId: "change-dup", sourcePath: path }] })
     expect(result.ok).toBe(false)
     if (!result.ok) expect(result.reason).toContain("more than once")
+  })
+})
+
+describe("draft marking helpers", () => {
+  test("toggle marks and unmarks one change, never adding it twice", () => {
+    expect(toggleMarkedChange([], "change-a")).toEqual(["change-a"])
+    expect(toggleMarkedChange(["change-a"], "change-b")).toEqual(["change-a", "change-b"])
+    expect(toggleMarkedChange(["change-a", "change-b"], "change-a")).toEqual(["change-b"])
+    expect(toggleMarkedChange(["change-a"], "change-a")).toEqual([])
+  })
+
+  test("select-all marks every active change in listing order, and nothing when the listing is empty", () => {
+    expect(markAllChanges(["change-a", "change-b", "change-c"])).toEqual(["change-a", "change-b", "change-c"])
+    expect(markAllChanges([])).toEqual([])
+  })
+
+  test("a confirmed multi-selection is ordered by the listing, independent of toggle order", () => {
+    // Toggled change-b then change-a; confirm reads change-a then change-b.
+    const marked = toggleMarkedChange(toggleMarkedChange([], "change-b"), "change-a")
+    expect(confirmedChangeSelection(marked, ["change-a", "change-b"])).toEqual(["change-a", "change-b"])
+  })
+
+  test("the confirmed selection dedupes and drops stale marks; an empty selection stays empty", () => {
+    expect(confirmedChangeSelection(["change-a", "change-a", "change-gone"], ["change-a", "change-b"])).toEqual(["change-a"])
+    expect(confirmedChangeSelection([], ["change-a", "change-b"])).toEqual([])
+    expect(confirmedChangeSelection([], [])).toEqual([])
   })
 })
 

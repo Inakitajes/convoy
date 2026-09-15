@@ -6,6 +6,7 @@ import { existsSync } from "node:fs"
 import { BoxRenderable, StyledText, TextRenderable, bg, bold, createCliRenderer, decodePasteBytes, fg, stripAnsiSequences, t } from "@opentui/core"
 
 import { defaultAdvisorMaxCalls } from "./advisor"
+import { confirmedChangeSelection, markAllChanges, toggleMarkedChange } from "./change-selection"
 import { buildAgentRegistry, emptyHooksConfig, loadMergedConvoyConfig } from "./config"
 import { currentBranch, dirtyFilesPreview, mainWorktreeDir, resolveWorktreeDefault, statusPorcelain } from "./git"
 import { hooksForPipeline } from "./hooks"
@@ -652,6 +653,12 @@ export class LaunchPicker {
   /** 0 = Manual prompt; 1..n = specs[index - 1]. */
   private specIndex = 0
   private specScroll = 0
+  /**
+   * Draft marks in the OpenSpec picker (change `openspec-multi-change-selection`):
+   * what `space`/`a` collected, before `enter` confirms it. Never a selection
+   * by itself — `selectedChangeIds` changes only on confirm.
+   */
+  private markedChangeIds: string[] = []
   /** The operator-selected ordered local changes; every entry is an explicit acceptance. */
   private selectedChangeIds: string[] = []
   /** True once the operator explicitly chose the no-change mode (Manual prompt or a manual preset). */
@@ -1113,6 +1120,7 @@ export class LaunchPicker {
     if (key.name === "escape") {
       if (this.specs.length > 0) {
         this.promptChoosing = true
+        this.focusContractPicker()
         this.promptError = ""
         this.render()
         return
@@ -1224,6 +1232,18 @@ export class LaunchPicker {
         this.specIndex = clamp(this.specIndex + 1, 0, this.specs.length)
         this.render()
         return
+      case " ":
+      case "space": {
+        const spec = this.specs[this.specIndex - 1]
+        if (!spec) return
+        this.markedChangeIds = toggleMarkedChange(this.markedChangeIds, spec.id)
+        this.render()
+        return
+      }
+      case "a":
+        this.markedChangeIds = markAllChanges(this.specs.map((spec) => spec.id))
+        this.render()
+        return
       case "pageup":
         this.specIndex = clamp(this.specIndex - this.contractVisibleRows(), 0, this.specs.length)
         this.render()
@@ -1256,14 +1276,39 @@ export class LaunchPicker {
   }
 
   /**
-   * Manual prompt (index 0) is the explicit no-change decision and opens the
-   * editor. A spec row pins `change=<id>` — an explicit acceptance of that
-   * suggestion; nothing is ever attached without one.
+   * The single picker-entry rule (design D4): seed the draft marks from the
+   * confirmed selection and land the highlight on the first selected change,
+   * else the first active change, else the no-change row. `openPrompt`, the
+   * options-step return, and the prompt-editor escape all call this so the
+   * three entry paths cannot drift. Nothing is confirmed here — marks stay
+   * draft until `enter`.
+   */
+  private focusContractPicker() {
+    const activeIds = this.specs.map((spec) => spec.id)
+    this.markedChangeIds = confirmedChangeSelection(this.selectedChangeIds, activeIds)
+    // The selection's own order wins: presets (`--change`, specs-viewer
+    // handoffs) are order-significant, so the first *selected* change — not the
+    // first listing id that happens to be selected — is the D4 target.
+    const target = this.selectedChangeIds.find((id) => activeIds.includes(id)) ?? activeIds[0]
+    const index = target ? activeIds.indexOf(target) : -1
+    this.specIndex = index >= 0 ? index + 1 : 0
+  }
+
+  /**
+   * Confirms the picker. The no-change row is the explicit manual/no-change
+   * gesture: confirming it selects nothing, even when other rows are marked
+   * (delta scenario "No-change row selects nothing"), so a seeded selection
+   * cannot survive an explicit no-change confirm. While a spec row is
+   * highlighted, any marked row confirms the whole marked set, ordered by the
+   * active-change listing (design D3); with nothing marked, `enter` pins that
+   * highlighted row. Nothing is ever attached without one of these explicit
+   * confirmations.
    */
   private acceptContract() {
     if (this.specIndex === 0) {
       this.selectedChangeIds = []
       this.manualNoChanges = true
+      this.markedChangeIds = []
       this.promptChoosing = false
       if (this.promptFromDefault) {
         this.applyPromptFieldState(emptyPromptField())
@@ -1273,10 +1318,26 @@ export class LaunchPicker {
       this.render()
       return
     }
+    const marked = confirmedChangeSelection(this.markedChangeIds, this.specs.map((spec) => spec.id))
+    if (marked.length > 0) {
+      this.confirmContract(marked)
+      return
+    }
     const spec = this.specs[this.specIndex - 1]
     if (!spec) return
-    this.selectedChangeIds = [spec.id]
+    this.confirmContract([spec.id])
+  }
+
+  /**
+   * Applies a confirmed non-empty selection and advances to the options step:
+   * one explicit acceptance became the ordered contract, so the draft marks are
+   * cleared and the prompt field is repopulated from the pipeline. Shared by
+   * the marked-set and single-row confirm paths so the two cannot drift.
+   */
+  private confirmContract(changeIds: string[]) {
+    this.selectedChangeIds = changeIds
     this.manualNoChanges = false
+    this.markedChangeIds = []
     this.applyPromptFieldState(cleanPromptField(openSpecPromptFor(this.currentChoice().name)))
     this.cursor = this.prompt.length
     this.promptError = ""
@@ -1348,13 +1409,7 @@ export class LaunchPicker {
         this.mode = "prompt"
         if (this.specs.length > 0) {
           this.promptChoosing = true
-          const first = this.selectedChangeIds[0]
-          if (first) {
-            const index = this.specs.findIndex((spec) => spec.id === first)
-            this.specIndex = index >= 0 ? index + 1 : 0
-          } else {
-            this.specIndex = 0
-          }
+          this.focusContractPicker()
         }
         this.cursor = this.prompt.length
         this.render()
@@ -1533,13 +1588,7 @@ export class LaunchPicker {
     this.promptScroll = 0
     if (this.specs.length > 0) {
       this.promptChoosing = true
-      const first = this.selectedChangeIds[0]
-      if (first) {
-        const index = this.specs.findIndex((spec) => spec.id === first)
-        this.specIndex = index >= 0 ? index + 1 : 0
-      } else {
-        this.specIndex = 0
-      }
+      this.focusContractPicker()
       this.render()
       return
     }
@@ -2256,7 +2305,7 @@ this.detailBox.title = reviewing ? " review " : " run setup "
     const lines: StyledText[] = []
     lines.push(new StyledText([fg(theme.faint)("pipeline "), bold(fg(theme.text)(choice.name))]))
     lines.push(plain(""))
-    const intro = wrapWords("An OpenSpec change is the contract. Pick one, or write a prompt by hand.", width)
+    const intro = wrapWords("An OpenSpec change is the contract. Mark one or more with space, or write a prompt by hand.", width)
     for (const line of intro) lines.push(t`${fg(theme.dim)(line)}`)
     lines.push(plain(""))
 
@@ -2270,8 +2319,16 @@ this.detailBox.title = reviewing ? " review " : " run setup "
     for (let index = this.specScroll; index < end; index++) {
       const selected = index === this.specIndex
       const marker = selected ? fg(theme.accent)("▸ ") : raw("  ")
-      const label = selected ? bold(fg(theme.text)(truncate(rows[index]!, Math.max(8, width - 2)))) : fg(theme.text)(truncate(rows[index]!, Math.max(8, width - 2)))
-      lines.push(new StyledText([marker, label]))
+      const spec = index > 0 ? this.specs[index - 1] : undefined
+      // The no-change row carries no mark column: it is the explicit absence
+      // of a selection rather than a change that could be marked.
+      const mark = spec
+        ? this.markedChangeIds.includes(spec.id)
+          ? fg(theme.teal)("[x] ")
+          : fg(theme.faint)("[ ] ")
+        : raw("    ")
+      const label = selected ? bold(fg(theme.text)(truncate(rows[index]!, Math.max(8, width - 6)))) : fg(theme.text)(truncate(rows[index]!, Math.max(8, width - 6)))
+      lines.push(new StyledText([marker, mark, label]))
     }
     return joinLines(lines)
   }
@@ -2284,9 +2341,11 @@ this.detailBox.title = reviewing ? " review " : " run setup "
     return Math.max(3, this.detailContentHeight() - 6)
   }
 
-  private selectedSpec(): OpenSpecChangeSummary | undefined {
-    const first = this.selectedChangeIds[0]
-    return first ? this.specs.find((spec) => spec.id === first) : undefined
+  /** The selected local changes, in the reviewed order, resolved against this checkout's active specs. */
+  private selectedSpecs(): OpenSpecChangeSummary[] {
+    return this.selectedChangeIds
+      .map((id) => this.specs.find((spec) => spec.id === id))
+      .filter((spec): spec is OpenSpecChangeSummary => spec !== undefined)
   }
 
   private optionsDetail(width: number) {
@@ -2294,11 +2353,13 @@ this.detailBox.title = reviewing ? " review " : " run setup "
     const lines: StyledText[] = []
     lines.push(new StyledText([fg(theme.faint)("pipeline "), bold(fg(theme.text)(choice.name))]))
     lines.push(new StyledText([fg(theme.faint)("prompt   "), fg(theme.text)(truncate(this.prompt, Math.max(10, width - 9)))]))
-    const spec = this.selectedSpec()
-    if (spec) {
+    // Every selected change is shown, in review order: a multi-selection must
+    // read as its whole ordered list, not just its first entry.
+    this.selectedSpecs().forEach((spec, index) => {
       const label = spec.title === spec.id ? spec.id : `${spec.id} · ${spec.title}`
-      lines.push(new StyledText([sectionLabel("openspec "), fg(theme.teal)(truncate(label, Math.max(10, width - 9)))]))
-    }
+      const prefix = index === 0 ? sectionLabel("openspec ") : raw("         ")
+      lines.push(new StyledText([prefix, fg(theme.teal)(truncate(label, Math.max(10, width - 9)))]))
+    })
     // The continue handoff shows what is being reused, so "no new worktree"
     // is a visible fact of the options step rather than an assumption.
     if (this.presetFeature) {
@@ -2517,10 +2578,11 @@ this.detailBox.title = reviewing ? " review " : " run setup "
 
   /**
    * The OpenSpec counterpart of the history notice: the checkout's active
-   * local changes, one of which the operator may pick as the contract. Quiet
-   * when the checkout has no active change, and when a pick exists the picked
-   * row already says it. Nothing attaches without an explicit pick — the
-   * notice points at the decision, it never announces a silent attach.
+   * local changes, one or more of which the operator may mark as the contract.
+   * Quiet when the checkout has no active change, and when a selection exists
+   * the picked rows already say it. Nothing attaches without an explicit
+   * confirm — the notice points at the decision, it never announces a silent
+   * attach.
    */
   private pushOpenSpecNotice(lines: StyledText[], width: number) {
     // A preset change handed in that is not active in this checkout is a stale
@@ -2534,7 +2596,7 @@ this.detailBox.title = reviewing ? " review " : " run setup "
     if (this.specs.length === 0 || this.selectedChangeIds.length > 0 || this.manualNoChanges) return
     const value = Math.max(8, width - 9)
     lines.push(plain(""))
-    lines.push(new StyledText([sectionLabel("openspec "), fg(theme.dim)(truncate(`${this.specs.length} active changes · pick one (esc), or Manual prompt for a no-change run`, value))]))
+    lines.push(new StyledText([sectionLabel("openspec "), fg(theme.dim)(truncate(`${this.specs.length} active changes · pick one or more (esc), or Manual prompt for a no-change run`, value))]))
   }
 
   /**
@@ -2594,9 +2656,11 @@ this.detailBox.title = reviewing ? " review " : " run setup "
           [
             { keys: "↑/↓", label: "select", priority: 2, tone: "dim" },
             { keys: "enter", label: this.specIndex === 0 ? "write prompt" : "options", priority: 3 },
+            { keys: "space", label: "mark", priority: 4 },
+            { keys: "a", label: "all", priority: 5 },
             { keys: "esc", label: "back", priority: 1 },
           ],
-          [fg(theme.faint)(`${this.specIndex + 1}/${this.specs.length + 1}`)],
+          [fg(theme.faint)(`${this.markedChangeIds.length}/${this.specs.length} marked`)],
         )
       }
       return row(

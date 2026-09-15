@@ -541,8 +541,8 @@ export async function dispatchWorkAction(targetDir: string, route: TuiRoute, wor
     return
   }
   if (action === "archive") {
-    // Archive acts on one explicitly selected change (never by discovery), so
-    // the operator picks from the checkout's own active changes first.
+    // Archive acts on explicitly selected changes (never by discovery), so the
+    // operator marks one or more of the checkout's own active changes first.
     const { readCheckoutActiveChanges } = await import("./checkout-openspec")
     const { showNoticeTui } = await import("./notice-tui")
     const active = await readCheckoutActiveChanges(worktree)
@@ -559,9 +559,11 @@ export async function dispatchWorkAction(targetDir: string, route: TuiRoute, wor
       title: "archive change",
       changes: active.value.map((change) => ({ changeId: change.changeId, ...(change.title !== undefined ? { title: change.title } : {}) })),
     })
-    if (choice.kind !== "select") return
+    // A confirmed empty batch is not a selection: archive nothing and report
+    // no success rather than running the guarded archive.
+    if (choice.kind !== "select" || choice.changeIds.length === 0) return
     const { runWorktreeArchive } = await import("./worktree-commands")
-    await runMenuGuarded(route, () => runWorktreeArchive({ worktree, changes: [choice.changeId], route }))
+    await runMenuGuarded(route, () => runWorktreeArchive({ worktree, changes: choice.changeIds, route }))
     return
   }
   if (action === "fetch" || action === "sync" || action === "push" || action === "pr" || action === "squash" || action === "remove") {

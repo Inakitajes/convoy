@@ -1693,9 +1693,8 @@ describe("launch TUI OpenSpec contract picker", () => {
   test("enter on a spec pins change and injects the canned prompt without opening the editor", async () => {
     const launcher = await createLauncher(100, 30, 1, specs)
     try {
-      launcher.mockInput.pressEnter()
-      launcher.mockInput.pressKey("j")
-      launcher.mockInput.pressEnter()
+      launcher.mockInput.pressEnter() // pipelines -> prompt (contract list, focused on add-login)
+      launcher.mockInput.pressEnter() // confirm the highlighted row
       await launcher.renderOnce()
       const view = launchView(launcher.picker)
       expect(view.mode).toBe("options")
@@ -1715,8 +1714,9 @@ describe("launch TUI OpenSpec contract picker", () => {
   test("enter on Manual prompt opens the editor and does not pin a change", async () => {
     const launcher = await createLauncher(100, 30, 1, specs)
     try {
-      launcher.mockInput.pressEnter()
-      launcher.mockInput.pressEnter()
+      launcher.mockInput.pressEnter() // pipelines -> prompt (contract list, focused on add-login)
+      launcher.mockInput.pressKey("k") // move up to the Manual prompt row
+      launcher.mockInput.pressEnter() // Manual prompt -> editor
       await launcher.renderOnce()
       const view = launchView(launcher.picker)
       expect(view.mode).toBe("prompt")
@@ -1724,6 +1724,181 @@ describe("launch TUI OpenSpec contract picker", () => {
       expect(view.selectedChangeIds).toEqual([])
       expect(view.manualNoChanges).toBe(true)
       expect(launcher.captureCharFrame()).toContain("Add onboarding, fix bug")
+    } finally {
+      await closeLauncher(launcher)
+    }
+  })
+})
+
+describe("launch TUI change picker multi-selection", () => {
+  const specs: OpenSpecChangeSummary[] = [
+    { id: "add-login", title: "Add Login" },
+    { id: "add-logout", title: "Add Logout" },
+  ]
+
+  test("the picker opens focused on the first active change with its mark boxes", async () => {
+    const launcher = await createLauncher(100, 30, 1, specs)
+    try {
+      launcher.mockInput.pressEnter()
+      await launcher.renderOnce()
+      const view = launchView(launcher.picker)
+      expect(view.promptChoosing).toBe(true)
+      expect(view.specIndex).toBe(1)
+      const frame = launcher.captureCharFrame()
+      expect(frame).toContain("space")
+      expect(frame).toContain("[ ]")
+      expect(frame).toContain("0/2 marked")
+    } finally {
+      await closeLauncher(launcher)
+    }
+  })
+
+  test("space marks several rows and enter confirms them in listing order", async () => {
+    const launcher = await createLauncher(100, 30, 1, specs)
+    try {
+      launcher.mockInput.pressEnter() // open, highlighted add-login
+      launcher.mockInput.pressKey("j") // add-logout
+      launcher.mockInput.pressKey(" ") // mark add-logout first
+      launcher.mockInput.pressKey("k") // add-login
+      launcher.mockInput.pressKey(" ") // mark add-login second
+      await launcher.renderOnce()
+      expect(launcher.captureCharFrame()).toContain("2/2 marked")
+      launcher.mockInput.pressEnter() // confirm the marked set -> options
+      await launcher.renderOnce()
+      const view = launchView(launcher.picker)
+      expect(view.mode).toBe("options")
+      expect(view.manualNoChanges).toBe(false)
+      expect(view.selectedChangeIds).toEqual(["add-login", "add-logout"])
+      expect(view.runSelection("pipeline-1").changes).toEqual(["add-login", "add-logout"])
+      // The options step lists every selected change, in review order.
+      const text = optionsText(view, 110)
+      expect(text).toContain("add-login · Add Login")
+      expect(text).toContain("add-logout · Add Logout")
+    } finally {
+      await closeLauncher(launcher)
+    }
+  })
+
+  test("select-all marks every active change", async () => {
+    const launcher = await createLauncher(100, 30, 1, specs)
+    try {
+      launcher.mockInput.pressEnter()
+      launcher.mockInput.pressKey("a")
+      await launcher.renderOnce()
+      expect(launcher.captureCharFrame()).toContain("2/2 marked")
+      launcher.mockInput.pressEnter()
+      await launcher.renderOnce()
+      expect(launchView(launcher.picker).selectedChangeIds).toEqual(["add-login", "add-logout"])
+    } finally {
+      await closeLauncher(launcher)
+    }
+  })
+
+  test("re-entry returns the highlight to the first selected change", async () => {
+    const launcher = await createLauncher(100, 30, 1, specs, ["add-logout"])
+    try {
+      launcher.mockInput.pressEnter()
+      await launcher.renderOnce()
+      expect(launchView(launcher.picker).specIndex).toBe(2)
+      launcher.mockInput.pressEnter() // confirm add-logout -> options
+      await launcher.renderOnce()
+      expect(launchView(launcher.picker).selectedChangeIds).toEqual(["add-logout"])
+      launcher.mockInput.pressKey("p") // options -> picker again
+      await launcher.renderOnce()
+      const view = launchView(launcher.picker)
+      expect(view.promptChoosing).toBe(true)
+      expect(view.specIndex).toBe(2)
+    } finally {
+      await closeLauncher(launcher)
+    }
+  })
+
+  test("a sole active change is attached only when confirmed, never on open", async () => {
+    const launcher = await createLauncher(100, 30, 1, [{ id: "only-change", title: "Only Change" }])
+    try {
+      launcher.mockInput.pressEnter()
+      await launcher.renderOnce()
+      const view = launchView(launcher.picker)
+      expect(view.promptChoosing).toBe(true)
+      expect(view.selectedChangeIds).toEqual([])
+      expect(view.manualNoChanges).toBe(false)
+      launcher.mockInput.pressEnter()
+      await launcher.renderOnce()
+      expect(launchView(launcher.picker).selectedChangeIds).toEqual(["only-change"])
+    } finally {
+      await closeLauncher(launcher)
+    }
+  })
+
+  test("the no-change row selects nothing even after a change was marked", async () => {
+    const launcher = await createLauncher(100, 30, 1, specs)
+    try {
+      launcher.mockInput.pressEnter() // open, focused add-login
+      launcher.mockInput.pressKey(" ") // mark add-login
+      await launcher.renderOnce()
+      expect(launcher.captureCharFrame()).toContain("1/2 marked")
+      launcher.mockInput.pressKey("k") // move up to the Manual prompt row
+      launcher.mockInput.pressEnter() // confirm the no-change row
+      await launcher.renderOnce()
+      const view = launchView(launcher.picker)
+      expect(view.mode).toBe("prompt")
+      expect(view.promptChoosing).toBe(false)
+      expect(view.selectedChangeIds).toEqual([])
+      expect(view.manualNoChanges).toBe(true)
+    } finally {
+      await closeLauncher(launcher)
+    }
+  })
+
+  test("space on the no-change row marks nothing and it still confirms manual mode", async () => {
+    const launcher = await createLauncher(100, 30, 1, specs)
+    try {
+      launcher.mockInput.pressEnter() // open, focused add-login
+      launcher.mockInput.pressKey("k") // move up to the Manual prompt row
+      launcher.mockInput.pressKey(" ") // space on the no-change row: not a markable change
+      await launcher.renderOnce()
+      expect(launcher.captureCharFrame()).toContain("0/2 marked")
+      launcher.mockInput.pressEnter() // the no-change row is still the explicit manual gesture
+      await launcher.renderOnce()
+      const view = launchView(launcher.picker)
+      expect(view.manualNoChanges).toBe(true)
+      expect(view.selectedChangeIds).toEqual([])
+    } finally {
+      await closeLauncher(launcher)
+    }
+  })
+
+  test("the no-change row clears an existing selection on re-entry", async () => {
+    const launcher = await createLauncher(100, 30, 1, specs, ["add-login"])
+    try {
+      launcher.mockInput.pressEnter() // open: add-login is seeded as a draft mark
+      await launcher.renderOnce()
+      expect(launcher.captureCharFrame()).toContain("1/2 marked")
+      launcher.mockInput.pressKey("k") // move up to the Manual prompt row
+      launcher.mockInput.pressEnter() // confirm the no-change row
+      await launcher.renderOnce()
+      const view = launchView(launcher.picker)
+      expect(view.selectedChangeIds).toEqual([])
+      expect(view.manualNoChanges).toBe(true)
+      expect(view.runSelection("pipeline-1").changes).toEqual([])
+    } finally {
+      await closeLauncher(launcher)
+    }
+  })
+
+  test("a preset ordered differently from the listing opens on the first selected change", async () => {
+    const launcher = await createLauncher(100, 30, 1, specs, ["add-logout", "add-login"])
+    try {
+      launcher.mockInput.pressEnter() // open, both preset changes seeded as draft marks
+      await launcher.renderOnce()
+      const view = launchView(launcher.picker)
+      expect(view.promptChoosing).toBe(true)
+      expect(view.specIndex).toBe(2) // add-logout: the first selected change, not the first listing id
+      expect(launcher.captureCharFrame()).toContain("2/2 marked")
+      launcher.mockInput.pressEnter() // confirm the marked set -> options
+      await launcher.renderOnce()
+      // Confirming through the picker reorders to the listing order (design D2).
+      expect(launchView(launcher.picker).selectedChangeIds).toEqual(["add-login", "add-logout"])
     } finally {
       await closeLauncher(launcher)
     }
@@ -1741,7 +1916,7 @@ describe("launch TUI OpenSpec notice", () => {
     try {
       await launcher.renderOnce()
       const frame = launcher.captureCharFrame()
-      expect(frame).toContain("2 active changes · pick one (esc)")
+      expect(frame).toContain("2 active changes · pick one or more (esc)")
       expect(frame).not.toContain("attaches to every step")
     } finally {
       await closeLauncher(launcher)
@@ -1749,11 +1924,10 @@ describe("launch TUI OpenSpec notice", () => {
   })
 
   test("the notice stays quiet once a change is explicitly picked", async () => {
-    const launcher = await createLauncher(100, 40, 1, specs, ["add-login"])
+    const launcher = await createLauncher(100, 40, 1, specs)
     try {
-      launcher.mockInput.pressEnter() // contract list
-      launcher.mockInput.pressKey("j") // index 1 (add-login)
-      launcher.mockInput.pressKey("j") // index 2 (add-logout)
+      launcher.mockInput.pressEnter() // contract list (focused on add-login)
+      launcher.mockInput.pressKey("j") // highlight add-logout
       launcher.mockInput.pressEnter() // pin add-logout -> options
       await launcher.renderOnce()
       const view = launchView(launcher.picker)
@@ -1761,7 +1935,7 @@ describe("launch TUI OpenSpec notice", () => {
       expect(view.selectedChangeIds).toEqual(["add-logout"])
       const frame = launcher.captureCharFrame()
       expect(frame).toContain("add-logout · Add Logout")
-      expect(frame).not.toContain("pick one (esc)")
+      expect(frame).not.toContain("pick one or more (esc)")
     } finally {
       await closeLauncher(launcher)
     }
@@ -1770,7 +1944,8 @@ describe("launch TUI OpenSpec notice", () => {
   test("the notice stays quiet once the operator explicitly chose the no-change mode", async () => {
     const launcher = await createLauncher(100, 40, 1, specs, [])
     try {
-      launcher.mockInput.pressEnter() // contract list
+      launcher.mockInput.pressEnter() // contract list (focused on add-login)
+      launcher.mockInput.pressKey("k") // move up to the Manual prompt row
       launcher.mockInput.pressEnter() // Manual prompt -> editor
       for (const ch of "ship it") launcher.mockInput.pressKey(ch)
       launcher.mockInput.pressEnter() // submit -> options
@@ -1779,7 +1954,7 @@ describe("launch TUI OpenSpec notice", () => {
       expect(view.mode).toBe("options")
       expect(view.manualNoChanges).toBe(true)
       const frame = launcher.captureCharFrame()
-      expect(frame).not.toContain("pick one (esc)")
+      expect(frame).not.toContain("pick one or more (esc)")
     } finally {
       await closeLauncher(launcher)
     }
@@ -1790,7 +1965,7 @@ describe("launch TUI OpenSpec notice", () => {
     try {
       await launcher.renderOnce()
       const frame = launcher.captureCharFrame()
-      expect(frame).not.toContain("pick one (esc)")
+      expect(frame).not.toContain("pick one or more (esc)")
       expect(frame).not.toContain("active changes")
     } finally {
       await closeLauncher(launcher)
@@ -1811,7 +1986,7 @@ describe("launch TUI preset changes (specs viewer / worktrees run handoff)", () 
       const view = launchView(launcher.picker)
       expect(view.selectedChangeIds).toEqual(["add-login"])
       // Nothing attaches silently, so there is no auto-attach notice to suppress.
-      expect(launcher.captureCharFrame()).not.toContain("pick one (esc)")
+      expect(launcher.captureCharFrame()).not.toContain("pick one or more (esc)")
       // The flags preview already names the pinned contract.
       const flags = view.optionsDetail(180).chunks.map((chunk) => chunk.text).join("")
       expect(flags).toContain("--change add-login")
@@ -1876,7 +2051,7 @@ describe("launch TUI preset changes (specs viewer / worktrees run handoff)", () 
       const view = launchView(launcher.picker)
       expect(view.selectedChangeIds).toEqual([])
       expect(view.manualNoChanges).toBe(false)
-      expect(launcher.captureCharFrame()).toContain("2 active changes · pick one (esc)")
+      expect(launcher.captureCharFrame()).toContain("2 active changes · pick one or more (esc)")
     } finally {
       await closeLauncher(launcher)
     }
