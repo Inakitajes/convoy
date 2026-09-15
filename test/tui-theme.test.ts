@@ -7,6 +7,30 @@ import { displayWidth, formatAgo, formatCount, formatElapsed, formatMoney, forma
 // real reply but degrade to undefined (→ static palettes) on any shape change.
 const fakeRenderer = (themeModeState: unknown) => ({ themeModeState }) as unknown as CliRenderer
 
+/** WCAG relative luminance of a #rrggbb color. */
+function luminance(hex: string): number {
+  const channels = [1, 3, 5].map((i) => Number.parseInt(hex.slice(i, i + 2), 16) / 255)
+  const linear = channels.map((channel) => (channel <= 0.03928 ? channel / 12.92 : Math.pow((channel + 0.055) / 1.055, 2.4)))
+  return 0.2126 * linear[0]! + 0.7152 * linear[1]! + 0.0722 * linear[2]!
+}
+
+/** WCAG contrast ratio between two #rrggbb colors. */
+function contrastRatio(a: string, b: string): number {
+  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x)
+  return (hi! + 0.05) / (lo! + 0.05)
+}
+
+/**
+ * Largest per-channel distance between two colors, in 0..1 — the separation a
+ * solid chip keeps from the fill it rides even when both hues are saturated
+ * and share a luminance.
+ */
+function maxChannelDelta(a: string, b: string): number {
+  const channels = (hex: string) => [1, 3, 5].map((i) => Number.parseInt(hex.slice(i, i + 2), 16))
+  const [left, right] = [channels(a), channels(b)]
+  return Math.max(...left.map((value, index) => Math.abs(value - right[index]!))) / 255
+}
+
 describe("palette derivation from the terminal background", () => {
   test("measures wide and combined graphemes in terminal cells", () => {
     expect(displayWidth("ascii")).toBe(5)
@@ -85,6 +109,16 @@ describe("palette derivation from the terminal background", () => {
       paletteForTerminal("light", "#fafafa"),
     ]) {
       expect(palette.bg).toBe("transparent")
+    }
+  })
+
+  // The warning chip carries its own ink on a filled surface, so the ink must
+  // clear AA against the chip fill in every palette, and the fill must stay
+  // separable from the accent it rides.
+  test("the warning chip's ink stays legible across every palette", () => {
+    for (const palette of [paletteForMode("dark"), paletteForMode("light"), paletteForMode(null)]) {
+      expect(contrastRatio(palette.warningInk, palette.warning)).toBeGreaterThanOrEqual(4.5)
+      expect(maxChannelDelta(palette.warning, palette.accent)).toBeGreaterThanOrEqual(0.25)
     }
   })
 })

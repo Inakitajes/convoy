@@ -94,10 +94,29 @@ Archive SHALL invoke the supported OpenSpec workflow in the explicitly selected 
 #### Scenario: Archive was performed outside Convoy
 - **WHEN** OpenSpec moves a change into a dated archive directory outside Convoy
 - **THEN** refresh shows the local archive and no association repair, branch rename, or lifecycle update is required
-
 #### Scenario: Archive modifies unrelated files
+
 - **WHEN** an archive attempt leaves changes outside its verified output
 - **THEN** Convoy preserves the files, stops before an automatic commit, and explains the recovery requirement
+
+### Requirement: Archive picker offers ordered batch selection
+
+The interactive archive picker SHALL let the operator select one or more of the checkout's active changes before confirming: toggling the highlighted row marks or unmarks that change, a select-all action marks every active change, and the confirmed batch is ordered by the picker's active-change listing. Confirming with no change marked SHALL NOT archive anything. The confirmed batch SHALL be handed to the archive command as the reviewed ordered batch and journaled per change.
+
+#### Scenario: Several changes archived as one batch
+
+- **WHEN** the operator marks two active changes and confirms
+- **THEN** both are archived in the picker's listing order and committed as one verified archive commit
+
+#### Scenario: Select-all archives every active change
+
+- **WHEN** the operator invokes select-all and confirms
+- **THEN** every active change in the checkout is archived in listing order
+
+#### Scenario: Nothing marked does not archive
+
+- **WHEN** the operator confirms with no change marked
+- **THEN** no archive runs and the picker does not report a success
 
 ### Requirement: Squash integration is whole-branch and does not rewrite its source
 Squash-to-base SHALL review the entire source/base difference, require the pinned base to be contained in the clean source (or explicitly perform sync first), and create exactly one operator-authored conventional candidate with that base as its only parent. Signing, hooks, secret protections, and existing run-recovery refs SHALL remain effective. The source's history SHALL NOT be rewritten. The base checkout SHALL be validated clean and on the intended branch before landing; movement of source/base or unknown state SHALL stop for renewed review. Empty aggregate content SHALL produce no commit and no historical integration claim. Successful integration SHALL report the actual base and commit, not create a permanent receipt or mark a domain entity completed.
