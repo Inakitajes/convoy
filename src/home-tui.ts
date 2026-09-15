@@ -1831,9 +1831,9 @@ export class HomeLauncher {
     const used = chunks.reduce((total, chunk) => total + displayWidth(typeof chunk === "string" ? chunk : (chunk as { text: string }).text), 0)
     const filler = bg(theme.accent)(fg(theme.chipText)(" ".repeat(Math.max(0, width - used))))
     // Chunks that already carry a background keep it — the state-color rail
-    // cell rides the accent fill instead of being repainted by it.
-    const hasBg = (chunk: TextChunk) => typeof chunk !== "string" && (chunk as { bg?: unknown }).bg !== undefined
-    return new StyledText(chunks.map((chunk) => (hasBg(chunk) ? chunk : bg(theme.accent)(chunk))).concat(filler))
+    // cell rides the accent fill instead of being repainted by it, and a
+    // warning chip keeps its own fill.
+    return new StyledText(chunks.map((chunk) => withFill(chunk, theme.accent)).concat(filler))
   }
 
   private previewContent(width: number): StyledText {
@@ -1866,7 +1866,7 @@ export class HomeLauncher {
     const line = (chunks: TextChunk[]) => this.highlighted([rail, ...chunks], width)
     const lines: StyledText[] = []
     const fact = (label: string, value: string, warn = false) =>
-      lines.push(line([raw(indent), fg(theme.chipText)(label.padEnd(9, " ")), raw(" "), fg(warn ? theme.yellow : theme.chipText)(truncate(value, Math.max(8, w - 10)))]))
+      lines.push(line([raw(indent), fg(theme.chipText)(label.padEnd(9, " ")), raw(" "), warn ? warnChip(truncate(value, Math.max(8, w - 10))) : fg(theme.chipText)(truncate(value, Math.max(8, w - 10)))]))
     if (row.kind === "worktree") {
       const worktree = row.worktree
       fact("branch", worktree.detached ? "detached HEAD" : (worktree.branch ?? "(no branch)"))
@@ -1974,8 +1974,9 @@ export class HomeLauncher {
     ]
     // The zone's fact-row rhythm: a nine-column label, one space, the honest
     // value.
-    const zoneFact = (label: string, value: string, color = theme.chipText) => {
-      zoneRows.push([fg(theme.chipText)(label.padEnd(9, " ")), raw(" "), fg(color)(truncate(value, Math.max(8, width - 11)))])
+    const zoneFact = (label: string, value: string, warn = false) => {
+      const text = truncate(value, Math.max(8, width - 11))
+      zoneRows.push([fg(theme.chipText)(label.padEnd(9, " ")), raw(" "), warn ? warnChip(text) : fg(theme.chipText)(text)])
     }
     zoneFact("branch", worktree.detached ? "detached HEAD" : (worktree.branch ?? "(no branch)"))
     // PR evidence rides the same on-demand observation the row fired on
@@ -1983,9 +1984,9 @@ export class HomeLauncher {
     // "no PR" and a merged PR never reads as completed work.
     const prEvidence = this.prEvidence.get(worktree.path)
     if (prEvidence && prEvidence !== "checking") {
-      zoneFact("pr", prObservationText(prEvidence), prEvidence.availability === "known" ? theme.chipText : theme.yellow)
+      zoneFact("pr", prObservationText(prEvidence), prEvidence.availability !== "known")
     } else {
-      zoneFact("pr", "checking…", theme.chipText)
+      zoneFact("pr", "checking…")
     }
     zoneRows.push([])
     lines.push(...filledLines(zoneRows, width, theme.accent))
@@ -2341,6 +2342,30 @@ function slugFromName(name: string): string {
   )
 }
 
+/** Whether a chunk already carries its own background. */
+function hasBackground(chunk: TextChunk): boolean {
+  return typeof chunk !== "string" && (chunk as { bg?: unknown }).bg !== undefined
+}
+
+/**
+ * Paints a chunk with a surface fill unless it already carries its own
+ * background, so a chip riding that surface (a warning value's amber) is not
+ * repainted by the surface it sits on.
+ */
+function withFill(chunk: TextChunk, fill: string): TextChunk {
+  return hasBackground(chunk) ? chunk : bg(fill)(chunk)
+}
+
+/**
+ * A warning value riding a filled surface: the warning color becomes the
+ * chip's fill and a contrasting ink carries the text, so the warning stays
+ * visible where yellow ink on the fill would be illegible. On a plain surface
+ * a warning keeps its yellow ink instead.
+ */
+function warnChip(value: string): TextChunk {
+  return bg(theme.warning)(fg(theme.warningInk)(value))
+}
+
 /**
  * A filled well: each row is a full-width painted strip. The span runs two
  * columns past the text column — one into each padding gutter — so the fill
@@ -2355,7 +2380,7 @@ function filledLines(rows: TextChunk[][], width: number, fill: string): StyledTe
     if (row.length === 0) return new StyledText([bg(fill)(fg(fill)(" ".repeat(span)))])
     const used = insetW + row.reduce((total, chunk) => total + displayWidth(typeof chunk === "string" ? chunk : (chunk as { text: string }).text), 0)
     const pad = Math.max(0, span - used)
-    return new StyledText([bg(fill)(fg(fill)(" ".repeat(insetW))), ...row.map((chunk) => bg(fill)(chunk)), bg(fill)(fg(fill)(" ".repeat(pad)))])
+    return new StyledText([bg(fill)(fg(fill)(" ".repeat(insetW))), ...row.map((chunk) => withFill(chunk, fill)), bg(fill)(fg(fill)(" ".repeat(pad)))])
   })
 }
 

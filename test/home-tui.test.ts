@@ -43,7 +43,7 @@ import type { PrObservation } from "../src/pr-observations"
 import type { BoardSource } from "../src/board-refresh"
 import type { BoardSnapshot } from "../src/board-cache"
 import type { LocalActiveChange } from "../src/checkout-openspec"
-import { theme } from "../src/tui-theme"
+import { paletteForMode, setTheme, theme } from "../src/tui-theme"
 import { versionDetails } from "../src/version"
 import type { BoardWorktree } from "../src/control-board"
 
@@ -769,12 +769,13 @@ describe("worktree detail sections and observations", () => {
     try {
       await openDetail(session)
       const spans = session.captureSpans()
-      // The folder basename, path, branch, and the linked PR share one accent
-      // fill; the rest of the observed facts stay plain.
+      // The folder basename, path, branch, and the linked PR share one filled
+      // zone — the PR's unavailable value rides its own warning chip inside it
+      // — while the rest of the observed facts stay plain.
       for (const needle of ["add-widget", "/wt/add-widget", "feat/add-widget", "pr"]) {
         const row = spans.lines.find((line) => line.spans.some((span) => span.text.includes(needle)))!
         expect(row).toBeDefined()
-        const filled = row.spans.filter((span) => span.bg.a > 0 && sameColor(span.bg, accentBg()))
+        const filled = row.spans.filter((span) => span.bg.a > 0 && (sameColor(span.bg, accentBg()) || sameColor(span.bg, paletteColor(theme.warning))))
         const filledWidth = filled.reduce((total, span) => total + span.text.length, 0)
         expect(filledWidth).toBeGreaterThan(60)
       }
@@ -791,7 +792,7 @@ describe("worktree detail sections and observations", () => {
     }
   })
 
-  test("the zone's PR warning stays yellow on the accent fill", async () => {
+  test("the zone's PR warning rides the warning chip on the accent fill", async () => {
     const session = await openHome({ height: 60 })
     try {
       await openDetail(session)
@@ -800,14 +801,134 @@ describe("worktree detail sections and observations", () => {
       const row = spans.lines.find((line) => line.spans.some((span) => span.text.includes(reason)))!
       expect(row).toBeDefined()
       const warning = row.spans.find((span) => span.text.includes(reason))!
-      // The warning keeps its own color on the accent fill, and the row still
-      // rides the zone.
-      expect(sameColor(warning.fg, paletteColor(theme.yellow))).toBe(true)
+      // The value rides the warning fill with the chip ink, so it stays legible
+      // on the accent fill; the label keeps the ordinary chip text.
+      expect(sameColor(warning.bg, paletteColor(theme.warning))).toBe(true)
+      expect(sameColor(warning.fg, paletteColor(theme.warningInk))).toBe(true)
       expect(row.spans.some((span) => span.bg.a > 0 && sameColor(span.bg, accentBg()))).toBe(true)
       const label = row.spans.find((span) => span.text.trimEnd() === "pr")!
       expect(sameColor(label.fg, paletteColor(theme.chipText))).toBe(true)
     } finally {
       await closeHome(session)
+    }
+  })
+
+  test("a live managed writer value rides the warning chip in the selected row's fold", async () => {
+    const busy = worktree({
+      path: "/wt/writing-fold",
+      branch: "feat/writing-fold",
+      writer: {
+        kind: "known",
+        value: { kind: "authoring", owner: "ses_f74d79c70ffeW9TrnXMN1pHBjq", pid: 4242, startedAt: Date.now() - 300_000, heartbeatAt: Date.now(), liveness: "live" },
+        collectedAt: 0,
+      },
+    })
+    const session = await openHome({ height: 48, worktrees: [worktree({ path: mainPath, branch: "main", main: true }), busy] })
+    try {
+      session.press("down") // New leads the list
+      await session.renderOnce()
+      session.press("down") // the writing worktree row — its fold unfolds
+      await session.renderOnce()
+      const spans = session.captureSpans()
+      const row = spans.lines.find((line) => line.spans.some((span) => span.text.trimEnd() === "writer"))!
+      expect(row).toBeDefined()
+      const value = row.spans.find((span) => span.text.includes("authoring"))!
+      expect(sameColor(value.bg, paletteColor(theme.warning))).toBe(true)
+      expect(sameColor(value.fg, paletteColor(theme.warningInk))).toBe(true)
+    } finally {
+      await closeHome(session)
+    }
+  })
+
+  test("an unknown dirt value rides the warning chip in the selected row's fold", async () => {
+    const unknownDirt = worktree({
+      path: "/wt/unknown-dirt",
+      branch: "feat/unknown-dirt",
+      dirt: { kind: "unknown", reason: "the working tree could not be read", collectedAt: 0 },
+    })
+    const session = await openHome({ height: 48, worktrees: [worktree({ path: mainPath, branch: "main", main: true }), unknownDirt] })
+    try {
+      session.press("down") // New leads the list
+      await session.renderOnce()
+      session.press("down") // the row whose dirt is unknown — its fold unfolds
+      await session.renderOnce()
+      const spans = session.captureSpans()
+      const row = spans.lines.find((line) => line.spans.some((span) => span.text.trimEnd() === "state"))!
+      expect(row).toBeDefined()
+      const value = row.spans.find((span) => span.text.includes("unknown"))!
+      expect(sameColor(value.bg, paletteColor(theme.warning))).toBe(true)
+      expect(sameColor(value.fg, paletteColor(theme.warningInk))).toBe(true)
+    } finally {
+      await closeHome(session)
+    }
+  })
+
+  test("a warning on a plain detail fact keeps its yellow ink", async () => {
+    const busy = worktree({
+      path: "/wt/writing-plain",
+      branch: "feat/writing-plain",
+      writer: {
+        kind: "known",
+        value: { kind: "authoring", owner: "ses_f74d79c70ffeW9TrnXMN1pHBjq", pid: 4242, startedAt: Date.now() - 300_000, heartbeatAt: Date.now(), liveness: "live" },
+        collectedAt: 0,
+      },
+    })
+    const session = await openHome({ height: 48, worktrees: [worktree({ path: mainPath, branch: "main", main: true }), busy] })
+    try {
+      session.press("down") // New leads the list
+      await session.renderOnce()
+      session.press("down")
+      await session.renderOnce()
+      session.press("return") // open the detail: the writer fact is now plain
+      await session.renderOnce()
+      const spans = session.captureSpans()
+      const row = spans.lines.find((line) => line.spans.some((span) => span.text.includes("authoring")))!
+      expect(row).toBeDefined()
+      const value = row.spans.find((span) => span.text.includes("authoring"))!
+      expect(value.bg.a).toBe(0)
+      expect(sameColor(value.fg, paletteColor(theme.yellow))).toBe(true)
+    } finally {
+      await closeHome(session)
+    }
+  })
+
+  test("the writer chip renders with each palette's warning colors", async () => {
+    const original = theme
+    try {
+      for (const mode of ["dark", "light", null] as const) {
+        const palette = paletteForMode(mode)
+        setTheme(palette)
+        const busy = worktree({
+          path: "/wt/palette-writer",
+          branch: "feat/palette-writer",
+          writer: {
+            kind: "known",
+            value: { kind: "authoring", owner: "ses_f74d79c70ffeW9TrnXMN1pHBjq", pid: 4242, startedAt: Date.now() - 300_000, heartbeatAt: Date.now(), liveness: "live" },
+            collectedAt: 0,
+          },
+        })
+        const session = await openHome({ height: 48, worktrees: [worktree({ path: mainPath, branch: "main", main: true }), busy] })
+        try {
+          session.press("down") // New leads the list
+          await session.renderOnce()
+          session.press("down") // the writing row — its fold unfolds
+          await session.renderOnce()
+          const spans = session.captureSpans()
+          const row = spans.lines.find((line) => line.spans.some((span) => span.text.trimEnd() === "writer"))!
+          expect(row).toBeDefined()
+          const value = row.spans.find((span) => span.text.includes("authoring"))!
+          // The warning value rides the palette's own warning fill and ink ...
+          expect(sameColor(value.bg, paletteColor(palette.warning))).toBe(true)
+          expect(sameColor(value.fg, paletteColor(palette.warningInk))).toBe(true)
+          // ... while a non-warning chunk on the same fill keeps the chip text.
+          const label = row.spans.find((span) => span.text.trimEnd() === "writer")!
+          expect(sameColor(label.fg, paletteColor(palette.chipText))).toBe(true)
+        } finally {
+          await closeHome(session)
+        }
+      }
+    } finally {
+      setTheme(original)
     }
   })
 
