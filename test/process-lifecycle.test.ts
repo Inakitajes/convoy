@@ -119,10 +119,31 @@ describe("platform adapters", () => {
     expect(hidden.status).toBe("unknown")
   })
 
-  test("linux adapter reports unknown when /proc evidence is incomplete", async () => {
+  test("linux adapter reads birth, uid, and executable from a live process", async () => {
     if (process.platform !== "linux") return
     const observation = await linuxProcessIdentity(process.pid)
     expect(observation.status).toBe("alive")
+    if (observation.status !== "alive") return
+    const bootId = (await readFile("/proc/sys/kernel/random/boot_id", "utf8")).trim()
+    expect(observation.identity.pid).toBe(process.pid)
+    // The birth token must carry the kernel boot discriminator, not just a
+    // start time: a reboot has to invalidate the recorded incarnation.
+    expect(observation.identity.birth.startsWith(`${bootId}:`)).toBe(true)
+    expect(observation.identity.uid).toBe(process.getuid?.() ?? -1)
+    expect(observation.identity.executable.length).toBeGreaterThan(0)
+  })
+
+  test("linux reboot invalidates the recorded incarnation, never authorizing a signal", async () => {
+    if (process.platform !== "linux") return
+    const observation = await linuxProcessIdentity(process.pid)
+    expect(observation.status).toBe("alive")
+    if (observation.status !== "alive") return
+    const recorded = observation.identity
+    const startTicks = recorded.birth.slice(recorded.birth.lastIndexOf(":") + 1)
+    // Same pid and start ticks, different boot: not the same incarnation.
+    const afterReboot: ProcessIdentity = { ...recorded, birth: `rebooted-boot:${startTicks}` }
+    expect(sameIdentity(recorded, afterReboot)).toBe(false)
+    expect(identityMismatchReason(recorded, afterReboot)).toContain("reused")
   })
 
   test("captureIdentity gives up non-destructively when a probe cannot answer", async () => {
