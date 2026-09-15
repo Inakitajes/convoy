@@ -3,6 +3,7 @@ import type { AgentConfig, Config, OpencodeClient } from "@opencode-ai/sdk/v2"
 import { capSubjectWithin, firstMeaningfulLine, maxCommitSubjectLength } from "./commit-text"
 import { log } from "./log"
 import { startOpencode } from "./opencode"
+import type { StopPolicy } from "./process-stop"
 import { splitModelVariant } from "./pipeline"
 import { parseModel } from "./runner"
 import { excerpt } from "./worktree"
@@ -41,6 +42,12 @@ export type CommitMessageInput = {
   /** Override the model that writes the message (provider/model[#variant]). */
   model?: string
   signal?: AbortSignal
+  /**
+   * Shared cleanup budget for the writer's owned helper (design D2). The
+   * coordinator passes a resolver drawing from its remaining shutdown deadline
+   * so this helper's stop cannot restart or exceed that budget.
+   */
+  stopPolicy?: () => StopPolicy
 }
 
 export type CommitMessageProposal = {
@@ -122,14 +129,20 @@ export async function proposeCommitMessage(
 ): Promise<CommitMessageProposal> {
   let error: string | undefined
   try {
-    const handle = await deps.startOpencode(writerOpencodeConfig(), AbortSignal.timeout(commitMessageTimeoutMs))
+    const handle = await deps.startOpencode(
+      writerOpencodeConfig(),
+      AbortSignal.timeout(commitMessageTimeoutMs),
+      // A helper under a coordinator gets its shared budget resolver so its
+      // bounded stop draws from the coordinator's remaining deadline.
+      input.stopPolicy ? { stopPolicy: input.stopPolicy } : undefined,
+    )
     try {
       const reply = await askForCommitMessage(handle.client, { ...input, model: input.model ?? defaultCommitMessageModel })
       const message = readCommitMessage(reply)
       if (message) return { message, source: "model" }
       error = `the commit writer's reply had no usable message: ${truncate(reply, 160)}`
     } finally {
-      handle.close()
+      await handle.close()
     }
   } catch (cause) {
     error = cause instanceof Error ? cause.message : String(cause)

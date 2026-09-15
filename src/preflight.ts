@@ -1,4 +1,4 @@
-import { startOpencode } from "./opencode"
+import { startOpencode, type OpencodeHandle } from "./opencode"
 import type { RunPlan } from "./types"
 import { type ProviderCatalog, preflightTargets, validatePreflightTargets } from "./preflight-validation"
 
@@ -6,17 +6,50 @@ const preflightTimeoutMs = 15_000
 export type PreflightDiscovery = (directory: string, signal: AbortSignal) => Promise<ProviderCatalog>
 
 /** Validate the exact physical OpenCode targets after approval and before run/worktree creation. */
-export async function preflightRunPlan(plan: RunPlan, discover: PreflightDiscovery = discoverProviderCatalog): Promise<void> {
+export async function preflightRunPlan(plan: RunPlan, discover?: PreflightDiscovery): Promise<void> {
   const targets = preflightTargets(plan)
   if (targets.length === 0) return
 
   const timeout = AbortSignal.timeout(preflightTimeoutMs)
+  if (!discover) {
+    // Production path: discovery owns a bounded helper whose stop must settle
+    // before a timeout-returning caller resumes (design D2).
+    const tracked = createTrackedDiscovery()
+    try {
+      const catalog = await withinPreflightTimeout(tracked.discover(plan.target.directory, timeout), timeout, tracked.cancel)
+      validatePreflightTargets(targets, catalog)
+    } finally {
+      await tracked.cancel()
+    }
+    return
+  }
   const catalog = await withinPreflightTimeout(discover(plan.target.directory, timeout), timeout)
   validatePreflightTargets(targets, catalog)
 }
 
-async function discoverProviderCatalog(directory: string, signal: AbortSignal): Promise<ProviderCatalog> {
+/**
+ * Discovery owns a bounded helper server. The timeout path must not return
+ * while that server is still shutting down (design D2): the helper handle is
+ * recorded here and cancelled before the timeout rejection reaches the caller.
+ */
+export function createTrackedDiscovery(): { discover: PreflightDiscovery; cancel: () => Promise<void> } {
+  let handle: OpencodeHandle | undefined
+  return {
+    discover: (directory, signal) => discoverProviderCatalog(directory, signal, (next) => (handle = next)),
+    cancel: async () => {
+      await handle?.stop()
+      handle = undefined
+    },
+  }
+}
+
+async function discoverProviderCatalog(
+  directory: string,
+  signal: AbortSignal,
+  track?: (handle: OpencodeHandle) => void,
+): Promise<ProviderCatalog> {
   const handle = await startOpencode({}, signal)
+  track?.(handle)
   try {
     // Runs use the classic session API, whose provider catalog owns the
     // credential connections and exact model IDs accepted by session.prompt.
@@ -26,16 +59,51 @@ async function discoverProviderCatalog(directory: string, signal: AbortSignal): 
     if (providerResult.error || !providerResult.data) throw new Error("OpenCode could not list connected providers and models")
     return providerResult.data
   } finally {
-    handle.close()
+    await handle.close()
   }
 }
 
-function withinPreflightTimeout<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+/**
+ * Races the operation against its timeout. On timeout the cancel hook runs to
+ * completion *before* the rejection settles, so the caller never returns ahead
+ * of the bounded owned-server stop — and never awaits the original request.
+ * The operation's own `finally` also closes the handle; the stop is idempotent.
+ */
+export function withinPreflightTimeout<T>(
+  operation: Promise<T>,
+  signal: AbortSignal,
+  cancel?: () => Promise<void>,
+): Promise<T> {
   if (signal.aborted) return Promise.reject(new Error("OpenCode preflight timed out"))
-  return Promise.race([
-    operation,
-    new Promise<never>((_, reject) => {
-      signal.addEventListener("abort", () => reject(new Error("OpenCode preflight timed out")), { once: true })
-    }),
-  ])
+  return new Promise<T>((resolve, reject) => {
+    let settled = false
+    signal.addEventListener(
+      "abort",
+      () => {
+        if (settled) return
+        settled = true
+        void (async () => {
+          try {
+            await cancel?.()
+          } catch {
+            // Cleanup failure never masks the timeout itself.
+          }
+          reject(new Error("OpenCode preflight timed out"))
+        })()
+      },
+      { once: true },
+    )
+    operation.then(
+      (value) => {
+        if (settled) return
+        settled = true
+        resolve(value)
+      },
+      (error) => {
+        if (settled) return
+        settled = true
+        reject(error)
+      },
+    )
+  })
 }

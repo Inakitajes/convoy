@@ -331,6 +331,42 @@ describe("control server", () => {
     }
   })
 
+  test("controller lease expiry leaves permission and human gates pending", async () => {
+    const pending = new ControlPendingQueue()
+    const server = await startControlServer({ pending, controllerTimeoutMs: 120 })
+    try {
+      const id = await claim(server)
+      expect(id).toBeTruthy()
+      let permissionSettled = false
+      let humanSettled = false
+      const permission = pending.holdPermission({ ...permissionInfo })
+      const human = pending.holdHuman({ stepName: "review-a", iterations: 0 })
+      void permission.then(() => {
+        permissionSettled = true
+      })
+      void human.then(() => {
+        humanSettled = true
+      })
+      expect(pending.snapshot().permission?.requestId).toBe("perm-1")
+      expect(pending.snapshot().human?.stepName).toBe("review-a")
+
+      // The controller goes silent; the lease expires with no further request.
+      await Bun.sleep(250)
+      expect(server.hasController()).toBe(false)
+
+      // A departed controller never answers or rejects a pending decision, and
+      // the gates are not auto-cancelled: they wait for the next controller
+      // (spec R5 "Background execution and independent services remain
+      // protected"). Only the finish hold follows the lease.
+      expect(permissionSettled).toBe(false)
+      expect(humanSettled).toBe(false)
+      expect(pending.snapshot().permission?.requestId).toBe("perm-1")
+      expect(pending.snapshot().human?.stepName).toBe("review-a")
+    } finally {
+      server.close()
+    }
+  })
+
   test("concurrent human gates resolve by id, not by queue head", async () => {
     const pending = new ControlPendingQueue()
     const server = await startControlServer({ pending })

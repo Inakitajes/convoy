@@ -36,11 +36,16 @@ let throwPrimitiveFromStart = false
 
 const fakeStartOpencode: RunDeps["startOpencode"] = async () => {
   if (throwPrimitiveFromStart) throw "primitive boom"
-  return {
-    client: fakeClient as never,
-    url: "http://127.0.0.1:41234",
-    close: () => {},
-  }
+  return fakeOpencodeHandle(fakeClient, "http://127.0.0.1:41234")
+}
+
+/**
+ * A stop-able fake handle. Owned servers now return an awaited, idempotent
+ * `stop()`, so every fake must provide one; these tests never spawn a child.
+ */
+function fakeOpencodeHandle(client: unknown, url: string) {
+  const stop = async (): Promise<{ status: "stopped"; via: "already-gone" }> => ({ status: "stopped", via: "already-gone" })
+  return { client: client as never, url, pid: 0, stop, forceStop: () => {}, close: stop }
 }
 
 // Bind the fake opencode handle so every test in this file exercises the
@@ -159,6 +164,30 @@ describe("run() with a hosted progress", () => {
       await result.release?.()
       const after = JSON.parse(await readFile(join(result.dir, "metadata.json"), "utf8"))
       expect(after.server).toBeUndefined()
+    } finally {
+      await rm(repo, { recursive: true, force: true })
+    }
+  })
+
+  test("an unresolved server stop keeps live-server metadata instead of reporting a clean shutdown", async () => {
+    const repo = await cleanRepo()
+    const dashboard = fakeDashboard()
+    // Awaiting stop() is not proof of exit: a stop that cannot confirm the
+    // child's exit must leave the live-server pointer in place as evidence.
+    const unresolvedStop: RunDeps["startOpencode"] = async () => ({
+      client: fakeClient as never,
+      url: "http://127.0.0.1:41237",
+      pid: 0,
+      stop: async () => ({ status: "unresolved" as const, reason: "exit was not observed within the budget" }),
+      forceStop: () => {},
+      close: async () => ({ status: "unresolved" as const, reason: "exit was not observed within the budget" }),
+    })
+    try {
+      const result = await realRun(makeOptions(repo, { progress: dashboard.progress }), { startOpencode: unresolvedStop })
+      await result.release?.()
+      const after = JSON.parse(await readFile(join(result.dir, "metadata.json"), "utf8"))
+      expect(after.server).toBeDefined()
+      expect(after.server.url).toBe("http://127.0.0.1:41237")
     } finally {
       await rm(repo, { recursive: true, force: true })
     }
@@ -380,11 +409,7 @@ describe("run() with a hosted progress", () => {
         },
       },
     }
-    const gatedStart: RunDeps["startOpencode"] = async () => ({
-      client: permissionClient as never,
-      url: "http://127.0.0.1:41235",
-      close: () => {},
-    })
+    const gatedStart: RunDeps["startOpencode"] = async () => fakeOpencodeHandle(permissionClient, "http://127.0.0.1:41235")
 
     const progress: ProgressUI = {
       ...noopProgress,
@@ -433,7 +458,7 @@ describe("run() with a hosted progress", () => {
     let captured: Awaited<Parameters<RunDeps["startOpencode"]>[0]> | undefined
     const capturingStart: RunDeps["startOpencode"] = async (config) => {
       captured = config
-      return { client: fakeClient as never, url: "http://127.0.0.1:41235", close: () => {} }
+      return fakeOpencodeHandle(fakeClient, "http://127.0.0.1:41235")
     }
     try {
       const options = makeOptions(repo, {
@@ -477,7 +502,7 @@ describe("run() with a hosted progress", () => {
     let captured: Awaited<Parameters<RunDeps["startOpencode"]>[0]> | undefined
     const capturingStart: RunDeps["startOpencode"] = async (config) => {
       captured = config
-      return { client: fakeClient as never, url: "http://127.0.0.1:41236", close: () => {} }
+      return fakeOpencodeHandle(fakeClient, "http://127.0.0.1:41236")
     }
     try {
       const options = makeOptions(repo, {

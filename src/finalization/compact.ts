@@ -6,6 +6,7 @@ import { currentHead, diffStat, execFile, resetSoft, resolveCommit } from "../gi
 import { log } from "../log"
 import { readPersistedRunTitle } from "../run-title"
 import { convoyHome } from "../workspace"
+import type { StopPolicy } from "../process-stop"
 import type { FeaturePlanLink } from "../types"
 import { boundedCommitAsOperator } from "./executor"
 import { verifyRunInterval, type RunInterval } from "./interval"
@@ -71,6 +72,12 @@ export type RunFinalizationInput = {
   feature?: FeaturePlanLink
   commitMessageModel?: string
   signal?: AbortSignal
+  /**
+   * Shared cleanup budget for the model-backed commit writer's helper (design
+   * D2). A coordinator passes a resolver drawing from its remaining shutdown
+   * deadline so this helper cannot restart or exceed that budget.
+   */
+  stopPolicy?: () => StopPolicy
   progress?: FinalizationProgress
   /**
    * Overrides message composition (hermetic tests inject a deterministic
@@ -566,6 +573,7 @@ async function composeMessage(input: RunFinalizationInput, interval: Extract<Run
     ...(prompt ? { prompt } : {}),
     ...(input.commitMessageModel ? { model: input.commitMessageModel } : {}),
     ...(input.signal ? { signal: input.signal } : {}),
+    ...(input.stopPolicy ? { stopPolicy: input.stopPolicy } : {}),
   })
   const message = proposal.message
   return formatCommitMessage(message)

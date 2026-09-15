@@ -27,6 +27,7 @@ function createProposalHarness(reply: string | Error) {
   const calls = {
     configs: [] as Config[],
     startSignals: [] as Array<AbortSignal | undefined>,
+    stopPolicies: [] as unknown[],
     creates: [] as unknown[],
     prompts: [] as unknown[],
     deletes: [] as unknown[],
@@ -50,14 +51,19 @@ function createProposalHarness(reply: string | Error) {
     },
   } as unknown as OpencodeClient
   const deps: ProposalDeps = {
-    async startOpencode(config, signal) {
+    async startOpencode(config, signal, deps) {
       calls.configs.push(config)
       calls.startSignals.push(signal)
+      calls.stopPolicies.push(deps?.stopPolicy)
       return {
         client,
         url: "http://localhost:0",
-        close() {
+        pid: 0,
+        stop: async () => ({ status: "stopped" as const, via: "already-gone" as const }),
+        forceStop: () => {},
+        close: async () => {
           calls.close++
+          return { status: "stopped" as const, via: "already-gone" as const }
         },
       }
     },
@@ -111,6 +117,18 @@ describe("proposeCommitMessage", () => {
     expect(proposal.error).toContain("no usable message")
     expect(calls.deletes).toHaveLength(1)
     expect(calls.close).toBe(1)
+  })
+
+  test("forwards a shared stop budget resolver to the writer helper (design D2)", async () => {
+    const { calls, deps } = createProposalHarness('{"type":"feat","subject":"add login","body":[]}')
+    const resolver = () => ({ graceMs: 100, forceObservationMs: 0 })
+
+    await proposeCommitMessage({ ...proposalInput, stopPolicy: resolver }, deps)
+
+    // The resolver travels to the owned helper so its bounded stop draws from
+    // the coordinator's remaining deadline instead of a fresh allowance.
+    expect(calls.stopPolicies).toHaveLength(1)
+    expect(calls.stopPolicies[0]).toBe(resolver)
   })
 
   test("uses the deterministic template and closes the handle when the writer errors", async () => {

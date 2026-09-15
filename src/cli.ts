@@ -1619,106 +1619,97 @@ async function openCheckoutConversationExternal(input: { launchDir: string; chec
 async function proposeInCheckout(input: { launchDir: string; route: TuiRoute; checkout: string; branch: string; displayName: string }): Promise<void> {
   const { bootOpencodeServerFrom } = await import("./opencode")
   const { createAuthoringConversation, listAuthoringCommands, invokeAuthoringCommand, openConversationForeground } = await import("./conversations")
+  const { startProposalCommand } = await import("./propose-service")
 
   const serverResolution = await resolveAuthoringServer({ launchDir: input.launchDir, checkout: input.checkout, route: input.route })
   if (serverResolution.status === "blocked") return
-  let serviceHandle: { url: string; close?(): void } | undefined
-  let boundedClose: (() => void) | undefined
+  let serviceHandle: { url: string } | undefined
+  let helper: { url: string; close?(): void | Promise<unknown> } | undefined
   if (serverResolution.status === "service") {
+    // An injected service URL conveys no shutdown right: the independent
+    // service owner remains authoritative (design D1).
     serviceHandle = { url: serverResolution.url }
   } else {
     const booted = await bootOpencodeServerFrom(input.checkout).catch(() => undefined)
     if (booted) {
       serviceHandle = booted
-      boundedClose = () => booted.close()
+      helper = booted
     }
   }
-
-  // Command discovery through the supported API, before any session exists:
-  // an absent workflow disables the action instead of imitating success.
-  let commandName: string | undefined
-  if (serviceHandle) {
-    const commands = await listAuthoringCommands({ checkout: input.checkout, server: serviceHandle })
-    if (commands === "unknown") {
-      await reportHandoffBlocker("the project's authoring commands could not be discovered", ["check the project's .opencode/commands/ directory — Convoy does not install commands into it"], input.route)
-      return
-    }
-    commandName = commands.find((name) => name === "opsx-propose") ?? commands.find((name) => name.endsWith("propose"))
-  }
-  if (!commandName) {
+  if (!serviceHandle) {
     await reportHandoffBlocker(
-      "this project has no supported proposal workflow command (looked for opsx-propose under .opencode/commands/)",
-      ["author the change manually in a conversation"],
+      "the authoring workflow could not start: no server could be established for this checkout",
+      ["open an ordinary conversation in the worktree instead"],
       input.route,
     )
-    boundedClose?.()
     return
   }
 
   // The writer claim precedes any writer work (capability work-conversations:
   // a conflicting managed writer is refused before a second writer starts).
   const { repoCommonDir } = await import("./repo-store")
-  const { acquireWriterClaim, writerConflictGuidance } = await import("./writer-claims")
+  const { acquireWriterClaim, writerConflictGuidance, releaseWriterClaim } = await import("./writer-claims")
   const commonDir = await repoCommonDir(input.launchDir).catch(() => undefined)
   let claimed = false
-  if (commonDir) {
-    const acquired = await acquireWriterClaim({
-      commonDir,
-      branch: input.branch,
-      checkoutPath: input.checkout,
-      kind: "authoring",
-      // The claim is taken before any session exists, under the "convoy"
-      // pre-session owner: the failure-path release and the post-session
-      // re-own (`reconcileOwner: "convoy"`) match this owner, so a failed
-      // propose always releases what it claimed.
-      owner: "convoy",
-    })
-    if (acquired.status === "acquired") {
-      claimed = true
-    } else {
+
+  // Discovery, ownership transfer, and command invocation live in one tested
+  // helper (design D1/D6): the fallback helper is stopped on every early
+  // return, and the independent service is established strictly before the
+  // command runs, so no command ever executes under recoverable helper
+  // ownership.
+  const outcome = await startProposalCommand(helper ? { kind: "helper", url: serviceHandle.url } : { kind: "independent", url: serviceHandle.url }, {
+    listCommands: (server) => listAuthoringCommands({ checkout: input.checkout, server }),
+    transfer: async () => {
+      if (!commonDir) return { status: "unavailable" as const, reason: "this checkout has no repository storage for an independent authoring service" }
+      const { ensureConversationService } = await import("./conversation-service")
+      return await ensureConversationService({ commonDir, checkout: input.checkout }).catch((error: unknown) => ({
+        status: "unavailable" as const,
+        reason: error instanceof Error ? error.message : String(error),
+      }))
+    },
+    stopHelper: () => Promise.resolve(helper?.close?.()),
+    // The claim is taken before any session exists, under the "convoy"
+    // pre-session owner: the failure-path release and the post-session
+    // re-own (`reconcileOwner: "convoy"`) match this owner, so a failed
+    // propose always releases what it claimed.
+    acquireClaim: async () => {
+      if (!commonDir) return { ok: true as const }
+      const acquired = await acquireWriterClaim({ commonDir, branch: input.branch, checkoutPath: input.checkout, kind: "authoring", owner: "convoy" })
+      if (acquired.status === "acquired") {
+        claimed = true
+        return { ok: true as const }
+      }
       const guidance =
         acquired.status === "conflict"
           ? writerConflictGuidance(acquired.existing)
           : ["a writer claim for this checkout is in an uncertain state — reconcile it before starting another writer"]
-      await reportHandoffBlocker(guidance[0], guidance.slice(1), input.route)
-      boundedClose?.()
-      return
-    }
-  }
+      return { ok: false as const, reason: guidance[0]!, remediation: guidance.slice(1) }
+    },
+    // Release by pid: the re-own to the session id only runs after success,
+    // so on a failure path the claim is still this process's (a mismatched
+    // owner release is a no-op and would wedge the checkout behind a claim).
+    releaseClaim: async () => {
+      if (claimed && commonDir) await releaseWriterClaim({ commonDir, branch: input.branch, ownerPid: process.pid }).catch(() => {})
+    },
+    createConversation: (server) => createAuthoringConversation({ checkout: input.checkout, title: input.displayName, server }),
+    invokeCommand: ({ ref, server, command }) => invokeAuthoringCommand({ ref, server, command }),
+  })
 
-  let ref: { harness: "opencode"; sessionId: string } | undefined
-  try {
-    if (!serviceHandle) throw new Error("no authoring server is available")
-    ref = await createAuthoringConversation({ checkout: input.checkout, title: input.displayName, server: serviceHandle })
-    await invokeAuthoringCommand({ ref, server: serviceHandle, command: commandName })
-  } catch (error) {
-    await reportHandoffBlocker(
-      `the authoring workflow could not start: ${error instanceof Error ? error.message : String(error)}`,
-      ["open an ordinary conversation in the worktree instead"],
-      input.route,
-    )
-    boundedClose?.()
-    if (claimed && commonDir) {
-      const { releaseWriterClaim } = await import("./writer-claims")
-      // The re-own to the session id only runs after success, so on this
-      // path the claim is still this process's: release by pid, which
-      // matches regardless of the owner string (a mismatched-owner release
-      // is a no-op and would wedge the checkout behind an authoring claim).
-      await releaseWriterClaim({ commonDir, branch: input.branch, ownerPid: process.pid }).catch(() => {})
-    }
+  if (outcome.status === "blocked") {
+    await reportHandoffBlocker(outcome.reason, outcome.remediation, input.route)
     return
   }
-  if (!ref) return
+
   // Re-own the claim by the session id so the idle release and conflict
   // guidance keep naming the actual writer.
   if (claimed && commonDir) {
     const { acquireWriterClaim } = await import("./writer-claims")
-    await acquireWriterClaim({ commonDir, branch: input.branch, checkoutPath: input.checkout, kind: "authoring", owner: ref.sessionId, reconcileOwner: "convoy" }).catch(() => {})
+    await acquireWriterClaim({ commonDir, branch: input.branch, checkoutPath: input.checkout, kind: "authoring", owner: outcome.ref.sessionId, reconcileOwner: "convoy" }).catch(() => {})
   }
 
   const renderer = input.route.session.renderer
-  const exitCode = await openConversationForeground({ checkout: input.checkout, ref, suspend: () => renderer.suspend(), resume: () => renderer.resume() })
-  await releaseAuthoringWriterIfIdle({ launchDir: input.launchDir, checkout: input.checkout, branch: input.branch, sessionId: ref.sessionId })
+  const exitCode = await openConversationForeground({ checkout: input.checkout, ref: outcome.ref, suspend: () => renderer.suspend(), resume: () => renderer.resume() })
+  await releaseAuthoringWriterIfIdle({ launchDir: input.launchDir, checkout: input.checkout, branch: input.branch, sessionId: outcome.ref.sessionId })
   if (exitCode !== 0) {
     await reportHandoffBlocker(`the authoring client exited with code ${exitCode}`, ["reopen the worktree to continue"], input.route)
   }

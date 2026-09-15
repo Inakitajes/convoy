@@ -71,7 +71,9 @@ async function listModelsFromSdk(targetDir: string, start: NonNullable<ModelCata
     if (result.error || !result.data) throw new Error("opencode returned an error listing providers/models")
     return toModelChoices(result.data.all, result.data.connected)
   } finally {
-    handle.close()
+    // Await the bounded owned stop before returning: a helper that kept
+    // running after its caller resolved is exactly the leak this fixes.
+    await handle.close()
   }
 }
 

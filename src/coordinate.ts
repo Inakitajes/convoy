@@ -2,11 +2,11 @@ import { closeSync, openSync } from "node:fs"
 import { mkdir, open, readFile, readdir, rm, stat, writeFile, type FileHandle } from "node:fs/promises"
 import { join, resolve, sep } from "node:path"
 
-import { startControlServer } from "./control-server"
+import { startControlServer, type ControlServer } from "./control-server"
 import { ControlProgress, type ControlProgressOptions } from "./control-progress"
 import { hasWritableStep } from "./pipeline"
 import { pidAlive } from "./runs"
-import { hostedTeardownFromError, isUserAbortError, run } from "./runner"
+import { hostedTeardownFromError, installShutdownSignals, isUserAbortError, run, RunShutdown } from "./runner"
 import { isOfficialStandaloneExecutable } from "./update"
 import { convoyHome } from "./workspace"
 import type { RunOptions, RunPlan } from "./types"
@@ -54,7 +54,9 @@ export function pendingRoot(): string {
 
 /** Strips functions so the launch payload survives JSON round-tripping. */
 export function launchPayload(options: RunOptions, plan: RunPlan | undefined): LaunchFile {
-  const { progress: _progress, ...rest } = options
+  // `shutdown` is a runtime-only ownership handle the coordinator installs in
+  // memory; it must never ride the persisted launch file.
+  const { progress: _progress, shutdown: _shutdown, ...rest } = options
   return {
     schemaVersion: 1,
     options: rest,
@@ -286,6 +288,10 @@ export type CoordinateBootDeps = {
   hostedTeardownFromError: typeof hostedTeardownFromError
   /** Override for `assertInternalLaunchPath`; tests point this at a scratch dir. */
   launchRoot?: string
+  /** Test seam: the coordinator-owned shutdown scope (design D3). */
+  createShutdown?: () => RunShutdown
+  /** Test seam: installs the process signal handlers; returns their remover. */
+  installSignals?: (shutdown: RunShutdown) => () => void
 }
 
 const defaultCoordinateBootDeps: CoordinateBootDeps = {
@@ -293,6 +299,17 @@ const defaultCoordinateBootDeps: CoordinateBootDeps = {
   startControlServer,
   createProgress: (options) => new ControlProgress(options),
   hostedTeardownFromError,
+}
+
+/**
+ * Awaits a terminal hold but yields to the coordinator's shutdown scope: a
+ * SIGTERM during the finish hold must fall through to the bounded owned-server
+ * stop instead of parking forever (design D3). An abort that already landed is
+ * checked first so no hold is entered after cancellation.
+ */
+async function holdUntilAbort(hold: Promise<void>, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return
+  await Promise.race([hold, new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }))])
 }
 
 /**
@@ -312,7 +329,14 @@ export async function runCoordinateBoot(
   const plan = launch.plan
   if (!plan) throw new Error(`launch file ${launchPath} carries no reviewed plan`)
 
-  const server = await deps.startControlServer()
+  // The coordinator owns one shutdown scope for its whole lifetime — boot,
+  // execution, the terminal finish hold, and final release (design D3). Its
+  // signal handlers must outlive run(), whose finally no longer disposes an
+  // injected scope; a SIGTERM during the finish hold therefore releases the
+  // wait and runs the bounded owned-server stop instead of exiting blindly.
+  const shutdown = (deps.createShutdown ?? (() => new RunShutdown()))()
+  const removeSignals = (deps.installSignals ?? installShutdownSignals)(shutdown)
+  let server: ControlServer | undefined
   // Managed writer ownership (capability work-conversations, design D5): the
   // coordinator is the run's writer, so its claim lives exactly as long as
   // the run does — acquired here (the coordinator's own PID is the liveness
@@ -320,30 +344,31 @@ export async function runCoordinateBoot(
   // in the same checkout before this child ever spawns; an acquisition
   // conflict or persistence failure stops the run (fail closed).
   let writerClaim: { branch: string } | undefined
-  if (hasWritableStep(plan.pipeline)) {
-    const { repoCommonDir } = await import("./repo-store")
-    const { acquireWriterClaim, writerConflictGuidance } = await import("./writer-claims")
-    const commonDir = await repoCommonDir(plan.target.directory)
-    if (commonDir) {
-      const { currentBranch } = await import("./git")
-      const branch = plan.target.branch ?? (await currentBranch(plan.target.directory).catch(() => undefined))
-      if (branch) {
-        const acquired = await acquireWriterClaim({
-          commonDir,
-          branch,
-          checkoutPath: plan.target.directory,
-          kind: "pipeline",
-        })
-        if (acquired.status === "acquired") {
-          writerClaim = { branch }
-        } else {
-          const detail = acquired.status === "conflict" ? writerConflictGuidance(acquired.existing).join(" ") : "a writer claim for this checkout is in an uncertain state — reconcile it before starting another writer"
-          throw new Error(`another managed writer owns ${plan.target.directory}: ${detail}`)
+  try {
+    server = await deps.startControlServer()
+    if (hasWritableStep(plan.pipeline)) {
+      const { repoCommonDir } = await import("./repo-store")
+      const { acquireWriterClaim, writerConflictGuidance } = await import("./writer-claims")
+      const commonDir = await repoCommonDir(plan.target.directory)
+      if (commonDir) {
+        const { currentBranch } = await import("./git")
+        const branch = plan.target.branch ?? (await currentBranch(plan.target.directory).catch(() => undefined))
+        if (branch) {
+          const acquired = await acquireWriterClaim({
+            commonDir,
+            branch,
+            checkoutPath: plan.target.directory,
+            kind: "pipeline",
+          })
+          if (acquired.status === "acquired") {
+            writerClaim = { branch }
+          } else {
+            const detail = acquired.status === "conflict" ? writerConflictGuidance(acquired.existing).join(" ") : "a writer claim for this checkout is in an uncertain state — reconcile it before starting another writer"
+            throw new Error(`another managed writer owns ${plan.target.directory}: ${detail}`)
+          }
         }
       }
     }
-  }
-  try {
     const progress = deps.createProgress({ server, readyPath })
     // The gate/control cycle shares exactly the adapter's AutoAccept object.
     // Seed it from the launch flags: run() uses options.autoAccept when
@@ -355,7 +380,7 @@ export async function runCoordinateBoot(
     // launch options carry the unresolved config; run() only swaps in the
     // reviewed steps when options.plan is set. Dropping it here silently
     // turns every advised pipeline into an unadvised one.
-    const options: RunOptions = { ...launch.options, plan, progress, autoAccept: progress.autoAccept, tui: false }
+    const options: RunOptions = { ...launch.options, plan, progress, autoAccept: progress.autoAccept, tui: false, shutdown }
     // metadata.server gains the control URL (no token) for liveness/debug.
     process.env.CONVOY_CONTROL_URL = server.url
 
@@ -365,17 +390,20 @@ export async function runCoordinateBoot(
     // metadata store, one server, one hook lifecycle, one finish hold.
     try {
       const result = await deps.run(options)
-      await progress.runFinished({ status: "completed", runDir: result.dir })
+      await holdUntilAbort(progress.runFinished({ status: "completed", runDir: result.dir }), shutdown.signal)
       await result.release?.()
       return 0
     } catch (error) {
       const teardown = deps.hostedTeardownFromError(error)
       if (!isUserAbortError(error)) {
-        await progress.runFinished({
-          status: "failed",
-          runDir: teardown?.runDir ?? "",
-          ...(error instanceof Error ? { error: error.message } : { error: String(error) }),
-        })
+        await holdUntilAbort(
+          progress.runFinished({
+            status: "failed",
+            runDir: teardown?.runDir ?? "",
+            ...(error instanceof Error ? { error: error.message } : { error: String(error) }),
+          }),
+          shutdown.signal,
+        )
       }
       await teardown?.release?.()
       throw error
@@ -387,6 +415,8 @@ export async function runCoordinateBoot(
       const commonDir = await repoCommonDir(plan.target.directory).catch(() => undefined)
       if (commonDir) await releaseWriterClaim({ commonDir, branch: writerClaim.branch, ownerPid: process.pid })
     }
-    server.close()
+    server?.close()
+    removeSignals()
+    shutdown.dispose()
   }
 }

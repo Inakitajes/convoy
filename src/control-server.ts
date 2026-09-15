@@ -261,12 +261,21 @@ export type ControlServer = {
    * only by its own /bye, and expired by silence.
    */
   hasController(): boolean
+  /**
+   * Subscribes to controller-lease transitions. Expiry is emitted by the
+   * server's own timer even when no HTTP request ever arrives again, so a
+   * terminal hold can follow a silent controller death (design D4). Returns
+   * an unsubscribe function; disposed with the server.
+   */
+  onControllerLease(listener: (event: ControllerLeaseEvent) => void): () => void
   /** Phases the resident armed with [i] through the control channel. */
   isInteractiveArmed(phase: string): boolean
   /** Repoints the command handlers; the ControlProgress adapter wires run objects late. */
   setHandlers(handlers: ControlServerHandlers): void
   close(): void
 }
+
+export type ControllerLeaseEvent = "claimed" | "released" | "expired"
 
 /** Header the controller client echoes on every request; doubles as the heartbeat. */
 export const CONTROLLER_ID_HEADER = "x-convoy-controller"
@@ -284,8 +293,32 @@ export async function startControlServer(options: ControlServerOptions = {}): Pr
   let controllerId: string | undefined
   let controllerLastSeen = 0
   const interactiveArmed = new Map<string, boolean>()
+  const leaseListeners = new Set<(event: ControllerLeaseEvent) => void>()
 
   const controllerActive = () => controllerId !== undefined && Date.now() - controllerLastSeen < controllerTimeoutMs
+
+  const notifyLease = (event: ControllerLeaseEvent) => {
+    for (const listener of [...leaseListeners]) {
+      try {
+        listener(event)
+      } catch (error) {
+        log.warn(`[control] lease listener failed: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+  }
+
+  // Autonomous expiry (design D4): a controller that dies without /bye is
+  // detected even when it never sends another request. The interval is
+  // bounded by the same lease the request path uses, and it is disposed with
+  // the server so no timer outlives a finished run.
+  const leaseTimer = setInterval(() => {
+    if (controllerId === undefined) return
+    if (Date.now() - controllerLastSeen < controllerTimeoutMs) return
+    controllerId = undefined
+    controllerLastSeen = 0
+    notifyLease("expired")
+  }, 1_000)
+  leaseTimer.unref?.()
 
   const server = Bun.serve({
     hostname,
@@ -297,12 +330,14 @@ export async function startControlServer(options: ControlServerOptions = {}): Pr
         claimController: () => {
           controllerId = crypto.randomUUID()
           controllerLastSeen = Date.now()
+          notifyLease("claimed")
           return controllerId
         },
         releaseController: (id) => {
           if (!controllerActive() || id !== controllerId) return false
           controllerId = undefined
           controllerLastSeen = 0
+          notifyLease("released")
           return true
         },
         refreshController: (id) => {
@@ -320,11 +355,19 @@ export async function startControlServer(options: ControlServerOptions = {}): Pr
     token,
     pending,
     hasController: () => controllerActive(),
+    onControllerLease: (listener) => {
+      leaseListeners.add(listener)
+      return () => leaseListeners.delete(listener)
+    },
     isInteractiveArmed: (phase) => interactiveArmed.get(phase) === true,
     setHandlers: (next) => {
       handlers = next
     },
-    close: () => server.stop(true),
+    close: () => {
+      clearInterval(leaseTimer)
+      leaseListeners.clear()
+      server.stop(true)
+    },
   }
 }
 
