@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises"
+import { resolve as resolvePath } from "node:path"
 
 import { bg, BoxRenderable, StyledText, TextRenderable, bold, createCliRenderer, fg, t } from "@opentui/core"
 
@@ -884,7 +885,16 @@ export class SpecsBrowser {
       this.runPendingRefresh()
       return
     }
-    this.refreshing = false
+    // Snapshot the open pane before the caches are dropped: the cycle re-reads
+    // the active group from disk, but an unexpected reload error must restore
+    // the last-good content instead of leaving the subject blank.
+    const pane = {
+      subject: this.subject,
+      groups: this.groups,
+      selectedGroup: this.selectedGroup,
+      bodies: new Map(this.bodies),
+      docs: new Map(this.docs),
+    }
     this.bodies.clear()
     this.docs.clear()
     const rows = this.rows
@@ -899,8 +909,74 @@ export class SpecsBrowser {
       const firstSelectable = rows.findIndex(isSelectableRow)
       if (firstSelectable >= 0) this.selectedRow = Math.min(firstSelectable, this.selectedRow)
     }
+    // The reading pane is re-derived like Home's open worktree detail: a cycle
+    // never leaves it emptied, and a subject the refreshed view no longer
+    // contains returns to the root list by the re-anchored selection. The
+    // cycle stays locked across the reload so no poll starts a second one.
+    let retained = true
+    try {
+      retained = await this.retainOpenSubject()
+    } catch {
+      // Roll the pane back to its last-good state. Ordinary read failures are
+      // absorbed inside `loadBody` as placeholders, so this guards only an
+      // unexpected error after the caches were cleared.
+      this.subject = pane.subject
+      this.groups = pane.groups
+      this.selectedGroup = pane.selectedGroup
+      this.bodies.clear()
+      for (const [file, body] of pane.bodies) this.bodies.set(file, body)
+      this.docs.clear()
+      for (const [source, doc] of pane.docs) this.docs.set(source, doc)
+      retained = true
+    } finally {
+      this.refreshing = false
+    }
+    if (!retained) {
+      this.leaveSubject()
+      this.runPendingRefresh()
+      return
+    }
     this.render()
     this.runPendingRefresh()
+  }
+
+  /**
+   * Keeps the open reading pane current across a refresh (capability
+   * specs-viewer, "Open reading pane survives a background refresh"):
+   * re-derives the subject and its artifact groups from the refreshed view and
+   * reloads the active group's markdown before the cycle repaints. The reading
+   * context — active tab, scroll position, and fullscreen state — is preserved
+   * rather than reset. Returns false when the subject is gone, so the caller
+   * returns to the root list; at the root level there is nothing to retain.
+   */
+  private async retainOpenSubject(): Promise<boolean> {
+    if (this.level !== "detail" || !this.subject) return true
+    if (!this.rebuildSubject()) return false
+    await this.loadSelectedGroup()
+    return true
+  }
+
+  /**
+   * Rebuilds the open subject from the refreshed view so the pane reflects
+   * current artifacts rather than the entry captured on entry. A change is
+   * matched by id in its containing checkout (same-id copies stay independent);
+   * a spec keeps its local path. `selectedGroup` is clamped; `detailScroll` and
+   * `fullscreen` are left for the render path to settle.
+   */
+  private rebuildSubject(): boolean {
+    const subject = this.subject
+    if (!subject) return false
+    if (subject.kind === "change") {
+      const change = this.view.changes.find((entry) => entry.id === subject.change.id && entry.checkout === subject.change.checkout)
+      if (!change) return false
+      this.subject = { kind: "change", change }
+      this.groups = groupChangeArtifacts(change)
+    } else {
+      if (!this.view.specs.includes(subject.path)) return false
+      this.groups = [{ label: "Spec", delta: false, entries: [{ file: subject.path }] }]
+    }
+    if (this.groups.length > 0) this.selectedGroup = Math.min(this.selectedGroup, this.groups.length - 1)
+    return true
   }
 
   /** Replays an explicit refresh that arrived mid-cycle, coalesced to one trailing run. */
@@ -958,7 +1034,10 @@ export class SpecsBrowser {
     if (cached !== undefined) return cached
     let body: string
     try {
-      body = stripYamlFrontmatter(await readFile(file, "utf8"))
+      // Canonical specs are listed checkout-relative while change artifacts are
+      // absolute: resolve against the loaded project so reading works from any
+      // launch directory (an absolute file wins the resolve).
+      body = stripYamlFrontmatter(await readFile(resolvePath(this.view.targetDir, file), "utf8"))
     } catch {
       const name = file.replaceAll("\\", "/").split("/").pop() ?? file
       body = `(couldn't read ${name})`

@@ -8,6 +8,7 @@ import { SpecsBrowser } from "../src/specs-browser"
 import type { BoardWorktree, ControlBoard } from "../src/control-board"
 import { BoardSource, fingerprintCheckout } from "../src/board-refresh"
 import { loadSpecsView, type SpecsChangeEntry, type SpecsResolution, type SpecsView } from "../src/specs"
+import type { LocalActiveChange } from "../src/checkout-openspec"
 import { createFixtureRepo } from "./helpers/multi-worktree"
 
 function keyEvent(name: string, options: { ctrl?: boolean; shift?: boolean; sequence?: string } = {}) {
@@ -519,3 +520,430 @@ describe("specs board background refresh", () => {
     resolvers[1]?.()
   })
 })
+
+/** A manual board entry for a real on-disk change; no git inventory is needed. */
+function localChange(checkout: string, id: string, sourcePath: string): LocalActiveChange {
+  return { checkout, changeId: id, sourcePath, hasMarkdown: true, artifacts: {} as LocalActiveChange["artifacts"] }
+}
+
+function boardWith(checkout: string, changes: LocalActiveChange[]): ControlBoard {
+  return {
+    commonDir: checkout,
+    baseBranch: "main",
+    worktrees: [{ path: checkout, branch: "main", detached: false, main: true, bare: false, accessible: true, changes }],
+  }
+}
+
+async function makeChangeTree(root: string, id: string, files: Record<string, string>): Promise<string> {
+  const dir = join(root, "openspec", "changes", id)
+  for (const [relative, contents] of Object.entries(files)) {
+    const target = join(dir, relative)
+    await mkdir(join(target, ".."), { recursive: true })
+    await writeFile(target, contents)
+  }
+  return dir
+}
+
+/**
+ * A board source whose refresh stays in flight until the test settles or fails
+ * it, so a cycle lands exactly while the reading pane is open — no cadence
+ * tick and no sleep-race decides when the refresh runs.
+ */
+function deferredBoardSource() {
+  const pending: Array<{ resolve: (board: ControlBoard) => void; reject: (error: unknown) => void }> = []
+  const source = {
+    refresh() {
+      return new Promise((resolve, reject) => {
+        pending.push({
+          resolve: (board: ControlBoard) =>
+            resolve({
+              snapshot: { schemaVersion: 1, repoKey: "k", commonDir: "/common", builtAt: Date.now(), board, fingerprints: {} },
+              refreshed: true,
+            }),
+          reject,
+        })
+      })
+    },
+    cached: async () => undefined,
+    current: () => undefined,
+    lastError: () => undefined,
+    lastRunEntries: () => undefined,
+  } as unknown as BoardSource
+  return {
+    source,
+    settle(board: ControlBoard) {
+      pending.shift()?.resolve(board)
+    },
+    fail(error: unknown) {
+      pending.shift()?.reject(error)
+    },
+  }
+}
+
+/** Opens the board and enters the first selectable row's reading pane. */
+async function openSourcedBoard(view: SpecsView, source: BoardSource) {
+  const testRenderer = await createTestRenderer({ width: 120, height: 40 })
+  const instance = new SpecsBrowser(testRenderer.renderer, view, async () => "copied-native", undefined, undefined, {
+    source,
+    // No cadence tick: the deferred source alone decides when a cycle runs.
+    pollMs: 100_000,
+  })
+  await testRenderer.renderOnce()
+  const session = {
+    ...testRenderer,
+    instance,
+    press(key: string, options: { ctrl?: boolean; shift?: boolean; sequence?: string } = {}) {
+      testRenderer.renderer.keyInput.emit("keypress", keyEvent(key, options))
+    },
+    async close() {
+      testRenderer.renderer.keyInput.emit("keypress", keyEvent("c", { ctrl: true }))
+      await instance.result.catch(() => {})
+    },
+  }
+  session.press("return")
+  await testRenderer.renderOnce()
+  await Bun.sleep(30)
+  await testRenderer.renderOnce()
+  return session
+}
+
+/** The open reading pane survives a background refresh (delta specs-viewer). */
+describe("the open reading pane survives a background refresh", () => {
+  test("a scheduled refresh keeps the open change's pane readable", async () => {
+    const root = await mkdtemp(join(tmpdir(), "convoy-specs-live-"))
+    const dir = await makeChangeTree(root, "add-widget", { "proposal.md": "# Add widget\n\nThe widget works.\n" })
+    const change = localChange(root, "add-widget", dir)
+    const { source, settle } = deferredBoardSource()
+    const session = await openSourcedBoard(await loadSpecsView(root, boardWith(root, [change])), source)
+    try {
+      expect(session.captureCharFrame()).toContain("The widget works.")
+      // The mount cycle settles while the reading pane is open: the pane must
+      // still hold the active group's content, not a blank loading body.
+      settle(boardWith(root, [change]))
+      await Bun.sleep(60)
+      await session.renderOnce()
+      expect(session.captureCharFrame()).toContain("The widget works.")
+    } finally {
+      await session.close()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  test("an external edit appears in the open pane", async () => {
+    const root = await mkdtemp(join(tmpdir(), "convoy-specs-live-"))
+    const dir = await makeChangeTree(root, "add-widget", { "proposal.md": "# Add widget\n\nThe widget works.\n" })
+    const change = localChange(root, "add-widget", dir)
+    const { source, settle } = deferredBoardSource()
+    const session = await openSourcedBoard(await loadSpecsView(root, boardWith(root, [change])), source)
+    try {
+      expect(session.captureCharFrame()).toContain("The widget works.")
+      await writeFile(join(dir, "proposal.md"), "# Add widget\n\nThe widget is better.\n")
+      settle(boardWith(root, [change]))
+      await Bun.sleep(60)
+      await session.renderOnce()
+      const frame = session.captureCharFrame()
+      expect(frame).toContain("The widget is better.")
+      expect(frame).not.toContain("The widget works.")
+    } finally {
+      await session.close()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  test("retains the active tab and scroll position", async () => {
+    const root = await mkdtemp(join(tmpdir(), "convoy-specs-live-"))
+    const tasks = "# Tasks\n\n" + Array.from({ length: 60 }, (_, i) => `- [ ] task-${String(i + 1).padStart(2, "0")}`).join("\n") + "\n"
+    const dir = await makeChangeTree(root, "add-widget", {
+      "proposal.md": "# Add widget\n\nProposal body.\n",
+      "tasks.md": tasks,
+    })
+    const change = localChange(root, "add-widget", dir)
+    const { source, settle } = deferredBoardSource()
+    const session = await openSourcedBoard(await loadSpecsView(root, boardWith(root, [change])), source)
+    try {
+      session.press("2")
+      await session.renderOnce()
+      await Bun.sleep(30)
+      await session.renderOnce()
+      expect(session.captureCharFrame()).toContain("2 Tasks")
+      expect(session.captureCharFrame()).toContain("task-01")
+      for (let i = 0; i < 15; i += 1) session.press("down")
+      await session.renderOnce()
+      expect(session.captureCharFrame()).not.toContain("task-01")
+      settle(boardWith(root, [change]))
+      await Bun.sleep(60)
+      await session.renderOnce()
+      const frame = session.captureCharFrame()
+      // Same tab, still scrolled past the first task: the context was retained.
+      expect(frame).toContain("2 Tasks")
+      expect(frame).not.toContain("task-01")
+      expect(frame).toMatch(/task-\d\d/)
+    } finally {
+      await session.close()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  test("keeps the fullscreen reader open across a refresh", async () => {
+    const root = await mkdtemp(join(tmpdir(), "convoy-specs-live-"))
+    const dir = await makeChangeTree(root, "add-widget", { "proposal.md": "# Add widget\n\nProposal body.\n" })
+    const change = localChange(root, "add-widget", dir)
+    const { source, settle } = deferredBoardSource()
+    const session = await openSourcedBoard(await loadSpecsView(root, boardWith(root, [change])), source)
+    try {
+      session.press("v")
+      await session.renderOnce()
+      expect(session.captureCharFrame()).toContain("c copy")
+      expect(session.captureCharFrame()).not.toContain("quit")
+      settle(boardWith(root, [change]))
+      await Bun.sleep(60)
+      await session.renderOnce()
+      const frame = session.captureCharFrame()
+      expect(frame).toContain("c copy")
+      expect(frame).not.toContain("quit")
+      expect(frame).toContain("Proposal body.")
+    } finally {
+      await session.close()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  test("a subject removed externally returns to the root list", async () => {
+    const root = await mkdtemp(join(tmpdir(), "convoy-specs-live-"))
+    const widgetDir = await makeChangeTree(root, "add-widget", { "proposal.md": "# Add widget\n\nThe widget works.\n" })
+    const otherDir = await makeChangeTree(root, "other-widget", { "proposal.md": "# Other widget\n\nStay put.\n" })
+    const widget = localChange(root, "add-widget", widgetDir)
+    const other = localChange(root, "other-widget", otherDir)
+    const { source, settle } = deferredBoardSource()
+    const session = await openSourcedBoard(await loadSpecsView(root, boardWith(root, [widget, other])), source)
+    try {
+      expect(session.captureCharFrame()).toContain("The widget works.")
+      await rm(widgetDir, { recursive: true, force: true })
+      settle(boardWith(root, [other]))
+      await Bun.sleep(60)
+      await session.renderOnce()
+      const frame = session.captureCharFrame()
+      // Back at the root list, never an empty reading pane.
+      expect(frame).toContain("╭─ changes")
+      expect(frame).toContain("other-widget")
+      expect(frame).not.toContain("The widget works.")
+    } finally {
+      await session.close()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  test("a failed refresh keeps the view and the loaded pane", async () => {
+    const root = await mkdtemp(join(tmpdir(), "convoy-specs-live-"))
+    const dir = await makeChangeTree(root, "add-widget", { "proposal.md": "# Add widget\n\nThe widget works.\n" })
+    const change = localChange(root, "add-widget", dir)
+    const { source, fail } = deferredBoardSource()
+    const session = await openSourcedBoard(await loadSpecsView(root, boardWith(root, [change])), source)
+    try {
+      expect(session.captureCharFrame()).toContain("The widget works.")
+      fail(new Error("git unavailable"))
+      await Bun.sleep(60)
+      await session.renderOnce()
+      expect(session.captureCharFrame()).toContain("The widget works.")
+    } finally {
+      await session.close()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  test("a failed active-group reload rolls the pane back and a later refresh recovers", async () => {
+    const root = await mkdtemp(join(tmpdir(), "convoy-specs-live-"))
+    const dir = await makeChangeTree(root, "add-widget", {
+      "proposal.md": "# Add widget\n\nProposal body.\n",
+      "tasks.md": "# Tasks\n\n- [ ] task-01\n",
+    })
+    const change = localChange(root, "add-widget", dir)
+    const { source, settle } = deferredBoardSource()
+    const session = await openSourcedBoard(await loadSpecsView(root, boardWith(root, [change])), source)
+    try {
+      // Land on the Tasks tab so a rollback must restore the reading context.
+      session.press("2")
+      await session.renderOnce()
+      await Bun.sleep(30)
+      await session.renderOnce()
+      expect(session.captureCharFrame()).toContain("2 Tasks")
+      expect(session.captureCharFrame()).toContain("task-01")
+
+      // Force the cycle's active-group reload to fail once. The cycle has
+      // already dropped its caches by now, so only the snapshot rollback can
+      // keep the pane readable.
+      const pane = session.instance as unknown as { loadSelectedGroup: () => Promise<void> }
+      const original = pane.loadSelectedGroup.bind(session.instance)
+      let calls = 0
+      pane.loadSelectedGroup = () => {
+        calls += 1
+        return calls === 1 ? Promise.reject(new Error("reload boom")) : original()
+      }
+      settle(boardWith(root, [change]))
+      await Bun.sleep(60)
+      await session.renderOnce()
+      expect(calls).toBe(1)
+      expect(session.captureCharFrame()).toContain("2 Tasks")
+      expect(session.captureCharFrame()).toContain("task-01")
+
+      // The cycle released its guard: a later refresh through the Actions menu
+      // succeeds and leaves the pane readable.
+      pane.loadSelectedGroup = original
+      session.press("!")
+      await session.renderOnce()
+      session.press("down")
+      session.press("down")
+      session.press("return")
+      settle(boardWith(root, [change]))
+      await Bun.sleep(60)
+      await session.renderOnce()
+      const frame = session.captureCharFrame()
+      expect(frame).toContain("2 Tasks")
+      expect(frame).toContain("task-01")
+    } finally {
+      await session.close()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  test("a canonical spec's single-group pane survives a refresh", async () => {
+    const root = await mkdtemp(join(tmpdir(), "convoy-specs-live-"))
+    const specDir = join(root, "openspec", "specs", "canonical")
+    await mkdir(specDir, { recursive: true })
+    await writeFile(join(specDir, "spec.md"), "# Canonical spec\n\nThe canonical body.\n")
+    const { source, settle } = deferredBoardSource()
+    const session = await openSourcedBoard(await loadSpecsView(root, boardWith(root, [])), source)
+    try {
+      // The spec is the only selectable row; its single group renders no strip.
+      expect(session.captureCharFrame()).toContain("The canonical body.")
+      settle(boardWith(root, []))
+      await Bun.sleep(60)
+      await session.renderOnce()
+      const frame = session.captureCharFrame()
+      expect(frame).toContain("The canonical body.")
+      expect(frame).not.toContain("1 Spec")
+    } finally {
+      await session.close()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  test("a same-id copy in another checkout stays independent across a refresh", async () => {
+    const base = await mkdtemp(join(tmpdir(), "convoy-specs-live-"))
+    const rootA = join(base, "a-checkout")
+    const rootB = join(base, "b-checkout")
+    const dirA = await makeChangeTree(rootA, "add-widget", { "proposal.md": "# Add widget\n\nThe A copy.\n" })
+    const dirB = await makeChangeTree(rootB, "add-widget", { "proposal.md": "# Add widget\n\nThe B copy.\n" })
+    // Two checkouts hold the same change id. Board order opens B's copy while
+    // the sorted change list puts A's first, so an id-only re-derive would
+    // silently retarget the pane at the other checkout's copy.
+    const board: ControlBoard = {
+      commonDir: base,
+      baseBranch: "main",
+      worktrees: [
+        { path: rootB, branch: "feat/b", detached: false, main: false, bare: false, accessible: true, changes: [localChange(rootB, "add-widget", dirB)] },
+        { path: rootA, branch: "main", detached: false, main: true, bare: false, accessible: true, changes: [localChange(rootA, "add-widget", dirA)] },
+      ],
+    }
+    const { source, settle } = deferredBoardSource()
+    const session = await openSourcedBoard(await loadSpecsView(rootA, board), source)
+    try {
+      expect(session.captureCharFrame()).toContain("The B copy.")
+      settle(board)
+      await Bun.sleep(60)
+      await session.renderOnce()
+      const frame = session.captureCharFrame()
+      expect(frame).toContain("The B copy.")
+      expect(frame).not.toContain("The A copy.")
+    } finally {
+      await session.close()
+      await rm(base, { recursive: true, force: true })
+    }
+  })
+
+  test("a group removed externally disappears and the active tab clamps", async () => {
+    const root = await mkdtemp(join(tmpdir(), "convoy-specs-live-"))
+    const dir = await makeChangeTree(root, "add-widget", {
+      "proposal.md": "# Add widget\n\nProposal body.\n",
+      "tasks.md": "# Tasks\n\n- [ ] task-01\n",
+    })
+    const change = localChange(root, "add-widget", dir)
+    const { source, settle } = deferredBoardSource()
+    const session = await openSourcedBoard(await loadSpecsView(root, boardWith(root, [change])), source)
+    try {
+      session.press("2")
+      await session.renderOnce()
+      await Bun.sleep(30)
+      await session.renderOnce()
+      expect(session.captureCharFrame()).toContain("2 Tasks")
+      expect(session.captureCharFrame()).toContain("task-01")
+
+      // Delete the open tab's artifact: the re-derived subject now has a single
+      // group, so the active tab must clamp back to it and the pane stay
+      // readable instead of going blank on an out-of-range group.
+      await rm(join(dir, "tasks.md"))
+      settle(boardWith(root, [change]))
+      await Bun.sleep(60)
+      await session.renderOnce()
+      const frame = session.captureCharFrame()
+      expect(frame).toContain("Proposal body.")
+      expect(frame).not.toContain("Tasks")
+      expect(frame).not.toContain("loading")
+    } finally {
+      await session.close()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  test("a group added externally appears without re-entering the subject", async () => {
+    const root = await mkdtemp(join(tmpdir(), "convoy-specs-live-"))
+    const dir = await makeChangeTree(root, "add-widget", { "proposal.md": "# Add widget\n\nProposal body.\n" })
+    const change = localChange(root, "add-widget", dir)
+    const { source, settle } = deferredBoardSource()
+    const session = await openSourcedBoard(await loadSpecsView(root, boardWith(root, [change])), source)
+    try {
+      // Single group: the strip is hidden and the proposal is the whole pane.
+      expect(session.captureCharFrame()).toContain("Proposal body.")
+      expect(session.captureCharFrame()).not.toContain("Tasks")
+
+      // A new artifact group lands from disk on the next cycle: the tab strip
+      // appears from the re-derived groups, with the content still readable.
+      await writeFile(join(dir, "tasks.md"), "# Tasks\n\n- [ ] task-01\n")
+      settle(boardWith(root, [change]))
+      await Bun.sleep(60)
+      await session.renderOnce()
+      const frame = session.captureCharFrame()
+      expect(frame).toContain("2 Tasks")
+      expect(frame).toContain("Proposal body.")
+    } finally {
+      await session.close()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  test("a canonical spec removed externally returns to the root list", async () => {
+    const root = await mkdtemp(join(tmpdir(), "convoy-specs-live-"))
+    const specDir = join(root, "openspec", "specs", "canonical")
+    await mkdir(specDir, { recursive: true })
+    await writeFile(join(specDir, "spec.md"), "# Canonical spec\n\nThe canonical body.\n")
+    const { source, settle } = deferredBoardSource()
+    const session = await openSourcedBoard(await loadSpecsView(root, boardWith(root, [])), source)
+    try {
+      expect(session.captureCharFrame()).toContain("The canonical body.")
+
+      // The spec file disappears; the refreshed view no longer lists it, so the
+      // browser must fall back to the root list rather than a stale empty pane.
+      await rm(specDir, { recursive: true, force: true })
+      settle(boardWith(root, []))
+      await Bun.sleep(60)
+      await session.renderOnce()
+      const frame = session.captureCharFrame()
+      expect(frame).toContain("╭─ changes")
+      expect(frame).not.toContain("The canonical body.")
+    } finally {
+      await session.close()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+})
+
