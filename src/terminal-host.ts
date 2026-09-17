@@ -175,20 +175,22 @@ function detectedMultiplexer(): "herdr" | "zellij" | undefined {
   return undefined
 }
 
-// `herdr pane split` always launches a login shell — there is no exec-a-command
-// flag the way `zellij action new-pane -- sh -lc` has. --cwd / --env PATH=
-// give that shell Convoy's directory and PATH; ZDOTDIR=/var/empty skips the
-// user's zshrc (nvm, fvm, completions…) so the prompt appears immediately
-// instead of two seconds later. Then we wait for any output (the prompt) and
-// `pane run` types only the short command. Typing `export PATH=...` or `cd`
-// would be visible keystrokes and, with retries, look like several commands.
+// `herdr pane split` always launches an interactive login shell — there is no
+// exec-a-command flag the way `zellij action new-pane -- sh -lc` has. --cwd /
+// --env PATH= give that shell Convoy's directory and PATH, while the operator's
+// own startup (zprofile, zshrc) stays in charge: suppressing it with
+// ZDOTDIR=/var/empty would leave a bare post-exit shell and would drop the PATH
+// ordering that decides which harness binary the pane resolves. Because that
+// startup can emit banners before the prompt, wait for the pane's output to
+// settle before `pane run` types the short command. Typing `export PATH=...`
+// or `cd` would be visible keystrokes and, with retries, look like several
+// commands.
 async function openInHerdr(command: string, cwd?: string, label?: string, env?: Record<string, string>) {
   const path = process.env.PATH
   const splitArgs = [
     "herdr", "pane", "split", "--current", "--direction", "right",
     ...(cwd ? ["--cwd", cwd] : []),
     ...(path ? ["--env", `PATH=${path}`] : []),
-    "--env", "ZDOTDIR=/var/empty",
     ...(env ? Object.entries(env).flatMap(([key, value]) => {
       assertEnvKey(key)
       return ["--env", `${key}=${value}`]
@@ -199,32 +201,55 @@ async function openInHerdr(command: string, cwd?: string, label?: string, env?: 
   const paneId = herdrPaneIdFromSplitOutput(stdout)
   // Name the pane, matching the Zellij backend's named panes.
   if (label) await spawnChecked(["herdr", "pane", "rename", paneId, label])
-  await waitForHerdrPanePrompt(paneId)
+  await waitForHerdrPaneReady(paneId)
   await runInHerdrPaneWithRetry(paneId, command)
 }
 
-const HERDR_PROMPT_WAIT_MS = 1500
+const HERDR_SETTLE_INTERVAL_MS = 75
+const HERDR_SETTLE_TIMEOUT_MS = 2500
 const HERDR_RUN_RETRIES = 3
 const HERDR_RETRY_DELAY_MS = 100
 
-// Split returns as soon as the pane exists, not when the shell has printed a
-// prompt. `pane run` types into that PTY, so a run before the prompt lands
-// either vanishes or gets retried as a second visible command.
-async function waitForHerdrPanePrompt(paneId: string) {
-  try {
-    await spawnChecked([
-      "herdr", "pane", "wait-output", paneId,
-      "--regex", ".",
-      "--timeout", String(HERDR_PROMPT_WAIT_MS),
-    ])
-  } catch {
-    // Best effort: a slow shell still gets pane run below.
+// Split returns as soon as the pane exists, not when the shell has finished
+// starting. `pane run` types into that PTY, so a run before the shell is ready
+// lands either vanishes or gets retried as a second visible command. The
+// operator's startup is no longer suppressed and can emit banners before the
+// prompt, so wait for the pane's output revision to stop changing (bounded by a
+// deadline) instead of typing on the first line. A shell that never reports
+// output still gets `pane run` below.
+async function waitForHerdrPaneReady(paneId: string) {
+  const deadline = Date.now() + HERDR_SETTLE_TIMEOUT_MS
+  let lastRevision: number | undefined
+  let lastChangedAt = Date.now()
+  while (Date.now() < deadline) {
+    let revision: number | undefined
+    try {
+      revision = await herdrPaneRevision(paneId)
+    } catch {
+      // Not readable yet; keep polling until the deadline.
+    }
+    const now = Date.now()
+    if (revision !== undefined && revision > 0) {
+      if (revision !== lastRevision) {
+        lastRevision = revision
+        lastChangedAt = now
+      } else if (now - lastChangedAt >= HERDR_SETTLE_INTERVAL_MS) {
+        return
+      }
+    }
+    await Bun.sleep(HERDR_SETTLE_INTERVAL_MS)
   }
 }
 
+async function herdrPaneRevision(paneId: string): Promise<number | undefined> {
+  const stdout = await spawnCapture(["herdr", "pane", "get", paneId])
+  const parsed = JSON.parse(stdout) as { result?: { pane?: { revision?: number } } }
+  return parsed.result?.pane?.revision
+}
+
 // Retries only cover a run that failed before sending (pane not registered
-// yet). After wait-output the first attempt should land; keep a short loop
-// so a single missed prompt doesn't lose the session.
+// yet). After the settle wait the first attempt should land; keep a short loop
+// so a single missed ready signal doesn't lose the session.
 async function runInHerdrPaneWithRetry(paneId: string, command: string) {
   for (let attempt = 1; ; attempt++) {
     try {

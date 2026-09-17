@@ -48,6 +48,14 @@ type SpawnResult = {
   stdout?: string
 }
 
+// The pane-ready wait polls `herdr pane get` for a settled output revision.
+// Answering it here keeps the Herdr tests off the real settle timeout.
+const HERDR_PANE_GET_JSON = JSON.stringify({ result: { pane: { pane_id: "pane-42", revision: 1 } } })
+
+function isHerdrPaneGet(cmd: unknown): boolean {
+  return Array.isArray(cmd) && cmd[0] === "herdr" && cmd[2] === "get"
+}
+
 function spawnProc(result: SpawnResult) {
   return {
     exited: Promise.resolve(result.exitCode ?? 0),
@@ -68,7 +76,10 @@ function spawnProc(result: SpawnResult) {
 
 function mockSpawnResult(exitCode = 0, stderr = "", stdout = ""): SpawnMock {
   const spawn = spyOn(Bun, "spawn")
-  spawn.mockImplementation((() => spawnProc({ exitCode, stderr, stdout })) as unknown as typeof Bun.spawn)
+  spawn.mockImplementation(((cmd: string[]) => {
+    if (isHerdrPaneGet(cmd)) return spawnProc({ stdout: HERDR_PANE_GET_JSON })
+    return spawnProc({ exitCode, stderr, stdout })
+  }) as unknown as typeof Bun.spawn)
   return spawn as unknown as SpawnMock
 }
 
@@ -90,7 +101,8 @@ function mockSpawnFailing(binary: string): SpawnMock {
 function mockSpawnResults(results: SpawnResult[]): SpawnMock {
   const spawn = spyOn(Bun, "spawn")
   let index = 0
-  spawn.mockImplementation((() => {
+  spawn.mockImplementation(((cmd: string[]) => {
+    if (isHerdrPaneGet(cmd)) return spawnProc({ stdout: HERDR_PANE_GET_JSON })
     const result = results[Math.min(index, results.length - 1)] ?? {}
     index++
     return spawnProc(result)
@@ -556,17 +568,16 @@ describe("openSessionCommand", () => {
         "herdr", "pane", "split", "--current", "--direction", "right",
         "--cwd", "/my repo",
         "--env", `PATH=${process.env.PATH}`,
-        "--env", "ZDOTDIR=/var/empty",
         "--focus",
       ])
       expect(mockSpawn.mock.calls[1]![0]).toEqual(["herdr", "pane", "rename", "pane-42", "opencode session"])
-      expect(mockSpawn.mock.calls[2]![0]).toEqual([
-        "herdr", "pane", "wait-output", "pane-42", "--regex", ".", "--timeout", "1500",
-      ])
-      const runArgs = mockSpawn.mock.calls[3]![0] as string[]
+      const runArgs = mockSpawn.mock.calls.find((call) => (call[0] as string[])[2] === "run")?.[0] as string[]
       expect(runArgs).toEqual(["herdr", "pane", "run", "pane-42", "opencode attach http://127.0.0.1:1234"])
       expect(runArgs[4]).not.toContain("export PATH")
       expect(runArgs[4]).not.toContain("cd ")
+      // The suppressed-shell wait is gone: the pane settles via `pane get`.
+      expect(mockSpawn.mock.calls.some((call) => (call[0] as string[])[2] === "wait-output")).toBe(false)
+      expect(mockSpawn.mock.calls[0]![0]).not.toContain("ZDOTDIR=/var/empty")
     } finally {
       mockSpawn.mockRestore()
     }
@@ -586,7 +597,7 @@ describe("openSessionCommand", () => {
       await openSessionCommand("opencode attach http://127.0.0.1:1234", "/repo", "opencode session")
       const splitArgs = mockSpawn.mock.calls[0]![0] as string[]
       expect(splitArgs).toContain("--env")
-      expect(splitArgs).toContain("ZDOTDIR=/var/empty")
+      expect(splitArgs).not.toContain("ZDOTDIR=/var/empty")
       expect(splitArgs[splitArgs.indexOf("--env") + 1]).toBe(`PATH=${process.env.PATH}`)
       const runCall = mockSpawn.mock.calls.find((call) => (call[0] as string[])[2] === "run")
       expect(runCall?.[0]).toEqual(["herdr", "pane", "run", "pane-42", "opencode attach http://127.0.0.1:1234"])
@@ -607,15 +618,49 @@ describe("openSessionCommand", () => {
       expect(mockSpawn.mock.calls[0]![0]).toEqual([
         "herdr", "pane", "split", "--current", "--direction", "right",
         "--env", `PATH=${process.env.PATH}`,
-        "--env", "ZDOTDIR=/var/empty",
         "--focus",
       ])
-      expect(mockSpawn.mock.calls[1]![0]).toEqual([
-        "herdr", "pane", "wait-output", "pane-42", "--regex", ".", "--timeout", "1500",
-      ])
-      expect(mockSpawn.mock.calls[2]![0]).toEqual(["herdr", "pane", "run", "pane-42", "opencode /repo"])
+      expect(mockSpawn.mock.calls[1]![0][2]).toBe("get")
+      const runCall = mockSpawn.mock.calls.find((call) => (call[0] as string[])[2] === "run")
+      expect(runCall?.[0]).toEqual(["herdr", "pane", "run", "pane-42", "opencode /repo"])
     } finally {
       mockSpawn.mockRestore()
+    }
+  })
+
+  test("waits for the pane output to settle and submits the command once", async () => {
+    setPlatform("linux")
+    delete process.env.CONVOY_TERMINAL
+    process.env.HERDR_ENV = "1"
+    Bun.which = (() => "/usr/bin/herdr") as typeof Bun.which
+    const spawn = spyOn(Bun, "spawn")
+    // Startup keeps producing output (rising revision) and only then settles.
+    const revisions = [1, 2, 3, 3]
+    let getIndex = 0
+    spawn.mockImplementation(((cmd: string[]) => {
+      if (Array.isArray(cmd) && cmd[0] === "herdr" && cmd[2] === "get") {
+        const revision = revisions[Math.min(getIndex, revisions.length - 1)] ?? 3
+        getIndex++
+        return spawnProc({ stdout: JSON.stringify({ result: { pane: { pane_id: "pane-42", revision } } }) })
+      }
+      if (Array.isArray(cmd) && cmd[0] === "herdr" && cmd[2] === "split") {
+        return spawnProc({ stdout: HERDR_SPLIT_JSON })
+      }
+      return spawnProc({})
+    }) as unknown as typeof Bun.spawn)
+
+    try {
+      await expect(openSessionCommand("opencode /repo")).resolves.toBe("herdr")
+      const calls = spawn.mock.calls.map((call) => call[0] as string[])
+      const firstGet = calls.findIndex((args) => args[2] === "get")
+      const firstRun = calls.findIndex((args) => args[2] === "run")
+      expect(firstGet).toBeGreaterThanOrEqual(0)
+      expect(firstRun).toBeGreaterThan(firstGet)
+      expect(calls.filter((args) => args[2] === "run")).toHaveLength(1)
+      // More than one poll before the run: the output had not settled on the first read.
+      expect(calls.filter((args) => args[2] === "get").length).toBeGreaterThan(1)
+    } finally {
+      spawn.mockRestore()
     }
   })
 
@@ -753,7 +798,6 @@ describe("openSessionCommand", () => {
     Bun.which = (() => "/usr/bin/herdr") as typeof Bun.which
     const mockSpawn = mockSpawnResults([
       { stdout: HERDR_SPLIT_JSON },
-      {},
       { exitCode: 1, stderr: "herdr: pane not ready" },
       {},
     ])
@@ -776,7 +820,6 @@ describe("openSessionCommand", () => {
     Bun.which = (() => "/usr/bin/herdr") as typeof Bun.which
     const mockSpawn = mockSpawnResults([
       { stdout: HERDR_SPLIT_JSON },
-      {},
       { exitCode: 1, stderr: "herdr: pane not ready" },
       { exitCode: 1, stderr: "herdr: pane not ready" },
       { exitCode: 1, stderr: "herdr: pane not ready" },
