@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
-import { noopProgress, type ProgressPhase, type ProgressUI, type RunStatus } from "../src/progress"
+import { noopProgress, type ProgressPhase, type ProgressUI, type RunStatus, type SessionErrorSignal } from "../src/progress"
 import { planBatches } from "../src/runner"
 import {
   formatTerminalTitle,
@@ -456,23 +456,29 @@ describe("trackRunStatus", () => {
 
   test("forwards every lifecycle call to the wrapped UI unchanged", () => {
     const calls: string[] = []
+    let forwardedFailure: SessionErrorSignal | undefined
     const progress: ProgressUI = {
       ...noopProgress,
       phaseStarted: (name) => calls.push(`started:${name}`),
       phaseCompleted: (name) => calls.push(`completed:${name}`),
-      phaseFailed: (name) => calls.push(`failed:${name}`),
+      phaseFailed: (name, _detail, failure) => {
+        calls.push(`failed:${name}`)
+        forwardedFailure = failure
+      },
       phaseSkipped: (name) => calls.push(`skipped:${name}`),
       stop: () => calls.push("stop"),
     }
     const wrapped = trackRunStatus(progress, new RunStatusTracker({ phases: [agentPhase("plan")], identity }))
+    const failure = { name: "APIError", message: "rate limited", statusCode: 429, isRetryable: true }
 
     wrapped.phaseStarted("plan")
     wrapped.phaseCompleted("plan")
-    wrapped.phaseFailed("plan")
+    wrapped.phaseFailed("plan", "rate limited", failure)
     wrapped.phaseSkipped("plan")
     wrapped.stop()
 
     expect(calls).toEqual(["started:plan", "completed:plan", "failed:plan", "skipped:plan", "stop"])
+    expect(forwardedFailure).toEqual(failure)
   })
 
   test("stop() marks the run stopped before the wrapped UI tears its renderer down", () => {

@@ -10,6 +10,7 @@ import type {
   ProgressPhase,
   ProgressPhaseSnapshot,
   ProgressStepUsage,
+  SessionErrorSignal,
   ProgressTokens,
   ProgressUI,
   ProgressUsage,
@@ -48,6 +49,8 @@ export type PhaseMetadata = {
   repositoryBaseline?: RepoSnapshot
   advisor?: AdvisorPhaseAggregate
   advisorEvents?: AdvisorEvent[]
+  /** Harness-provided classification for failures caused by a session error. */
+  error?: SessionErrorSignal
 }
 
 /** The stage a goal cycle's durable record says the run is in. */
@@ -192,7 +195,7 @@ export type RunMetadataStore = {
   phaseAdvisorEvent(name: string, event: AdvisorEvent): void
   repositoryBaseline(name: string): RepoSnapshot | undefined
   phaseRepositoryBaseline(name: string, baseline: RepoSnapshot): Promise<void>
-  phaseEnded(name: string, status: "completed" | "skipped" | "failed", detail?: string): Promise<void>
+  phaseEnded(name: string, status: "completed" | "skipped" | "failed", detail?: string, failure?: SessionErrorSignal): Promise<void>
   controlState(): RunControlState
   setControlState(state: RunControlState): Promise<void>
   flush(): Promise<void>
@@ -435,6 +438,7 @@ export async function openRunMetadata(
     async phaseStarted(name) {
       const entry = phase(name)
       entry.status = "running"
+      delete entry.error
       entry.startedAt ??= Date.now()
       await persist({ throwOnError: true })
     },
@@ -468,9 +472,11 @@ export async function openRunMetadata(
       phase(name).repositoryBaseline = baseline
       await persist({ throwOnError: true })
     },
-    async phaseEnded(name, status, detail) {
+    async phaseEnded(name, status, detail, failure) {
       const entry = phase(name)
       entry.status = status
+      if (status === "failed" && failure) entry.error = failure
+      else delete entry.error
       entry.endedAt = Date.now()
       if (detail) entry.detail = detail
       if (entry.startedAt !== undefined) entry.durationMs = entry.endedAt - entry.startedAt
@@ -569,9 +575,9 @@ export function recordProgress(progress: ProgressUI, store: RunMetadataStore): P
       await store.phaseEnded(name, "skipped").catch((error) => log.warn(`couldn't persist phase-skipped metadata: ${String(error)}`))
       progress.phaseSkipped(name)
     },
-    async phaseFailed(name, detail) {
-      await store.phaseEnded(name, "failed", detail).catch((error) => log.warn(`couldn't persist phase-failed metadata: ${String(error)}`))
-      progress.phaseFailed(name, detail)
+    async phaseFailed(name, detail, failure) {
+      await store.phaseEnded(name, "failed", detail, failure).catch((error) => log.warn(`couldn't persist phase-failed metadata: ${String(error)}`))
+      progress.phaseFailed(name, detail, failure)
     },
     phaseRestored: (name, snapshot) => progress.phaseRestored(name, snapshot),
     message: (message) => progress.message(message),
