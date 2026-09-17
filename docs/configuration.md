@@ -24,7 +24,7 @@ defaults:
   baseRef: main                    # optional; auto-detected when unset (origin default branch, else main/master/develop/trunk, else current branch)
   pipeline: quick                  # pipeline used when -p/--pipeline is not given
   autoAcceptJudgeModel: anthropic/claude-haiku-4-5   # model for smart auto-accept (--smart); defaults to the run's model
-  branchNameModel: openrouter/deepseek/deepseek-v4-flash-0731  # proposes worktree branch names (may look up referenced issues); you confirm the name
+  branchNameModel: openrouter/deepseek/deepseek-v4.1-flash  # proposes worktree branch names (may look up referenced issues); you confirm the name
   commitMessageModel: openai/gpt-5.6-luna     # writes the conventional commit message for automatic run compaction and close's squash-merge commit
   worktree: true                   # force a new branch + worktree for every run; false always runs in the current tree. Unset decides per branch (isolate on a trunk, run in place on a branch)
   worktreeLocation: ~/dev/worktrees/{repo}/{branch}  # where isolated worktrees are created ({repo}/{branch} placeholders, ~ = home; the branch slug is appended when {branch} is missing). A marker line in the repo's AGENTS.md/README.md outranks this; default ~/.convoy/worktrees

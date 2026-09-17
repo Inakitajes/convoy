@@ -409,7 +409,7 @@ describe("launch TUI narrow-width row budgets", () => {
         { stepName: "score-report", groupId: "g2", kind: "agent" as const, modelLabel: "x-ai-grok-5", advisorLabel: "" },
       ],
       improve: [
-        { stepName: "fix", groupId: "g3", kind: "agent" as const, modelLabel: "deepseek-v4-flash", advisorLabel: "x-ai-grok-5 advisor ×3" },
+        { stepName: "fix", groupId: "g3", kind: "agent" as const, modelLabel: "deepseek-v4.1-flash", advisorLabel: "x-ai-grok-5 advisor ×3" },
       ],
     } satisfies GoalPreview
     for (const width of widths) {
@@ -713,7 +713,7 @@ describe("launch TUI pipeline preview", () => {
       { stepName: "score-report", groupId: "g2", kind: "agent", modelLabel: "x-ai-grok-5", advisorLabel: "" },
     ],
     improve: [
-      { stepName: "fix", groupId: "g3", kind: "agent", modelLabel: "deepseek-v4-flash", advisorLabel: "x-ai-grok-5 advisor ×3" },
+      { stepName: "fix", groupId: "g3", kind: "agent", modelLabel: "deepseek-v4.1-flash", advisorLabel: "x-ai-grok-5 advisor ×3" },
     ],
   } satisfies GoalPreview
 
@@ -736,7 +736,7 @@ describe("launch TUI pipeline preview", () => {
     // relationship, with their resolved models.
     expect(lines).toContain("    ○ score  · 2 models")
     expect(lines).toContain("    ○ score-report  · x-ai-grok-5")
-    expect(lines).toContain("    ○ fix  · deepseek-v4-flash → x-ai-grok-5 advisor ×3")
+    expect(lines).toContain("    ○ fix  · deepseek-v4.1-flash → x-ai-grok-5 advisor ×3")
   })
 
   test("goalLines collapses policy chips and fragment roles when the panel is narrow", () => {
@@ -1569,7 +1569,7 @@ describe("launch TUI goal classification", () => {
             { stepName: "score", groupId: "g1", kind: "agent", modelLabel: "glm-5.3-high", advisorLabel: "" },
             { stepName: "score-report", groupId: "g2", kind: "agent", modelLabel: "x-ai-grok-5", advisorLabel: "" },
           ],
-          improve: [{ stepName: "fix", groupId: "g3", kind: "agent", modelLabel: "deepseek-v4-flash", advisorLabel: "" }],
+          improve: [{ stepName: "fix", groupId: "g3", kind: "agent", modelLabel: "deepseek-v4.1-flash", advisorLabel: "" }],
         },
       }],
       "configured",
@@ -1587,7 +1587,7 @@ describe("launch TUI goal classification", () => {
       expect(detail).not.toContain("4 measurements")
       expect(detail).toContain("measure  · score ← score-report")
       expect(detail).toContain("improve  · brief → fix  · then re-measure")
-      expect(detail).toContain("○ fix  · deepseek-v4-flash")
+      expect(detail).toContain("○ fix  · deepseek-v4.1-flash")
     } finally {
       await closeLauncher(launcher)
     }

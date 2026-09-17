@@ -15,9 +15,9 @@ const opusViaOpenRouter = "openrouter/anthropic/claude-opus-5"
 /** Grok 4.6 high: the review and ship scoring, plus one hunter audit track. */
 const grokModel = "openrouter/x-ai/grok-4.6#high"
 const kimiModel = "openrouter/moonshotai/kimi-k3"
-/** DeepSeek V4 Flash 0731 on OpenRouter: the writer for `implement`, review's report, and the goal fixers. */
-const deepseekModel = "openrouter/deepseek/deepseek-v4-flash-0731"
-/** DeepSeek V4 Flash on OpenRouter with reasoning raised: used for writing, flash audits and run recaps. */
+/** DeepSeek V4.1 Flash on OpenRouter: the writer for `implement`, review's report, and the goal fixers. */
+const deepseekModel = "openrouter/deepseek/deepseek-v4.1-flash"
+/** DeepSeek V4.1 Flash on OpenRouter with reasoning raised: used for writing, flash audits and run recaps. */
 const deepseekHighModel = `${deepseekModel}#high`
 /** GPT 5.6 Sol: the consensus reporter for full-cycle and the hunter pipelines at xhigh. */
 const solModel = "openai/gpt-5.6-sol"
@@ -462,7 +462,7 @@ export const builtInPipelines: Record<string, PipelineSpec> = {
   // Implementation follows the same model choices as full-cycle, but closes
   // with a recap instead of running the quality loop. Only the writer is advised.
   implement: {
-    description: "Advised implementation on DeepSeek V4 Flash consulting Astra 6, then pattern/security audits, design polish, tests, and a one-page run recap",
+    description: "Advised implementation on DeepSeek V4.1 Flash consulting Astra 6, then pattern/security audits, design polish, tests, and a one-page run recap",
     steps: [
       { agent: "implementer", model: defaultImplementerModel, advisor: defaultImplementAdvisorModel, reports: "none" },
       { agent: "patterns", model: defaultImplementAuditModel, advisor: false },
@@ -475,7 +475,7 @@ export const builtInPipelines: Record<string, PipelineSpec> = {
   // The default combines implementation with a terminal, independently scored goal loop.
   "full-cycle": {
     description:
-      "Implement with DeepSeek V4 Flash and GLM 5.3 Flash, advised by Astra 6 and GLM 5.3, then measure with Grok and GLM and a verified Sol consensus; fix gaps up to five times to reach 90/100.",
+      "Implement with DeepSeek V4.1 Flash and GLM 5.3 Flash, advised by Astra 6 and GLM 5.3, then measure with Grok and GLM and a verified Sol consensus; fix gaps up to five times to reach 90/100.",
     steps: [
       { agent: "implementer", model: deepseekHighModel, advisor: astraXhighModel, reports: "none" },
       { agent: "patterns", model: deepseekHighModel, advisor: glm53HighModel },
@@ -489,7 +489,7 @@ export const builtInPipelines: Record<string, PipelineSpec> = {
           improve: {
             briefStep: "fix",
             steps: [
-              // The directed fixer, on DeepSeek V4 Flash advised by Astra 6 (extra
+              // The directed fixer, on DeepSeek V4.1 Flash advised by Astra 6 (extra
               // high). It alone receives the score brief (by step name). diff:
               // true is load-bearing: as the fragment's first step it would
               // otherwise default to no diff.
@@ -520,7 +520,7 @@ export const builtInPipelines: Record<string, PipelineSpec> = {
   // Report-only audits on two flash models, followed by independent scoring.
   review: {
     description:
-      "Report-only PR review on ultra-cheap models: scope, parallel audits (DeepSeek V4 Flash + GLM 5.3 Flash) and report on flash models; the scoring uses GLM 5.3 high + Grok 4.6 high and the score consensus stays on GLM 5.3 high. Makes no changes.",
+      "Report-only PR review on ultra-cheap models: scope, parallel audits (DeepSeek V4.1 Flash + GLM 5.3 Flash) and report on flash models; the scoring uses GLM 5.3 high + Grok 4.6 high and the score consensus stays on GLM 5.3 high. Makes no changes.",
     defaultPrompt: "Review the current branch against its base and report prioritized findings with a verified quality score.",
     suggestedPrompts: ["Review the open PR for this branch", "Review only the last commit's diff"],
     steps: [

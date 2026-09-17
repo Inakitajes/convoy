@@ -287,7 +287,7 @@ defaults:
   # maxConcurrentAgents: 30 # optional: cap agents running at once within a parallel group
   # baseRef: main # optional: when unset, convoy auto-detects (origin default branch, else main/master/develop/trunk, else current branch)
   # pipeline: full-cycle
-  # branchNameModel: openrouter/deepseek/deepseek-v4-flash-0731 # optional: model that names worktree branches
+  # branchNameModel: openrouter/deepseek/deepseek-v4.1-flash # optional: model that names worktree branches
   # commitMessageModel: openai/gpt-5.6-luna # optional: model that writes the conventional commit message for automatic run compaction and close's squash-merge commit
   # worktree: true # optional: force a fresh branch + worktree for every run; false always runs in the current tree. Unset decides per branch: isolate on a trunk (main/master/develop/trunk or the detected base), run in place on any other branch
   # worktreeLocation: ~/dev/worktrees/{repo}/{branch} # optional: where isolated worktrees are created ({repo}/{branch} placeholders, ~ = home; the branch slug is appended when {branch} is missing). A marker in the repo's AGENTS.md/README.md outranks this; unusable locations fall back to ~/.convoy/worktrees
@@ -347,7 +347,7 @@ defaults:
 # The \`implement\` pipeline is inlined below as an editable starting point; redefining a name here overrides the built-in.
 pipelines:
   implement:
-    description: Advised implementation on DeepSeek V4 Flash consulting Astra 6, then pattern/security audits, design polish, tests, and a one-page run recap
+    description: Advised implementation on DeepSeek V4.1 Flash consulting Astra 6, then pattern/security audits, design polish, tests, and a one-page run recap
     # defaultPrompt and suggestedPrompts are optional. A defaultPrompt is used
     # when the pipeline runs without an explicit prompt — the launcher prefills
     # its field and \`convoy -p <pipeline>\` falls back to it — and the
