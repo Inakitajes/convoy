@@ -79,11 +79,11 @@ describe("built-in implement pipeline", () => {
         .map((step) => [step.name, step]),
     )
 
-    expect(byName.implementer).toMatchObject({ model: "openrouter/deepseek/deepseek-v4-flash-0731", variant: "high" })
-    expect(byName.patterns).toMatchObject({ model: "openrouter/deepseek/deepseek-v4-flash-0731", variant: "high" })
+    expect(byName.implementer).toMatchObject({ model: "openrouter/deepseek/deepseek-v4.1-flash", variant: "high" })
+    expect(byName.patterns).toMatchObject({ model: "openrouter/deepseek/deepseek-v4.1-flash", variant: "high" })
     expect(byName.security).toMatchObject({ model: "openrouter/z-ai/glm-5.3-flash", variant: "high" })
     expect(byName.design).toMatchObject({ model: "openrouter/z-ai/glm-5.3-flash", variant: "high" })
-    expect(byName.tests).toMatchObject({ model: "openrouter/deepseek/deepseek-v4-flash-0731", variant: "high" })
+    expect(byName.tests).toMatchObject({ model: "openrouter/deepseek/deepseek-v4.1-flash", variant: "high" })
   })
 
   test("advises only the implementation phase with Astra xhigh", () => {
@@ -134,7 +134,7 @@ describe("built-in implement pipeline", () => {
     const recap = byName["run-report"]
     expect(recap).toMatchObject({
       agentName: "run-reporter",
-      model: "openrouter/deepseek/deepseek-v4-flash-0731",
+      model: "openrouter/deepseek/deepseek-v4.1-flash",
       variant: "high",
       readOnly: true,
       inputDiff: false,
@@ -229,13 +229,13 @@ describe("default pipeline", () => {
         .steps.filter((step): step is AgentStep => step.type === "agent")
         .map((step) => [step.name, step]),
     )
-    expect(prefix.implementer).toMatchObject({ model: "openrouter/deepseek/deepseek-v4-flash-0731", variant: "high" })
-    expect(prefix.patterns).toMatchObject({ model: "openrouter/deepseek/deepseek-v4-flash-0731", variant: "high" })
+    expect(prefix.implementer).toMatchObject({ model: "openrouter/deepseek/deepseek-v4.1-flash", variant: "high" })
+    expect(prefix.patterns).toMatchObject({ model: "openrouter/deepseek/deepseek-v4.1-flash", variant: "high" })
     expect(prefix.security).toMatchObject({ model: "openrouter/z-ai/glm-5.3-flash", variant: "high" })
     const consensus = defaultPipeline().goalPlan!.measure.steps.find((step) => step.name === "score-report")
     expect(consensus).toMatchObject({ model: "openai/gpt-5.6-sol", variant: "xhigh", verify: true })
     const [fix] = defaultPipeline().goalPlan!.improve.steps
-    expect(fix).toMatchObject({ model: "openrouter/deepseek/deepseek-v4-flash-0731", variant: "high" })
+    expect(fix).toMatchObject({ model: "openrouter/deepseek/deepseek-v4.1-flash", variant: "high" })
   })
 })
 
@@ -268,7 +268,7 @@ describe("built-in ship pipeline", () => {
   test("syncs the base in before anything reads the diff, so the review describes the merged result", () => {
     const [sync] = shipSteps()
 
-    expect(sync).toMatchObject({ agentName: "sync-with-base", model: "openrouter/deepseek/deepseek-v4-flash-0731", variant: "high" })
+    expect(sync).toMatchObject({ agentName: "sync-with-base", model: "openrouter/deepseek/deepseek-v4.1-flash", variant: "high" })
     // The merge writes to the repository: goal mode refuses a report-only
     // pipeline, so this step is also what makes ship goal-eligible.
     expect(sync?.readOnly).toBeFalsy()
@@ -281,7 +281,7 @@ describe("built-in ship pipeline", () => {
       const fan = shipSteps().filter((step) => step.stepName === base)
       expect(fan).toHaveLength(2)
       expect(fan.map((step) => step.model)).toEqual([
-        "openrouter/deepseek/deepseek-v4-flash-0731",
+        "openrouter/deepseek/deepseek-v4.1-flash",
         "openrouter/z-ai/glm-5.3-flash",
       ])
       expect(fan.every((step) => step.readOnly)).toBe(true)
@@ -295,7 +295,7 @@ describe("built-in ship pipeline", () => {
     expect(byName.triage).toMatchObject({ agentName: "review-adversary", model: "openrouter/z-ai/glm-5.3", variant: "high", readOnly: true })
     expect(byName.fixes).toMatchObject({
       agentName: "review-fixer",
-      model: "openrouter/deepseek/deepseek-v4-flash-0731",
+      model: "openrouter/deepseek/deepseek-v4.1-flash",
       variant: "high",
       advisor: "openai/gpt-6-astra",
       advisorVariant: "xhigh",
@@ -319,7 +319,7 @@ describe("built-in ship pipeline", () => {
     const [fix] = goal.improve.steps
 
     expect(goal.improve.steps.map((step) => step.name)).toEqual(["fix"])
-    expect(fix).toMatchObject({ agentName: "goal-fixer", model: "openrouter/deepseek/deepseek-v4-flash-0731", variant: "high", inputDiff: true, prdHistory: true })
+    expect(fix).toMatchObject({ agentName: "goal-fixer", model: "openrouter/deepseek/deepseek-v4.1-flash", variant: "high", inputDiff: true, prdHistory: true })
     expect(fix?.advisor).toBe("openai/gpt-6-astra")
     expect(fix?.readOnly).toBeFalsy()
   })
@@ -405,11 +405,11 @@ describe("built-in review pipeline", () => {
   test("scopes, runs the three audits fanned across two models, synthesizes a findings report, then scores", () => {
     expect(stepNames(scored())).toEqual([
       "scope",
-      "clean-code__openrouter-deepseek-deepseek-v4-flash-0731-high",
+      "clean-code__openrouter-deepseek-deepseek-v4-1-flash-high",
       "clean-code__openrouter-z-ai-glm-5-3-flash-high",
-      "security__openrouter-deepseek-deepseek-v4-flash-0731-high",
+      "security__openrouter-deepseek-deepseek-v4-1-flash-high",
       "security__openrouter-z-ai-glm-5-3-flash-high",
-      "bugs__openrouter-deepseek-deepseek-v4-flash-0731-high",
+      "bugs__openrouter-deepseek-deepseek-v4-1-flash-high",
       "bugs__openrouter-z-ai-glm-5-3-flash-high",
       "report",
       "score__openrouter-z-ai-glm-5-3-high",
@@ -424,11 +424,11 @@ describe("built-in review pipeline", () => {
     expect(findings?.inputFiles).toEqual([
       "prd.md",
       "reports/scope.md",
-      "reports/clean-code__openrouter-deepseek-deepseek-v4-flash-0731-high.md",
+      "reports/clean-code__openrouter-deepseek-deepseek-v4-1-flash-high.md",
       "reports/clean-code__openrouter-z-ai-glm-5-3-flash-high.md",
-      "reports/security__openrouter-deepseek-deepseek-v4-flash-0731-high.md",
+      "reports/security__openrouter-deepseek-deepseek-v4-1-flash-high.md",
       "reports/security__openrouter-z-ai-glm-5-3-flash-high.md",
-      "reports/bugs__openrouter-deepseek-deepseek-v4-flash-0731-high.md",
+      "reports/bugs__openrouter-deepseek-deepseek-v4-1-flash-high.md",
       "reports/bugs__openrouter-z-ai-glm-5-3-flash-high.md",
     ])
 
@@ -438,11 +438,11 @@ describe("built-in review pipeline", () => {
     expect(report?.inputFiles).toEqual([
       "prd.md",
       "reports/scope.md",
-      "reports/clean-code__openrouter-deepseek-deepseek-v4-flash-0731-high.md",
+      "reports/clean-code__openrouter-deepseek-deepseek-v4-1-flash-high.md",
       "reports/clean-code__openrouter-z-ai-glm-5-3-flash-high.md",
-      "reports/security__openrouter-deepseek-deepseek-v4-flash-0731-high.md",
+      "reports/security__openrouter-deepseek-deepseek-v4-1-flash-high.md",
       "reports/security__openrouter-z-ai-glm-5-3-flash-high.md",
-      "reports/bugs__openrouter-deepseek-deepseek-v4-flash-0731-high.md",
+      "reports/bugs__openrouter-deepseek-deepseek-v4-1-flash-high.md",
       "reports/bugs__openrouter-z-ai-glm-5-3-flash-high.md",
       "reports/report.md",
       "reports/score__openrouter-z-ai-glm-5-3-high.md",
@@ -515,15 +515,15 @@ describe("review model choices", () => {
     expect(scope).toMatchObject({ agentName: "review-scope", readOnly: true, verify: true })
   })
 
-  test("runs entirely on low-cost models: DeepSeek V4 Flash scopes, audits, and reports, and the scoring stays on GLM 5.3 + Grok 4.6", () => {
+  test("runs entirely on low-cost models: DeepSeek V4.1 Flash scopes, audits, and reports, and the scoring stays on GLM 5.3 + Grok 4.6", () => {
     const pipeline = review()
     expect(stepNames(pipeline)).toEqual([
       "scope",
-      "clean-code__openrouter-deepseek-deepseek-v4-flash-0731-high",
+      "clean-code__openrouter-deepseek-deepseek-v4-1-flash-high",
       "clean-code__openrouter-z-ai-glm-5-3-flash-high",
-      "security__openrouter-deepseek-deepseek-v4-flash-0731-high",
+      "security__openrouter-deepseek-deepseek-v4-1-flash-high",
       "security__openrouter-z-ai-glm-5-3-flash-high",
-      "bugs__openrouter-deepseek-deepseek-v4-flash-0731-high",
+      "bugs__openrouter-deepseek-deepseek-v4-1-flash-high",
       "bugs__openrouter-z-ai-glm-5-3-flash-high",
       "report",
       "score__openrouter-z-ai-glm-5-3-high",
@@ -534,16 +534,16 @@ describe("review model choices", () => {
     const byName = Object.fromEntries(
       pipeline.steps.filter((step): step is AgentStep => step.type === "agent").map((step) => [step.name, step]),
     )
-    expect(byName.scope?.model).toBe("openrouter/deepseek/deepseek-v4-flash-0731")
-    expect(byName.report?.model).toBe("openrouter/deepseek/deepseek-v4-flash-0731")
+    expect(byName.scope?.model).toBe("openrouter/deepseek/deepseek-v4.1-flash")
+    expect(byName.report?.model).toBe("openrouter/deepseek/deepseek-v4.1-flash")
     expect(byName.report?.inputFiles).toEqual([
       "prd.md",
       "reports/scope.md",
-      "reports/clean-code__openrouter-deepseek-deepseek-v4-flash-0731-high.md",
+      "reports/clean-code__openrouter-deepseek-deepseek-v4-1-flash-high.md",
       "reports/clean-code__openrouter-z-ai-glm-5-3-flash-high.md",
-      "reports/security__openrouter-deepseek-deepseek-v4-flash-0731-high.md",
+      "reports/security__openrouter-deepseek-deepseek-v4-1-flash-high.md",
       "reports/security__openrouter-z-ai-glm-5-3-flash-high.md",
-      "reports/bugs__openrouter-deepseek-deepseek-v4-flash-0731-high.md",
+      "reports/bugs__openrouter-deepseek-deepseek-v4-1-flash-high.md",
       "reports/bugs__openrouter-z-ai-glm-5-3-flash-high.md",
     ])
   })

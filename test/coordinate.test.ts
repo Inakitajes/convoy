@@ -294,15 +294,15 @@ describe("runCoordinateBoot", () => {
     const unresolved = advisedImplementerStep()
     const resolved = {
       ...unresolved,
-      model: "openrouter/deepseek/deepseek-v4-flash-0731",
+      model: "openrouter/deepseek/deepseek-v4.1-flash",
       resolvedModel: {
         configured: "nan/deepseek-v4-flash#high",
         logical: "nan/deepseek-v4-flash#high",
         gateway: "nitro" as const,
         providerID: "openrouter",
-        modelID: "deepseek/deepseek-v4-flash-0731",
+        modelID: "deepseek/deepseek-v4.1-flash",
         variant: "high",
-        target: "openrouter/deepseek/deepseek-v4-flash-0731#high",
+        target: "openrouter/deepseek/deepseek-v4.1-flash#high",
       },
       resolvedAdvisor: {
         configured: "openrouter/x-ai/grok-4.6#high",

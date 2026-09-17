@@ -396,10 +396,10 @@ test("throughputRoutedModels collects the run's OpenRouter models, deduplicated"
     { providerID: "openrouter", modelID: "z-ai/glm-5.2" },
     { providerID: "openrouter", modelID: "anthropic/claude-opus-5" },
   ])
-  expect(throughputRoutedModels(routed, { providerID: "openrouter", modelID: "deepseek/deepseek-v4-flash-0731" })).toEqual([
+  expect(throughputRoutedModels(routed, { providerID: "openrouter", modelID: "deepseek/deepseek-v4.1-flash" })).toEqual([
     { providerID: "openrouter", modelID: "z-ai/glm-5.2" },
     { providerID: "openrouter", modelID: "anthropic/claude-opus-5" },
-    { providerID: "openrouter", modelID: "deepseek/deepseek-v4-flash-0731" },
+    { providerID: "openrouter", modelID: "deepseek/deepseek-v4.1-flash" },
   ])
   expect(throughputRoutedModels(routed, { providerID: "openai", modelID: "gpt-5.6-sol" })).toHaveLength(2)
   expect(throughputRoutedModels({ name: "empty", steps: [] })).toEqual([])

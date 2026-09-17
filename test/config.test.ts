@@ -1156,7 +1156,7 @@ describe("default config init", () => {
     expect(body).toContain("# maxConcurrentAgents: 30")
     expect(body).toContain("# baseRef: main")
     expect(body).toContain("# pipeline: full-cycle")
-    expect(body).toContain("# branchNameModel: openrouter/deepseek/deepseek-v4-flash-0731")
+    expect(body).toContain("# branchNameModel: openrouter/deepseek/deepseek-v4.1-flash")
     expect(body).toContain("# hooks:")
     expect(body).toContain("#           command: gh pr create --fill")
     expect(body).toContain("# agents:")

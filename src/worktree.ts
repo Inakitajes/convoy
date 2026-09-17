@@ -49,7 +49,7 @@ export type BranchNameProposal = {
 }
 
 /** Cheap, fast model used to synthesize a branch name from the prompt. */
-export const defaultBranchNameModel = "openrouter/deepseek/deepseek-v4-flash-0731"
+export const defaultBranchNameModel = "openrouter/deepseek/deepseek-v4.1-flash"
 
 /** Registered so the namer replaces opencode's default coding agent instead of merely appending to it. */
 const namerAgentName = "convoy-branch-namer"

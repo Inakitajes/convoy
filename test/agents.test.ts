@@ -277,12 +277,12 @@ describe("throughput routing in the opencode config", () => {
     ], undefined, {
       throughputModels: [
         { providerID: "openrouter", modelID: "z-ai/glm-5.3" },
-        { providerID: "openrouter", modelID: "deepseek/deepseek-v4-flash-0731" },
+        { providerID: "openrouter", modelID: "deepseek/deepseek-v4.1-flash" },
       ],
     })
 
     expect(config.provider?.openrouter?.models?.["z-ai/glm-5.3"]).toEqual({ options: { provider: { sort: "throughput" } } })
-    expect(config.provider?.openrouter?.models?.["deepseek/deepseek-v4-flash-0731"]).toEqual({ options: { provider: { sort: "throughput" } } })
+    expect(config.provider?.openrouter?.models?.["deepseek/deepseek-v4.1-flash"]).toEqual({ options: { provider: { sort: "throughput" } } })
     // Options-only entries: no name or limit is invented over the catalog's real model.
     expect(config.provider?.openrouter?.models?.["z-ai/glm-5.3"]?.name).toBeUndefined()
     expect(config.provider?.openrouter?.models?.["z-ai/glm-5.3"]?.limit).toBeUndefined()
