@@ -19,7 +19,7 @@ const kimiModel = "openrouter/moonshotai/kimi-k3"
 const deepseekModel = "openrouter/deepseek/deepseek-v4.1-flash"
 /** DeepSeek V4.1 Flash on OpenRouter with reasoning raised: used for writing, flash audits and run recaps. */
 const deepseekHighModel = `${deepseekModel}#high`
-/** GPT 5.6 Sol: the consensus reporter for full-cycle and the hunter pipelines at xhigh. */
+/** GPT 5.6 Sol: the hunter pipeline's consensus reporter at xhigh. */
 const solModel = "openai/gpt-5.6-sol"
 const solXhighModel = `${solModel}#xhigh`
 /** GLM 5.3 Flash with reasoning raised: the security and design model for the implementation pipelines. */
@@ -475,7 +475,7 @@ export const builtInPipelines: Record<string, PipelineSpec> = {
   // The default combines implementation with a terminal, independently scored goal loop.
   "full-cycle": {
     description:
-      "Implement with DeepSeek V4.1 Flash and GLM 5.3 Flash, advised by Astra 6 and GLM 5.3, then measure with Grok and GLM and a verified Sol consensus; fix gaps up to five times to reach 90/100.",
+      "Implement with DeepSeek V4.1 Flash and GLM 5.3 Flash, advised by Astra 6 and GLM 5.3, then measure with Grok and GLM and a verified GLM consensus; fix gaps up to five times to reach 90/100.",
     steps: [
       { agent: "implementer", model: deepseekHighModel, advisor: astraXhighModel, reports: "none" },
       { agent: "patterns", model: deepseekHighModel, advisor: glm53HighModel },
@@ -510,7 +510,7 @@ export const builtInPipelines: Record<string, PipelineSpec> = {
               // The consensus sees only the fresh scorer reports, never the
               // fixer's, so its measurement cannot anchor on the number it is
               // reconciling.
-              { agent: "quality-score-report", name: "score-report", model: solXhighModel, reports: ["score"], verify: true, diff: true, prdHistory: true },
+              { agent: "quality-score-report", name: "score-report", model: glm53HighModel, reports: ["score"], verify: true, diff: true, prdHistory: true },
             ],
           },
         },

@@ -27,7 +27,7 @@ All model IDs below are public provider IDs. The former local NAN models use the
 | `design` | GLM 5.3 Flash · high | GPT 6 Astra · xhigh |
 | `tests` | DeepSeek V4.1 Flash · high | GLM 5.3 · high |
 | Goal: independent scorers | Grok 4.6 · high + GLM 5.3 · high | — |
-| Goal: verified consensus | GPT 5.6 Sol · xhigh | — |
+| Goal: verified consensus | GLM 5.3 · high | — |
 | Goal: targeted fixes | DeepSeek V4.1 Flash · high | GPT 6 Astra · xhigh |
 
 The goal measures first, then fixes only reported gaps. It stops at **90/100**, after **five fix rounds**, or on the configured plateau limit (three rounds by default). A run that hits a limit can finish below the target; inspect its final score. Scorers read the original requirements and current diff without previous reports; the consensus reads only the current scorer reports and verifies their claims.

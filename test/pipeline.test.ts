@@ -233,7 +233,7 @@ describe("default pipeline", () => {
     expect(prefix.patterns).toMatchObject({ model: "openrouter/deepseek/deepseek-v4.1-flash", variant: "high" })
     expect(prefix.security).toMatchObject({ model: "openrouter/z-ai/glm-5.3-flash", variant: "high" })
     const consensus = defaultPipeline().goalPlan!.measure.steps.find((step) => step.name === "score-report")
-    expect(consensus).toMatchObject({ model: "openai/gpt-5.6-sol", variant: "xhigh", verify: true })
+    expect(consensus).toMatchObject({ model: "openrouter/z-ai/glm-5.3", variant: "high", verify: true })
     const [fix] = defaultPipeline().goalPlan!.improve.steps
     expect(fix).toMatchObject({ model: "openrouter/deepseek/deepseek-v4.1-flash", variant: "high" })
   })

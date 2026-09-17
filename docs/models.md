@@ -21,7 +21,7 @@ opencode models openai
 opencode models anthropic
 ```
 
-To use different providers, authenticate them in OpenCode and select models as `provider/model`. The default `full-cycle` uses OpenRouter for DeepSeek, GLM and Grok, and OpenAI for Astra and Sol. `implement` uses the same writing models, with advice only on implementation and a closing DeepSeek recap. See the [default pipeline](pipelines.md#the-default-pipeline-full-cycle) for the step-by-step model choices.
+To use different providers, authenticate them in OpenCode and select models as `provider/model`. The default `full-cycle` uses OpenRouter for DeepSeek, GLM and Grok, and OpenAI for Astra. `implement` uses the same writing models, with advice only on implementation and a closing DeepSeek recap. See the [default pipeline](pipelines.md#the-default-pipeline-full-cycle) for the step-by-step model choices.
 
 ## Model gateways
 
