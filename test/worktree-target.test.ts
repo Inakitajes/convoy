@@ -153,7 +153,12 @@ describe("validateCheckoutTarget", () => {
     const wrong = await validateCheckoutTarget(observed, { requireBranch: "feat/other" })
     expect(wrong.ok).toBe(false)
     if (!wrong.ok) expect(wrong.code).toBe("branch-changed")
-    const staleHead = await validateCheckoutTarget(observed, { requireHead: `${observed.head!.slice(0, 39)}0`.padEnd(40, "0") })
+    // A head that differs from the observed one in exactly one hex digit.
+    // Flip the last character explicitly: assuming it is not already "0" made
+    // this test fail ~1/16 of runs whenever the fixture commit's SHA ended in 0.
+    const head = observed.head!
+    const flipped = `${head.slice(0, -1)}${head.at(-1) === "0" ? "1" : "0"}`
+    const staleHead = await validateCheckoutTarget(observed, { requireHead: flipped })
     expect(staleHead.ok).toBe(false)
     if (!staleHead.ok) expect(staleHead.code).toBe("head-changed")
   })
