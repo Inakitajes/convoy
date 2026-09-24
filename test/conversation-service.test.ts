@@ -18,6 +18,7 @@ import {
 } from "../src/conversation-service"
 import { bootOpencodeServerFrom, connectOpencode } from "../src/opencode"
 import { createAuthoringConversation, validateAuthoringSession } from "../src/conversations"
+import { defaultReadinessTimeoutMs } from "../src/managed-server"
 
 /**
  * Task 4.3 (capability work-conversations, design D5): the authoring
@@ -311,6 +312,17 @@ describe("conversation-service explicit stop decisions (task 4.6)", () => {
   })
 })
 
+/**
+ * The real-server tests boot the OpenCode CLI, which takes several seconds on
+ * a cold, loaded CI runner — already ~3s on a warm one, over Bun's 5s default
+ * when the runner is busy. They opt into a longer timeout, kept above the boot
+ * readiness budget so a genuinely slow boot reports its own bounded error
+ * instead of being cut off mid-boot (the macos-14 flake: the runner's 5s
+ * default aborted the boot, whose pending rejection then surfaced as an
+ * unhandled ManagedServerStartupError / SIGTERM between tests).
+ */
+const REAL_SERVER_TEST_TIMEOUT_MS = defaultReadinessTimeoutMs + 10_000
+
 describe("conversation-service shutdown boundaries (task 4.3, real server)", () => {
   let realRepoDir: string
   let realCommonDir: string
@@ -354,7 +366,7 @@ describe("conversation-service shutdown boundaries (task 4.3, real server)", () 
       // Explicit stop with idle evidence (a fresh session is quiescent).
       await stopConversationService({ commonDir: realCommonDir, activity: "idle" })
     }
-  })
+  }, REAL_SERVER_TEST_TIMEOUT_MS)
 
   test("a client view detaching keeps the service alive and sessions resolvable", async () => {
     const service = await ensureConversationService({ commonDir: realCommonDir, checkout: realRepoDir })
@@ -384,7 +396,7 @@ describe("conversation-service shutdown boundaries (task 4.3, real server)", () 
     if (fresh.status !== "live") return
     expect(fresh.reused).toBe(false)
     await stopConversationService({ commonDir: realCommonDir, activity: "idle" })
-  })
+  }, REAL_SERVER_TEST_TIMEOUT_MS)
 })
 
 describe("conversation-service publication failure (design D6)", () => {
