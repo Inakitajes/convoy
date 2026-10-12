@@ -42,6 +42,12 @@ export type ConversationServiceRecord = {
   bootCheckout: string
   startedAt: number
   /**
+   * The V2 per-boot HTTP Basic password for the recorded server (design D2).
+   * Optional and additive: legacy records omit it, and clients connecting to a
+   * record without one simply fail to authenticate against a V2 server.
+   */
+  password?: string
+  /**
    * Kernel birth identity of the recorded child for servers booted by this
    * build (design D6). Optional and additive: legacy records simply omit it,
    * and an explicit stop only re-verifies it when present so a recycled PID
@@ -70,6 +76,7 @@ export function validateConversationServiceRecord(value: unknown): ConversationS
     pid: record.pid,
     bootCheckout: record.bootCheckout,
     startedAt: record.startedAt,
+    ...(typeof record.password === "string" && record.password !== "" ? { password: record.password } : {}),
     ...(typeof record.childBirth === "string" && record.childBirth !== "" ? { childBirth: record.childBirth } : {}),
   }
 }
@@ -141,7 +148,7 @@ export async function probeConversationService(record: ConversationServiceRecord
 
 /** The outcome of ensuring the repository's authoring service. */
 export type ConversationServiceOutcome =
-  | { status: "live"; url: string; record: ConversationServiceRecord; reused: boolean }
+  | { status: "live"; url: string; password?: string; record: ConversationServiceRecord; reused: boolean }
   | { status: "uncertain"; reason: string; record?: ConversationServiceRecord }
   | { status: "unavailable"; reason: string }
 
@@ -159,7 +166,7 @@ export async function ensureConversationService(input: {
   checkout: string
   bootTimeoutMs?: number
   /** Injected boot (tests); defaults to the detached OpenCode server boot. */
-  boot?: (checkout: string, timeoutMs?: number) => Promise<{ url: string; close(): void | Promise<unknown>; pid: number; identity?: ProcessIdentity }>
+  boot?: (checkout: string, timeoutMs?: number) => Promise<{ url: string; password?: string; close(): void | Promise<unknown>; pid: number; identity?: ProcessIdentity }>
   /** Injected probe (tests); defaults to the PID + URL liveness probe. */
   probe?: (record: ConversationServiceRecord) => Promise<"live" | "stale" | "uncertain">
 }): Promise<ConversationServiceOutcome> {
@@ -176,7 +183,7 @@ export async function ensureConversationService(input: {
     if (read.status === "found") {
       const liveness = await probe(read.value)
       if (liveness === "live") {
-        outcome = { status: "live", url: read.value.url, record: read.value, reused: true }
+        outcome = { status: "live", url: read.value.url, ...(read.value.password ? { password: read.value.password } : {}), record: read.value, reused: true }
         return
       }
       if (liveness === "uncertain") {
@@ -195,7 +202,7 @@ export async function ensureConversationService(input: {
       outcome = { status: "uncertain", reason: `the authoring service discovery record is ${read.status === "unreadable" ? `unreadable: ${read.reason}` : read.status} — inspect ${discoveryPath(input.commonDir)} before conversation work` }
       return
     }
-    let booted: { url: string; close(): void | Promise<unknown>; pid: number; identity?: ProcessIdentity }
+    let booted: { url: string; password?: string; close(): void | Promise<unknown>; pid: number; identity?: ProcessIdentity }
     try {
       booted = await boot(input.checkout, input.bootTimeoutMs)
     } catch (error) {
@@ -208,12 +215,14 @@ export async function ensureConversationService(input: {
       pid: booted.pid,
       bootCheckout: input.checkout,
       startedAt: Date.now(),
+      ...(booted.password ? { password: booted.password } : {}),
       // Retain the child's kernel birth identity for newly booted services so
       // the guarded stop can refuse a recycled PID (design D6).
       ...(booted.identity?.birth ? { childBirth: booted.identity.birth } : {}),
     }
     try {
-      await writeJsonFile(discoveryPath(input.commonDir), record)
+      // Owner-only: the record carries the server's password.
+      await writeJsonFile(discoveryPath(input.commonDir), record, { mode: 0o600 })
     } catch (error) {
       // An unpublished child has no discovery record to control its lifetime:
       // close it rather than leak an unreachable server (design D6).
@@ -221,7 +230,7 @@ export async function ensureConversationService(input: {
       outcome = { status: "unavailable", reason: `the authoring service discovery record could not be written: ${error instanceof Error ? error.message : String(error)}` }
       return
     }
-    outcome = { status: "live", url: booted.url, record, reused: false }
+    outcome = { status: "live", url: booted.url, ...(booted.password ? { password: booted.password } : {}), record, reused: false }
   })
   return outcome
 }

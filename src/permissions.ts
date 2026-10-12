@@ -1,8 +1,8 @@
 import { stdout } from "node:process"
 
-import type { OpencodeClient } from "@opencode-ai/sdk/v2"
+import type { OpencodeClient } from "./opencode-client"
 
-import { getSessionEventHub } from "./event-hub"
+import { getSessionEventHub, payloadProperties } from "./event-hub"
 import { log } from "./log"
 import { writeReportToolName } from "./report"
 import { noopProgress, type AutoAccept, type PermissionPromptInfo, type PermissionReply, type ProgressUI } from "./progress"
@@ -76,6 +76,8 @@ export type StartGateOptions = {
   terminalInput?: TerminalInput
   /** The opencode server URL for [i] inspect to attach to. Absent in readline fallback on non-macOS. */
   serverUrl?: string
+  /** The server's generated password, which the inspect window's client needs to connect. */
+  serverPassword?: string
 }
 
 export function startPermissionGate(options: StartGateOptions): PermissionGate {
@@ -99,13 +101,13 @@ export function startPermissionGate(options: StartGateOptions): PermissionGate {
   const hub = getSessionEventHub(options.client, options.directory)
   const unsubscribe = hub.onAny((payload) => {
     if (controller.signal.aborted) return
-    if (!isPermissionAsked(payload)) return
-    const request = payload.properties
+    const request = permissionRequestFrom(payload)
+    if (!request) return
     if (handled.has(request.id)) return
     if (pausedAll || pausedSessions.has(request.sessionID)) return
     handled.add(request.id)
     queue(() =>
-      handleRequest(options.client, request, options.interactive, progress, options.directory, options.autoAccept, options.judgeModel, controller.signal, options.advisorCheckpoint, terminalInput, options.serverUrl),
+      handleRequest(options.client, request, options.interactive, progress, options.directory, options.autoAccept, options.judgeModel, controller.signal, options.advisorCheckpoint, terminalInput, options.serverUrl, options.serverPassword),
     )
   })
 
@@ -125,12 +127,29 @@ export function startPermissionGate(options: StartGateOptions): PermissionGate {
   }
 }
 
-function isPermissionAsked(payload: unknown): payload is { type: "permission.asked"; properties: PermissionRequest } {
-  if (!payload || typeof payload !== "object") return false
-  const type = (payload as { type?: unknown }).type
-  if (type !== "permission.asked") return false
-  const properties = (payload as { properties?: unknown }).properties
-  return Boolean(properties && typeof properties === "object" && "id" in properties)
+/**
+ * Normalizes a `permission.asked` event into Convoy's request shape. V1 nests
+ * the request under `properties` and names the fields `permission`/`patterns`;
+ * V2 puts it under `data` and names them `action`/`resources`.
+ */
+export function permissionRequestFrom(payload: unknown): PermissionRequest | undefined {
+  if (!payload || typeof payload !== "object") return undefined
+  if ((payload as { type?: unknown }).type !== "permission.asked") return undefined
+  const raw = payloadProperties(payload)
+  if (!raw || typeof raw !== "object" || !("id" in raw)) return undefined
+  const record = raw as Record<string, unknown>
+  const strings = (value: unknown): string[] => (Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [])
+  const permission = typeof record.permission === "string" ? record.permission : typeof record.action === "string" ? record.action : ""
+  const patterns = record.patterns !== undefined ? strings(record.patterns) : strings(record.resources)
+  return {
+    id: typeof record.id === "string" ? record.id : String(record.id),
+    sessionID: typeof record.sessionID === "string" ? record.sessionID : "",
+    permission,
+    patterns,
+    metadata: record.metadata && typeof record.metadata === "object" ? (record.metadata as Record<string, unknown>) : {},
+    always: strings(record.always),
+    ...(record.tool && typeof record.tool === "object" ? { tool: record.tool as { messageID: string; callID: string } } : {}),
+  }
 }
 
 async function handleRequest(
@@ -145,6 +164,7 @@ async function handleRequest(
   advisorCheckpoint?: AdvisorCheckpoint,
   terminalInput: TerminalInput = createTerminalInput(),
   serverUrl?: string,
+  serverPassword?: string,
 ) {
   const summary = describeRequest(request)
 
@@ -155,12 +175,12 @@ async function handleRequest(
     const tool = pickString(request.metadata, ["tool"]) || request.patterns[0]
     if (tool && doomLoopAllowTools.has(tool)) {
       log.info(`[permission] allowed doom_loop on ${tool}: ${summary}`)
-      await reply(client, request.id, directory, "once")
+      await reply(client, request, directory, "once")
       return
     }
     log.warn(`[permission] denied doom_loop on ${tool ?? "unknown"}: ${summary}`)
     progress.message(`denied doom loop: ${summary}`)
-    await reply(client, request.id, directory, "reject", "Convoy rejected: doom loop on a mutating tool")
+    await reply(client, request, directory, "reject", "Convoy rejected: doom loop on a mutating tool")
     return
   }
 
@@ -172,11 +192,11 @@ async function handleRequest(
     if (decision.action === "advise") {
       log.info(`[permission] advisor checkpoint held the first write: ${summary}`)
       progress.message(`advisor consulted before first write: ${summary}`)
-      await reply(client, request.id, directory, "reject", decision.message)
+      await reply(client, request, directory, "reject", decision.message)
       return
     }
     if (decision.action === "allow") {
-      await reply(client, request.id, directory, "once")
+      await reply(client, request, directory, "once")
       return
     }
   }
@@ -187,7 +207,7 @@ async function handleRequest(
   if (autoAccept?.mode === "all") {
     log.info(`[permission] auto-allowed (auto-accept on): ${summary}`)
     progress.message(`auto-allowed: ${summary}`)
-    await reply(client, request.id, directory, "once")
+    await reply(client, request, directory, "once")
     return
   }
 
@@ -202,7 +222,7 @@ async function handleRequest(
     if (verdict.safe) {
       log.info(`[permission] smart-allowed: ${summary} — ${verdict.reason}`)
       progress.message(`smart-allowed: ${summary} — ${verdict.reason}`)
-      await reply(client, request.id, directory, "once")
+      await reply(client, request, directory, "once")
       return
     }
     log.info(`[permission] smart auto-accept escalating to user: ${summary} — ${verdict.reason}`)
@@ -222,7 +242,7 @@ async function handleRequest(
   if (ask) {
     const answer = await ask(promptInfoForUser(request, judgeReason, verdictReason, judgeModel, client, directory, signal))
     log.info(`[permission] replied ${answer} for ${request.permission}`)
-    await reply(client, request.id, directory, answer, answer === "reject" ? "rejected by user" : undefined)
+    await reply(client, request, directory, answer, answer === "reject" ? "rejected by user" : undefined)
     return
   }
 
@@ -231,7 +251,7 @@ async function handleRequest(
   // a failsafe for unit tests that build a bare gate.
   if (!interactive) {
     log.warn(`[permission] auto-rejecting ${request.permission} (no TTY): ${summary}`)
-    await reply(client, request.id, directory, "reject", "Convoy rejected: non-interactive run")
+    await reply(client, request, directory, "reject", "Convoy rejected: non-interactive run")
     return
   }
 
@@ -264,7 +284,12 @@ async function handleRequest(
           if (serverUrl && request.sessionID) {
             try {
               const { openOpencodeSessionWindow } = await import("./opencode")
-              const backend = await openOpencodeSessionWindow({ url: serverUrl, targetDir: directory, sessionID: request.sessionID })
+              const backend = await openOpencodeSessionWindow({
+                url: serverUrl,
+                ...(serverPassword ? { password: serverPassword } : {}),
+                targetDir: directory,
+                sessionID: request.sessionID,
+              })
               stdout.write(`\nopened session in ${backend}\n\n`)
             } catch (error) {
               stdout.write(`\ncouldn't open session: ${error instanceof Error ? error.message : String(error)}\n\n`)
@@ -283,7 +308,7 @@ async function handleRequest(
     }
   })
   log.info(`[permission] replied ${answer} for ${request.permission}`)
-  await reply(client, request.id, directory, answer, answer === "reject" ? "rejected by user" : undefined)
+  await reply(client, request, directory, answer, answer === "reject" ? "rejected by user" : undefined)
 }
 
 function promptInfo(request: PermissionRequest, judgeReason?: string): PermissionPromptInfo {
@@ -330,11 +355,18 @@ function promptInfoForUser(
   return info
 }
 
-async function reply(client: OpencodeClient, requestID: string, directory: string, choice: Reply, message?: string) {
-  // The reply must carry the same directory scope as the session that asked,
-  // or a server hosting multiple instances routes it to the wrong one.
-  const result = await client.permission.reply({ requestID, directory, reply: choice, ...(message ? { message } : {}) })
-  if (result.error) log.warn(`[permission] reply error for ${requestID}: ${String((result.error as { message?: unknown }).message ?? result.error)}`)
+async function reply(client: OpencodeClient, request: PermissionRequest, directory: string, choice: Reply, message?: string) {
+  // The reply must carry the same session and directory scope as the request
+  // that asked: V2 routes `permission.reply` by sessionID, and a server hosting
+  // multiple instances routes the directory-scoped request to the right one.
+  const result = await client.permission.reply({
+    sessionID: request.sessionID,
+    requestID: request.id,
+    directory,
+    reply: choice,
+    ...(message ? { message } : {}),
+  })
+  if (result.error) log.warn(`[permission] reply error for ${request.id}: ${String((result.error as { message?: unknown }).message ?? result.error)}`)
 }
 
 function describeRequest(request: PermissionRequest) {

@@ -6,11 +6,13 @@ import { addAllAndCommit } from "./git"
 import { recordLedgeredCommit } from "./finalization/ledger"
 import type { CommitLedgerEntry } from "./finalization/types"
 import { log } from "./log"
-import { openInteractiveOpencodeWindow } from "./opencode"
+import { openInteractiveOpencodeWindow, serverPasswordEnv } from "./opencode"
+import { resolveOpencodeBin } from "./opencode-runtime"
 import { noopProgress, type HumanReviewAction, type ProgressUI } from "./progress"
 import type { PermissionGate } from "./permissions"
 import { stepCommitMessageFactory } from "./step-commit"
 import { createTerminalInput, type TerminalInput, TerminalInterrupt } from "./terminal-input"
+import type { ServerAuth } from "./server-auth"
 import type { RunOptions } from "./types"
 import type { Workspace } from "./workspace"
 import type { RunMetadataStore } from "./metadata"
@@ -25,7 +27,7 @@ const defaultHumanReviewGateDeps: HumanReviewGateDeps = { openInteractiveOpencod
 export async function runHumanReviewGate(
   workspace: Workspace,
   options: RunOptions,
-  opencodeUrl: string,
+  server: ServerAuth,
   progress: ProgressUI = noopProgress,
   permissions?: PermissionGate,
   stepName = "human-review",
@@ -85,7 +87,7 @@ export async function runHumanReviewGate(
           // and chooses the next action.
           permissions?.pause()
           try {
-            const opened = await openExternalIteration(options, opencodeUrl, progress, stepName, deps.openInteractiveOpencodeWindow)
+            const opened = await openExternalIteration(options, server, progress, stepName, deps.openInteractiveOpencodeWindow)
             if (opened) {
               action = await askAction()
               continue
@@ -94,10 +96,10 @@ export async function runHumanReviewGate(
             permissions?.resume()
           }
 
-          await runSuspendedInteractiveIteration(options, opencodeUrl, progress, stepName, permissions, deps.runInteractiveOpencode)
+          await runSuspendedInteractiveIteration(options, server, progress, stepName, permissions, deps.runInteractiveOpencode)
           await commitHumanChanges(workspace, options, stepName, metadata)
         } else {
-          await runInteractiveIteration(options, opencodeUrl, stepName, permissions, deps.runInteractiveOpencode)
+          await runInteractiveIteration(options, server, stepName, permissions, deps.runInteractiveOpencode)
           await commitHumanChanges(workspace, options, stepName, metadata)
         }
         action = await askAction()
@@ -221,7 +223,7 @@ export async function askHumanAction({ prompt, allowed, terminalInput }: HumanAc
 
 async function openExternalIteration(
   options: RunOptions,
-  opencodeUrl: string,
+  server: ServerAuth,
   progress: ProgressUI,
   stepName: string,
   openWindow: typeof openInteractiveOpencodeWindow = openInteractiveOpencodeWindow,
@@ -229,7 +231,8 @@ async function openExternalIteration(
   progress.phaseActivity(stepName, "opening OpenCode iteration in a new window", "system")
   try {
     const backend = await openWindow({
-      url: opencodeUrl,
+      url: server.url,
+      ...(server.password ? { password: server.password } : {}),
       targetDir: options.targetDir,
     })
     progress.phaseActivity(stepName, `OpenCode iteration opened in ${backend}; return here and press c to continue`, "system")
@@ -242,7 +245,7 @@ async function openExternalIteration(
 
 async function runSuspendedInteractiveIteration(
   options: RunOptions,
-  opencodeUrl: string,
+  server: ServerAuth,
   progress: ProgressUI,
   stepName: string,
   permissions?: PermissionGate,
@@ -251,7 +254,7 @@ async function runSuspendedInteractiveIteration(
   progress.phaseActivity(stepName, "falling back to interactive OpenCode in this terminal", "system")
   progress.suspend()
   try {
-    await runInteractiveIteration(options, opencodeUrl, stepName, permissions, runInteractive)
+    await runInteractiveIteration(options, server, stepName, permissions, runInteractive)
   } finally {
     progress.resume()
   }
@@ -259,7 +262,7 @@ async function runSuspendedInteractiveIteration(
 
 async function runInteractiveIteration(
   options: RunOptions,
-  opencodeUrl: string,
+  server: ServerAuth,
   stepName: string,
   permissions?: PermissionGate,
   runInteractive: typeof runInteractiveOpencode = runInteractiveOpencode,
@@ -268,24 +271,24 @@ async function runInteractiveIteration(
   // gate must not race it for the same requests.
   permissions?.pause()
   try {
-    await runInteractive(options, opencodeUrl, stepName)
+    await runInteractive(options, server, stepName)
   } finally {
     permissions?.resume()
   }
 }
 
-async function runInteractiveOpencode(options: RunOptions, opencodeUrl: string, stepName = "human") {
+async function runInteractiveOpencode(options: RunOptions, server: ServerAuth, stepName = "human") {
   // Same shape as the windowed path: `run --interactive` refuses to start
-  // without a message, so attach the full TUI to the run's server instead.
-  const args = ["attach", opencodeUrl, "--dir", options.targetDir, "--continue"]
+  // without a message, so connect the full TUI to the run's server instead.
+  const args = [options.targetDir, "--server", server.url, "--continue"]
 
-  log.info(`[${stepName}] handing control to OpenCode (attached to ${opencodeUrl})`)
-  const proc = Bun.spawn(["opencode", ...args], {
+  log.info(`[${stepName}] handing control to OpenCode (connected to ${server.url})`)
+  const proc = Bun.spawn([resolveOpencodeBin(), ...args], {
     cwd: options.targetDir,
     stdin: "inherit",
     stdout: "inherit",
     stderr: "inherit",
-    env: process.env,
+    env: { ...process.env, ...serverPasswordEnv(server.password) },
   })
 
   const code = await proc.exited

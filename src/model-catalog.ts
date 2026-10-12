@@ -1,4 +1,4 @@
-import type { Provider } from "@opencode-ai/sdk/v2"
+import type { Provider } from "./opencode-client"
 
 import { log } from "./log"
 import { startOpencode } from "./opencode"

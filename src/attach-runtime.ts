@@ -5,7 +5,7 @@ import { goalProgressPhases } from "./goal-phases"
 import { readRunMetadata, type PhaseMetadata, type RunMetadata } from "./metadata"
 import { progressPhases, watchSession, backfillSessionTranscript, withGoalPhases, type SessionWatcher } from "./runner"
 
-import type { OpencodeClient } from "@opencode-ai/sdk/v2"
+import type { OpencodeClient } from "./opencode-client"
 import type { GoalLoopView, ProgressPhaseSnapshot, ProgressUI } from "./progress"
 
 const pollMs = 1_000

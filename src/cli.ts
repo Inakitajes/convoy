@@ -1479,7 +1479,7 @@ export async function openCheckoutConversation(input: { launchDir: string; route
 
   const server = await resolveAuthoringServer({ launchDir: input.launchDir, checkout: input.checkout, route: input.route })
   if (server.status === "blocked") return
-  const serviceHandle = server.status === "service" ? { url: server.url } : undefined
+  const serviceHandle = server.status === "service" ? { url: server.url, ...(server.password ? { password: server.password } : {}) } : undefined
 
   // Resume the exactly linked session when a verifiable reference exists
   // (capability work-conversations): the stored reference is navigation
@@ -1567,7 +1567,7 @@ async function openCheckoutConversationExternal(input: { launchDir: string; chec
 
   const serverResolution = await resolveAuthoringServer({ launchDir: input.launchDir, checkout: input.checkout, route: input.route })
   if (serverResolution.status === "blocked") return
-  const serviceHandle = serverResolution.status === "service" ? { url: serverResolution.url } : undefined
+  const serviceHandle = serverResolution.status === "service" ? { url: serverResolution.url, ...(serverResolution.password ? { password: serverResolution.password } : {}) } : undefined
 
   // The external pane presents the same exact session reference as the
   // foreground presentation: a verifiable linked session is reused, never
@@ -1625,12 +1625,12 @@ async function proposeInCheckout(input: { launchDir: string; route: TuiRoute; ch
 
   const serverResolution = await resolveAuthoringServer({ launchDir: input.launchDir, checkout: input.checkout, route: input.route })
   if (serverResolution.status === "blocked") return
-  let serviceHandle: { url: string } | undefined
-  let helper: { url: string; close?(): void | Promise<unknown> } | undefined
+  let serviceHandle: { url: string; password?: string } | undefined
+  let helper: { url: string; password?: string; close?(): void | Promise<unknown> } | undefined
   if (serverResolution.status === "service") {
     // An injected service URL conveys no shutdown right: the independent
     // service owner remains authoritative (design D1).
-    serviceHandle = { url: serverResolution.url }
+    serviceHandle = { url: serverResolution.url, ...(serverResolution.password ? { password: serverResolution.password } : {}) }
   } else {
     const booted = await bootOpencodeServerFrom(input.checkout).catch(() => undefined)
     if (booted) {
@@ -1659,7 +1659,7 @@ async function proposeInCheckout(input: { launchDir: string; route: TuiRoute; ch
   // return, and the independent service is established strictly before the
   // command runs, so no command ever executes under recoverable helper
   // ownership.
-  const outcome = await startProposalCommand(helper ? { kind: "helper", url: serviceHandle.url } : { kind: "independent", url: serviceHandle.url }, {
+  const outcome = await startProposalCommand(helper ? { kind: "helper", url: serviceHandle.url, ...(serviceHandle.password ? { password: serviceHandle.password } : {}) } : { kind: "independent", url: serviceHandle.url, ...(serviceHandle.password ? { password: serviceHandle.password } : {}) }, {
     listCommands: (server) => listAuthoringCommands({ checkout: input.checkout, server }),
     transfer: async () => {
       if (!commonDir) return { status: "unavailable" as const, reason: "this checkout has no repository storage for an independent authoring service" }
@@ -1741,13 +1741,13 @@ async function reportHandoffBlocker(reason: string, remediation: readonly string
  *   unanswerable URL) or its discovery record is unreadable: fail closed and
  *   report, never boot a second server over unverified state.
  */
-async function resolveAuthoringServer(input: { launchDir: string; checkout: string; route?: TuiRoute }): Promise<{ status: "service"; url: string } | { status: "fallback" } | { status: "blocked"; reason: string }> {
+async function resolveAuthoringServer(input: { launchDir: string; checkout: string; route?: TuiRoute }): Promise<{ status: "service"; url: string; password?: string } | { status: "fallback" } | { status: "blocked"; reason: string }> {
   const { repoCommonDir } = await import("./repo-store")
   const commonDir = await repoCommonDir(input.launchDir).catch(() => undefined)
   if (!commonDir) return { status: "fallback" }
   const { ensureConversationService } = await import("./conversation-service")
   const service = await ensureConversationService({ commonDir, checkout: input.checkout }).catch((error: unknown) => ({ status: "unavailable" as const, reason: error instanceof Error ? error.message : String(error) }))
-  if (service.status === "live") return { status: "service", url: service.url }
+  if (service.status === "live") return { status: "service", url: service.url, ...(service.password ? { password: service.password } : {}) }
   if (service.status === "uncertain") {
     await reportHandoffBlocker(service.reason, ["the service is kept running and nothing was booted over it — resolve its state, then retry"], input.route)
     return { status: "blocked", reason: service.reason }
@@ -1789,11 +1789,11 @@ async function releaseAuthoringWriterIfIdle(input: { launchDir: string; checkout
   // discovery failure falls back to the adapter's bounded boot, and either
   // failure reads as "unknown" — which keeps the claim. No blockers are
   // reported here: the release path is bookkeeping, not a user handoff.
-  let serviceHandle: { url: string } | undefined
+  let serviceHandle: { url: string; password?: string } | undefined
   try {
     const { ensureConversationService } = await import("./conversation-service")
     const service = await ensureConversationService({ commonDir, checkout: input.checkout })
-    if (service.status === "live") serviceHandle = { url: service.url }
+    if (service.status === "live") serviceHandle = { url: service.url, ...(service.password ? { password: service.password } : {}) }
   } catch {
     serviceHandle = undefined
   }

@@ -2,7 +2,7 @@ import { copyFile, mkdir, open, readFile, writeFile } from "node:fs/promises"
 import { basename, dirname, isAbsolute, join, relative } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 
-import type { FilePartInput } from "@opencode-ai/sdk/v2"
+import type { FilePartInput } from "./opencode-client"
 
 import { loadAgentPrompt } from "./agents"
 import { log } from "./log"

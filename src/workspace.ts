@@ -90,20 +90,20 @@ export function globalAgentsDir() {
 }
 
 /**
- * A Convoy-owned OpenCode config directory, passed to the server as
- * OPENCODE_CONFIG_DIR so Convoy's `tools/*.ts` shims (including write_report
- * and advisor) are discovered.
- *
- * Convoy-owned rather than the repo's `.opencode/` (which would show up in git
- * status and in the read-only baseline checks) or the user's
- * `~/.config/opencode/` (which would leak the tool into their own sessions).
- * Verified against opencode 1.18.5: the variable is additive, so the user's
- * global config, plugins and MCP servers keep loading exactly as before.
- * Persistent, so the dependency install OpenCode kicks off in such a directory
- * happens once rather than per run.
+ * Writes one V2 plugin package (`<dir>/plugins/<name>/index.ts`): V2 loads a
+ * configured local plugin only from a package directory, not a bare file.
+ * Rewrites only on change, since OpenCode watches plugin sources. Returns the
+ * entry file; its directory is what the config's `plugins` list names.
  */
-export function opencodeConfigDir() {
-  return join(convoyHome(), "opencode")
+export async function writeOpencodePlugin(dir: string, name: string, source: string): Promise<string> {
+  const packageDir = join(dir, "plugins", name)
+  await mkdir(packageDir, { recursive: true, mode: 0o700 })
+  const entry = join(packageDir, "index.ts")
+  const manifest = join(packageDir, "package.json")
+  const manifestSource = `${JSON.stringify({ name: `convoy-${name}`, private: true, type: "module", main: "index.ts" })}\n`
+  if ((await readFile(manifest, "utf8").catch(() => undefined)) !== manifestSource) await writeFile(manifest, manifestSource, { mode: 0o600 })
+  if ((await readFile(entry, "utf8").catch(() => undefined)) !== source) await writeFile(entry, source, { mode: 0o600 })
+  return entry
 }
 
 export function isValidRunID(runID: string) {

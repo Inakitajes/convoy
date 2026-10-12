@@ -1,6 +1,6 @@
-import { describe, expect, test } from "bun:test"
+import { describe, expect, spyOn, test } from "bun:test"
 import { createTestRenderer } from "@opentui/core/testing"
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, dirname } from "node:path"
 
@@ -102,6 +102,14 @@ async function waitForRenderedFrame(
     frame = captureCharFrame()
   }
   throw new Error(`timed out waiting for rendered frame:\n${frame}`)
+}
+
+async function waitUntil(check: () => boolean) {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    if (check()) return
+    await Bun.sleep(5)
+  }
+  throw new Error("timed out waiting for condition")
 }
 
 describe("run dashboard defaults", () => {
@@ -1377,6 +1385,46 @@ describe("permission modal [e] explain and [i] inspect", () => {
       expect(captureCharFrame()).toContain("no live opencode server")
     } finally {
       dashboard.stop()
+    }
+  })
+
+  // The run's V2 server is password-protected: the inspect window's client
+  // gets the password from the run's private server-auth record.
+  test("[i] opens the session with the run server's password", async () => {
+    const runDir = await mkdtemp(join(tmpdir(), "convoy-tui-auth-"))
+    await writeFile(join(runDir, "server-auth.json"), JSON.stringify({ url: "http://127.0.0.1:41234", password: "s3cret" }))
+    const originalPlatform = process.platform
+    const originalTerminal = process.env.CONVOY_TERMINAL
+    Object.defineProperty(process, "platform", { value: "darwin", configurable: true })
+    process.env.CONVOY_TERMINAL = "terminal"
+    const spawn = spyOn(Bun, "spawn").mockImplementation((() => ({ exited: Promise.resolve(0), exitCode: 0, stdout: new Response("").body, stderr: new Response("").body })) as unknown as typeof Bun.spawn)
+    const { dashboard, mockInput, renderOnce } = await createDashboard(200, 40)
+    let staged: string | undefined
+    try {
+      dashboard.start("20260101-000000-abcd", "/repo", runDir)
+      dashboard.serverReady("http://127.0.0.1:41234")
+      void dashboard.askPermission({ id: "p1", permission: "bash", command: "ls", patterns: [], sessionID: "sess-1" })
+      await renderOnce()
+
+      mockInput.pressKey("i")
+      await waitUntil(() => spawn.mock.calls.length > 0)
+
+      const args = spawn.mock.calls[0]![0] as unknown as string[]
+      // The password is staged in a one-shot file, never typed into the command.
+      expect(args.at(-1)).toContain('OPENCODE_PASSWORD=\\"$(cat ')
+      expect(args.at(-1)).not.toContain("s3cret")
+      staged = args.at(-1)!.match(/(\/[^'\s]*convoy-client-auth-[^/'\s]+\/password)/)![1]!
+      expect(await readFile(staged, "utf8")).toBe("s3cret")
+      expect(args.at(-1)).toContain("http://127.0.0.1:41234")
+      expect(args.at(-1)).toContain("sess-1")
+    } finally {
+      dashboard.stop()
+      spawn.mockRestore()
+      Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true })
+      if (originalTerminal === undefined) delete process.env.CONVOY_TERMINAL
+      else process.env.CONVOY_TERMINAL = originalTerminal
+      await rm(runDir, { recursive: true, force: true })
+      if (staged) await rm(dirname(staged), { recursive: true, force: true })
     }
   })
 

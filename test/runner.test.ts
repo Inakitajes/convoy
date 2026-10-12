@@ -2192,6 +2192,21 @@ describe("waitForPhaseGate", () => {
     expect(calls.activities).toContain("session reopened in terminal; return here and press c to continue")
   })
 
+  test("iterate reopens the session with the run server's password", async () => {
+    const { progress } = gateProgress(["iterate", "continue"])
+    const { permissions } = trackedPermissions()
+    const opened: unknown[] = []
+
+    await waitForPhaseGate("implementer", "/repo", "ses_1", { serverUrl: "http://127.0.0.1:1", serverPassword: "s3cret", permissions }, progress, { kind: "interactive", canRetry: false }, {
+      openWindow: async (input) => {
+        opened.push(input)
+        return "terminal"
+      },
+    })
+
+    expect(opened).toEqual([{ url: "http://127.0.0.1:1", password: "s3cret", targetDir: "/repo", sessionID: "ses_1" }])
+  })
+
   test("a failed window reopen keeps the gate waiting instead of crashing", async () => {
     const { calls, progress } = gateProgress(["iterate", "continue"])
     const { events, permissions } = trackedPermissions()
@@ -2713,7 +2728,11 @@ describe("loopGuard seam regressions", () => {
       event: { subscribe: async () => ({ stream: stream() }) },
       session: {
         create: async () => ({ data: { id: "ses_1" } }),
-        promptAsync: async () => {
+        promptAsync: async (input: { delivery?: string }) => {
+          if (input?.delivery === "queue") {
+            queued.push(input)
+            return {}
+          }
           v1Prompts++
           started.resolve()
           return {}
@@ -2721,14 +2740,6 @@ describe("loopGuard seam regressions", () => {
         messages: async () => ({ data: [completedMessage("msg_1", 0, "# report")] }),
         status: async () => ({ data: {} }),
         abort: async () => ({}),
-      },
-      v2: {
-        session: {
-          prompt: async (input: unknown) => {
-            queued.push(input)
-            return {}
-          },
-        },
       },
     } as never
 
@@ -2748,7 +2759,7 @@ describe("loopGuard seam regressions", () => {
     await Promise.resolve()
     expect(result.info.id).toBe("msg_1")
     expect(v1Prompts).toBe(1)
-    expect(queued).toEqual([{ sessionID: "ses_1", prompt: { text: softBudgetNudgeText }, delivery: "queue" }])
+    expect(queued).toEqual([{ sessionID: "ses_1", parts: [{ type: "text", text: softBudgetNudgeText }], delivery: "queue" }])
     expect(activities.some((detail) => detail.includes("soft budget"))).toBe(false)
   })
 
@@ -2764,13 +2775,14 @@ describe("loopGuard seam regressions", () => {
       yield { type: "session.idle", properties: { sessionID: "ses_1" } }
       await new Promise<void>(() => {})
     }
-    // SessionBusyError-shaped rejection: the v2 queue route can refuse a
+    // SessionBusyError-shaped rejection: the queue route can refuse a
     // mid-turn delivery. The nudge is best-effort, so the turn must survive.
     const client = {
       event: { subscribe: async () => ({ stream: stream() }) },
       session: {
         create: async () => ({ data: { id: "ses_1" } }),
-        promptAsync: async () => {
+        promptAsync: async (input: { delivery?: string }) => {
+          if (input?.delivery === "queue") throw new Error("Session is busy")
           started.resolve()
           return {}
         },
@@ -2779,13 +2791,6 @@ describe("loopGuard seam regressions", () => {
         abort: async () => {
           aborts++
           return {}
-        },
-      },
-      v2: {
-        session: {
-          prompt: async () => {
-            throw new Error("Session is busy")
-          },
         },
       },
     } as never
@@ -3745,6 +3750,33 @@ describe("watchSession transcript backfill", () => {
         { channel: "tool", text: "read: src/a.ts" },
         { channel: "bash", text: "bun test" },
       ])
+    } finally {
+      await watcher.stop()
+    }
+  })
+
+  test("V2 tool markers dedupe against history by their call id", async () => {
+    // V2 names the call `id` on live tool events; history carries it as callID.
+    const { watcher, chunks } = backfillClient(
+      [
+        { type: "session.tool.input.started", data: { sessionID: "ses_1", assistantMessageID: "msg_1", id: "call_1", name: "read" } },
+        { type: "session.tool.called", data: { sessionID: "ses_1", assistantMessageID: "msg_1", id: "call_1", input: { path: "src/a.ts" }, executed: false } },
+        { type: "session.tool.input.started", data: { sessionID: "ses_1", assistantMessageID: "msg_1", id: "call_2", name: "read" } },
+        { type: "session.tool.called", data: { sessionID: "ses_1", assistantMessageID: "msg_1", id: "call_2", input: { path: "src/b.ts" }, executed: false } },
+      ],
+      [
+        assistantMessage("msg_1", "", {
+          completed: false,
+          parts: [{ id: "tp1", sessionID: "ses_1", messageID: "msg_1", type: "tool" as const, callID: "call_1", tool: "read", state: { status: "completed", input: { path: "src/a.ts" }, output: "ok", title: "", metadata: {} } }],
+        }),
+      ],
+      40,
+    )
+    try {
+      await until(chunks, 2)
+      await Bun.sleep(60)
+      expect(chunks.filter((chunk) => chunk.text.includes("src/a.ts"))).toHaveLength(1)
+      expect(chunks.filter((chunk) => chunk.text.includes("src/b.ts"))).toHaveLength(1)
     } finally {
       await watcher.stop()
     }

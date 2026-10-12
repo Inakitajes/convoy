@@ -124,12 +124,35 @@ describe("report bridge", () => {
 })
 
 describe("write_report tool file", () => {
-  test("exposes the optional commit argument to writable phases", async () => {
+  test("registers the tool with the commit argument as a V2 plugin", async () => {
     const dir = await scratch()
     const path = await installWriteReportTool({ dir, url: "http://127.0.0.1:1234/report", token: "t" })
     const source = await readFile(path, "utf8")
-    expect(source).toContain('commit: tool.schema.object({ subject: tool.schema.string(), details: tool.schema.array(tool.schema.string()).optional() }).optional()')
+    expect(source).toContain('import { Plugin } from "@opencode/plugin"')
+    expect(source).toContain("ctx.tool.transform")
+    expect(source).toContain("commit: { type: \"object\"")
+    expect(source).toContain("subject: { type: \"string\" }")
     expect(source).toContain("imperative English subject")
+  })
+
+  test("is a valid plugin that registers the write_report tool", async () => {
+    const dir = await scratch()
+    const modulePath = join(dir, "write_report.mjs")
+    const installedPath = await installWriteReportTool({ dir, url: "http://127.0.0.1:9/report", token: "tok" })
+    const source = (await readFile(installedPath, "utf8")).replace(
+      '"@opencode/plugin"',
+      JSON.stringify(import.meta.resolve("@opencode/plugin")),
+    )
+    await writeFile(modulePath, source)
+    const plugin = (await import(modulePath)).default
+
+    let tool: { name: string; input: { required?: string[]; properties: Record<string, unknown> } } | undefined
+    await plugin.setup({ tool: { transform: async (cb: (editor: { add: (t: typeof tool) => void }) => void) => { cb({ add: (t) => { tool = t } }) } } })
+    expect(plugin.id).toBe("convoy-write-report")
+    expect(tool?.name).toBe("write_report")
+    expect(tool?.input.required).toEqual(["markdown"])
+    expect(tool?.input.properties.markdown).toEqual({ type: "string" })
+    expect(tool?.input.properties.commit).toBeDefined()
   })
 
   test("has the fixed-path schema and restrictive permissions", async () => {
@@ -137,7 +160,10 @@ describe("write_report tool file", () => {
     const path = await installWriteReportTool({ dir, url: "http://127.0.0.1:1234/report", token: "bridge-token" })
     const source = await readFile(path, "utf8")
 
-    expect(path).toBe(join(dir, "tools", "write_report.ts"))
+    expect(path).toBe(join(dir, "plugins", "write_report", "index.ts"))
+    expect(JSON.parse(await readFile(join(dir, "plugins", "write_report", "package.json"), "utf8"))).toMatchObject({ main: "index.ts", type: "module" })
+    // V2 hides plugin tools behind Code Mode unless told otherwise.
+    expect(source).toContain("options: { codemode: false }")
     expect(source).toContain("context?.sessionID")
     expect(source).toContain("dimensions")
     expect(source).not.toContain("reportPath")

@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import { launchManagedServer, parseReadinessLine } from "../src/managed-server"
+import { launchManagedServer, parseReadinessLine, parseServerPasswordLine, redactServerCredentials } from "../src/managed-server"
 import {
   captureIdentity,
   defaultIdentityProbe,
@@ -533,9 +533,67 @@ describe("managed server launch and stop", () => {
   const probe: IdentityProbe = { observe: async (pid) => ({ status: "alive", identity: identity(pid, { executable: "opencode" }) }) }
 
   test("parses the strict readiness line and rejects a malformed one", () => {
-    expect(parseReadinessLine("opencode server listening on http://127.0.0.1:4123")).toEqual({ url: "http://127.0.0.1:4123" })
-    expect(parseReadinessLine("opencode server listening somewhere")).toBe("malformed")
+    expect(parseReadinessLine("server listening on http://127.0.0.1:4123")).toEqual({ url: "http://127.0.0.1:4123" })
+    expect(parseReadinessLine("server listening somewhere")).toBe("malformed")
     expect(parseReadinessLine("some other output")).toBeUndefined()
+  })
+
+  test("parses the V2 credential line and redacts it from retained text", () => {
+    expect(parseServerPasswordLine("server password s3cr3t-token")).toBe("s3cr3t-token")
+    expect(parseServerPasswordLine("server password   ")).toBeUndefined()
+    expect(parseServerPasswordLine("server listening on http://127.0.0.1:1")).toBeUndefined()
+    expect(redactServerCredentials("ready\nserver password s3cr3t-token\n")).toBe("ready\nserver password [redacted]\n")
+    expect(redactServerCredentials("no secrets here")).toBe("no secrets here")
+  })
+
+  test("captures the per-boot password and exposes readiness only once both are known", async () => {
+    const root = await scratchDir()
+    const store = createProcessRecordStore(join(root, "processes"))
+    const { child, emitData } = fakeChild()
+    const serverPromise = launchManagedServer({
+      command: "opencode",
+      args: ["serve"],
+      cwd: root,
+      env: {},
+      lifetime: "helper",
+      label: "test helper",
+      deps: { spawn: () => child as never, probe, store, policy: { graceMs: 5, forceObservationMs: 5 } },
+    })
+    // The URL alone must not resolve the boot: the authenticated client needs
+    // the credential that arrives on the following line.
+    emitData("server listening on http://127.0.0.1:9999\n")
+    let resolved = false
+    void serverPromise.then(() => { resolved = true })
+    await Bun.sleep(10)
+    expect(resolved).toBe(false)
+    emitData("server password boot-secret\n")
+    const server = await serverPromise
+    expect(server.url).toBe("http://127.0.0.1:9999")
+    expect(server.password).toBe("boot-secret")
+    await server.stop()
+  })
+
+  test("a failed boot never leaks the credential into its diagnostics", async () => {
+    const root = await scratchDir()
+    const store = createProcessRecordStore(join(root, "processes"))
+    const { child, emitData, emitExit } = fakeChild()
+    const serverPromise = launchManagedServer({
+      command: "opencode",
+      args: ["serve"],
+      cwd: root,
+      env: {},
+      lifetime: "helper",
+      label: "test helper",
+      deps: { spawn: () => child as never, probe, store, policy: { graceMs: 5, forceObservationMs: 5 } },
+    })
+    emitData("server password leak-me-not\n")
+    emitExit()
+    const error = await serverPromise.then(
+      () => undefined,
+      (reason: Error) => reason,
+    )
+    expect(error?.message).toContain("[redacted]")
+    expect(error?.message).not.toContain("leak-me-not")
   })
 
   test("publishes ownership before resolving and stops idempotently", async () => {
@@ -551,7 +609,7 @@ describe("managed server launch and stop", () => {
       label: "test helper",
       deps: { spawn: () => child as never, probe, store, policy: { graceMs: 5, forceObservationMs: 5 } },
     })
-    emitData("opencode server listening on http://127.0.0.1:9999\n")
+    emitData("server listening on http://127.0.0.1:9999\nserver password fixture-pw\n")
     const server = await serverPromise
     expect(server.url).toBe("http://127.0.0.1:9999")
     expect(server.recordId).toBeDefined()
@@ -580,7 +638,7 @@ describe("managed server launch and stop", () => {
       label: "test helper",
       deps: { spawn: () => child as never, probe, store, policy: { graceMs: 5, forceObservationMs: 5 } },
     })
-    emitData("opencode server listening somewhere\n")
+    emitData("server listening somewhere\n")
     await expect(serverPromise).rejects.toThrow(/malformed readiness/)
   })
 
@@ -601,7 +659,7 @@ describe("managed server launch and stop", () => {
     // without bound. The cap keeps only the tail, so a readiness line on its
     // own line still parses.
     emitData("x".repeat(200_000))
-    emitData("\nopencode server listening on http://127.0.0.1:4321\n")
+    emitData("\nserver listening on http://127.0.0.1:4321\nserver password fixture-pw\n")
     const server = await serverPromise
     expect(server.url).toBe("http://127.0.0.1:4321")
     await server.stop()
@@ -664,7 +722,7 @@ describe("managed server launch and stop", () => {
       label: "authoring service",
       deps: { spawn: () => child as never, probe, store, policy: { graceMs: 5, forceObservationMs: 5 } },
     })
-    emitData("opencode server listening on http://127.0.0.1:8888\n")
+    emitData("server listening on http://127.0.0.1:8888\nserver password fixture-pw\n")
     const server = await serverPromise
     expect(server.recordId).toBeUndefined()
     expect(await store.list()).toEqual([])
@@ -771,7 +829,7 @@ describe("managed server ownership evidence and startup recovery", () => {
       label: "test helper",
       deps: { spawn: () => child as never, probe: unknownProbe, store, policy: stopPolicy },
     })
-    emitData("opencode server listening on http://127.0.0.1:7777\n")
+    emitData("server listening on http://127.0.0.1:7777\nserver password fixture-pw\n")
     await expect(serverPromise).rejects.toThrow(/identity could not be captured/)
     // The still-owned child is cleaned up and its transient record removed.
     expect(child.killedTimes).toBe(1)
@@ -801,7 +859,7 @@ describe("managed server ownership evidence and startup recovery", () => {
       label: "test run server",
       deps: { spawn: () => child as never, probe, store: flaky, policy: stopPolicy },
     })
-    emitData("opencode server listening on http://127.0.0.1:7778\n")
+    emitData("server listening on http://127.0.0.1:7778\nserver password fixture-pw\n")
     await expect(serverPromise).rejects.toThrow(/ownership could not be published/)
     expect(child.killedTimes).toBe(1)
   })
@@ -833,7 +891,7 @@ describe("managed server ownership evidence and startup recovery", () => {
         policy: stopPolicy,
       },
     })
-    emitData("opencode server listening on http://127.0.0.1:6666\n")
+    emitData("server listening on http://127.0.0.1:6666\nserver password fixture-pw\n")
     const server = await serverPromise
     expect(order).toEqual(["reconcile", "spawn"])
     expect(passes.length).toBe(1)
@@ -864,7 +922,7 @@ describe("managed server ownership evidence and startup recovery", () => {
         policy: stopPolicy,
       },
     })
-    emitData("opencode server listening on http://127.0.0.1:6667\n")
+    emitData("server listening on http://127.0.0.1:6667\nserver password fixture-pw\n")
     const server = await serverPromise
     expect(passes).toBe(0)
     await server.stop()
@@ -891,7 +949,7 @@ describe("managed server ownership evidence and startup recovery", () => {
         policy: stopPolicy,
       },
     })
-    emitData("opencode server listening on http://127.0.0.1:6668\n")
+    emitData("server listening on http://127.0.0.1:6668\nserver password fixture-pw\n")
     const server = await serverPromise
     expect(server.url).toBe("http://127.0.0.1:6668")
     await server.stop()
@@ -912,7 +970,7 @@ describe("managed server ownership evidence and startup recovery", () => {
       label: "test helper",
       deps: { spawn: () => child as never, probe, store, policy: stopPolicy },
     })
-    emitData("opencode server listening on http://127.0.0.1:4444\n")
+    emitData("server listening on http://127.0.0.1:4444\nserver password fixture-pw\n")
     const server = await serverPromise
     const outcome = await server.stop()
     expect(outcome.status).toBe("unresolved")
@@ -945,7 +1003,7 @@ describe("managed server ownership evidence and startup recovery", () => {
         },
       },
     })
-    emitData("opencode server listening on http://127.0.0.1:7777\n")
+    emitData("server listening on http://127.0.0.1:7777\nserver password fixture-pw\n")
     const server = await serverPromise
     const started = Date.now()
     const outcome = await server.stop()

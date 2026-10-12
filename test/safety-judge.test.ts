@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
-import type { OpencodeClient } from "@opencode-ai/sdk/v2"
+import type { OpencodeClient } from "../src/opencode-client"
 
 import { explainCommand, judgeCommand, parseVerdict } from "../src/safety-judge"
 
@@ -34,12 +34,16 @@ type FakeClientOptions = {
   promptThrows?: boolean
   promptHangs?: boolean
   onDelete?: (id: string) => void
+  onCreate?: (input: unknown) => void
 }
 
 function fakeClient(opts: FakeClientOptions): OpencodeClient {
   return {
     session: {
-      create: async () => ({ data: { id: "judge-session" }, error: undefined }),
+      create: async (input: unknown) => {
+        opts.onCreate?.(input)
+        return { data: { id: "judge-session" }, error: undefined }
+      },
       prompt: async (_args: unknown, { signal }: { signal?: AbortSignal } = {}) => {
         if (opts.promptThrows) throw new Error("provider unavailable")
         if (opts.promptHangs) {
@@ -65,6 +69,15 @@ const request = { permission: "bash", command: "ls -la" }
 const model = { providerID: "openai", modelID: "gpt-5.5" }
 
 describe("judgeCommand", () => {
+  test("opens a tool-less judge session (V2 denies every action at creation)", async () => {
+    let createInput: unknown
+    const client = fakeClient({ promptText: '{"safe": true}', onCreate: (input) => { createInput = input } })
+    await judgeCommand(client, { request, model, directory: "/tmp" })
+    expect((createInput as { permissions?: Array<{ action: string; resource: string; effect: string }> }).permissions).toEqual([
+      { action: "*", resource: "*", effect: "deny" },
+    ])
+  })
+
   test("returns the model's verdict on a clean answer", async () => {
     const client = fakeClient({ promptText: '{"safe": true, "reason": "lists files"}' })
     expect(await judgeCommand(client, { request, model, directory: "/tmp" })).toEqual({ safe: true, reason: "lists files" })

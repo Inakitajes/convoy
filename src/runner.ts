@@ -5,7 +5,7 @@ import { dirname, join } from "node:path"
 import { stdin, stdout } from "node:process"
 import { createInterface } from "node:readline/promises"
 
-import type { AssistantMessage, FilePartInput, OpencodeClient, Part } from "@opencode-ai/sdk/v2"
+import type { AssistantMessage, FilePartInput, OpencodeClient, Part } from "./opencode-client"
 
 import { advisorNeedsOf, completionQuestion, type AdvisorUsage, type ModelSelection } from "./advisor"
 import { installAdvisorTool, startAdvisorBridge, type AdvisorBridge } from "./advisor-bridge"
@@ -25,9 +25,10 @@ import { hookPhaseNames, hooksForPipeline, runHooks, type HookStage } from "./ho
 import { getSessionEventHub, payloadProperties } from "./event-hub"
 import { askHumanAction, phaseGatePrompt, runHumanReviewGate } from "./human"
 import { log } from "./log"
-import { LoopGuard, LoopGuardError, observationFromSessionEvent, resolveLoopGuard, type LoopGuardConfig } from "./loop-guard"
+import { LoopGuard, LoopGuardError, observationFromSessionEvent, resolveLoopGuard, type LoopGuardConfig, type LoopGuardObservation } from "./loop-guard"
 import { openRunMetadata, recordProgress, type RunMetadataStore } from "./metadata"
 import { openOpencodeSessionWindow, startOpencode } from "./opencode"
+import { clearServerAuth, writeServerAuth } from "./server-auth"
 import { defaultStopPolicy, type StopOutcome, type StopPolicy } from "./process-stop"
 import { HerdrReporter } from "./herdr"
 import { defaultNotificationSettings, Notifier } from "./notifications"
@@ -65,7 +66,7 @@ import { createTerminalInput, type TerminalInput } from "./terminal-input"
 import type { AgentSpec, AgentStep, DeliverableContract, HookSet, HookSpec, Pipeline, ResolvedGoalPlan, RunOptions, Step } from "./types"
 import { consensusStep, loadQualityRubricWeights, parseQualityScoreReport, qualityDimensionWeights, type QualityDimension, type QualityScore } from "./quality-score"
 import { addTokens, emptyTokens, tokensFromValue } from "./usage"
-import { cleanupWorkspace, createWorkspace, opencodeConfigDir, resumeWorkspace, type Workspace, writeSummary } from "./workspace"
+import { cleanupWorkspace, createWorkspace, resumeWorkspace, type Workspace, writeSummary } from "./workspace"
 
 export type ActiveSession = {
   client: OpencodeClient
@@ -630,6 +631,7 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
     }
     await metadata?.serverStopped().catch((error) => log.warn(`couldn't persist server-stopped metadata: ${String(error)}`))
     await metadata?.flush().catch((error) => log.warn(`couldn't flush run metadata: ${String(error)}`))
+    await clearServerAuth(workspace.dir).catch(() => {})
     await releaseLease?.().catch((error) => log.warn(`couldn't release run lease: ${String(error)}`))
     return stop
   }
@@ -807,14 +809,17 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
       (options.plan?.modelRouting.gateway ?? options.gateway ?? "configured") === "nitro"
         ? throughputRoutedModels(pipeline, autoAccept.mode === "smart" ? judgeModel : undefined)
         : []
-    // Every custom tool must exist before the server spawns: the SDK hands
-    // OpenCode Convoy's environment at spawn time and OPENCODE_CONFIG_DIR is
-    // scanned once at startup. Every OpenCode phase owns a report, so this path
-    // is deliberately independent of whether any phase has an advisor.
-    process.env.OPENCODE_CONFIG_DIR = opencodeConfigDir()
+    // Every custom tool must exist before the server spawns: the run config
+    // names each plugin package and the server loads them at startup. Every
+    // OpenCode phase owns a report, so this path is deliberately independent
+    // of whether any phase has an advisor.
     let reports: ReportRuntime | undefined
     reportBridge = await startReportBridge({ reports: () => reports })
-    await installWriteReportTool({ url: reportBridge.url, token: reportBridge.token })
+    // Per-run plugin directory: each package embeds this run's bridge URL and
+    // token, and V2 watches plugin sources, so a shared location would let a
+    // concurrent run rewrite a live run's tools.
+    const pluginDir = join(workspace.dir, "opencode")
+    const pluginEntries = [await installWriteReportTool({ url: reportBridge.url, token: reportBridge.token, dir: pluginDir })]
     // The advisor bridge serves a runtime created only after the SDK returns a
     // client, so it uses the same deferred lookup pattern.
     let advisors: AdvisorRuntime | undefined
@@ -825,7 +830,7 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
       advisorBridge = await startAdvisorBridge({ advisors: () => advisors })
       // Embed the URL and token as string literals in the tool source so
       // subprocesses (bash tool calls) cannot read them via process.env.
-      await installAdvisorTool({ url: advisorBridge.url, token: advisorBridge.token })
+      pluginEntries.push(...(await installAdvisorTool({ url: advisorBridge.url, token: advisorBridge.token, dir: pluginDir })))
     }
     try {
       opencode = await deps.startOpencode(
@@ -833,6 +838,7 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
           advisorAgents: advisorNeeds.agents,
           advisorModels: advisorNeeds.models,
           throughputModels,
+          plugins: pluginEntries.map((entry) => dirname(entry)),
         }),
         boot.signal,
         // The run server is owned through the coordinator's release; helpers
@@ -849,6 +855,9 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
     // abandon the child (design D3).
     shutdown.setForceHandler(() => opencode?.forceStop())
     progress.serverReady(opencode.url)
+    // Publish the private connection auth for the dashboard's attach path
+    // (design D2): the password stays out of the generic run metadata.
+    await writeServerAuth(workspace.dir, { url: opencode.url, ...(opencode.password ? { password: opencode.password } : {}) }).catch(() => {})
     // Link the live-server block to the actual child identity (design D6): the
     // historical coordinator `pid` stays, and the record id / child PID/birth
     // let an operator (or later recovery) identify the `serve` child without
@@ -891,6 +900,7 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
       judgeModel,
       terminalInput,
       serverUrl: opencode.url,
+      ...(opencode.password ? { serverPassword: opencode.password } : {}),
       ...(advisorNeeds.agents.size > 0 ? { advisorCheckpoint: advisors.checkpoint } : {}),
     })
 
@@ -905,6 +915,7 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
     // arrow functions, but a `const` alias captured here stays narrowed.
     const client = opencode.client
     const serverUrl = opencode.url
+    const serverPassword = opencode.password
     const runMetadata = metadata
 
     // One shared execution context: the pipeline prefix and every goal
@@ -924,6 +935,7 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
       limitAgents,
       resuming,
       serverUrl,
+      serverPassword,
       permissions,
       terminalInput,
       advisors,
@@ -1262,6 +1274,7 @@ export type PhaseGroupContext = {
   limitAgents: ReturnType<typeof createConcurrencyLimiter>
   resuming: boolean
   serverUrl: string
+  serverPassword: string | undefined
   permissions: PermissionGate | undefined
   terminalInput: TerminalInput
   advisors: AdvisorRuntime | undefined
@@ -1284,7 +1297,7 @@ export type PhaseGroupContext = {
  * aggregate into one `PhaseGroupError` after the control checkpoint.
  */
 export async function executePhaseGroups(ctx: PhaseGroupContext, steps: readonly Step[]): Promise<void> {
-  const { client, workspace, metadata, options, extraFiles, projectContextFiles, progress, shutdown, control, gitLock, limitAgents, resuming, serverUrl, permissions, terminalInput, advisors, reports } = ctx
+  const { client, workspace, metadata, options, extraFiles, projectContextFiles, progress, shutdown, control, gitLock, limitAgents, resuming, serverUrl, serverPassword, permissions, terminalInput, advisors, reports } = ctx
 
   for (const batch of planBatches(steps)) {
     shutdown.throwIfRequested()
@@ -1299,7 +1312,7 @@ export async function executePhaseGroups(ctx: PhaseGroupContext, steps: readonly
         await control.checkpointAfterBatch(shutdown.signal)
         continue
       }
-      await runHumanReviewGate(workspace, options, serverUrl, progress, permissions, first.name, undefined, metadata)
+      await runHumanReviewGate(workspace, options, { url: serverUrl, ...(serverPassword ? { password: serverPassword } : {}) }, progress, permissions, first.name, undefined, metadata)
       await control.checkpointAfterBatch(shutdown.signal)
       continue
     }
@@ -1316,7 +1329,7 @@ export async function executePhaseGroups(ctx: PhaseGroupContext, steps: readonly
         await limitAgents(async () => {
           const restored = resuming && (await restorePhaseFromPreviousRun(workspace, metadata, step, progress))
           if (!restored) {
-            await runPhase(client, workspace, metadata, step, options, extraFiles, projectContextFiles, progress, shutdown, gitLock, { serverUrl, permissions, terminalInput }, advisors, reports)
+            await runPhase(client, workspace, metadata, step, options, extraFiles, projectContextFiles, progress, shutdown, gitLock, { serverUrl, ...(serverPassword ? { serverPassword } : {}), permissions, terminalInput }, advisors, reports)
           }
         })
       }),
@@ -1581,6 +1594,8 @@ function recoveryReport(phaseName: string) {
 /** What the mid-step interactive gate needs to reopen the session window and hold permission prompts. */
 export type TakeoverContext = {
   serverUrl: string
+  /** The run server's generated password; the reopened OpenCode client needs it to connect. */
+  serverPassword?: string
   permissions?: PermissionGate
   /** Shared terminal-input arbiter so a failed member's gate and a live sibling's permission prompt never both read stdin. */
   terminalInput?: TerminalInput
@@ -2143,7 +2158,12 @@ export async function waitForPhaseGate(
         const backend =
           options.runner === "claude-code"
             ? await (deps.openClaudeWindow ?? openClaudeSessionWindow)({ targetDir, sessionID, runDir: options.runDir ?? "" })
-            : await deps.openWindow({ url: takeover?.serverUrl ?? "", targetDir, sessionID })
+            : await deps.openWindow({
+                url: takeover?.serverUrl ?? "",
+                ...(takeover?.serverPassword ? { password: takeover.serverPassword } : {}),
+                targetDir,
+                sessionID,
+              })
         if (kind === "failure") {
           // Only a successfully opened session proves the user took control.
           // Until then, keep [c] unavailable and preserve [r].
@@ -2866,12 +2886,10 @@ export const softBudgetNudgeText = [
 
 async function queueSoftBudgetNudge(client: OpencodeClient, sessionID: string, phaseName: string) {
   try {
-    // The v2 route queues this user message behind the in-flight turn.
-    // It is intentionally separate from v1 promptAsync(), which created the
-    // phase session and cannot request non-interrupting delivery. Best-effort:
-    // OpenCode may accept the queue on a busy v1 session without injecting the
+    // Queued behind the in-flight turn (non-interrupting delivery). Best-effort:
+    // OpenCode may accept the queue on a busy session without injecting the
     // instruction into later turns. The hard budget gate is the real stop.
-    const queued = await client.v2.session.prompt({ sessionID, prompt: { text: softBudgetNudgeText }, delivery: "queue" })
+    const queued = await client.session.promptAsync({ sessionID, parts: [{ type: "text", text: softBudgetNudgeText }], delivery: "queue" })
     if (queued.error) log.warn(`[${phaseName}] couldn't queue the soft step-budget nudge: ${formatSdkError(queued.error)}`)
   } catch (error) {
     // A failed nudge must not change the active turn or bypass the hard budget
@@ -2896,6 +2914,8 @@ type ActivityState = {
   reasoningPart: number
   textPart: number
   usageSignature: string
+  /** The most recent tool name (V2 `session.tool.input.started` carries it; `session.tool.called` does not). */
+  lastToolName: string
 }
 
 type SessionSignal =
@@ -3091,11 +3111,9 @@ export function watchSession(
     if (settled || controller.signal.aborted) return
     state.lastServerEvent = Date.now()
     const properties = payloadProperties(payload)
-    if (properties) {
-      const observation = observationFromSessionEvent(payloadType(payload), properties)
-      if (observation) tripLoopGuard(observation)
-      if (settled) return
-    }
+    const observation = guardObservationFrom(payload)
+    if (observation) tripLoopGuard(observation)
+    if (settled) return
     const signal = describeSessionActivity(payload, state)
     if (signal) {
       if (signal.type !== "idle" && signal.type !== "error") sawWork = true
@@ -3203,6 +3221,53 @@ function payloadType(payload: unknown) {
   return typeof name === "string" ? name.replace(/\.1$/, "") : ""
 }
 
+/**
+ * Maps the released V2 event vocabulary to the names the activity/transcript
+ * switch understands. V2 renamed the stream (`session.text.delta`,
+ * `session.tool.*`, `session.execution.*`) and moved the payload to `data`;
+ * `payloadProperties` already reads `data`, so only the type name — and a few
+ * field names — differ. Verified against a real V2 server's event stream.
+ */
+const v2EventAliases: Record<string, string> = {
+  "session.reasoning.started": "session.next.reasoning.started",
+  "session.reasoning.delta": "session.next.reasoning.delta",
+  "session.reasoning.ended": "session.next.reasoning.ended",
+  "session.text.started": "session.next.text.started",
+  "session.text.delta": "session.next.text.delta",
+  "session.text.ended": "session.next.text.ended",
+  "session.tool.input.started": "session.next.tool.input.started",
+  "session.tool.input.delta": "session.next.tool.input.delta",
+  "session.tool.input.ended": "session.next.tool.input.ended",
+  "session.tool.called": "session.next.tool.called",
+  "session.tool.progress": "session.next.tool.progress",
+  "session.tool.success": "session.next.tool.success",
+  "session.tool.failed": "session.next.tool.failed",
+  "session.shell.started": "session.next.shell.started",
+  "session.shell.ended": "session.next.shell.ended",
+  "session.retry.scheduled": "session.next.retried",
+  "session.compaction.started": "session.next.compaction.started",
+  "session.compaction.delta": "session.next.compaction.delta",
+  "session.compaction.ended": "session.next.compaction.ended",
+  "session.step.started": "session.next.step.started",
+  "session.step.ended": "session.next.step.ended",
+  "session.step.failed": "session.next.step.failed",
+  "session.usage.updated": "message.updated",
+  // V2 has no `session.idle`: a settled turn is an execution outcome.
+  "session.execution.succeeded": "session.idle",
+  "session.execution.failed": "session.error",
+  "session.execution.interrupted": "session.error",
+}
+
+export function normalizeEventType(type: string): string {
+  return v2EventAliases[type] ?? type
+}
+
+/** The loop-guard observation for a V2 session event, read through the same aliases as the activity feed. */
+export function guardObservationFrom(payload: unknown): LoopGuardObservation | undefined {
+  const properties = payloadProperties(payload)
+  return properties ? observationFromSessionEvent(normalizeEventType(payloadType(payload)), properties) : undefined
+}
+
 export function newActivityState(): ActivityState {
   return {
     reasoningChars: 0,
@@ -3217,6 +3282,7 @@ export function newActivityState(): ActivityState {
     reasoningPart: 0,
     textPart: 0,
     usageSignature: "",
+    lastToolName: "",
   }
 }
 
@@ -3230,7 +3296,7 @@ function pulse(kind: ActivityKind, message: string): SessionSignal {
 }
 
 export function describeSessionActivity(payload: unknown, state: ActivityState): SessionSignal | undefined {
-  const type = payloadType(payload)
+  const type = normalizeEventType(payloadType(payload))
   const properties = payloadProperties(payload)
   if (!properties) return undefined
   const now = Date.now()
@@ -3282,19 +3348,24 @@ export function describeSessionActivity(payload: unknown, state: ActivityState):
     case "message.part.delta":
       return pulse("write", `streaming ${pickString(properties, ["field"]) || "message"}`)
     case "session.next.tool.input.started":
-      return activity("tool", `preparing ${pickString(properties, ["name"]) || "tool"}`)
+      state.lastToolName = pickString(properties, ["name"]) || state.lastToolName
+      return activity("tool", `preparing ${state.lastToolName || "tool"}`)
     case "session.next.tool.called":
-      return activity("tool", describeToolCall(properties))
+      return activity("tool", describeToolCall({ tool: pickString(properties, ["tool"]) || state.lastToolName, input: properties.input }))
     case "session.next.tool.progress":
       return activity("tool", `tool progress: ${describeToolContent(properties.content)}`)
     case "session.next.tool.success":
       return activity("tool", `tool done: ${describeToolContent(properties.content)}`)
     case "session.next.tool.failed":
       return activity("error", `tool failed: ${formatEventError(properties.error)}`)
-    case "session.next.shell.started":
-      return activity("bash", pickString(properties, ["command"]))
-    case "session.next.shell.ended":
-      return activity("bash", `done: ${firstLine(pickString(properties, ["output"]))}`)
+    case "session.next.shell.started": {
+      const shell = properties.shell && typeof properties.shell === "object" ? (properties.shell as Record<string, unknown>) : properties
+      return activity("bash", pickString(shell, ["command"]))
+    }
+    case "session.next.shell.ended": {
+      const shell = properties.shell && typeof properties.shell === "object" ? (properties.shell as Record<string, unknown>) : properties
+      return activity("bash", `done: ${firstLine(pickString(shell, ["output", "command"]))}`)
+    }
     case "session.next.retried":
       return activity("retry", `provider retry ${properties.attempt ?? ""}: ${formatEventError(properties.error)}`)
     case "session.next.compaction.started":
@@ -3304,7 +3375,7 @@ export function describeSessionActivity(payload: unknown, state: ActivityState):
     case "session.next.compaction.ended":
       return activity("info", "context compaction complete")
     case "permission.asked":
-      return activity("permission", `permission requested: ${pickString(properties, ["permission"])}`)
+      return activity("permission", `permission requested: ${pickString(properties, ["action", "permission"])}`)
     case "permission.replied":
       return activity("permission", `permission ${pickString(properties, ["reply"])}`)
     case "todo.updated": {
@@ -3331,7 +3402,7 @@ export function describeSessionActivity(payload: unknown, state: ActivityState):
  * belongs to the activity path, not the transcript.
  */
 export function describeMessageChunk(payload: unknown, state?: ActivityState): ProgressMessage | undefined {
-  const type = payloadType(payload)
+  const type = normalizeEventType(payloadType(payload))
   const properties = payloadProperties(payload)
   if (!properties) return undefined
 
@@ -3363,9 +3434,10 @@ export function describeMessageChunk(payload: unknown, state?: ActivityState): P
       return text ? { channel: "response", text, partID: `text:${state?.textPart ?? 0}` } : undefined
     }
     case "session.next.tool.called":
-      return { channel: "tool", text: describeToolCall(properties) }
+      return { channel: "tool", text: describeToolCall({ tool: pickString(properties, ["tool"]) || state?.lastToolName || "tool", input: properties.input }) }
     case "session.next.shell.started": {
-      const command = pickString(properties, ["command"])
+      const shell = properties.shell && typeof properties.shell === "object" ? (properties.shell as Record<string, unknown>) : properties
+      const command = pickString(shell, ["command"])
       return command ? { channel: "bash", text: command } : undefined
     }
     default:
@@ -3461,7 +3533,8 @@ function historyTranscript(messages: readonly unknown[]): SessionHistory {
 function chunkIdentity(properties: Record<string, unknown> | undefined): { messageID?: string; callID?: string } {
   if (!properties) return {}
   const messageID = [properties.messageID, properties.assistantMessageID].find((value) => typeof value === "string") as string | undefined
-  const callID = typeof properties.callID === "string" ? properties.callID : undefined
+  // V2 tool events name their call `id`; history carries the same value as callID.
+  const callID = [properties.callID, properties.id].find((value) => typeof value === "string") as string | undefined
   return { ...(messageID ? { messageID } : {}), ...(callID ? { callID } : {}) }
 }
 
@@ -3707,7 +3780,18 @@ function stepUsageFromEvent(payload: unknown, properties: Record<string, unknown
 // deltas only matter as fallback until the first one arrives.
 function messageUsageSignal(properties: Record<string, unknown>, state: ActivityState): SessionSignal | undefined {
   const info = properties.info
-  if (!info || typeof info !== "object") return undefined
+  if (!info || typeof info !== "object") {
+    // V2: `session.usage.updated` carries the cumulative session total directly
+    // (no per-message `info`), so there is nothing to dedup by message id.
+    const tokens = tokensFromValue(properties.tokens)
+    const cost = typeof properties.cost === "number" && Number.isFinite(properties.cost) ? properties.cost : 0
+    if (!tokens || (tokens.total === 0 && cost === 0)) return undefined
+    const signature = `${cost.toFixed(6)}:${tokens.input}:${tokens.output}:${tokens.reasoning}:${tokens.total}`
+    if (signature === state.usageSignature) return undefined
+    state.usageSignature = signature
+    const sessionID = typeof properties.sessionID === "string" ? properties.sessionID : undefined
+    return { type: "usage", usage: { cost, tokens, sessionID, ...(state.currentStepModel ? { model: state.currentStepModel } : {}) } }
+  }
   const message = info as Partial<AssistantMessage> & { role?: unknown }
   if (message.role !== "assistant" || typeof message.id !== "string") return undefined
 

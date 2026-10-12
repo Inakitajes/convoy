@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
-import { chmod, mkdir, mkdtemp, readFile, rm } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -83,6 +83,16 @@ describe("conversation-service discovery and reuse (task 4.3)", () => {
     expect(second.reused).toBe(true)
     expect(second.url).toBe(first.url)
     expect(boots).toBe(1)
+  })
+
+  // The record carries the service's V2 password: only the owner may read it.
+  test("the discovery record holding the server password is owner-only", async () => {
+    const boot = async () => ({ url: "http://127.0.0.1:51009", password: "s3cret", close() {}, pid: 123_459 })
+    const started = await ensureConversationService({ commonDir, checkout: repoDir, boot, probe: async () => "stale" })
+    expect(started.status).toBe("live")
+    const path = join(commonDir, "convoy", "authoring-server.json")
+    expect(JSON.parse(await readFile(path, "utf8")).password).toBe("s3cret")
+    expect((await stat(path)).mode & 0o777).toBe(0o600)
   })
 
   test("a stale discovery record (dead pid) is replaced by a fresh boot, not trusted", async () => {
@@ -347,7 +357,7 @@ describe("conversation-service shutdown boundaries (task 4.3, real server)", () 
     if (service.status !== "live") return
     try {
       // An authoring session is created through the service.
-      const ref = await createAuthoringConversation({ checkout: realRepoDir, title: "boundary", server: { url: service.url } })
+      const ref = await createAuthoringConversation({ checkout: realRepoDir, title: "boundary", server: { url: service.url, ...(service.password ? { password: service.password } : {}) } })
       expect(ref.sessionId).toMatch(/^ses_/)
       // A run's server (the dashboard's attachment) boots and then closes —
       // the run dashboard goes away entirely.
@@ -360,7 +370,7 @@ describe("conversation-service shutdown boundaries (task 4.3, real server)", () 
       if (again.status !== "live") return
       expect(again.url).toBe(service.url)
       expect(again.reused).toBe(true)
-      const validated = await validateAuthoringSession({ ref, checkout: realRepoDir, server: { url: again.url } })
+      const validated = await validateAuthoringSession({ ref, checkout: realRepoDir, server: { url: again.url, ...(again.password ? { password: again.password } : {}) } })
       expect(validated.status).toBe("available")
     } finally {
       // Explicit stop with idle evidence (a fresh session is quiescent).
@@ -373,14 +383,14 @@ describe("conversation-service shutdown boundaries (task 4.3, real server)", () 
     expect(service.status).toBe("live")
     if (service.status !== "live") return
     try {
-      const client = connectOpencode(service.url)
+      const client = connectOpencode(service.url, service.password)
       const created = await client.session.create({ title: "detach" })
       if (created.error || !created.data) throw new Error("session create failed")
       const sessionId = created.data.id
       // The client view detaches (its process is gone; nobody holds a handle).
       // The service outlives it: the exact session still resolves through the
       // service, and the discovery record still probes live.
-      const validated = await validateAuthoringSession({ ref: { harness: "opencode", sessionId }, checkout: realRepoDir, server: { url: service.url } })
+      const validated = await validateAuthoringSession({ ref: { harness: "opencode", sessionId }, checkout: realRepoDir, server: { url: service.url, ...(service.password ? { password: service.password } : {}) } })
       expect(validated.status).toBe("available")
       const record = await readConversationServiceDiscovery(realCommonDir)
       expect(record.status).toBe("found")

@@ -1,7 +1,7 @@
 import { readFileSync, statSync } from "node:fs"
 import { join } from "node:path"
 
-import type { AgentConfig, Config, PermissionActionConfig } from "@opencode-ai/sdk/v2"
+import type { AgentConfig, Config, PermissionActionConfig } from "./opencode-client"
 import { advisorFeedbackToolName, advisorProviderOverride, advisorToolName, type ModelSelection } from "./advisor"
 import { bashPolicy, noAdditions } from "./bash-policy"
 import { builtInPrompts } from "./built-in-prompts"
@@ -44,6 +44,8 @@ export type OpencodeConfigOptions = {
    * OpenCode config, so the user's global config keeps its default routing.
    */
   throughputModels?: readonly ModelSelection[]
+  /** Convoy's runtime plugin packages (write_report, advisor tools) the run server loads. */
+  plugins?: readonly string[]
 }
 
 export function opencodeConfig(
@@ -85,6 +87,7 @@ export function opencodeConfig(
       question: "deny",
       doom_loop: doomLoopPermission,
     },
+    ...(options.plugins?.length ? { plugins: [...options.plugins] } : {}),
   }
 }
 

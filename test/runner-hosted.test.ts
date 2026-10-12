@@ -10,6 +10,7 @@ import type { RunOptions } from "../src/types"
 import { preparePhaseRun, run as realRun, hostedTeardownFromError, UserAbortError, compactRunRowName, type RunDeps } from "../src/runner"
 import { buildRunPlan } from "../src/run-plan"
 import { noopProgress } from "../src/progress"
+import { runsRoot } from "../src/workspace"
 import { builtInAgents } from "../src/pipeline"
 import { prdHistoryDir, readPrdHistoryIndex, writePrdHistory } from "../src/prd-history"
 import { loadOpenSpecBundle } from "../src/openspec"
@@ -153,17 +154,20 @@ describe("run() with a hosted progress", () => {
       expect(dashboard.events).not.toContain("runFinished:failed")
       // The abort handler is cleared on the way out, not left pointing at a dead run.
       expect(dashboard.events).toContain("clearAbortHandler")
-      // Every OpenCode run receives the report shim, even without an advisor.
-      expect(existsSync(join(hostedHome, ".convoy", "opencode", "tools", "write_report.ts"))).toBe(true)
+      // Every OpenCode run receives the report plugin, even without an advisor.
+      expect(existsSync(join(result.dir, "opencode", "plugins", "write_report", "index.ts"))).toBe(true)
 
       // The finally no longer closes the server/lease: those ride on release.
       expect(result.release).toBeFunction()
       const metadata = JSON.parse(await readFile(join(result.dir, "metadata.json"), "utf8"))
       expect(metadata.server).toBeDefined()
+      // The connection auth rides a private file, not the navigation metadata.
+      expect(existsSync(join(result.dir, "server-auth.json"))).toBe(true)
 
       await result.release?.()
       const after = JSON.parse(await readFile(join(result.dir, "metadata.json"), "utf8"))
       expect(after.server).toBeUndefined()
+      expect(existsSync(join(result.dir, "server-auth.json"))).toBe(false)
     } finally {
       await rm(repo, { recursive: true, force: true })
     }
@@ -492,6 +496,34 @@ describe("run() with a hosted progress", () => {
       })
       // The provider-level timeout settings still ride along.
       expect(captured?.provider?.openrouter?.options?.timeout).toBe(false)
+    } finally {
+      await rm(repo, { recursive: true, force: true })
+    }
+  })
+
+  // V2 loads plugins from the paths the run config names, and each package
+  // embeds that run's bridge URL and token: it must live in the run's own
+  // directory, so a concurrent run can never rewrite a live run's tools.
+  test("the run config names the write_report plugin package inside the run's own directory", async () => {
+    const repo = await cleanRepo()
+    let captured: Awaited<Parameters<RunDeps["startOpencode"]>[0]> | undefined
+    const capturingStart: RunDeps["startOpencode"] = async (config) => {
+      captured = config
+      return fakeOpencodeHandle(fakeClient, "http://127.0.0.1:41237")
+    }
+    try {
+      try {
+        await realRun(makeOptions(repo), { startOpencode: capturingStart })
+      } catch {
+        // Expected: the fake client cannot run the phase.
+      }
+
+      const plugins = captured?.plugins ?? []
+      expect(plugins).toHaveLength(1)
+      expect(plugins[0]).toMatch(new RegExp(`^${runsRoot()}/[^/]+/opencode/plugins/write_report$`))
+      const source = await readFile(join(plugins[0]!, "index.ts"), "utf8")
+      expect(source).toContain("write_report")
+      expect(source).toContain("codemode: false")
     } finally {
       await rm(repo, { recursive: true, force: true })
     }

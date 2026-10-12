@@ -1,7 +1,7 @@
 import { describe, expect, test, spyOn, beforeEach, afterEach } from "bun:test"
-import { mkdtemp, rm } from "node:fs/promises"
+import { chmod, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 
 import {
   runDirAccessConfig,
@@ -15,6 +15,7 @@ import {
   connectOpencode,
   startOpencode,
   bootOpencodeServerFrom,
+  serverClientCommand,
 } from "../src/opencode"
 
 import type { OpencodeHandle } from "../src/opencode"
@@ -904,7 +905,9 @@ describe("openOpencodeSessionWindow", () => {
     }
   })
 
-  test("shell-quoted osascript contains attach, url, dir, and session", async () => {
+  // V2 has no `attach` subcommand or `--dir` flag: the client takes the
+  // directory positionally and reaches the run's server through --server.
+  test("connects the V2 client to the run's server on the session", async () => {
     const mockSpawn = mockSpawnResult()
 
     try {
@@ -915,9 +918,48 @@ describe("openOpencodeSessionWindow", () => {
       })
       const args = mockSpawn.mock.calls[0]![0] as string[]
       const scriptArg = args[args.length - 1]!
-      expect(scriptArg).toContain("http://127.0.0.1:12345")
-      expect(scriptArg).toContain("--dir")
-      expect(scriptArg).toContain("--session")
+      expect(scriptArg).toContain("'opencode' '/repo' '--server' 'http://127.0.0.1:12345' '--session' 'sess-1'")
+      expect(scriptArg).not.toContain("attach")
+      expect(scriptArg).not.toContain("--dir")
+    } finally {
+      mockSpawn.mockRestore()
+    }
+  })
+
+  test("launches the operator's explicit OpenCode binary when one is configured", async () => {
+    const original = process.env.CONVOY_OPENCODE_BIN
+    process.env.CONVOY_OPENCODE_BIN = "/opt/opencode-v2/bin/opencode"
+    const mockSpawn = mockSpawnResult()
+
+    try {
+      await openOpencodeSessionWindow({ url: "http://127.0.0.1:12345", targetDir: "/repo", sessionID: "sess-1" })
+      const args = mockSpawn.mock.calls[0]![0] as string[]
+      expect(args[args.length - 1]).toContain("'/opt/opencode-v2/bin/opencode' '/repo' '--server'")
+    } finally {
+      mockSpawn.mockRestore()
+      restoreEnv("CONVOY_OPENCODE_BIN", original)
+    }
+  })
+
+  // The run's server requires its generated password; the V2 client reads it
+  // from OPENCODE_PASSWORD (exported by the window's shell command), never
+  // from the --server URL.
+  test("never puts the server password in the window's command", async () => {
+    const mockSpawn = mockSpawnResult()
+
+    try {
+      await openOpencodeSessionWindow({
+        url: "http://127.0.0.1:12345",
+        password: "s3cret",
+        targetDir: "/repo",
+        sessionID: "sess-1",
+      })
+      const args = mockSpawn.mock.calls[0]![0] as string[]
+      const scriptArg = args[args.length - 1]!
+      expect(scriptArg).toContain('OPENCODE_PASSWORD=\\"$(cat ')
+      expect(scriptArg).not.toContain("s3cret")
+      // The mocked window never runs its command, so nothing consumes the file.
+      await rm(dirname(stagedPasswordFile(scriptArg)), { recursive: true, force: true })
     } finally {
       mockSpawn.mockRestore()
     }
@@ -1053,8 +1095,29 @@ describe("openInteractiveOpencodeWindow", () => {
       })
       const args = mockSpawn.mock.calls[0]![0] as string[]
       const scriptArg = args[args.length - 1]!
-      expect(scriptArg).toContain("--continue")
+      expect(scriptArg).toContain("'opencode' '/repo' '--server' 'http://127.0.0.1:12345' '--continue'")
       expect(scriptArg).not.toContain("--session")
+      expect(scriptArg).not.toContain("attach")
+    } finally {
+      mockSpawn.mockRestore()
+    }
+  })
+
+  test("never puts the server password in the window's command", async () => {
+    const mockSpawn = mockSpawnResult()
+
+    try {
+      await openInteractiveOpencodeWindow({
+        url: "http://127.0.0.1:12345",
+        password: "s3cret",
+        targetDir: "/repo",
+      })
+      const args = mockSpawn.mock.calls[0]![0] as string[]
+      const scriptArg = args[args.length - 1]!
+      expect(scriptArg).toContain('OPENCODE_PASSWORD=\\"$(cat ')
+      expect(scriptArg).not.toContain("s3cret")
+      // The mocked window never runs its command, so nothing consumes the file.
+      await rm(dirname(stagedPasswordFile(scriptArg)), { recursive: true, force: true })
     } finally {
       mockSpawn.mockRestore()
     }
@@ -1118,6 +1181,26 @@ describe("openStoredSessionWindow", () => {
       const scriptArg = args[args.length - 1]!
       expect(scriptArg).toContain("--session")
       expect(scriptArg).not.toContain("attach")
+      expect(scriptArg).not.toContain("--server")
+    } finally {
+      mockSpawn.mockRestore()
+    }
+  })
+
+  // Without --standalone the V2 client joins the user's background service
+  // instead of starting its own server as the V1 TUI did.
+  test("runs on a private standalone server", async () => {
+    const mockSpawn = mockSpawnResult()
+
+    try {
+      await openStoredSessionWindow({
+        targetDir: "/repo",
+        sessionID: "sess-2",
+        runDir: "/tmp/convoy-run",
+      })
+      const args = mockSpawn.mock.calls[0]![0] as string[]
+      const scriptArg = args[args.length - 1]!
+      expect(scriptArg).toContain("'opencode' '/repo' '--standalone' '--session' 'sess-2'")
     } finally {
       mockSpawn.mockRestore()
     }
@@ -1214,7 +1297,7 @@ describe("openIterateOpencodeWindow", () => {
       })
       const args = mockSpawn.mock.calls[0]![0] as string[]
       const scriptArg = args[args.length - 1]!
-      expect(scriptArg).toContain("--prompt")
+      expect(scriptArg).toContain("'opencode' '/repo' '--standalone' '--prompt' 'Fix the bug'")
     } finally {
       mockSpawn.mockRestore()
     }
@@ -1545,5 +1628,111 @@ describe("owned-server factory failure and boot", () => {
       },
     })
     expect(launchOptions?.lifetime).toBe("authoring-service")
+  })
+
+  test("a rejected runtime gate fails the boot before any spawn", async () => {
+    let launched = false
+    await expect(
+      startOpencode({}, undefined, {
+        getFreePort: async () => 1,
+        assertRuntime: async () => {
+          throw new Error("Unsupported OpenCode runtime 1.18.4")
+        },
+        launch: async () => {
+          launched = true
+          return {
+            url: "http://127.0.0.1:1",
+            pid: 1,
+            stop: async () => ({ status: "stopped" as const, via: "already-gone" as const }),
+            forceStop: () => {},
+          }
+        },
+      }),
+    ).rejects.toThrow(/Unsupported OpenCode runtime/)
+    // The gate runs before the owned child is spawned, so no work can start.
+    expect(launched).toBe(false)
+  })
+})
+
+// The password must reach the client without ever appearing in a command line
+// (argv, `ps`, a typed shell's history): it is staged in a one-shot owner-only
+// file that the window's shell reads into the client's environment and removes.
+const stagedPasswordFile = (command: string) => command.match(/(\/[^'\s]*convoy-client-auth-[^/'\s]+\/password)/)![1]!
+
+describe("serverClientCommand", () => {
+  async function fakeClient() {
+    const dir = await mkdtemp(join(tmpdir(), "convoy-client-cmd-"))
+    const bin = join(dir, "fake-opencode")
+    await writeFile(bin, '#!/bin/sh\nprintf "%s|%s" "$OPENCODE_PASSWORD" "$*"\n')
+    await chmod(bin, 0o755)
+    return { dir, bin }
+  }
+
+  // Herdr types the command into the user's own interactive shell, so it
+  // must run unchanged in every shell, not only POSIX ones.
+  for (const shell of ["sh", "bash", "zsh", "fish"]) {
+    test.if(Bun.which(shell) !== null)(`runs the client with the password from a one-shot owner-only file under ${shell}`, async () => {
+      const fake = await fakeClient()
+      try {
+        const command = await serverClientCommand([fake.bin, "/repo", "--server", "http://127.0.0.1:1"], "s3cr'et pw")
+        expect(command).not.toContain("s3cr")
+        const staged = stagedPasswordFile(command)
+        expect((await stat(staged)).mode & 0o777).toBe(0o600)
+
+        const result = Bun.spawnSync([shell, "-c", command])
+        expect(result.stdout.toString()).toBe("s3cr'et pw|/repo --server http://127.0.0.1:1")
+        await expect(stat(staged)).rejects.toThrow()
+      } finally {
+        await rm(fake.dir, { recursive: true, force: true })
+      }
+    })
+  }
+
+  // A re-run (up-arrow, a held pane's ENTER) must fail clearly instead of
+  // starting the client without a password.
+  test("a second run fails clearly instead of connecting without the password", async () => {
+    const fake = await fakeClient()
+    try {
+      const command = await serverClientCommand([fake.bin, "/repo"], "s3cret")
+      expect(Bun.spawnSync(["sh", "-c", command]).exitCode).toBe(0)
+
+      const rerun = Bun.spawnSync(["sh", "-c", command])
+      expect(rerun.exitCode).toBe(1)
+      expect(rerun.stdout.toString()).toBe("")
+      expect(rerun.stderr.toString()).toContain("one-time password was already used")
+    } finally {
+      await rm(fake.dir, { recursive: true, force: true })
+    }
+  })
+
+  test("is the plain quoted command when there is no password", async () => {
+    const before = (await readdir(tmpdir())).filter((name) => name.startsWith("convoy-client-auth-")).length
+    expect(await serverClientCommand(["opencode", "/repo"], undefined)).toBe("'opencode' '/repo'")
+    expect((await readdir(tmpdir())).filter((name) => name.startsWith("convoy-client-auth-")).length).toBe(before)
+  })
+})
+
+describe("server client windows", () => {
+  const originalTerminal = process.env.CONVOY_TERMINAL
+
+  beforeEach(() => {
+    setPlatform("darwin")
+    process.env.CONVOY_TERMINAL = "terminal"
+  })
+
+  afterEach(() => {
+    restoreEnv("CONVOY_TERMINAL", originalTerminal)
+  })
+
+  test("a window that fails to open leaves no staged password behind", async () => {
+    const mockSpawn = mockSpawnResult(1, "osascript failed")
+
+    try {
+      await expect(openOpencodeSessionWindow({ url: "http://127.0.0.1:1", password: "s3cret", targetDir: "/repo", sessionID: "sess-1" })).rejects.toThrow()
+      const script = (mockSpawn.mock.calls[0]![0] as string[]).at(-1)!
+      await expect(stat(stagedPasswordFile(script))).rejects.toThrow()
+    } finally {
+      mockSpawn.mockRestore()
+    }
   })
 })

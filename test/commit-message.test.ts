@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import type { Config, OpencodeClient } from "@opencode-ai/sdk/v2"
+import type { Config, OpencodeClient } from "../src/opencode-client"
 
 import {
   closeFallbackCommitMessage,
@@ -95,7 +95,11 @@ describe("proposeCommitMessage", () => {
         },
       },
     })
-    expect(calls.creates).toEqual([{ directory: "/repo", title: "convoy commit writer" }])
+    expect(calls.creates[0]).toMatchObject({ directory: "/repo", title: "convoy commit writer" })
+    // The read-only writer is enforced through V2 session permissions, not a
+    // per-prompt tools map (which V2 does not have).
+    const perms = (calls.creates[0] as { permissions?: Array<{ action: string }> }).permissions ?? []
+    expect(perms.map((p) => p.action).sort()).toEqual(["bash", "edit", "shell", "webfetch", "write"])
     expect(calls.prompts[0]).toMatchObject({
       sessionID: "session-1",
       directory: "/repo",

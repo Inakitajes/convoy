@@ -1,4 +1,4 @@
-import type { OpencodeClient } from "@opencode-ai/sdk/v2"
+import type { OpencodeClient } from "./opencode-client"
 
 import { log } from "./log"
 
@@ -90,7 +90,15 @@ async function runJudgeSession(
   let sessionID: string | undefined
   try {
     const session = await client.session.create(
-      { directory: input.directory, title: "convoy safety judge" },
+      {
+        directory: input.directory,
+        title: "convoy safety judge",
+        // V2 has no per-prompt `tools` map: a tool-less judge must deny every
+        // action at session creation. Denying only specific tools is not enough
+        // — a model can fall back to another (e.g. shell after `read`).
+        // Validated against a real V2 server: `action: "*"` blocks all tools.
+        permissions: [{ action: "*", resource: "*", effect: "deny" }],
+      },
       { signal: controller.signal },
     )
     if (session.error || !session.data?.id) throw new Error("safety judge couldn't open a session")

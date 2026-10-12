@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
-import type { OpencodeClient } from "@opencode-ai/sdk/v2"
+import type { OpencodeClient } from "../src/opencode-client"
 
 import { startPermissionGate } from "../src/permissions"
 import { noopProgress, type PermissionPromptInfo, type PermissionReply, type ProgressUI } from "../src/progress"

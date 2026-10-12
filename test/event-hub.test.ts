@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import type { OpencodeClient } from "@opencode-ai/sdk/v2"
+import type { OpencodeClient } from "../src/opencode-client"
 
 import { createSessionEventHub, getSessionEventHub } from "../src/event-hub"
 

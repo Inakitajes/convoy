@@ -18,7 +18,8 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createCliRenderer } from "@opentui/core"
-import { createOpencodeClient } from "@opencode-ai/sdk/v2"
+import { createOpencodeClient } from "../src/opencode-client"
+import { bootV2Server } from "./v2-fixture"
 import { runForegroundChild } from "../src/terminal-host"
 import { openConversationExternal } from "../src/conversations"
 
@@ -41,28 +42,8 @@ git(["add", "."])
 git(["-c", "user.email=t@x", "-c", "user.name=T", "commit", "-q", "-m", "init"])
 git(["worktree", "add", "-q", "-b", "feat/fg-probe", wt])
 
-let nextPort = 26701
-async function bootServer(cwd: string): Promise<{ url: string; proc: Bun.Subprocess<"ignore" | "pipe", "pipe", "pipe"> }> {
-  const proc = Bun.spawn(["opencode", "serve", "--hostname=127.0.0.1", `--port=${nextPort++}`], { cwd, stdout: "pipe", stderr: "pipe" })
-  const url = await new Promise<string>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("boot timeout")), 30_000)
-    ;(proc.stdout as ReadableStream).pipeThrough(new TextDecoderStream()).pipeTo(
-      new WritableStream({
-        write(chunk) {
-          const match = [...chunk.matchAll(/http:\/\/[^\s]+/g)].at(-1)
-          if (match) {
-            clearTimeout(timer)
-            resolve(match[0].replace(/[^\S].*$/, "").trim())
-          }
-        },
-      }),
-    ).catch(() => reject(new Error("boot timeout")))
-  })
-  return { url, proc }
-}
-
-const server = await bootServer(wt)
-const client = createOpencodeClient({ baseUrl: server.url })
+const server = await bootV2Server(wt)
+const client = createOpencodeClient({ baseUrl: server.url, ...(server.password ? { password: server.password } : {}) })
 const created = await client.session.create({ title: "foreground probe" })
 if (created.error) throw new Error(`session create failed: ${JSON.stringify(created.error)}`)
 const sessionId = created.data!.id
@@ -124,7 +105,7 @@ const external = await openConversationExternal({ checkout: wt, ref: { harness: 
 record("external-pane-failure-path", { status: external.status, reason: external.status === "failed" ? external.reason.slice(0, 120) : undefined })
 
 renderer.destroy()
-server.proc.kill()
+await server.stop()
 await rm(root, { recursive: true, force: true })
 record("teardown", { destroyed: renderer.isDestroyed })
 console.log("PROBE COMPLETE")

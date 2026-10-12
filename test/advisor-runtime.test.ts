@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
-import type { OpencodeClient } from "@opencode-ai/sdk/v2"
+import type { OpencodeClient } from "../src/opencode-client"
 
 import { defaultAdvisorMaxCalls, type AdvisorResult, type AdvisorUsage } from "../src/advisor"
 import { createAdvisorRuntime, firstWriteMessage, totalAdvisorUsage } from "../src/advisor-runtime"

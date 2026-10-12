@@ -17,7 +17,8 @@ import { appendFileSync } from "node:fs"
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { createOpencodeClient } from "@opencode-ai/sdk/v2"
+import { createOpencodeClient } from "../src/opencode-client"
+import { bootV2Server } from "./v2-fixture"
 import { openConversationExternal } from "../src/conversations"
 
 const logPath = process.env.CONVOY_VERIFY_LOG ?? "verify-multiplexer.log"
@@ -37,23 +38,8 @@ git(["init", "-q", "-b", "main"])
 git(["add", "."])
 git(["-c", "user.email=t@x", "-c", "user.name=T", "commit", "-q", "-m", "init"])
 
-let nextPort = 27001
-const proc = Bun.spawn(["opencode", "serve", "--hostname=127.0.0.1", `--port=${nextPort}`], { cwd: wt, stdout: "pipe", stderr: "pipe" })
-const url = await new Promise<string>((resolve, reject) => {
-  const timer = setTimeout(() => reject(new Error("boot timeout")), 30_000)
-  ;(proc.stdout as ReadableStream).pipeThrough(new TextDecoderStream()).pipeTo(
-    new WritableStream({
-      write(chunk) {
-        const match = [...chunk.matchAll(/http:\/\/[^\s]+/g)].at(-1)
-        if (match) {
-          clearTimeout(timer)
-          resolve(match[0].replace(/[^\S].*$/, "").trim())
-        }
-      },
-    }),
-  ).catch(() => reject(new Error("boot timeout")))
-})
-const client = createOpencodeClient({ baseUrl: url })
+const server = await bootV2Server(wt)
+const client = createOpencodeClient({ baseUrl: server.url, ...(server.password ? { password: server.password } : {}) })
 const session = await client.session.create({ title: "multiplexer probe" })
 if (session.error) throw new Error(`session create failed: ${JSON.stringify(session.error)}`)
 const sessionId = session.data!.id
@@ -61,7 +47,7 @@ record("fixture", { sessionId, wt })
 
 // The success path: pane creation and session verification through the same
 // validated work and session reference the foreground path uses.
-const outcome = await openConversationExternal({ checkout: wt, ref: { harness: "opencode", sessionId }, server: { url } })
+const outcome = await openConversationExternal({ checkout: wt, ref: { harness: "opencode", sessionId }, server: { url: server.url } })
 record("external-pane-outcome", {
   status: outcome.status,
   backend: outcome.status === "opened" || outcome.status === "opened-unverified" ? outcome.backend : undefined,
@@ -75,7 +61,7 @@ await Bun.sleep(4_000)
 const status = await client.session.status()
 record("session-status-after-pane", { data: JSON.stringify(status.data).slice(0, 200) })
 
-proc.kill()
+await server.stop()
 await rm(root, { recursive: true, force: true })
 record("done", {})
 process.exit(0)

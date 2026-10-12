@@ -51,10 +51,6 @@ async function discoverProviderCatalog(
   const handle = await startOpencode({}, signal)
   track?.(handle)
   try {
-    // Runs use the classic session API, whose provider catalog owns the
-    // credential connections and exact model IDs accepted by session.prompt.
-    // The newer client.v2 catalog is a separate provider system and can omit
-    // working classic providers such as an authenticated OpenAI connection.
     const providerResult = await handle.client.provider.list({ directory })
     if (providerResult.error || !providerResult.data) throw new Error("OpenCode could not list connected providers and models")
     return providerResult.data

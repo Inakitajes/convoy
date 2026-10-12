@@ -3,7 +3,7 @@ import { access, constants, mkdir, readFile, realpath, stat } from "node:fs/prom
 import { homedir } from "node:os"
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path"
 
-import type { AgentConfig, Config, OpencodeClient } from "@opencode-ai/sdk/v2"
+import { toolPermissions, type AgentConfig, type Config, type OpencodeClient } from "./opencode-client"
 
 import { loadMergedConvoyConfig, type ConvoyConfig } from "./config"
 import { addWorktree, branchExists } from "./git"
@@ -12,6 +12,9 @@ import { startOpencode } from "./opencode"
 import { splitModelVariant } from "./pipeline"
 import { parseModel } from "./runner"
 import { convoyHome } from "./workspace"
+
+/** Read-only tools for the branch namer; translated to V2 session permissions at create. */
+const namerTools: Record<string, boolean> = { read: true, list: true, glob: true, grep: true, webfetch: true, write: false, edit: false, bash: false, todoread: false, todowrite: false }
 
 export type WorktreeResult = {
   /** Absolute path of the newly created worktree. */
@@ -421,7 +424,8 @@ export async function askForBranchName(client: OpencodeClient, input: BranchName
   let sessionID: string | undefined
   try {
     const session = await client.session.create(
-      { directory: input.targetDir, title: "convoy branch namer" },
+      { directory: input.targetDir, title: "convoy branch namer", permissions: toolPermissions(namerTools) },
+
       { signal: controller.signal },
     )
     if (session.error || !session.data?.id) throw new Error("couldn't open a naming session")
@@ -438,7 +442,7 @@ export async function askForBranchName(client: OpencodeClient, input: BranchName
         // resolve, the reply must still follow the contract rather than be a
         // free-form answer from opencode's default persona.
         system: branchNameSystemPrompt,
-        tools: { read: true, list: true, glob: true, grep: true, webfetch: true, write: false, edit: false, bash: false, todoread: false, todowrite: false },
+        tools: namerTools,
         parts: [{ type: "text", text: namerMessage(input.prompt, input.guidance) }],
       },
       { signal: controller.signal },
