@@ -132,4 +132,33 @@ Rollback means restoring the prior Convoy build/dependencies and using an explic
 | Helpers/authoring/terminals | helper, conversations/service, spin/propose, install, terminal-host/herdr suites | Settled helper results, commands, exact authenticated continuation and restoration/independent lifetime |
 | Goals/history/Git | metadata/goal-scheduler/step-commit/finalization suites; canonical contracts | Existing records/checkpoints, measurement isolation, qualified reports, hooks, writer claims and finalization |
 
-All execution evidence is pending. The known feasibility checks are acceptance gates, not optional scope or grounds to remove a feature. Patch-version selection and exact supported argv/auth/config transport are resolved by the first contract/runtime gate within this approach, using published declarations and controlled fixtures.
+The known feasibility checks are acceptance gates, not optional scope or grounds to remove a feature. Patch-version selection and exact supported argv/auth/config transport are resolved by the first contract/runtime gate within this approach, using published declarations and controlled fixtures.
+
+#### Recorded evidence and open blockers (OpenCode 2.0.26, `@opencode/client` 2.0.26)
+
+Verified against the real runtime with a scripted local provider (no paid model), in `test/opencode-v2-runtime.integration.test.ts`:
+
+- Hard deny wins over the ask fallback and allowlist: V2 evaluates the bash map as an ordered ruleset where the last match wins, so `bashPolicy` emits `"*"` first and denials last.
+- Allowlisted checks run without asking.
+- `write_report` loads as a plugin package directory from the run config's `plugins` list and is offered directly (`codemode: false`).
+- The operator's global config and providers still load: Convoy no longer sets `OPENCODE_CONFIG_DIR`, which replaces the global config directory in V2.
+- A selected variant reaches the model request, and the catalog lists custom providers and variants as soon as the server is up.
+- History carries the session id and tool call ids, and live V2 tool markers deduplicate against history.
+
+Covered by V2 event fixtures in `test/runner-v2-events.test.ts`: loop-guard fuses (identical calls, same-tool failures, steps and cumulative cost).
+
+Prompt admission (task 3.2): Convoy admits every prompt under a client-chosen V2 message id (`@opencode/schema` `Session.Message.ID`). The runtime admits an id once. A lost admission response is reconciled with `session.message.get` before it is reported as a failure, and a blocking helper prompt returns only the assistant reply that follows its own admitted message. Both are verified on the real runtime.
+
+Terminal continuation:
+
+- Session windows connect with `opencode <dir> --server <url>`. The server password is staged in a one-shot owner-only file. A `sh -c` wrapper reads it into `OPENCODE_PASSWORD` and deletes it before the client starts, so it also runs in a non-POSIX interactive shell (Herdr). The password never appears in a command line, `ps` or shell history.
+- A re-run of the same command fails clearly instead of connecting without the password. Files whose window never ran are removed when Convoy exits. All of this is verified by running the real command under sh, bash and zsh.
+- Standalone windows (stored session, iterate and authoring conversation) pass `--standalone`. This keeps V1's own-server behavior and stays off the user's background service.
+- V2's `--session <id>` creates a missing session, so a stored-session window is verified first with `validateAuthoringSession`, the same check authoring conversations use, and refused when the session is gone. The real runtime refuses an unknown id without creating it.
+
+`doom_loop`: V2 still accepts the permission key, but its runtime has no repeated-call detector that raises it. Convoy's loop guard identical-call fuse covers repetition and is verified on V2 event fixtures. Not a blocker.
+
+Open blockers. These keep tasks 5.3 and 9.3 open:
+
+- Agent and advisor temperature: OpenCode 2.0.26 forwards no temperature from configuration. It was probed on the real runtime through agent `temperature`/`options`/`request.body`, the V2 `agents` form, model `options` and a model variant; none reached the provider request. Convoy keeps emitting the setting, and `test.failing` flips when the runtime forwards it. This is an upstream runtime gap; Convoy cannot set it per request.
+- No model-backed parity scenarios have been run. Task 9.3 requires explicit approval for paid runs.
