@@ -158,7 +158,17 @@ Terminal continuation:
 
 `doom_loop`: V2 still accepts the permission key, but its runtime has no repeated-call detector that raises it. Convoy's loop guard identical-call fuse covers repetition and is verified on V2 event fixtures. Not a blocker.
 
-Open blockers. These keep tasks 5.3 and 9.3 open:
+Model-backed acceptance (task 9.3), 2026-10-13, `openai/gpt-6-luna` through the operator's OpenAI subscription on OpenCode 2.0.27, with a project pipeline in an isolated target repository and `CONVOY_HOME`:
+
+- An advised implementer used on-demand and completion consultations. The first-write checkpoint is skipped by design after an on-demand consult; that V2 edits and writes raise the `edit` permission the checkpoint intercepts is verified separately on the real runtime.
+- A `verify` validation step and parallel read-only bug and security reviews ran, and the repository stayed unchanged.
+- The goal cycle measured, ran an improve round, stopped on plateau and restored the best measured state.
+- SIGINT during the implementer aborted the session, stopped the owned server and kept the run. `--resume` completed it.
+- Automatic compaction wrote AI commit messages.
+- Found and fixed: V2's `session.wait` returns at once before a turn starts executing, so helper prompts (commit writer, safety judge, advisor, branch namer) intermittently failed with no reply. A helper turn now settles only once history records `idle` after its admitted message.
+- Not exercised: human recovery needs an interactive terminal and remains unverified with a real model.
+
+Open blockers. These keep task 5.3 open:
 
 - Agent and advisor temperature: OpenCode 2.0.26 forwards no temperature from configuration. It was probed on the real runtime through agent `temperature`/`options`/`request.body`, the V2 `agents` form, model `options` and a model variant; none reached the provider request. Convoy keeps emitting the setting, and `test.failing` flips when the runtime forwards it. This is an upstream runtime gap; Convoy cannot set it per request.
-- No model-backed parity scenarios have been run. Task 9.3 requires explicit approval for paid runs.
+- Human recovery has not run against a real model; it needs an interactive terminal.
