@@ -6,6 +6,7 @@ import { opencodeConfig } from "../src/agents"
 import { validateAuthoringSession } from "../src/conversations"
 import { createOpencodeClient } from "../src/opencode-client"
 import { toModelChoices } from "../src/model-catalog"
+import { builtInAgents } from "../src/pipeline"
 import { installWriteReportTool } from "../src/report-bridge"
 import { writeReportToolName } from "../src/report"
 import { serverAuthPath } from "../src/server-auth"
@@ -38,6 +39,10 @@ afterEach(async () => {
 
 type Fixture = { runtime: IsolatedRuntime; provider: ScriptedProvider; booted: BootedRuntime; runDir: string }
 
+// A run configures only its pipeline's agents. All built-ins together exceed
+// Linux's 128 KiB limit on a single environment variable (E2BIG at spawn).
+const fixtureAgents = builtInAgents.filter((agent) => agent.name === "implementer" || agent.name === "bug-auditor")
+
 async function boot(reply: Parameters<typeof startScriptedProvider>[0], withPlugin = false): Promise<Fixture> {
   const provider = startScriptedProvider(reply)
   cleanups.push(() => provider.stop())
@@ -46,7 +51,7 @@ async function boot(reply: Parameters<typeof startScriptedProvider>[0], withPlug
   const runDir = join(runtime.root, "run")
   await mkdir(runDir, { recursive: true })
   const plugins = withPlugin ? [dirname(await installWriteReportTool({ url: "http://127.0.0.1:1/report", token: "t", dir: join(runtime.root, "convoy-opencode") }))] : []
-  const booted = await bootRuntime(runtime, opencodeConfig(runDir, runtime.checkout, undefined, undefined, { plugins }))
+  const booted = await bootRuntime(runtime, opencodeConfig(runDir, runtime.checkout, fixtureAgents, undefined, { plugins }))
   cleanups.push(() => booted.server.stop())
   return { runtime, provider, booted, runDir }
 }
