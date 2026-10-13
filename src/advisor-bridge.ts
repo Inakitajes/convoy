@@ -6,6 +6,7 @@ import { advisorFallbackText, advisorFeedbackToolName, advisorToolName } from ".
 import type { AdvisorFeedbackOutcome } from "./advisor-events"
 import type { AdvisorRuntime } from "./advisor-runtime"
 import { log } from "./log"
+import { registerSecret } from "./runners/redaction"
 import { opencodeConfigDir } from "./workspace"
 
 /**
@@ -45,6 +46,7 @@ export type StartAdvisorBridgeOptions = {
 
 export async function startAdvisorBridge(options: StartAdvisorBridgeOptions): Promise<AdvisorBridge> {
   const token = crypto.randomUUID()
+  registerSecret(token)
   const hostname = options.hostname ?? "127.0.0.1"
   const port = await freePort(hostname)
 

@@ -5,6 +5,7 @@ import { join } from "node:path"
 import { log } from "./log"
 import { writeReportToolName } from "./report"
 import type { ReportRuntime } from "./report-runtime"
+import { registerSecret } from "./runners/redaction"
 import { opencodeConfigDir } from "./workspace"
 
 export const reportUrlEnv = "CONVOY_REPORT_URL"
@@ -25,6 +26,7 @@ export type StartReportBridgeOptions = {
 /** Starts the authenticated loopback hop used by OpenCode's write_report shim. */
 export async function startReportBridge(options: StartReportBridgeOptions): Promise<ReportBridge> {
   const token = crypto.randomUUID()
+  registerSecret(token)
   const hostname = options.hostname ?? "127.0.0.1"
   const port = await freePort(hostname)
   const server = Bun.serve({

@@ -25,6 +25,7 @@ import {
   type ProcessIdentity,
 } from "./process-identity"
 import { childStopTarget, stopTarget, type StopOutcome, type StopPolicy } from "./process-stop"
+import { redactSecrets } from "./runners/redaction"
 import {
   createProcessRecordStore,
   newProcessRecord,
@@ -277,7 +278,7 @@ export async function launchManagedServer(options: ManagedServerOptions): Promis
     }
 
     const diagnosticSuffix = () => {
-      const tail = (stderrTail || stdoutTail).trim()
+      const tail = redactSecrets((stderrTail || stdoutTail).trim())
       return tail ? `: ${tail.slice(-diagnosticTailLimit)}` : ""
     }
 
