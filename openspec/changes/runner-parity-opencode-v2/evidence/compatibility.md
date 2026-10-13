@@ -42,6 +42,21 @@ global credentials or configuration.
 | Permission hosting | MCP `--permission-prompt-tool` hosts ask-level prompts; `PreToolUse` hooks run before other steps and cannot be skipped by auto-approval. | Documented; group 6 validates. |
 | Native advisor / background attach | `--advisor` and `--bg` exist; `--bg` does not combine with `-p`. | Candidate only; requires equivalence evidence (D8/D10). |
 
+## Authorized test model (real-harness acceptance)
+
+Operator authorization recorded for the OpenCode real-runtime path only:
+
+- **OpenCode acceptance model: `nan/deepseek-v4-flash`** (provider `nan`). Use it
+  for OpenCode real-runtime acceptance (tasks 1.2/12.2). This is the model the
+  adapter fixtures and any OpenCode smoke should drive; do not substitute an
+  expensive provider.
+- **Claude acceptance: deferred (design option B).** No Claude real-harness smoke,
+  paid or subscription, runs until the Claude adapter exists and the operator
+  re-authorizes a bounded spend.
+
+Nothing here authorizes API-key spend on any provider beyond the `nan` provider
+above, and no authorization changes global credentials.
+
 ## Evidence status
 
 - **Fixture-verified:** OpenCode protocol facts above are documented against a
