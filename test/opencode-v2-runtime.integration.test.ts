@@ -206,6 +206,34 @@ describe.if(opencodeAvailable)("Convoy prompt admission on the real runtime", ()
     expect(history.data!.filter((message) => message.info.role === "user")).toHaveLength(1)
   }, 40_000)
 
+  // V2's `wait` returns at once when the turn has not started executing yet
+  // (seen with gpt-6-luna on the commit writer): a helper must still wait for
+  // its own turn instead of failing with no reply.
+  test("a helper prompt settles its turn even when wait returns before execution starts", async () => {
+    const fixture = await boot(() => ({ text: "the reply" }))
+    let early = false
+    const racing = Object.assign(
+      async (input: string | URL | Request, init?: RequestInit) => {
+        const url = new URL(input instanceof Request ? input.url : String(input))
+        if (!early && url.pathname.endsWith("/wait")) {
+          early = true
+          return new Response(null, { status: 204 })
+        }
+        return await fetch(input, init)
+      },
+      { preconnect: fetch.preconnect },
+    ) as typeof fetch
+    const client = createOpencodeClient({ baseUrl: fixture.booted.server.url, password: fixture.booted.server.password!, fetch: racing })
+    const session = await client.session.create({ directory: fixture.runtime.checkout })
+
+    const reply = await client.session.prompt({ sessionID: session.data!.id, model: { providerID: "mock", modelID: "mock-model" }, parts: [{ type: "text", text: "go" }] })
+
+    expect(early).toBe(true)
+    expect(reply.error).toBeUndefined()
+    const text = reply.data!.parts.filter((part) => part.type === "text").map((part) => (part as { text: string }).text).join("")
+    expect(text).toBe("the reply")
+  }, 40_000)
+
   // A helper's blocking prompt settles its own turn: a turn that fails must not
   // hand back the previous turn's assistant output as its result.
   test("a helper prompt never returns an earlier turn's reply as its result", async () => {

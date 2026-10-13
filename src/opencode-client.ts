@@ -373,7 +373,7 @@ export function createOpencodeClient(options: CreateOpencodeClientOptions): Open
           if (model) await client.session.switchModel({ sessionID: input.sessionID, model }, opts)
           const payload = toPromptPayload(input.parts, input.system)
           const id = await admitPrompt(client, { sessionID: input.sessionID, text: payload.text, files: payload.files }, opts)
-          await client.session.wait({ sessionID: input.sessionID }, opts)
+          await waitForTurn(client, input.sessionID, id, opts)
           const messages = await listSessionMessages(client, input.sessionID, opts)
           // Only this turn's reply counts (history is oldest first): an earlier
           // turn's output can never stand in for a turn that produced none.
@@ -554,23 +554,62 @@ async function admitPrompt(
   return id
 }
 
+const turnPollMs = 250
+
+/**
+ * Waits until the admitted turn has finished. V2's `wait` returns at once when
+ * the turn has not started executing yet, so the turn counts as settled only
+ * once history records an `idle` after the admitted message. Bounded by the
+ * caller's signal, like every helper prompt.
+ */
+async function waitForTurn(client: ReturnType<typeof OpenCode.make>, sessionID: string, admittedID: string, opts?: RequestOptions): Promise<void> {
+  for (;;) {
+    await client.session.wait({ sessionID }, opts)
+    const items = await listSessionItems(client, sessionID, opts)
+    const admitted = items.findIndex((item) => item.id === admittedID)
+    if (admitted !== -1 && items.slice(admitted + 1).some((item) => item.type === "idle")) return
+    await pollDelay(opts?.signal)
+  }
+}
+
+function pollDelay(signal: AbortSignal | undefined): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer)
+      reject(signal?.reason)
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort)
+      resolve()
+    }, turnPollMs)
+    signal?.addEventListener("abort", onAbort, { once: true })
+  })
+}
+
 /** Reads a session's full history, following V2's cursor pagination. */
 async function listSessionMessages(
   client: ReturnType<typeof OpenCode.make>,
   sessionID: string,
   opts?: RequestOptions,
 ): Promise<SessionMessage[]> {
-  const out: SessionMessage[] = []
+  const items = await listSessionItems(client, sessionID, opts)
+  return items.filter((item) => item.type === "user" || item.type === "assistant").map((item) => mapMessageInfo(item, sessionID))
+}
+
+/** Every history item (messages and markers such as `idle`), oldest first. */
+async function listSessionItems(
+  client: ReturnType<typeof OpenCode.make>,
+  sessionID: string,
+  opts?: RequestOptions,
+): Promise<V2MessageInfo[]> {
+  const out: V2MessageInfo[] = []
   let cursor: string | undefined
   for (;;) {
     // V2 encodes the order/direction inside the opaque cursor; passing `order`
     // alongside a cursor is rejected (InvalidCursorError).
     const input = cursor ? { sessionID, cursor } : { sessionID, order: "asc" as const }
     const page = await client.message.list(input, opts)
-    for (const info of page.data) {
-      const type = (info as { type?: string }).type
-      if (type === "user" || type === "assistant") out.push(mapMessageInfo(info, sessionID))
-    }
+    out.push(...(page.data as V2MessageInfo[]))
     const next = page.cursor?.next
     if (!next || next === cursor) break
     cursor = next
