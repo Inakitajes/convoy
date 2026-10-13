@@ -24,6 +24,7 @@ convoy/
 │   ├── main.ts          # entrypoint
 │   ├── cli.ts           # flag parsing
 │   ├── runner.ts        # pipeline orchestration
+│   ├── runners/         # harness-neutral runner ports/contracts (see below)
 │   ├── opencode.ts      # startup/control via SDK
 │   ├── managed-server.ts # owned `opencode serve` child launch + bounded observed stop
 │   ├── process-stop.ts  # shared SIGTERM→SIGKILL stop state machine
@@ -66,5 +67,46 @@ convoy/
 ```
 
 ---
+
+## Runner compatibility and parity
+
+Convoy is migrating from a single implicit OpenCode backend to explicit runner
+ports (`src/runners/contracts.ts`) with independent OpenCode and Claude adapters.
+The work is tracked in the OpenSpec change `runner-parity-opencode-v2`; its
+`evidence/` directory holds the runner inventory and the compatibility record.
+
+Runtime requirements and the current gate:
+
+- **OpenCode** must be a supported V2 on `PATH`; Convoy never installs, updates,
+  or replaces it. Exact selected client/plugin/schema versions and the tested CLI
+  version are in `openspec/changes/runner-parity-opencode-v2/evidence/compatibility.md`.
+- **Claude** baseline uses the operator's authenticated CLI with subscription
+  authentication. Subscription authentication is not a no-cost guarantee: usage
+  credits and paid features are governed by a separate billing policy. API-key
+  execution is an explicit, separately selected mode.
+
+Release gate: no part of the parity matrix in
+`openspec/changes/runner-parity-opencode-v2/design.md` (decision D4) ships until
+its mandatory cells have passing automated tests plus consented real-harness
+acceptance. Advanced exceptions must name exact versions and authentication modes.
+Until then, treat Claude parity and the runner ports as **in progress**: the
+OpenCode path remains the shipped behavior.
+
+### Runner ports and ownership responsibilities
+
+- `src/runners/contracts.ts` is Convoy-owned and **vendor-free**: execution
+  requests, normalized events, attempt outcomes, runner-qualified sessions,
+  described capabilities, and the `RunnerRegistry`. No SDK type may appear here.
+- Adapters live under `src/runners/` and are the **only** place a vendor harness
+  package may be imported. `test/runner-boundaries.test.ts` enforces this with a
+  shrinking burn-down allowlist of the modules that still import one; a new
+  off-boundary import fails the suite.
+- `test/helpers/runner-conformance.ts` is the shared conformance suite every
+  adapter must pass; real adapters run it from their own tests.
+- **Core keeps** scheduling, goal rounds, budgets, retries, Git coordination,
+  writer claims, quality loops, report validation, and advisor policy. **Adapters
+  own** their protocol client, native event decoding, permission interception,
+  and harness process ownership, and translate all of it into the neutral
+  vocabulary.
 
 [Back to documentation](README.md)

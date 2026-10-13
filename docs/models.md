@@ -23,6 +23,22 @@ opencode models anthropic
 
 To use different providers, authenticate them in OpenCode and select models as `provider/model`. The default `full-cycle` uses OpenRouter for DeepSeek, GLM and Grok, and OpenAI for Astra. `implement` uses the same writing models, with advice only on implementation and a closing DeepSeek recap. See the [default pipeline](pipelines.md#the-default-pipeline-full-cycle) for the step-by-step model choices.
 
+## Runner authentication and billing
+
+Convoy is moving runner choice and authentication to explicit selections
+(tracked in `openspec/changes/runner-parity-opencode-v2/`; in progress):
+
+- **OpenCode** is the shipped runner and requires a supported OpenCode V2 on
+  `PATH`. Convoy never installs, updates, or replaces it.
+- **Claude** uses the operator's authenticated CLI. Subscription authentication
+  is the baseline; API-key execution is an explicit, separately selected mode.
+- Authentication and billing are **separate**. Subscription login does not
+  guarantee included-only usage: usage credits and paid features are governed by
+  an explicit billing policy. Convoy never changes account spending settings.
+
+Selected versions and the release gate are recorded in that change's
+`evidence/compatibility.md` and `design.md`.
+
 ## Model gateways
 
 Convoy can change how every OpenCode model is reached without rewriting a pipeline:
