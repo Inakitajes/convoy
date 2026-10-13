@@ -50,6 +50,12 @@ Operator authorization recorded for the OpenCode real-runtime path only:
   for OpenCode real-runtime acceptance (tasks 1.2/12.2). This is the model the
   adapter fixtures and any OpenCode smoke should drive; do not substitute an
   expensive provider.
+  *Limitation observed:* its provider routing answers **404 "No endpoints found
+  that support tool use"** when the session's agent enables tools (e.g. `edit`),
+  so it verifies protocol, authentication, session, prompt admission, completion
+  signalling, and truthful failure — but **not** tool-using steps. Tool-using
+  OpenCode acceptance needs either a tool-capable model or an agent config that
+  disables tools (config translation lands in task 4.3).
 - **Claude acceptance: deferred (design option B).** No Claude real-harness smoke,
   paid or subscription, runs until the Claude adapter exists and the operator
   re-authorizes a bounded spend.

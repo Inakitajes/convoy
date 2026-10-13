@@ -28,7 +28,11 @@ describe.if(live)("opencode v2 live prompt (nan/deepseek-v4-flash)", () => {
       await waitForIdle(client, session.id)
       const messages = await listMessages(client, session.id)
       const hasAssistant = messages.data.some((entry) => (entry as { type?: unknown }).type === "assistant")
+      const hasIdle = messages.data.some((entry) => (entry as { type?: unknown }).type === "idle")
+      // Admission + completion signalling, independent of whether the provider
+      // could serve the turn (this model does not support tool use).
       expect(hasAssistant).toBe(true)
+      expect(hasIdle).toBe(true)
     } finally {
       await server.stop()
       await rm(dir, { recursive: true, force: true })
