@@ -1,6 +1,5 @@
 import "./polyfills"
 
-import { rmSync } from "node:fs"
 import { mkdtemp, rm, stat, writeFile } from "node:fs/promises"
 import { createServer } from "node:net"
 import { homedir, tmpdir } from "node:os"
@@ -133,7 +132,8 @@ export function serverPasswordEnv(password: string | undefined): Record<string, 
  * line is visible in `ps`, and Terminal.app types it into the user's shell
  * history, so the password never appears in it: it is staged in a one-shot
  * owner-only file that the command reads into the client's environment and
- * removes before the client starts.
+ * removes before the client starts. It is not removed when Convoy exits: the
+ * window may start its client later, against a run server that outlives Convoy.
  */
 export async function serverClientCommand(argv: readonly string[], password: string | undefined): Promise<string> {
   return (await prepareServerClientCommand(argv, password)).command
@@ -145,7 +145,6 @@ async function prepareServerClientCommand(argv: readonly string[], password: str
   const dir = await mkdtemp(join(tmpdir(), "convoy-client-auth-"))
   const file = join(dir, "password")
   await writeFile(file, password, { mode: 0o600 })
-  stagedPasswordDirs.add(dir)
   // Wrapped in `sh -c` so it also runs when typed into a non-POSIX
   // interactive shell (Herdr). A re-run (up-arrow, a held pane) finds the
   // file gone and fails clearly instead of connecting without a password.
@@ -158,20 +157,9 @@ async function prepareServerClientCommand(argv: readonly string[], password: str
   ].join("; ")
   return {
     command: `sh -c ${shellQuote(script)}`,
-    discard: async () => {
-      stagedPasswordDirs.delete(dir)
-      await rm(dir, { recursive: true, force: true })
-    },
+    discard: () => rm(dir, { recursive: true, force: true }),
   }
 }
-
-// A staged password whose window never ran its command (a failed cd, a pane
-// closed early) is removed when Convoy exits; it is useless once the run's
-// server is gone anyway.
-const stagedPasswordDirs = new Set<string>()
-process.once("exit", () => {
-  for (const dir of stagedPasswordDirs) rmSync(dir, { recursive: true, force: true })
-})
 
 async function openServerClientWindow(argv: readonly string[], password: string | undefined, targetDir: string, label: string): Promise<SessionWindowBackend> {
   const prepared = await prepareServerClientCommand(argv, password)
@@ -277,6 +265,14 @@ async function freePort() {
   })
 }
 
+// A server child must generate its own per-boot password: given the user's
+// OPENCODE_PASSWORD/OPENCODE_SERVER_PASSWORD it adopts that one and never
+// prints the `server password` line its readiness waits for.
+function serverChildEnv(): Record<string, string | undefined> {
+  const { OPENCODE_PASSWORD: _client, OPENCODE_SERVER_PASSWORD: _server, ...env } = withoutHerdrEnv(process.env)
+  return env
+}
+
 /**
  * Boots a bounded OpenCode server rooted at an explicit checkout (capability
  * work-conversations, design D5). Unlike `startOpencode`, which inherits
@@ -301,7 +297,7 @@ export async function bootOpencodeServerFrom(
     command: resolveOpencodeBin(),
     args: ["serve", "--hostname=127.0.0.1", `--port=${await (options.deps?.getFreePort ?? freePort)()}`],
     cwd: checkout,
-    env: withoutHerdrEnv(process.env),
+    env: serverChildEnv(),
     lifetime,
     label: lifetime === "authoring-service" ? "opencode authoring service" : "opencode helper",
     timeoutMs,
@@ -344,7 +340,7 @@ export async function startOpencode(
     command: resolveOpencodeBin(),
     args,
     cwd: process.cwd(),
-    env: { ...withoutHerdrEnv(process.env), OPENCODE_CONFIG_CONTENT: JSON.stringify(config ?? {}) },
+    env: { ...serverChildEnv(), OPENCODE_CONFIG_CONTENT: JSON.stringify(config ?? {}) },
     lifetime,
     label: lifetime === "run" ? "opencode run server" : "opencode helper",
     timeoutMs: 30_000,

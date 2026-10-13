@@ -328,6 +328,9 @@ export async function launchManagedServer(options: ManagedServerOptions): Promis
     }
 
     let parsedUrl: string | undefined
+    // Set once ownership publication starts: output arriving during its awaits
+    // must not start another, whose failure would stop a server already ready.
+    let publishing = false
 
     const onLine = (line: string) => {
       if (settled) return
@@ -350,7 +353,10 @@ export async function launchManagedServer(options: ManagedServerOptions): Promis
         }
         if (parsed) parsedUrl = parsed.url
       }
-      if (parsedUrl && password) void publishOwnershipThenResolve()
+      if (parsedUrl && password && !publishing) {
+        publishing = true
+        void publishOwnershipThenResolve()
+      }
     }
 
     const publishOwnershipThenResolve = async () => {

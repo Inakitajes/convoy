@@ -143,7 +143,9 @@ Verified against the real runtime with a scripted local provider (no paid model)
 - `write_report` loads as a plugin package directory from the run config's `plugins` list and is offered directly (`codemode: false`).
 - The operator's global config and providers still load: Convoy no longer sets `OPENCODE_CONFIG_DIR`, which replaces the global config directory in V2.
 - A selected variant reaches the model request, and the catalog lists custom providers and variants as soon as the server is up.
-- History carries the session id and tool call ids, and live V2 tool markers deduplicate against history.
+- History carries the session id, tool call ids and each assistant turn's finish reason, and live V2 tool markers deduplicate against history.
+- Agents read and write the run dir but are denied its `private/` dir, which holds the server password and the plugin packages that embed the bridge tokens. V2 matches `external_directory` rules by a file's directory, so the secrets need their own dir.
+- Managed servers are spawned without the user's `OPENCODE_PASSWORD`/`OPENCODE_SERVER_PASSWORD`. Given either, V2 adopts it and never prints the `server password` line readiness waits for.
 
 Covered by V2 event fixtures in `test/runner-v2-events.test.ts`: loop-guard fuses (identical calls, same-tool failures, steps and cumulative cost).
 
@@ -152,7 +154,8 @@ Prompt admission (task 3.2): Convoy admits every prompt under a client-chosen V2
 Terminal continuation:
 
 - Session windows connect with `opencode <dir> --server <url>`. The server password is staged in a one-shot owner-only file. A `sh -c` wrapper reads it into `OPENCODE_PASSWORD` and deletes it before the client starts, so it also runs in a non-POSIX interactive shell (Herdr). The password never appears in a command line, `ps` or shell history.
-- A re-run of the same command fails clearly instead of connecting without the password. Files whose window never ran are removed when Convoy exits. All of this is verified by running the real command under sh, bash and zsh.
+- A re-run of the same command fails clearly instead of connecting without the password. A staged file outlives Convoy's exit, because a window may start its client after Convoy quits, against a run server that is still up. All of this is verified by running the real command under sh, bash and zsh.
+- The authoring service's discovery record is schema 2. A schema-1 record names a pre-V2 server that the V2 client cannot drive, so it is reported for the operator to stop instead of being reused.
 - Standalone windows (stored session, iterate and authoring conversation) pass `--standalone`. This keeps V1's own-server behavior and stays off the user's background service.
 - V2's `--session <id>` creates a missing session, so a stored-session window is verified first with `validateAuthoringSession`, the same check authoring conversations use, and refused when the session is gone. The real runtime refuses an unknown id without creating it.
 

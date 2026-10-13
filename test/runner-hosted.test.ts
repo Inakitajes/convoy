@@ -10,7 +10,8 @@ import type { RunOptions } from "../src/types"
 import { preparePhaseRun, run as realRun, hostedTeardownFromError, UserAbortError, compactRunRowName, type RunDeps } from "../src/runner"
 import { buildRunPlan } from "../src/run-plan"
 import { noopProgress } from "../src/progress"
-import { runsRoot } from "../src/workspace"
+import { serverAuthPath } from "../src/server-auth"
+import { runPrivateDir, runsRoot } from "../src/workspace"
 import { builtInAgents } from "../src/pipeline"
 import { prdHistoryDir, readPrdHistoryIndex, writePrdHistory } from "../src/prd-history"
 import { loadOpenSpecBundle } from "../src/openspec"
@@ -155,19 +156,19 @@ describe("run() with a hosted progress", () => {
       // The abort handler is cleared on the way out, not left pointing at a dead run.
       expect(dashboard.events).toContain("clearAbortHandler")
       // Every OpenCode run receives the report plugin, even without an advisor.
-      expect(existsSync(join(result.dir, "opencode", "plugins", "write_report", "index.ts"))).toBe(true)
+      expect(existsSync(join(runPrivateDir(result.dir), "plugins", "write_report", "index.ts"))).toBe(true)
 
       // The finally no longer closes the server/lease: those ride on release.
       expect(result.release).toBeFunction()
       const metadata = JSON.parse(await readFile(join(result.dir, "metadata.json"), "utf8"))
       expect(metadata.server).toBeDefined()
       // The connection auth rides a private file, not the navigation metadata.
-      expect(existsSync(join(result.dir, "server-auth.json"))).toBe(true)
+      expect(existsSync(serverAuthPath(result.dir))).toBe(true)
 
       await result.release?.()
       const after = JSON.parse(await readFile(join(result.dir, "metadata.json"), "utf8"))
       expect(after.server).toBeUndefined()
-      expect(existsSync(join(result.dir, "server-auth.json"))).toBe(false)
+      expect(existsSync(serverAuthPath(result.dir))).toBe(false)
     } finally {
       await rm(repo, { recursive: true, force: true })
     }
@@ -520,7 +521,7 @@ describe("run() with a hosted progress", () => {
 
       const plugins = captured?.plugins ?? []
       expect(plugins).toHaveLength(1)
-      expect(plugins[0]).toMatch(new RegExp(`^${runsRoot()}/[^/]+/opencode/plugins/write_report$`))
+      expect(plugins[0]).toMatch(new RegExp(`^${runsRoot()}/[^/]+/private/plugins/write_report$`))
       const source = await readFile(join(plugins[0]!, "index.ts"), "utf8")
       expect(source).toContain("write_report")
       expect(source).toContain("codemode: false")

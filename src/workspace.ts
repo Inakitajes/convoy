@@ -90,6 +90,15 @@ export function globalAgentsDir() {
 }
 
 /**
+ * A run's owner-only secrets: its server password and its plugin packages,
+ * which embed the bridge tokens. Agents may read the rest of the run dir but
+ * are denied this one (agents.ts).
+ */
+export function runPrivateDir(runDir: string): string {
+  return join(runDir, "private")
+}
+
+/**
  * Writes one V2 plugin package (`<dir>/plugins/<name>/index.ts`): V2 loads a
  * configured local plugin only from a package directory, not a bare file.
  * Rewrites only on change, since OpenCode watches plugin sources. Returns the

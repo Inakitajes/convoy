@@ -17,6 +17,7 @@ import type { LimitsSnapshot } from "../src/limits"
 import type { PublishSeam, ProgressPhase } from "../src/progress"
 import type { AdvisorEvent } from "../src/advisor-events"
 import type { RunMetadata } from "../src/metadata"
+import { writeServerAuth } from "../src/server-auth"
 
 async function createDashboard(
   width = 120,
@@ -1392,7 +1393,7 @@ describe("permission modal [e] explain and [i] inspect", () => {
   // gets the password from the run's private server-auth record.
   test("[i] opens the session with the run server's password", async () => {
     const runDir = await mkdtemp(join(tmpdir(), "convoy-tui-auth-"))
-    await writeFile(join(runDir, "server-auth.json"), JSON.stringify({ url: "http://127.0.0.1:41234", password: "s3cret" }))
+    await writeServerAuth(runDir, { url: "http://127.0.0.1:41234", password: "s3cret" })
     const originalPlatform = process.platform
     const originalTerminal = process.env.CONVOY_TERMINAL
     Object.defineProperty(process, "platform", { value: "darwin", configurable: true })

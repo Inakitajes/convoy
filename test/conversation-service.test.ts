@@ -7,7 +7,7 @@ import { execFile } from "../src/git"
 import { repoCommonDir, writeJsonFile } from "../src/repo-store"
 
 /** The discovery record's schema version (matches conversation-service.ts). */
-const schemaVersion = 1
+const schemaVersion = 2
 import {
   ensureConversationService,
   probeConversationService,
@@ -189,6 +189,30 @@ describe("conversation-service discovery and reuse (task 4.3)", () => {
     await Bun.write(join(commonDir, "convoy", "authoring-server.json"), "{ not json")
     const outcome = await ensureConversationService({ commonDir, checkout: repoDir, boot })
     expect(outcome.status).toBe("uncertain")
+    expect(boots).toBe(0)
+  })
+
+  // A V1 service left running across the upgrade answers its URL, but the V2
+  // client cannot drive it: it is reported, never reused or booted over.
+  test("a pre-V2 discovery record is reported, never reused or booted over", async () => {
+    let boots = 0
+    const boot = async () => {
+      boots += 1
+      return { url: "http://127.0.0.1:51006", close() {}, pid: 123_460 }
+    }
+    const { writeJsonFile } = await import("../src/repo-store")
+    await writeJsonFile(join(commonDir, "convoy", "authoring-server.json"), {
+      schemaVersion: 1,
+      url: "http://127.0.0.1:51007",
+      pid: process.pid,
+      bootCheckout: repoDir,
+      startedAt: Date.now(),
+    })
+    const outcome = await ensureConversationService({ commonDir, checkout: repoDir, boot, probe: async () => "live" })
+    expect(outcome.status).toBe("uncertain")
+    if (outcome.status !== "uncertain") return
+    expect(outcome.reason).toContain("before the OpenCode V2 migration")
+    expect(outcome.reason).toContain("authoring-server.json")
     expect(boots).toBe(0)
   })
 

@@ -623,6 +623,7 @@ type V2MessageInfo = {
   time: { created: number; completed?: number }
   model?: { id: string; providerID: string; variant?: string }
   agent?: string
+  finish?: string
   cost?: number
   tokens?: { input: number; output: number; reasoning: number; cache: { read: number; write: number } }
   error?: unknown
@@ -641,6 +642,7 @@ function mapMessageInfo(info: unknown, sessionID: string): SessionMessage {
         role: "assistant",
         time: { created: message.time.created, ...(message.time.completed ? { completed: message.time.completed } : {}) },
         ...(message.error ? { error: message.error } : {}),
+        ...(message.finish ? { finish: message.finish } : {}),
         modelID: model.id,
         providerID: model.providerID,
         ...(model.variant ? { variant: model.variant } : {}),

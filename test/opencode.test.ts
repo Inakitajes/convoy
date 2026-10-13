@@ -1538,6 +1538,43 @@ describe("startOpencode", () => {
       delete process.env.HERDR_PANE_ID
     }
   })
+
+  // A server given OPENCODE_PASSWORD/OPENCODE_SERVER_PASSWORD adopts it and
+  // never prints the `server password` line readiness waits for.
+  test("strips the user's OpenCode password variables from every server child", async () => {
+    process.env.OPENCODE_PASSWORD = "user-secret"
+    process.env.OPENCODE_SERVER_PASSWORD = "user-server-secret"
+    const observed: Array<Record<string, string | undefined>> = []
+    const launch = async (options: { env?: Record<string, string | undefined> }) => {
+      observed.push({ ...options.env })
+      return {
+        url: "http://127.0.0.1:1",
+        pid: 1,
+        stop: async () => ({ status: "stopped" as const, via: "already-gone" as const }),
+        forceStop: () => {},
+      }
+    }
+
+    try {
+      const handle = await startOpencode({}, undefined, {
+        getFreePort: async () => 1,
+        launch,
+        createClient: () => ({ session: {} }) as unknown as OpencodeHandle["client"],
+      })
+      await handle.close()
+      await bootOpencodeServerFrom("/tmp/checkout", 500, { deps: { getFreePort: async () => 1, launch } })
+
+      expect(observed).toHaveLength(2)
+      for (const env of observed) {
+        expect(env).not.toHaveProperty("OPENCODE_PASSWORD")
+        expect(env).not.toHaveProperty("OPENCODE_SERVER_PASSWORD")
+      }
+      expect(process.env.OPENCODE_PASSWORD).toBe("user-secret")
+    } finally {
+      delete process.env.OPENCODE_PASSWORD
+      delete process.env.OPENCODE_SERVER_PASSWORD
+    }
+  })
 })
 
 describe("owned-server factory failure and boot", () => {
@@ -1700,6 +1737,26 @@ describe("serverClientCommand", () => {
       expect(rerun.exitCode).toBe(1)
       expect(rerun.stdout.toString()).toBe("")
       expect(rerun.stderr.toString()).toContain("one-time password was already used")
+    } finally {
+      await rm(fake.dir, { recursive: true, force: true })
+    }
+  })
+
+  // A window opener returns before the client starts (Ghostty's `open -na`,
+  // Terminal.app's shell startup), so the user can quit Convoy first; the
+  // run's server outlives it and the window must still connect.
+  test("a window whose client starts after Convoy exits still gets the password", async () => {
+    const fake = await fakeClient()
+    try {
+      const stager = Bun.spawnSync([
+        process.execPath,
+        "-e",
+        `const { serverClientCommand } = await import(${JSON.stringify(join(import.meta.dir, "../src/opencode.ts"))}); process.stdout.write(await serverClientCommand([${JSON.stringify(fake.bin)}, "/repo"], "s3cret"))`,
+      ])
+      expect(stager.exitCode).toBe(0)
+
+      const result = Bun.spawnSync(["sh", "-c", stager.stdout.toString()])
+      expect(result.stdout.toString()).toBe("s3cret|/repo")
     } finally {
       await rm(fake.dir, { recursive: true, force: true })
     }

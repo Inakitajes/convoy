@@ -4,8 +4,13 @@ import { bootOpencodeServerFrom } from "./opencode"
 import { captureIdentity, defaultIdentityProbe, type IdentityProbe, type ProcessIdentity } from "./process-identity"
 import { readJsonFile, removePath, withExclusiveLock, writeJsonFile, type StoreRead } from "./repo-store"
 
-/** The discovery record's schema version; bumped only for a wire-format change. */
-const schemaVersion = 1
+/**
+ * The discovery record's schema version; bumped only for a wire-format change.
+ * 2: an OpenCode V2 server. A schema-1 record names a pre-V2 server that the
+ * V2 client cannot drive.
+ */
+const schemaVersion = 2
+const preV2SchemaVersion = 1
 
 /**
  * The authoring conversation service (capability work-conversations, design
@@ -108,7 +113,7 @@ function discoveryPath(commonDir: string): string {
 /** Reads the transient discovery record; a missing record is simply "none". */
 export async function readConversationServiceDiscovery(commonDir: string): Promise<StoreRead<ConversationServiceRecord>> {
   return readJsonFile(discoveryPath(commonDir), validateConversationServiceRecord, {
-    unsupported: (value) => typeof value.schemaVersion === "number" && value.schemaVersion > schemaVersion,
+    unsupported: (value) => typeof value.schemaVersion === "number" && value.schemaVersion !== schemaVersion,
   })
 }
 
@@ -199,7 +204,13 @@ export async function ensureConversationService(input: {
     } else if (read.status !== "missing") {
       // Corrupt/unsupported/unreadable discovery is not evidence of a live
       // server, but it is also not clean state: report instead of overwriting.
-      outcome = { status: "uncertain", reason: `the authoring service discovery record is ${read.status === "unreadable" ? `unreadable: ${read.reason}` : read.status} — inspect ${discoveryPath(input.commonDir)} before conversation work` }
+      outcome = {
+        status: "uncertain",
+        reason:
+          read.status === "unsupported" && read.schemaVersion === preV2SchemaVersion
+            ? `an authoring server from before the OpenCode V2 migration may still be running — stop the pid recorded in ${discoveryPath(input.commonDir)}, then delete that record, before conversation work`
+            : `the authoring service discovery record is ${read.status === "unreadable" ? `unreadable: ${read.reason}` : read.status} — inspect ${discoveryPath(input.commonDir)} before conversation work`,
+      }
       return
     }
     let booted: { url: string; password?: string; close(): void | Promise<unknown>; pid: number; identity?: ProcessIdentity }

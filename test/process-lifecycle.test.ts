@@ -625,6 +625,41 @@ describe("managed server launch and stop", () => {
     expect(await store.list()).toEqual([])
   })
 
+  // Output after the credential arrives while ownership is still being
+  // published: it must not start a second publication, whose failure would
+  // stop a server already handed out as ready.
+  test("output after the credential publishes ownership only once", async () => {
+    const childObservations = async (trailing: string) => {
+      const root = await scratchDir()
+      const store = createProcessRecordStore(join(root, "processes"))
+      const { child, emitData } = fakeChild()
+      let observed = 0
+      const counting: IdentityProbe = {
+        observe: async (pid) => {
+          if (pid === child.pid) observed++
+          return probe.observe(pid)
+        },
+      }
+      const serverPromise = launchManagedServer({
+        command: "opencode",
+        args: ["serve"],
+        cwd: root,
+        env: {},
+        lifetime: "helper",
+        label: "test helper",
+        deps: { spawn: () => child as never, probe: counting, store, policy: { graceMs: 5, forceObservationMs: 5 } },
+      })
+      emitData(`server listening on http://127.0.0.1:9999\nserver password fixture-pw\n${trailing}`)
+      const server = await serverPromise
+      await Bun.sleep(20)
+      const count = observed
+      await server.stop()
+      return count
+    }
+
+    expect(await childObservations("plugin loaded\nwatching files\n")).toBe(await childObservations(""))
+  })
+
   test("a malformed readiness line fails the boot after bounded cleanup", async () => {
     const root = await scratchDir()
     const store = createProcessRecordStore(join(root, "processes"))

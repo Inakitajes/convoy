@@ -66,7 +66,7 @@ import { createTerminalInput, type TerminalInput } from "./terminal-input"
 import type { AgentSpec, AgentStep, DeliverableContract, HookSet, HookSpec, Pipeline, ResolvedGoalPlan, RunOptions, Step } from "./types"
 import { consensusStep, loadQualityRubricWeights, parseQualityScoreReport, qualityDimensionWeights, type QualityDimension, type QualityScore } from "./quality-score"
 import { addTokens, emptyTokens, tokensFromValue } from "./usage"
-import { cleanupWorkspace, createWorkspace, resumeWorkspace, type Workspace, writeSummary } from "./workspace"
+import { cleanupWorkspace, createWorkspace, resumeWorkspace, runPrivateDir, type Workspace, writeSummary } from "./workspace"
 
 export type ActiveSession = {
   client: OpencodeClient
@@ -818,7 +818,7 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
     // Per-run plugin directory: each package embeds this run's bridge URL and
     // token, and V2 watches plugin sources, so a shared location would let a
     // concurrent run rewrite a live run's tools.
-    const pluginDir = join(workspace.dir, "opencode")
+    const pluginDir = runPrivateDir(workspace.dir)
     const pluginEntries = [await installWriteReportTool({ url: reportBridge.url, token: reportBridge.token, dir: pluginDir })]
     // The advisor bridge serves a runtime created only after the SDK returns a
     // client, so it uses the same deferred lookup pattern.

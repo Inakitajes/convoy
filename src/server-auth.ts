@@ -6,22 +6,25 @@
  * The V2 server's per-boot HTTP Basic password must reach the dashboard's
  * attach path without being written into the run's generic `metadata.json`
  * (which is read for navigation, liveness and history and must stay
- * secret-free). It lives in a separate `0600` file next to the metadata and is
- * removed when the owned server stops.
+ * secret-free). It lives in a separate `0600` file in the run's private dir,
+ * which agents cannot read, and is removed when the owned server stops.
  */
-import { readFile, rm, writeFile } from "node:fs/promises"
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
+
+import { runPrivateDir } from "./workspace"
 
 export type ServerAuth = { url: string; password?: string }
 
 const fileName = "server-auth.json"
 
 export function serverAuthPath(runDir: string): string {
-  return join(runDir, fileName)
+  return join(runPrivateDir(runDir), fileName)
 }
 
 /** Writes the private auth record with owner-only permissions. */
 export async function writeServerAuth(runDir: string, auth: ServerAuth): Promise<void> {
+  await mkdir(runPrivateDir(runDir), { recursive: true, mode: 0o700 })
   await writeFile(serverAuthPath(runDir), JSON.stringify(auth), { mode: 0o600 })
 }
 

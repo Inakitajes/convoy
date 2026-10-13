@@ -7,6 +7,9 @@ import { validateAuthoringSession } from "../src/conversations"
 import { createOpencodeClient } from "../src/opencode-client"
 import { toModelChoices } from "../src/model-catalog"
 import { installWriteReportTool } from "../src/report-bridge"
+import { writeReportToolName } from "../src/report"
+import { serverAuthPath } from "../src/server-auth"
+import { runPrivateDir } from "../src/workspace"
 import {
   answersToolResult,
   bootRuntime,
@@ -76,6 +79,24 @@ async function settled(fixture: Fixture, sessionID: string): Promise<void> {
   expect(done).toBe(true)
 }
 
+// Has the implementer read a run-dir file (seeded with a sentinel), returning
+// what the model saw and the tool call's outcome.
+async function readRunFile(pathIn: (runDir: string) => string): Promise<{ result: string; status: unknown }> {
+  let path = ""
+  const fixture = await boot((body) =>
+    answersToolResult(body) ? { text: "done" } : offeredTools(body).length ? { tool: "read", args: { path } } : { text: "title" },
+  )
+  path = pathIn(fixture.runDir)
+  await Bun.write(path, "SECRET-SENTINEL\n")
+  const sessionID = await prompt(fixture, { agent: "implementer" })
+  await settled(fixture, sessionID)
+  const answered = fixture.provider.requests.find(answersToolResult)
+  const messages = await fixture.booted.client.session.messages({ sessionID })
+  const tool = messages.data!.flatMap((message) => message.parts).find((part) => part.type === "tool") as { state?: { status?: unknown } } | undefined
+  const toolMessages = ((answered?.messages ?? []) as Array<{ role?: string }>).filter((message) => message.role === "tool")
+  return { result: JSON.stringify(toolMessages), status: tool?.state?.status }
+}
+
 const gitLog = async (checkout: string) => (await Bun.$`git log --format=%s`.cwd(checkout).quiet().text()).trim()
 
 describe.if(opencodeAvailable)("Convoy run config on the real V2 runtime", () => {
@@ -109,6 +130,26 @@ describe.if(opencodeAvailable)("Convoy run config on the real V2 runtime", () =>
     const messages = await fixture.booted.client.session.messages({ sessionID })
     const tool = messages.data!.flatMap((message) => message.parts).find((part) => part.type === "tool")
     expect(tool).toMatchObject({ type: "tool", state: { status: "completed" } })
+  }, 40_000)
+
+  // The run dir is readable for reports, but the server password and the
+  // plugins' bridge tokens in it are not: with them an agent could talk to the
+  // server or the bridges past Convoy's gate.
+  for (const [label, path] of [
+    ["the server password", (runDir: string) => serverAuthPath(runDir)],
+    ["a plugin's bridge token", (runDir: string) => join(runPrivateDir(runDir), "plugins", writeReportToolName, "index.ts")],
+  ] as const) {
+    test(`an agent cannot read ${label} from the run dir`, async () => {
+      const fixture = await readRunFile(path)
+      expect(fixture.result).not.toContain("SECRET-SENTINEL")
+      expect(fixture.status).toBe("error")
+    }, 40_000)
+  }
+
+  test("an agent still reads the run dir's other files", async () => {
+    const fixture = await readRunFile((runDir) => join(runDir, "notes.md"))
+    expect(fixture.result).toContain("SECRET-SENTINEL")
+    expect(fixture.status).toBe("completed")
   }, 40_000)
 
   // Parity blocker (recorded in the change's acceptance matrix): V2 normalizes
@@ -169,6 +210,10 @@ describe.if(opencodeAvailable)("Convoy V2 client boundary on the real runtime", 
     const tool = messages.data!.flatMap((message) => message.parts).find((part) => part.type === "tool")
     expect(tool).toMatchObject({ type: "tool", tool: "read" })
     expect(typeof (tool as { callID?: unknown }).callID).toBe("string")
+    // The attempt log records why each assistant turn ended.
+    const finishes = messages.data!.flatMap((message) => (message.info.role === "assistant" ? [message.info.finish] : []))
+    expect(finishes).toContain("tool-calls")
+    expect(finishes.at(-1)).toBe("stop")
   }, 40_000)
 })
 
