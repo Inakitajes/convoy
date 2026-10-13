@@ -71,3 +71,39 @@ export async function createSession(
   }
   return session as { id: string; directory?: string }
 }
+
+export type OpenCodeModelRef = { providerID: string; modelID: string; variant?: string }
+
+/** Admits one prompt into a session. Acceptance is not completion (see waitForIdle). */
+export async function sendPrompt(
+  client: OpencodeV2Client,
+  input: { sessionID: string; text: string; model?: OpenCodeModelRef; agent?: string },
+): Promise<void> {
+  const params = {
+    sessionID: input.sessionID,
+    text: input.text,
+    ...(input.model ? { model: input.model } : {}),
+    ...(input.agent ? { agent: input.agent } : {}),
+  } as unknown as Parameters<OpencodeV2Client["session"]["prompt"]>[0]
+  await client.session.prompt(params)
+}
+
+/** Resolves once the session's agent loop is idle. */
+export async function waitForIdle(client: OpencodeV2Client, sessionID: string): Promise<void> {
+  const input = { sessionID } as unknown as Parameters<OpencodeV2Client["session"]["wait"]>[0]
+  await client.session.wait(input)
+}
+
+export type V2Messages = Awaited<ReturnType<OpencodeV2Client["message"]["list"]>>
+
+/** Reads a session's projected message timeline. */
+export async function listMessages(client: OpencodeV2Client, sessionID: string): Promise<V2Messages> {
+  const input = { sessionID } as unknown as Parameters<OpencodeV2Client["message"]["list"]>[0]
+  return client.message.list(input)
+}
+
+/** Interrupts a session's running execution. */
+export async function interruptSession(client: OpencodeV2Client, sessionID: string): Promise<void> {
+  const input = { sessionID } as unknown as Parameters<OpencodeV2Client["session"]["interrupt"]>[0]
+  await client.session.interrupt(input)
+}
