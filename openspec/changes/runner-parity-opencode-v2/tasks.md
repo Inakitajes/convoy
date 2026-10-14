@@ -19,9 +19,9 @@
 ## 3. Implement explicit Claude authentication and configuration routing
 
 - [ ] 3.1 Add runner defaults, per-step auth overrides, helper/advisor routes, and authoring selection to configuration parsing/serialization; verify round-trip tests preserve existing runner IDs and reject embedded secret values or invalid mode combinations.
-- [ ] 3.2 Build child-local subscription/API-key environment and settings preparation with effective-auth validation; verify ambient keys, key helpers, OAuth overrides, third-party settings, absent login, and organization-policy conflicts cannot silently change billing or mutate global state.
-- [ ] 3.3 Preserve supported CLI subscription execution and add explicit API-key CLI execution without introducing an SDK dependency for the baseline; verify both modes through protocol fixtures and that quota/auth failures never trigger cross-mode fallback.
-- [ ] 3.4 Implement explicit-mode migration errors for ambiguous legacy noninteractive configurations and freeze resolved non-secret auth in plans; verify missing mode and resumed-run cases either preserve verified subscription behavior or request explicit mode selection without inferring API consent.
+- [x] 3.2 Build child-local subscription/API-key environment and settings preparation with effective-auth validation; verify ambient keys, key helpers, OAuth overrides, third-party settings, absent login, and organization-policy conflicts cannot silently change billing or mutate global state.
+- [x] 3.3 Preserve supported CLI subscription execution and add explicit API-key CLI execution without introducing an SDK dependency for the baseline; verify both modes through protocol fixtures and that quota/auth failures never trigger cross-mode fallback.
+- [x] 3.4 Implement explicit-mode migration errors for ambiguous legacy noninteractive configurations and freeze resolved non-secret auth in plans; verify missing mode and resumed-run cases either preserve verified subscription behavior or request explicit mode selection without inferring API consent.
 - [x] 3.5 Add credential redaction and private runtime-secret handling for child diagnostics, local bridges, and server connections; verify keys, passwords, headers, and credential-bearing URLs never enter public metadata, logs, or terminal argv.
 - [ ] 3.6 Document subscription setup, API-key opt-in, legacy configuration migration, and cost labels with complete examples; verify examples parse and subscription examples require neither an API key nor OpenCode.
 - [x] 3.7 Add separately resolved subscription billing policy and consent to every executor/helper/advisor/authoring route; verify allowance-exhaustion with credits enabled, inherited paid features, unknown extra-usage status, and noninteractive launches either satisfy verified included-only controls or require explicit account-policy authorization. Document that subscription login alone is not a no-charge guarantee and that Convoy never changes provider-side spending settings.
@@ -55,12 +55,12 @@
 
 ## 7. Deliver structured reports and advisor parity
 
-- [ ] 7.1 Expose the shared report validator through a scoped Claude MCP tool and the v2 OpenCode tool; verify reports, scores, and structured commit descriptions obey identical schemas and cannot target arbitrary paths or sibling attempts.
-- [ ] 7.2 Move deliverable completion/correction orchestration to core with both adapters supporting bounded follow-up turns; verify invalid score, malformed replacement, missing report, successful correction, and correction-limit cases against the same fixtures.
-- [ ] 7.3 Persist accepted report/commit data before acknowledgement and preserve recovery identity; verify crash-after-report/before-commit and duplicate-submission tests do not lose semantic data or duplicate a commit.
-- [ ] 7.4 Extract bounded normalized consultation context and runner-independent advisor execution; verify Claude subscription-to-subscription consultation without OpenCode/key and both cross-runner directions with explicitly routed dependencies.
-- [ ] 7.5 Implement mandatory advisor checkpoints via the permission boundary and expose advisor tools in both runners; verify an unconsulted first write is blocked even under native auto-approval, and failed consultation leaves protected work blocked.
-- [ ] 7.6 Apply advisor call/output/time limits, cancellation, recursion prevention, and separate usage attribution; verify concurrent consultations and cancellation affect only the originating attempt and consume the correct budget once.
+- [x] 7.1 Expose the shared report validator through a scoped Claude MCP tool and the v2 OpenCode tool; verify reports, scores, and structured commit descriptions obey identical schemas and cannot target arbitrary paths or sibling attempts.
+- [x] 7.2 Move deliverable completion/correction orchestration to core with both adapters supporting bounded follow-up turns; verify invalid score, malformed replacement, missing report, successful correction, and correction-limit cases against the same fixtures.
+- [x] 7.3 Persist accepted report/commit data before acknowledgement and preserve recovery identity; verify crash-after-report/before-commit and duplicate-submission tests do not lose semantic data or duplicate a commit.
+- [x] 7.4 Extract bounded normalized consultation context and runner-independent advisor execution; verify Claude subscription-to-subscription consultation without OpenCode/key and both cross-runner directions with explicitly routed dependencies.
+- [x] 7.5 Implement mandatory advisor checkpoints via the permission boundary and expose advisor tools in both runners; verify an unconsulted first write is blocked even under native auto-approval, and failed consultation leaves protected work blocked.
+- [x] 7.6 Apply advisor call/output/time limits, cancellation, recursion prevention, and separate usage attribution; verify concurrent consultations and cancellation affect only the originating attempt and consume the correct budget once.
 - [ ] 7.7 Document reports/advisors and mixed-runner route examples; verify every example parses and any use of a native advisor is backed by equivalence tests rather than feature-name matching.
 
 ## 8. Route full plans and remove hidden OpenCode dependencies
