@@ -10,13 +10,17 @@ import type {
   KeepAwakeState,
   PermissionPromptInfo,
   PermissionReply,
+  ProgressAttempt,
   ProgressHostControls,
   ProgressPhase,
+  ProgressMessage,
   ProgressUI,
   RunControlState,
   RunOutcome,
   RunStatus,
 } from "./progress"
+import type { RunnerId } from "./runners/contracts"
+import { CoordinatorEvents, runnerEventFromProgressMessage } from "./runners/coordinator-events"
 import type { Pipeline } from "./types"
 
 /**
@@ -33,8 +37,14 @@ import type { Pipeline } from "./types"
  *   this fires once at run start rather than once per iteration).
  * - pause/abort/keep-awake are wired when the runner calls `setHostControls` /
  *   `setAbortHandler`.
- * - The live view is *not* duplicated here: the attach client follows the
- *   OpenCode server through `LiveAttach` exactly like an observer does.
+ * - The live view is *not* rendered here: an attached dashboard follows either
+ *   the OpenCode server through `LiveAttach` (native live attach) or, for
+ *   Claude and any runner without native attach, the neutral journal below.
+ * - Runner-neutral transcript delivery (design D6): when a `CoordinatorEvents`
+ *   read model is supplied, phase messages are appended to the durable journal
+ *   for any runner (Claude or OpenCode) instead of being dropped. The append is
+ *   buffered behind a bounded queue, so a slow journal write or dashboard
+ *   never blocks native intake or the permission gate.
  */
 
 export type ControlProgressOptions = {
@@ -44,6 +54,14 @@ export type ControlProgressOptions = {
   readyPath?: string
   /** Token recorded in `control.json`; defaults to the server's. */
   token?: string
+  /**
+   * Coordinator-owned durable event read model (design D6). When present,
+   * `phaseMessage` publishes runner-neutral events so a dashboard can follow
+   * Claude or OpenCode from the journal alone, without an OpenCode server URL.
+   */
+  events?: CoordinatorEvents
+  /** Which runner is executing; defaults to `opencode` for legacy callers. */
+  runner?: RunnerId
 }
 
 export class ControlProgress implements ProgressUI {
@@ -53,6 +71,10 @@ export class ControlProgress implements ProgressUI {
   private readonly server: ControlServer
   private readonly readyPath?: string
   private readonly controlToken: string
+  private readonly events?: CoordinatorEvents
+  private readonly runner: RunnerId
+  /** Structured attempt counter per phase, so published fragments are qualified. */
+  private readonly attempts = new Map<string, number>()
   private abortHandler?: () => void
   private pauseToggle?: () => void
   private keepAwakeToggle?: () => void
@@ -68,6 +90,8 @@ export class ControlProgress implements ProgressUI {
     this.server = options.server
     this.readyPath = options.readyPath
     this.controlToken = options.token ?? options.server.token
+    this.events = options.events
+    this.runner = options.runner ?? "opencode"
     // The server command routes resolve against the runner objects as they are
     // handed over via setHostControls/setAbortHandler; /status reads adapter
     // state that is only known after run() creates the RunControl.
@@ -84,10 +108,27 @@ export class ControlProgress implements ProgressUI {
 
   phaseStarted(): void {}
   phaseRunning(): void {}
-  phaseAttempt(): void {}
+  phaseAttempt(name: string, info: ProgressAttempt): void {
+    this.attempts.set(name, info.attempt)
+  }
   phaseSession(): void {}
   phaseActivity(): void {}
-  phaseMessage(): void {}
+  /**
+   * Runner-neutral transcript intake (design D6): buffer the chunk onto the
+   * durable journal's bounded queue and return immediately. Claude and OpenCode
+   * both deliver through here, so a dashboard following the journal never needs
+   * an OpenCode server URL. Dropped fragments under back pressure are reported
+   * through `CoordinatorEvents.status()` rather than silently lost.
+   */
+  phaseMessage(name: string, message: ProgressMessage): void {
+    if (!this.events || !this.runID) return
+    const attempt = this.attempts.get(name) ?? 1
+    this.events.enqueue({
+      runId: this.runID,
+      phase: name,
+      event: runnerEventFromProgressMessage(this.runner, attempt, message),
+    })
+  }
   phaseStepUsage(): void {}
   phaseUsageTotal(): void {}
   phaseAdvisorEvent(): void {}
@@ -180,6 +221,9 @@ export class ControlProgress implements ProgressUI {
     next: { runID: string; targetDir: string; runDir: string; pipeline: Pipeline; retainMessage?: string },
   ): void {
     this.runID = next.runID
+    // A goal cycle reuses phase names across iterations; drop the previous
+    // iteration's attempt counters so a fragment is never misattributed.
+    this.attempts.clear()
     const reset: ControlReset = {
       runID: next.runID,
       targetDir: next.targetDir,

@@ -4,6 +4,7 @@ import { aggregateAdvisorEvents, readAdvisorEvents } from "./advisor-events"
 import { goalProgressPhases } from "./goal-phases"
 import { readRunMetadata, type PhaseMetadata, type RunMetadata } from "./metadata"
 import { progressPhases, watchSession, backfillSessionTranscript, withGoalPhases, type SessionWatcher } from "./runner"
+import { progressMessageFromRunnerEvent, type CoordinatorEventItem, type CoordinatorEvents } from "./runners/coordinator-events"
 
 import type { OpencodeClient } from "@opencode-ai/sdk/v2"
 import type { GoalLoopView, ProgressPhaseSnapshot, ProgressUI } from "./progress"
@@ -23,6 +24,7 @@ export class LiveAttach {
   private readonly backfilled = new Set<string>()
   private lastGoalView?: GoalLoopView
   private poll?: ReturnType<typeof setInterval>
+  private neutralUnsub?: () => void
   private stopped = false
 
   constructor(
@@ -32,6 +34,13 @@ export class LiveAttach {
     private readonly metaPath: string,
     private readonly phasesWithoutLiveAttach: ReadonlySet<string> = new Set(),
     private readonly tickMs = pollMs,
+    /**
+     * Coordinator-owned durable event read model (design D6), created per run.
+     * When supplied the dashboard follows the runner-neutral journal instead of
+     * an OpenCode-only SSE subscription, so Claude phases stream and completed
+     * phases reconstruct without any OpenCode server URL.
+     */
+    private readonly events?: CoordinatorEvents,
   ) {
     this.serverGone = new Promise((resolve) => {
       this.resolveServerGone = resolve
@@ -39,9 +48,35 @@ export class LiveAttach {
   }
 
   async start() {
+    this.startNeutral()
     await this.tick()
     this.poll = setInterval(() => void this.tick(), this.tickMs)
     this.poll.unref?.()
+  }
+
+  /**
+   * Replays the durable journal from the beginning and follows it live, so a
+   * dashboard attaching after a phase completed still reconstructs that phase's
+   * transcript, and the live tail merges with the replay without duplicates
+   * (the read model's high-water mark owns the overlap).
+   */
+  private startNeutral() {
+    if (!this.events || this.neutralUnsub) return
+    this.neutralUnsub = this.events.subscribe(0, (item) => this.applyNeutral(item))
+  }
+
+  private applyNeutral(item: CoordinatorEventItem) {
+    if (this.stopped || item.kind === "gap") return
+    const name = item.record.attempt.phase
+    const message = progressMessageFromRunnerEvent(item.record.event)
+    if (message) {
+      this.tui.phaseMessage(name, message)
+      return
+    }
+    const event = item.record.event
+    if (event.type === "session") this.tui.phaseSession(name, event.session.sessionId)
+    else if (event.type === "permission-request") this.tui.phaseActivity(name, `permission: ${event.action}`, "permission")
+    else if (event.type === "permission-settled") this.tui.phaseActivity(name, `permission ${event.decision}`, "permission")
   }
 
   private async tick() {
@@ -66,7 +101,10 @@ export class LiveAttach {
           if (phase.model) this.tui.phaseAttempt(name, { attempt: 1, model: phase.model })
         }
         for (const event of phase.advisorEvents ?? []) this.tui.phaseAdvisorEvent(name, event)
-        if (!this.phasesWithoutLiveAttach.has(name)) this.watch(name, phase.sessionID)
+        // When the neutral journal backs this dashboard there is no per-phase
+        // OpenCode SSE subscription to open: the read model already streams the
+        // phase (Claude included) without a server URL.
+        if (!this.events && !this.phasesWithoutLiveAttach.has(name)) this.watch(name, phase.sessionID)
       } else if (phase.status !== "pending" && !this.finalized.has(name)) {
         this.finalized.add(name)
         this.tui.phaseRestored(name, snapshotOf(phase, phase.status))
@@ -138,7 +176,9 @@ export class LiveAttach {
    * no server-held history to read.
    */
   requestSessionBackfill(name: string) {
-    if (this.stopped || this.backfilled.has(name) || this.watchers.has(name) || this.phasesWithoutLiveAttach.has(name)) return
+    // With a neutral journal the read model's replay already reconstructed every
+    // available phase transcript, so there is no OpenCode server history to ask.
+    if (this.stopped || this.events || this.backfilled.has(name) || this.watchers.has(name) || this.phasesWithoutLiveAttach.has(name)) return
     const sessionID = this.sessionIDs.get(name)
     if (!sessionID) return
     this.backfilled.add(name)
@@ -164,6 +204,8 @@ export class LiveAttach {
     if (this.stopped) return
     this.stopped = true
     if (this.poll) clearInterval(this.poll)
+    this.neutralUnsub?.()
+    this.neutralUnsub = undefined
     await Promise.all([...this.watchers.values()].map((watcher) => watcher.stop().catch(() => {})))
     this.watchers.clear()
   }

@@ -68,17 +68,17 @@
 - [ ] 8.1 Replace static brand exclusions with effective capability validation and runner-qualified model discovery/effort mapping; verify Claude write/verify/fan-out selections are accepted when supported and incompatible model/variant choices fail visibly.
 - [x] 8.2 Traverse all ordinary steps, goal fragments, advisors, judges, and helper routes in preflight and plan freezing; verify a missing future dependency is reported before any writable phase starts.
 - [ ] 8.3 Enable Claude model fan-out and mixed parallel nodes through the existing scheduler; verify dependency ordering, per-run/per-runner concurrency bounds, report/session isolation, quota backoff, and protected conflicting-write behavior.
-- [ ] 8.4 Route branch-name and commit-message helpers through the helper port and remove unconditional OpenCode runtime/tool setup; verify Claude-only preflight, execution, helpers, and finalization with OpenCode absent, plus deterministic run-title regression tests.
+- [x] 8.4 Route branch-name and commit-message helpers through the helper port and remove unconditional OpenCode runtime/tool setup; verify Claude-only preflight, execution, helpers, and finalization with OpenCode absent, plus deterministic run-title regression tests.
 - [ ] 8.5 Add scoped model override behavior and usable Claude-only pipeline presets/examples without guessing mappings from arbitrary OpenCode providers; verify plan-preview fixtures show all resolved models/auth modes and existing explicit OpenCode selections are unchanged.
 - [ ] 8.6 Update config editor and CLI/launch review to show capability reasons, helper dependencies, authentication, and API-only feature requirements; verify parse/review/UI tests and document the new fields and non-silent migration behavior.
 
 ## 9. Deliver durable runner-neutral observation
 
 - [x] 9.1 Implement versioned normalized event journaling with attempt-qualified identity, sequence cursors, private files, and bounded buffers; verify ordering, duplicate native IDs, partial final records, disk failure, and long-stream memory bounds.
-- [ ] 9.2 Replace coordinator phase-message no-ops and OpenCode-only dashboard subscriptions with journal/live event delivery; verify production coordinated Claude streaming without an OpenCode server URL and mixed-runner tab attribution.
-- [ ] 9.3 Implement cursor replay plus live high-water-mark merging and supported runner-history backfill; verify late attachment, reconnect overlap, completed scoring rounds, and stream gaps neither duplicate fragments nor claim nonexistent content.
+- [x] 9.2 Replace coordinator phase-message no-ops and OpenCode-only dashboard subscriptions with journal/live event delivery; verify production coordinated Claude streaming without an OpenCode server URL and mixed-runner tab attribution.
+- [x] 9.3 Implement cursor replay plus live high-water-mark merging and supported runner-history backfill; verify late attachment, reconnect overlap, completed scoring rounds, and stream gaps neither duplicate fragments nor claim nonexistent content.
 - [x] 9.4 Support offline captured transcripts and honest legacy placeholders; verify history remains readable without either binary, credentials, model calls, or a live server and incomplete journals show gap markers.
-- [ ] 9.5 Decouple slow observers from native event intake and permission processing; verify a stalled dashboard cannot block sibling attempts or mandatory approval decisions. Document transcript retention, exposed reasoning, privacy, and incomplete-history behavior.
+- [x] 9.5 Decouple slow observers from native event intake and permission processing; verify a stalled dashboard cannot block sibling attempts or mandatory approval decisions. Document transcript retention, exposed reasoning, privacy, and incomplete-history behavior.
 
 ## 10. Deliver usage controls and exact recovery
 
