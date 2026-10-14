@@ -3,7 +3,7 @@
 ## 1. Establish supported protocols and parity evidence
 
 - [x] 1.1 Inventory every runner-dependent operation, including goal fragments, helpers, authoring, human gates, and dashboards; verify the delivered inventory maps each operation to the design's parity matrix and a spec scenario.
-- [ ] 1.2 Select tested OpenCode v2 CLI/client and Claude CLI versions using official API/plugin/hook/auth documentation and isolated compatibility fixtures; verify the compatibility record includes startup/auth, prompt admission versus completion, event shapes, model lookup, and tool registration for each mode.
+- [x] 1.2 Select tested OpenCode v2 CLI/client and Claude CLI versions using official API/plugin/hook/auth documentation and isolated compatibility fixtures; verify the compatibility record includes startup/auth, prompt admission versus completion, event shapes, model lookup, and tool registration for each mode.
 - [ ] 1.3 Verify the documented Claude CLI subscription path supports per-invocation hooks, MCP reports/advisors, and permission hosting without `--bare`, blanket `--safe-mode`, token extraction, or API-key substitution; record fixture evidence and, with explicit consent, a bounded real-harness smoke result. Treat inability to meet baseline policy as a blocker requiring review, not an implicit API fallback.
 - [x] 1.4 Investigate native Claude advisor and live-attach/handoff facilities against the selected headless transport; verify a delivered evidence table distinguishes native support, supported equivalent, account/version restriction, and missing implementation without claiming print/background modes are interchangeable.
 - [x] 1.5 Add version/authentication/parity guidance to the development and models documentation; verify every claimed minimum and advanced exception links to evidence and the baseline release gate is explicit.
@@ -29,7 +29,7 @@
 ## 4. Migrate the OpenCode adapter to released v2
 
 - [ ] 4.1 Replace the legacy SDK integration with a pinned released `@opencode/client` inside the adapter; verify dependency install, typecheck, and HTTP fixture tests use v2 routes and reject HTML/incorrect envelopes despite HTTP 200.
-- [ ] 4.2 Implement authenticated owned-server startup, readiness/version checks, explicit locations, and private reattachment credentials; verify startup cancellation, malformed output, unauthorized responses, client-construction failure, and bounded cleanup preserve existing lifecycle tests.
+- [x] 4.2 Implement authenticated owned-server startup, readiness/version checks, explicit locations, and private reattachment credentials; verify startup cancellation, malformed output, unauthorized responses, client-construction failure, and bounded cleanup preserve existing lifecycle tests.
 - [x] 4.3 Translate logical agents/models/policies into v2 runtime configuration without rewriting supported user V1 config; verify concurrent runs retain independent injected settings and do not mutate parent environment or global files.
 - [x] 4.4 Implement v2 session creation, prompting, continuation, outcome reconciliation, event decoding, and history backfill; verify accepted prompts are not treated as completed and disconnect/idle/error races cannot fabricate success or replay uncertain prompts.
 - [ ] 4.5 Port actual Convoy report/advisor tools and mandatory permission integration to the v2 public extension surface; verify registration health is checked before prompting and legacy plugin code is not loaded as if compatible.
@@ -77,7 +77,7 @@
 - [x] 9.1 Implement versioned normalized event journaling with attempt-qualified identity, sequence cursors, private files, and bounded buffers; verify ordering, duplicate native IDs, partial final records, disk failure, and long-stream memory bounds.
 - [ ] 9.2 Replace coordinator phase-message no-ops and OpenCode-only dashboard subscriptions with journal/live event delivery; verify production coordinated Claude streaming without an OpenCode server URL and mixed-runner tab attribution.
 - [ ] 9.3 Implement cursor replay plus live high-water-mark merging and supported runner-history backfill; verify late attachment, reconnect overlap, completed scoring rounds, and stream gaps neither duplicate fragments nor claim nonexistent content.
-- [ ] 9.4 Support offline captured transcripts and honest legacy placeholders; verify history remains readable without either binary, credentials, model calls, or a live server and incomplete journals show gap markers.
+- [x] 9.4 Support offline captured transcripts and honest legacy placeholders; verify history remains readable without either binary, credentials, model calls, or a live server and incomplete journals show gap markers.
 - [ ] 9.5 Decouple slow observers from native event intake and permission processing; verify a stalled dashboard cannot block sibling attempts or mandatory approval decisions. Document transcript retention, exposed reasoning, privacy, and incomplete-history behavior.
 
 ## 10. Deliver usage controls and exact recovery
