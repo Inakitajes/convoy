@@ -7,6 +7,7 @@ import type { FilePartInput } from "@opencode-ai/sdk/v2"
 import { loadAgentPrompt } from "./agents"
 import { log } from "./log"
 import { openSessionCommand, shellQuote, type SessionWindowBackend } from "./opencode"
+import { baseAgentName } from "./runners/agent-source"
 import type { ProgressMessage, ProgressTokens, ProgressUI } from "./progress"
 import { stepRunnerFor } from "./step-runners"
 import type { AgentStep, Pipeline } from "./types"
@@ -474,9 +475,7 @@ async function writeClaudeSystemPrompt(workspace: Workspace, phase: AgentStep, a
 }
 
 /** Synthesized read-only variants ("agent__ro") share the base agent's prompt file. */
-function baseAgentName(agentName: string): string {
-  return agentName.endsWith("__ro") ? agentName.slice(0, -"__ro".length) : agentName
-}
+// (moved to ./runners/agent-source; imported above)
 
 function claudeRawStreamLog(workspace: Workspace, phase: AgentStep, attempt: number) {
   const path = join(workspace.dir, "logs", `${phase.name}.${attempt}.claude.jsonl`)

@@ -12,7 +12,7 @@
 
 - [x] 2.1 Define Convoy-owned execution requests, attachment descriptors, model references, events, outcomes, and runner-qualified sessions plus optional conversation/control ports; verify typecheck and contract tests use no vendor SDK types.
 - [ ] 2.2 Introduce the adapter registry and runtime/attempt ownership seam around existing dispatch; verify a fake adapter executes through the scheduler and no core context requires `OpencodeClient`.
-- [ ] 2.3 Extract logical agent instructions and attachment preparation from OpenCode configuration rendering; verify both adapters receive equivalent source context and unsupported attachments cause an explicit error rather than silent omission.
+- [x] 2.3 Extract logical agent instructions and attachment preparation from OpenCode configuration rendering; verify both adapters receive equivalent source context and unsupported attachments cause an explicit error rather than silent omission.
 - [x] 2.4 Add versioned runner/auth/model/session/attempt provenance with compatibility readers for old records; verify legacy Claude/OpenCode fixtures remain readable, ambiguous sessions are not guessed, and coordinator PIDs retain their old meanings.
 - [x] 2.5 Introduce shared adapter conformance fixtures and dependency-boundary checks; verify vendor imports outside adapter boundaries fail the check and document the ports/ownership responsibilities in the development guide.
 
@@ -37,7 +37,7 @@
 
 ## 5. Establish Claude execution and attributable lifecycle
 
-- [ ] 5.1 Replace fixed read-only invocation with reviewed per-attempt CLI settings and tool availability for read-only, verification, and writable modes, gated on mandatory policy enforcement; verify argv/settings fixtures preserve subscription auth and load required Convoy integrations.
+- [x] 5.1 Replace fixed read-only invocation with reviewed per-attempt CLI settings and tool availability for read-only, verification, and writable modes, gated on mandatory policy enforcement; verify argv/settings fixtures preserve subscription auth and load required Convoy integrations.
 - [x] 5.2 Normalize Claude streaming, session initialization, tool activity, terminal results, and errors into the neutral event/outcome contract; verify malformed lines, missing result, startup-hook output, nested messages, and partial streams cannot fabricate completion.
 - [x] 5.3 Generalize shared process ownership utilities for Claude children and bridge resources while preserving OpenCode contracts; verify PID reuse, incomplete evidence, independent processes, and concurrent reconciliation are never unsafe kill targets.
 - [x] 5.4 Add bounded interrupt/stop/escalation and observation for Claude attempts, including attributable descendant work; verify hanging commands, blocked permissions, repeat abort, cancellation during startup, and unknown descendant state settle within the shared deadline with truthful outcomes.

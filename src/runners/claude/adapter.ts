@@ -7,12 +7,17 @@
  * explicit API key), and enforces the execution mode through tool/permission
  * flags. It never extracts credentials and never spends on its own.
  *
- * Tool/permission mapping here is the baseline that group 6 hardens with
- * mandatory pre-action enforcement.
+ * The invocation is built per attempt by `buildClaudeInvocation`. Attempts that
+ * can raise an ask-level decision or mutate the checkout require a reviewed
+ * `EnforcementPlan` (PreToolUse hook + permission host); without it they fail
+ * closed. Read-only + auto is the only combination that may run without the
+ * permission host.
  */
 
 import { describeClaudeEvent, ndjsonLines, newClaudeStreamState, type ClaudeSignal } from "../../claude-code"
 import { resolveClaudeAuth } from "./auth"
+import { assertEnforcementReady, EnforcementNotReadyError, type EnforcementPlan } from "./enforcement"
+import { encodeClaudeMcpConfig, encodeClaudeSettings, permissionPromptArgs } from "./settings"
 
 import type { AttemptOutcome, ExecutionAdapter, ExecutionRequest, RunnerEvent, Usage } from "../contracts"
 import type { ProgressTokens } from "../../progress"
@@ -38,6 +43,12 @@ export type ClaudeRunnerOptions = {
   env?: NodeJS.ProcessEnv
   binary?: string
   deps?: Partial<ClaudeRunnerDeps>
+  /**
+   * Mandatory enforcement (PreToolUse hook + permission host) for attempts that
+   * can raise ask-level decisions or mutate the checkout. Attempts that require
+   * it fail closed when it is absent (design D7).
+   */
+  enforcement?: EnforcementPlan
 }
 
 export type ClaudeRunner = ExecutionAdapter
@@ -61,6 +72,60 @@ export function buildClaudeArgs(request: ExecutionRequest): string[] {
   if (flags.tools) args.push("--tools", flags.tools)
   args.push("--permission-mode", flags.permissionMode)
   return args
+}
+
+/** The full argv (excluding the binary) plus isolated child env for one attempt. */
+export type ClaudeInvocation = {
+  args: string[]
+  env: NodeJS.ProcessEnv
+}
+
+/**
+ * True when the attempt could raise an ask-level decision or mutate the
+ * checkout, so mandatory enforcement (PreToolUse hook + permission host) is
+ * required. Read-only + auto is the only combination that may run without it.
+ */
+export function enforcementRequired(request: ExecutionRequest): boolean {
+  return request.approvals !== "auto" || request.mode !== "read-only"
+}
+
+/**
+ * Builds one attempt's invocation from reviewed per-attempt settings. The auth
+ * overlay is applied to the child env exactly as before. When enforcement is
+ * supplied it is validated and passed through `--settings`, `--mcp-config`, and
+ * `--permission-prompt-tool`; when it is required but absent, the attempt fails
+ * closed instead of running with weaker (or no) enforcement. `--bare` is never
+ * passed (subscription uses the operator login) and `--safe-mode` is never used
+ * as a blanket replacement for reviewed settings.
+ */
+export function buildClaudeInvocation(
+  request: ExecutionRequest,
+  enforcement?: EnforcementPlan,
+  options: { env?: NodeJS.ProcessEnv } = {},
+): ClaudeInvocation {
+  if (enforcement) {
+    assertEnforcementReady(enforcement)
+  } else if (enforcementRequired(request)) {
+    throw new EnforcementNotReadyError(
+      `Claude ${request.mode} attempt with "${request.approvals}" approvals requires mandatory enforcement ` +
+        `(a PreToolUse hook plus an authenticated permission host); refusing to run without it.`,
+    )
+  }
+
+  const baseEnv = options.env ?? process.env
+  const resolution = resolveClaudeAuth({ selection: request.auth, env: baseEnv })
+  const env: NodeJS.ProcessEnv = { ...baseEnv }
+  for (const key of resolution.unset) delete env[key]
+  Object.assign(env, resolution.set)
+
+  const args = buildClaudeArgs(request)
+  if (enforcement) {
+    args.push("--settings", encodeClaudeSettings(enforcement.settings))
+    args.push("--mcp-config", encodeClaudeMcpConfig(enforcement.mcpConfig))
+    args.push(...permissionPromptArgs(enforcement.permissionPromptTool))
+  }
+
+  return { args, env }
 }
 
 /** ProgressTokens -> neutral Usage. */
@@ -107,6 +172,7 @@ export function createClaudeRunner(options: ClaudeRunnerOptions): ClaudeRunner {
   const spawn = options.deps?.spawn ?? defaultDeps.spawn
   const binary = options.binary ?? defaultBinary
   const baseEnv = options.env ?? process.env
+  const enforcement = options.enforcement
 
   return {
     id: "claude-code",
@@ -132,22 +198,18 @@ export function createClaudeRunner(options: ClaudeRunnerOptions): ClaudeRunner {
         return { status: "failed", error: `claude adapter received a ${request.runner} request` }
       }
 
-      let auth
+      let invocation: ClaudeInvocation
       try {
-        auth = resolveClaudeAuth({ selection: request.auth, env: baseEnv })
+        invocation = buildClaudeInvocation(request, enforcement, { env: baseEnv })
       } catch (error) {
         const outcome: AttemptOutcome = { status: "failed", error: error instanceof Error ? error.message : String(error) }
         sink({ type: "terminal", runner: "claude-code", attempt: request.attempt, outcome })
         return outcome
       }
 
-      const env: NodeJS.ProcessEnv = { ...baseEnv }
-      for (const key of auth.unset) delete env[key]
-      Object.assign(env, auth.set)
-
-      const proc = spawn([binary, ...buildClaudeArgs(request)], {
+      const proc = spawn([binary, ...invocation.args], {
         cwd: request.checkout,
-        env,
+        env: invocation.env,
         stdin: new Blob([request.prompt]),
         stdout: "pipe",
         stderr: "pipe",

@@ -39,6 +39,11 @@ export function encodeClaudeSettings(settings: Record<string, unknown>): string 
   return JSON.stringify(settings)
 }
 
+/** Serializes an MCP config object for the `--mcp-config` argument. */
+export function encodeClaudeMcpConfig(mcpConfig: Record<string, unknown>): string {
+  return JSON.stringify(mcpConfig)
+}
+
 /** True when the settings object installs a PreToolUse hook. */
 export function hasPreToolUseHook(settings: unknown): boolean {
   if (typeof settings !== "object" || settings === null) return false

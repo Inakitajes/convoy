@@ -9,6 +9,9 @@ import {
   usageFromTokens,
   type ClaudeProcess,
 } from "../src/runners/claude/adapter"
+import type { EnforcementPlan } from "../src/runners/claude/enforcement"
+import { buildPermissionPromptTool } from "../src/runners/claude/permission-broker"
+import { buildClaudeSettings, buildPermissionMcpConfig } from "../src/runners/claude/settings"
 
 function request(overrides: Partial<ExecutionRequest> = {}): ExecutionRequest {
   return {
@@ -24,6 +27,15 @@ function request(overrides: Partial<ExecutionRequest> = {}): ExecutionRequest {
     approvals: "auto",
     signal: new AbortController().signal,
     ...overrides,
+  }
+}
+
+/** A reviewed plan that installs the hook and the permission host. */
+function enforcementPlan(): EnforcementPlan {
+  return {
+    settings: buildClaudeSettings({ preToolUse: { command: "convoy hook pre-tool-use" } }),
+    mcpConfig: buildPermissionMcpConfig("convoy", "convoy-mcp"),
+    permissionPromptTool: buildPermissionPromptTool("convoy", "permission"),
   }
 }
 
@@ -97,7 +109,7 @@ describe("claude adapter (unit)", () => {
 
 describe("claude adapter (fixture execution)", () => {
   test("streams a fixture turn into events and a completed outcome", async () => {
-    const runner = createClaudeRunner({ cwd: "/tmp", env: {}, deps: { spawn: () => fakeProcess(fixture) } })
+    const runner = createClaudeRunner({ cwd: "/tmp", env: {}, deps: { spawn: () => fakeProcess(fixture) }, enforcement: enforcementPlan() })
     const events: RunnerEvent[] = []
     const outcome = await runner.executeAttempt(request(), (event) => events.push(event))
 
@@ -115,6 +127,7 @@ describe("claude adapter (fixture execution)", () => {
     const runner = createClaudeRunner({
       cwd: "/tmp",
       env: { ANTHROPIC_API_KEY: "sk-ambient-leak", PATH: "/bin" },
+      enforcement: enforcementPlan(),
       deps: {
         spawn: (_command, options) => {
           seenEnv = options.env
@@ -132,6 +145,7 @@ describe("claude adapter (fixture execution)", () => {
     const runner = createClaudeRunner({
       cwd: "/tmp",
       env: {},
+      enforcement: enforcementPlan(),
       deps: { spawn: () => fakeProcess([], () => { killed = true }) },
     })
     const controller = new AbortController()
@@ -140,11 +154,50 @@ describe("claude adapter (fixture execution)", () => {
     expect(killed).toBe(true)
     expect(outcome.status).toBe("interrupted")
   })
+
+  test("fails closed without enforcement for a writable auto attempt", async () => {
+    let spawned = false
+    const runner = createClaudeRunner({
+      cwd: "/tmp",
+      env: {},
+      deps: { spawn: () => { spawned = true; return fakeProcess(fixture) } },
+    })
+    const events: RunnerEvent[] = []
+    const outcome = await runner.executeAttempt(request({ mode: "write", approvals: "auto" }), (event) => events.push(event))
+    expect(spawned).toBe(false)
+    expect(outcome.status).toBe("failed")
+    expect(outcome.error).toContain("enforcement")
+    expect(events.at(-1)?.type).toBe("terminal")
+  })
+
+  test("runs read-only + auto without the permission host", async () => {
+    let spawned = false
+    const runner = createClaudeRunner({
+      cwd: "/tmp",
+      env: {},
+      deps: { spawn: () => { spawned = true; return fakeProcess(fixture) } },
+    })
+    const outcome = await runner.executeAttempt(
+      request({
+        mode: "read-only",
+        approvals: "auto",
+        agent: { name: "reviewer", mode: "read-only", model: { runner: "claude-code", modelId: "sonnet" } },
+      }),
+      () => {},
+    )
+    expect(spawned).toBe(true)
+    expect(outcome.status).toBe("completed")
+  })
 })
 
 describe("claude adapter (robustness)", () => {
   async function run(lines: string[]) {
-    const runner = createClaudeRunner({ cwd: "/tmp", env: {}, deps: { spawn: () => fakeProcess(lines) } })
+    const runner = createClaudeRunner({
+      cwd: "/tmp",
+      env: {},
+      enforcement: enforcementPlan(),
+      deps: { spawn: () => fakeProcess(lines) },
+    })
     const events: RunnerEvent[] = []
     const outcome = await runner.executeAttempt(request(), (event) => events.push(event))
     return { outcome, events }
