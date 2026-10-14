@@ -24,7 +24,7 @@
 - [ ] 3.4 Implement explicit-mode migration errors for ambiguous legacy noninteractive configurations and freeze resolved non-secret auth in plans; verify missing mode and resumed-run cases either preserve verified subscription behavior or request explicit mode selection without inferring API consent.
 - [x] 3.5 Add credential redaction and private runtime-secret handling for child diagnostics, local bridges, and server connections; verify keys, passwords, headers, and credential-bearing URLs never enter public metadata, logs, or terminal argv.
 - [ ] 3.6 Document subscription setup, API-key opt-in, legacy configuration migration, and cost labels with complete examples; verify examples parse and subscription examples require neither an API key nor OpenCode.
-- [ ] 3.7 Add separately resolved subscription billing policy and consent to every executor/helper/advisor/authoring route; verify allowance-exhaustion with credits enabled, inherited paid features, unknown extra-usage status, and noninteractive launches either satisfy verified included-only controls or require explicit account-policy authorization. Document that subscription login alone is not a no-charge guarantee and that Convoy never changes provider-side spending settings.
+- [x] 3.7 Add separately resolved subscription billing policy and consent to every executor/helper/advisor/authoring route; verify allowance-exhaustion with credits enabled, inherited paid features, unknown extra-usage status, and noninteractive launches either satisfy verified included-only controls or require explicit account-policy authorization. Document that subscription login alone is not a no-charge guarantee and that Convoy never changes provider-side spending settings.
 
 ## 4. Migrate the OpenCode adapter to released v2
 
@@ -48,10 +48,10 @@
 
 - [x] 6.1 Extract runner-neutral action/policy evaluation from the current permission gate while retaining hard-denial, verification, and smart-judge semantics; verify the same policy fixtures pass for equivalent Claude and OpenCode actions.
 - [x] 6.2 Implement Claude mandatory pre-action hooks plus authenticated MCP ask-level permission hosting, and map OpenCode v2 enforcement to the same decisions; verify native allow rules and Auto-accept cannot bypass hard denials or first-write checkpoints.
-- [ ] 6.3 Scope permission requests/replies to exact execution identity and generation; verify stale, duplicate, foreign, cancelled, and timed-out replies cannot authorize another attempt and sibling requests remain independently responsive.
-- [ ] 6.4 Cover indirect mutation through shell, delegated agents, and external tools with conservative enforcement or disabled unsupported paths; verify adversarial read-only and verification tests deny disallowed effects before execution.
+- [x] 6.3 Scope permission requests/replies to exact execution identity and generation; verify stale, duplicate, foreign, cancelled, and timed-out replies cannot authorize another attempt and sibling requests remain independently responsive.
+- [x] 6.4 Cover indirect mutation through shell, delegated agents, and external tools with conservative enforcement or disabled unsupported paths; verify adversarial read-only and verification tests deny disallowed effects before execution.
 - [x] 6.5 Implement startup enforcement-health checks and runtime failure handling; verify unavailable hooks/bridges fail closed without enabling unrestricted bypass or leaving an unbounded approval wait.
-- [ ] 6.6 Route smart judges through the selected runner/auth/model and update launcher review while keeping its selector cycle/default/flags; verify Claude-only smart approval without OpenCode, explicit-judge compatibility, judge timeout handling, and the modified launcher spec scenarios. Document the safety mappings and failure modes.
+- [x] 6.6 Route smart judges through the selected runner/auth/model and update launcher review while keeping its selector cycle/default/flags; verify Claude-only smart approval without OpenCode, explicit-judge compatibility, judge timeout handling, and the modified launcher spec scenarios. Document the safety mappings and failure modes.
 
 ## 7. Deliver structured reports and advisor parity
 
@@ -82,17 +82,17 @@
 
 ## 10. Deliver usage controls and exact recovery
 
-- [ ] 10.1 Normalize usage semantics and persist cumulative baselines across turns/resume; verify repeated events, nested subagents, advisors, and continued Claude conversations do not double-count, and unavailable fields remain unknown.
-- [ ] 10.2 Apply core turn/time/tool-loop/token/cost policies to both adapters with supported soft steering and bounded hard cancellation; verify budget trips, quota failures, overshoot disclosure, and refusal of unenforceable requested guarantees.
+- [x] 10.1 Normalize usage semantics and persist cumulative baselines across turns/resume; verify repeated events, nested subagents, advisors, and continued Claude conversations do not double-count, and unavailable fields remain unknown.
+- [x] 10.2 Apply core turn/time/tool-loop/token/cost policies to both adapters with supported soft steering and bounded hard cancellation; verify budget trips, quota failures, overshoot disclosure, and refusal of unenforceable requested guarantees.
 - [ ] 10.3 Reconcile interrupted attempts against runner availability, process identity, accepted reports, and actual Git state before continuation or retry; verify uncertain prompt submission/write outcomes do not trigger automatic duplicate execution.
 - [ ] 10.4 Preserve auth mode, model route, exact session identity, and completed sibling results on resume; verify missing session, changed checkout, expired credentials, changed version, and legacy ambiguity produce explicit recovery choices rather than retargeting.
 - [ ] 10.5 Update usage and recovery documentation with subscription-estimate versus API-billing distinctions and concrete retry/resume examples; verify documented behavior against fixtures for both modes and both runners.
-- [ ] 10.6 Apply the reviewed subscription billing policy to resumed/background/parallel requests and inherited helpers; verify depleted allowance, stale quota snapshots, and unknown billing evidence cannot silently broaden included-only authorization or raise account limits, and disclose estimate-versus-provider-cap limitations.
+- [x] 10.6 Apply the reviewed subscription billing policy to resumed/background/parallel requests and inherited helpers; verify depleted allowance, stale quota snapshots, and unknown billing evidence cannot silently broaden included-only authorization or raise account limits, and disclose estimate-versus-provider-cap limitations.
 
 ## 11. Deliver authoring and human-control parity
 
-- [ ] 11.1 Route home/worktree conversations, proposal fallback, specs iteration, human gates, and finish-screen iteration through the conversation port; verify Claude-only authoring works without OpenCode and foreground/external presentation uses the selected exact harness session.
-- [ ] 11.2 Implement supported native attach and explicit quiesced handoff separately from post-exit resume; verify no second writer starts before authority transfer, failed handoff does not claim success, and unavailable native interaction is labeled honestly.
+- [x] 11.1 Route home/worktree conversations, proposal fallback, specs iteration, human gates, and finish-screen iteration through the conversation port; verify Claude-only authoring works without OpenCode and foreground/external presentation uses the selected exact harness session.
+- [x] 11.2 Implement supported native attach and explicit quiesced handoff separately from post-exit resume; verify no second writer starts before authority transfer, failed handoff does not claim success, and unavailable native interaction is labeled honestly.
 - [ ] 11.3 Revalidate checkout continuity, session availability, auth mode, and Git effects on interactive entry/return, including after external shell startup; verify changed credentials, reused/moved paths, missing sessions, and stale binaries cannot silently change execution target or billing.
 - [ ] 11.4 Preserve terminal restoration, operator-shell behavior, authoring lifetime, and shared writer guards; verify existing conversation/terminal regressions plus Claude-specific failure/interruption cases.
 - [ ] 11.5 Generalize human-iteration commit provenance and UI language to both harnesses; verify exactly-one authoritative run trailers for normal, recovered, and human-created changes and no empty provenance-only commits. Document verified interaction semantics and advanced exceptions.
