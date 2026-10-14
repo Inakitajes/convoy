@@ -92,6 +92,30 @@ acceptance. Advanced exceptions must name exact versions and authentication mode
 Until then, treat Claude parity and the runner ports as **in progress**: the
 OpenCode path remains the shipped behavior.
 
+The operator-facing guide is [Runners](runners.md); this section is the
+source-facing summary.
+
+### `src/runners/` module map
+
+```
+src/runners/
+├── contracts.ts        # vendor-free ports: requests, events, outcomes, capabilities, registry
+├── registry.ts         # composition root that registers the built-in adapters
+├── capabilities.ts     # effective capability resolution by runner/version/auth/policy
+├── policy.ts           # runner-neutral action policy (read/write/execute/delegate decisions)
+├── deliverables.ts     # runner-neutral report/score/commit validator + ledger
+├── advisor-consult.ts  # normalized consultation context + first-write checkpoint
+├── advisor-limits.ts   # advisor call/output/time/recursion limits and budget
+├── journal.ts          # versioned append-only normalized event journal
+├── provenance.ts       # per-attempt runner/auth/session/attempt record + legacy reader
+├── usage.ts            # token/cost normalization and cumulative-delta subtraction
+├── redaction.ts        # secret registration and log redaction
+├── claude/             # Claude adapter: adapter, auth, effective-auth, mode, settings,
+│                       #   hook, enforcement, permission-broker, mcp-permission-server, mcp-stdio
+└── opencode/           # OpenCode v2 adapter: adapter, boot, runtime, v2-client, config,
+                        #   history, log-events, permission, server-auth, terminal
+```
+
 ### Runner ports and ownership responsibilities
 
 - `src/runners/contracts.ts` is Convoy-owned and **vendor-free**: execution

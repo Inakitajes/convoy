@@ -23,7 +23,7 @@
 - [x] 3.3 Preserve supported CLI subscription execution and add explicit API-key CLI execution without introducing an SDK dependency for the baseline; verify both modes through protocol fixtures and that quota/auth failures never trigger cross-mode fallback.
 - [x] 3.4 Implement explicit-mode migration errors for ambiguous legacy noninteractive configurations and freeze resolved non-secret auth in plans; verify missing mode and resumed-run cases either preserve verified subscription behavior or request explicit mode selection without inferring API consent.
 - [x] 3.5 Add credential redaction and private runtime-secret handling for child diagnostics, local bridges, and server connections; verify keys, passwords, headers, and credential-bearing URLs never enter public metadata, logs, or terminal argv.
-- [ ] 3.6 Document subscription setup, API-key opt-in, legacy configuration migration, and cost labels with complete examples; verify examples parse and subscription examples require neither an API key nor OpenCode.
+- [x] 3.6 Document subscription setup, API-key opt-in, legacy configuration migration, and cost labels with complete examples; verify examples parse and subscription examples require neither an API key nor OpenCode.
 - [x] 3.7 Add separately resolved subscription billing policy and consent to every executor/helper/advisor/authoring route; verify allowance-exhaustion with credits enabled, inherited paid features, unknown extra-usage status, and noninteractive launches either satisfy verified included-only controls or require explicit account-policy authorization. Document that subscription login alone is not a no-charge guarantee and that Convoy never changes provider-side spending settings.
 
 ## 4. Migrate the OpenCode adapter to released v2
@@ -42,7 +42,7 @@
 - [x] 5.3 Generalize shared process ownership utilities for Claude children and bridge resources while preserving OpenCode contracts; verify PID reuse, incomplete evidence, independent processes, and concurrent reconciliation are never unsafe kill targets.
 - [x] 5.4 Add bounded interrupt/stop/escalation and observation for Claude attempts, including attributable descendant work; verify hanging commands, blocked permissions, repeat abort, cancellation during startup, and unknown descendant state settle within the shared deadline with truthful outcomes.
 - [x] 5.5 Separate runtime release, view detachment, explicit cancellation, and finished controller holds; verify active detached executions retain claims, the existing lease timing holds, and independent authoring survives run cleanup.
-- [ ] 5.6 Document Claude execution modes, customization loading, supported restrictions, and lifecycle limits; verify examples and lifecycle fixtures do not claim an OS sandbox or assume child exit proves all descendant termination.
+- [x] 5.6 Document Claude execution modes, customization loading, supported restrictions, and lifecycle limits; verify examples and lifecycle fixtures do not claim an OS sandbox or assume child exit proves all descendant termination.
 
 ## 6. Deliver shared permission enforcement and approvals
 
@@ -61,7 +61,7 @@
 - [x] 7.4 Extract bounded normalized consultation context and runner-independent advisor execution; verify Claude subscription-to-subscription consultation without OpenCode/key and both cross-runner directions with explicitly routed dependencies.
 - [x] 7.5 Implement mandatory advisor checkpoints via the permission boundary and expose advisor tools in both runners; verify an unconsulted first write is blocked even under native auto-approval, and failed consultation leaves protected work blocked.
 - [x] 7.6 Apply advisor call/output/time limits, cancellation, recursion prevention, and separate usage attribution; verify concurrent consultations and cancellation affect only the originating attempt and consume the correct budget once.
-- [ ] 7.7 Document reports/advisors and mixed-runner route examples; verify every example parses and any use of a native advisor is backed by equivalence tests rather than feature-name matching.
+- [x] 7.7 Document reports/advisors and mixed-runner route examples; verify every example parses and any use of a native advisor is backed by equivalence tests rather than feature-name matching.
 
 ## 8. Route full plans and remove hidden OpenCode dependencies
 
@@ -86,7 +86,7 @@
 - [x] 10.2 Apply core turn/time/tool-loop/token/cost policies to both adapters with supported soft steering and bounded hard cancellation; verify budget trips, quota failures, overshoot disclosure, and refusal of unenforceable requested guarantees.
 - [ ] 10.3 Reconcile interrupted attempts against runner availability, process identity, accepted reports, and actual Git state before continuation or retry; verify uncertain prompt submission/write outcomes do not trigger automatic duplicate execution.
 - [ ] 10.4 Preserve auth mode, model route, exact session identity, and completed sibling results on resume; verify missing session, changed checkout, expired credentials, changed version, and legacy ambiguity produce explicit recovery choices rather than retargeting.
-- [ ] 10.5 Update usage and recovery documentation with subscription-estimate versus API-billing distinctions and concrete retry/resume examples; verify documented behavior against fixtures for both modes and both runners.
+- [x] 10.5 Update usage and recovery documentation with subscription-estimate versus API-billing distinctions and concrete retry/resume examples; verify documented behavior against fixtures for both modes and both runners.
 - [x] 10.6 Apply the reviewed subscription billing policy to resumed/background/parallel requests and inherited helpers; verify depleted allowance, stale quota snapshots, and unknown billing evidence cannot silently broaden included-only authorization or raise account limits, and disclose estimate-versus-provider-cap limitations.
 
 ## 11. Deliver authoring and human-control parity

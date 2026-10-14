@@ -5,6 +5,7 @@
 Authenticate providers and route executor and advisor models through gateways.
 
 - [Authentication And Providers](#authentication-and-providers)
+- [Runner authentication and billing](#runner-authentication-and-billing)
 - [Model gateways](#model-gateways)
 
 ## Authentication And Providers
@@ -25,16 +26,104 @@ To use different providers, authenticate them in OpenCode and select models as `
 
 ## Runner authentication and billing
 
-Convoy is moving runner choice and authentication to explicit selections
-(tracked in `openspec/changes/runner-parity-opencode-v2/`; in progress):
+Runner choice and authentication are explicit selections (tracked in
+`openspec/changes/runner-parity-opencode-v2/`; in progress). **OpenCode** is the
+shipped runner and requires a supported OpenCode V2 on `PATH`; Convoy never
+installs, updates, or replaces it. **Claude** uses the operator's authenticated
+`claude` CLI. Authentication and billing are **separate**: subscription login
+does not guarantee included-only usage, and Convoy never changes account
+spending settings. See [Runners](runners.md) for execution modes, reports,
+advisors, and recovery.
 
-- **OpenCode** is the shipped runner and requires a supported OpenCode V2 on
-  `PATH`. Convoy never installs, updates, or replaces it.
-- **Claude** uses the operator's authenticated CLI. Subscription authentication
-  is the baseline; API-key execution is an explicit, separately selected mode.
-- Authentication and billing are **separate**. Subscription login does not
-  guarantee included-only usage: usage credits and paid features are governed by
-  an explicit billing policy. Convoy never changes account spending settings.
+### Subscription setup
+
+Sign in once with the CLI's own supported login flow (`claude`, then `/login`);
+Convoy never reads credential stores, extracts tokens, or automates login. A new
+Claude configuration defaults to `subscription`, and can state it explicitly:
+
+```yaml
+version: 1
+runners:
+  claude-code:
+    authMode: subscription
+    billingPolicy: included-only   # conservative default
+    model: sonnet
+```
+
+A subscription-only configuration requires no API key and no OpenCode
+installation. `included-only` is honored only when Convoy can verify and enforce
+it; when it cannot, preflight asks for an explicit billing decision
+(`account-policy`) instead of requiring an API key or implying free usage.
+Convoy never enables extra usage, buys credits, or raises provider-side spend
+limits.
+
+### API-key opt-in
+
+API-key execution is a separate, explicit mode. Reference an environment
+variable by name; never put the key itself in the file:
+
+```yaml
+version: 1
+runners:
+  claude-code:
+    authMode: api-key
+    credentialRef: CONVOY_ANTHROPIC_KEY   # the variable that holds the key
+```
+
+```bash
+export CONVOY_ANTHROPIC_KEY=sk-ant-...
+```
+
+Convoy sets the key only for the child and removes ambient OAuth/subscription
+tokens for it, so the selected key is the effective billing source. Run metadata
+records the mode and the variable name, never the value.
+
+### Legacy configuration migration
+
+Older Claude steps declared `runner: claude-code` with no mode. During launch
+review an entry with no mode must declare one: Convoy resolves it to
+`subscription` only when the effective CLI authentication is a verifiable
+subscription, and otherwise refuses to infer permission to spend.
+
+```yaml
+# Before: ambiguous — no authentication mode is declared
+version: 1
+pipelines:
+  review:
+    steps:
+      - agent: security
+        runner: claude-code
+```
+
+```yaml
+# After: declare the mode explicitly (subscription shown)
+version: 1
+runners:
+  claude-code:
+    authMode: subscription
+pipelines:
+  review:
+    steps:
+      - agent: security
+        runner: claude-code
+```
+
+A noninteractive run (CI, `--no-tui`) with an ambiguous entry fails with a
+migration message asking for `runners.claude-code.authMode`; it never falls back
+to an API key. Existing runner IDs and model strings stay compatible.
+
+### Cost labels
+
+Subscription and API-key figures are labeled differently and never conflated:
+
+| | OpenCode / API key | Claude subscription |
+|---|---|---|
+| Monetary value | estimate of provider charges | **estimate only**, not a cash charge |
+| Quota | provider-side; not tracked as a guarantee | not a remaining-balance report |
+| Missing data | unknown, never zero | unknown, never zero |
+
+Neither column is an invoice. [Runners](runners.md#usage-and-billing) explains
+the distinction and gives retry/resume examples.
 
 Selected versions and the release gate are recorded in that change's
 `evidence/compatibility.md` and `design.md`.
