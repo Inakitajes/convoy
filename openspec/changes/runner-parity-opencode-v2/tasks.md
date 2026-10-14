@@ -66,7 +66,7 @@
 ## 8. Route full plans and remove hidden OpenCode dependencies
 
 - [ ] 8.1 Replace static brand exclusions with effective capability validation and runner-qualified model discovery/effort mapping; verify Claude write/verify/fan-out selections are accepted when supported and incompatible model/variant choices fail visibly.
-- [ ] 8.2 Traverse all ordinary steps, goal fragments, advisors, judges, and helper routes in preflight and plan freezing; verify a missing future dependency is reported before any writable phase starts.
+- [x] 8.2 Traverse all ordinary steps, goal fragments, advisors, judges, and helper routes in preflight and plan freezing; verify a missing future dependency is reported before any writable phase starts.
 - [ ] 8.3 Enable Claude model fan-out and mixed parallel nodes through the existing scheduler; verify dependency ordering, per-run/per-runner concurrency bounds, report/session isolation, quota backoff, and protected conflicting-write behavior.
 - [ ] 8.4 Route branch-name and commit-message helpers through the helper port and remove unconditional OpenCode runtime/tool setup; verify Claude-only preflight, execution, helpers, and finalization with OpenCode absent, plus deterministic run-title regression tests.
 - [ ] 8.5 Add scoped model override behavior and usable Claude-only pipeline presets/examples without guessing mappings from arbitrary OpenCode providers; verify plan-preview fixtures show all resolved models/auth modes and existing explicit OpenCode selections are unchanged.
