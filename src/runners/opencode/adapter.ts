@@ -23,6 +23,7 @@ import type {
   Usage,
 } from "../contracts"
 import { bootOwnedServer, type OwnedServer } from "./boot"
+import { mapOpencodeEvent } from "./log-events"
 import { assertSupportedOpencodeRuntime } from "./runtime"
 import {
   createSession,
@@ -30,6 +31,7 @@ import {
   interruptSession,
   listMessages,
   sendPrompt,
+  subscribeEvents,
   waitForIdle,
   type OpencodeV2Client,
 } from "./v2-client"
@@ -185,11 +187,30 @@ export function createOpencodeRunner(options: OpencodeRunnerOptions): OpencodeRu
         return { status: "failed", error: `opencode adapter received a ${request.runner} request` }
       }
       const attempt = request.attempt
+      let streamAbort: AbortController | undefined
       try {
         const { client: c } = await ensureServer()
         const session = await createSession(c, { directory: request.checkout, title: `convoy ${request.phaseName}` })
         activeSessions.set(attempt, session.id)
         sink({ type: "session", runner: "opencode", attempt, session: { runner: "opencode", sessionId: session.id } })
+
+        // Stream this attempt's live events (text/reasoning deltas, usage).
+        // Terminal is derived from the recorded message below, so a streamed
+        // execution outcome is not emitted twice.
+        let sawText = false
+        streamAbort = new AbortController()
+        const streamTask = (async () => {
+          try {
+            for await (const event of subscribeEvents(c, streamAbort!.signal)) {
+              const mapped = mapOpencodeEvent(event, attempt, session.id)
+              if (!mapped || mapped.type === "terminal") continue
+              if (mapped.type === "text") sawText = true
+              sink(mapped)
+            }
+          } catch {
+            // aborted or the stream ended; the outcome is derived below
+          }
+        })()
 
         await sendPrompt(c, {
           sessionID: session.id,
@@ -197,6 +218,8 @@ export function createOpencodeRunner(options: OpencodeRunnerOptions): OpencodeRu
           model: parseOpencodeModel(request.agent.model),
         })
         await waitForIdle(c, session.id)
+        streamAbort.abort()
+        await streamTask.catch(() => undefined)
 
         const messages = await listMessages(c, session.id)
         const assistant = [...messages.data].reverse().find((entry) => (entry as { type?: unknown }).type === "assistant")
@@ -204,7 +227,8 @@ export function createOpencodeRunner(options: OpencodeRunnerOptions): OpencodeRu
           return { status: "uncertain", session: { runner: "opencode", sessionId: session.id }, error: "no assistant message recorded" }
         }
         const summary = summarizeAssistant(assistant)
-        if (summary.text) sink({ type: "text", runner: "opencode", attempt, text: summary.text })
+        // Fall back to the final message text only when nothing streamed live.
+        if (summary.text && !sawText) sink({ type: "text", runner: "opencode", attempt, text: summary.text })
         for (const name of summary.tools) sink({ type: "tool", runner: "opencode", attempt, name })
 
         const outcome: AttemptOutcome = {
@@ -225,6 +249,7 @@ export function createOpencodeRunner(options: OpencodeRunnerOptions): OpencodeRu
         sink({ type: "terminal", runner: "opencode", attempt, outcome })
         return outcome
       } finally {
+        streamAbort?.abort()
         activeSessions.delete(attempt)
       }
     },

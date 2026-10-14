@@ -107,3 +107,18 @@ export async function interruptSession(client: OpencodeV2Client, sessionID: stri
   const input = { sessionID } as unknown as Parameters<OpencodeV2Client["session"]["interrupt"]>[0]
   await client.session.interrupt(input)
 }
+
+/** The durable session-log stream (used for history backfill / late attachment). */
+export type V2SessionLog = ReturnType<OpencodeV2Client["session"]["log"]>
+
+export function readSessionLog(client: OpencodeV2Client, sessionID: string): V2SessionLog {
+  const input = { sessionID } as unknown as Parameters<OpencodeV2Client["session"]["log"]>[0]
+  return client.session.log(input)
+}
+
+/** The live server-wide event stream; pass a signal to stop iterating. */
+export type V2EventStream = ReturnType<OpencodeV2Client["event"]["subscribe"]>
+
+export function subscribeEvents(client: OpencodeV2Client, signal?: AbortSignal): V2EventStream {
+  return client.event.subscribe(signal ? { signal } : undefined)
+}
