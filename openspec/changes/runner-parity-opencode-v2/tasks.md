@@ -93,9 +93,9 @@
 
 - [x] 11.1 Route home/worktree conversations, proposal fallback, specs iteration, human gates, and finish-screen iteration through the conversation port; verify Claude-only authoring works without OpenCode and foreground/external presentation uses the selected exact harness session.
 - [x] 11.2 Implement supported native attach and explicit quiesced handoff separately from post-exit resume; verify no second writer starts before authority transfer, failed handoff does not claim success, and unavailable native interaction is labeled honestly.
-- [ ] 11.3 Revalidate checkout continuity, session availability, auth mode, and Git effects on interactive entry/return, including after external shell startup; verify changed credentials, reused/moved paths, missing sessions, and stale binaries cannot silently change execution target or billing.
+- [x] 11.3 Revalidate checkout continuity, session availability, auth mode, and Git effects on interactive entry/return, including after external shell startup; verify changed credentials, reused/moved paths, missing sessions, and stale binaries cannot silently change execution target or billing.
 - [ ] 11.4 Preserve terminal restoration, operator-shell behavior, authoring lifetime, and shared writer guards; verify existing conversation/terminal regressions plus Claude-specific failure/interruption cases.
-- [ ] 11.5 Generalize human-iteration commit provenance and UI language to both harnesses; verify exactly-one authoritative run trailers for normal, recovered, and human-created changes and no empty provenance-only commits. Document verified interaction semantics and advanced exceptions.
+- [x] 11.5 Generalize human-iteration commit provenance and UI language to both harnesses; verify exactly-one authoritative run trailers for normal, recovered, and human-created changes and no empty provenance-only commits. Document verified interaction semantics and advanced exceptions.
 
 ## 12. Validate release-wide parity and migration
 
