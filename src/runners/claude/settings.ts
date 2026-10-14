@@ -47,3 +47,17 @@ export function hasPreToolUseHook(settings: unknown): boolean {
   const pre = (hooks as { PreToolUse?: unknown }).PreToolUse
   return Array.isArray(pre) && pre.length > 0
 }
+
+/**
+ * The `--mcp-config` object declaring the local server that hosts the
+ * permission prompt tool. Passed per invocation; the operator's own MCP
+ * configuration is untouched.
+ */
+export function buildPermissionMcpConfig(server: string, command: string, args: readonly string[] = []): Record<string, unknown> {
+  return { mcpServers: { [server]: { command, args: [...args] } } }
+}
+
+/** The `--permission-prompt-tool` argument pair for a hosted permission tool. */
+export function permissionPromptArgs(tool: string): string[] {
+  return ["--permission-prompt-tool", tool]
+}

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 
 import type { PolicyConfig } from "../src/runners/policy"
 import { decideToolCall, preToolUseOutput, resourceOf, toActionRequest, toolToIntent } from "../src/runners/claude/hook"
-import { buildClaudeSettings, encodeClaudeSettings, hasPreToolUseHook } from "../src/runners/claude/settings"
+import { buildClaudeSettings, buildPermissionMcpConfig, encodeClaudeSettings, hasPreToolUseHook, permissionPromptArgs } from "../src/runners/claude/settings"
 
 describe("claude pre-action hook", () => {
   test("maps built-in tools to neutral intents and resources", () => {
@@ -60,5 +60,12 @@ describe("claude settings with interception", () => {
     expect(hasPreToolUseHook({})).toBe(false)
     expect(hasPreToolUseHook(null)).toBe(false)
     expect(hasPreToolUseHook({ hooks: { PreToolUse: [] } })).toBe(false)
+  })
+
+  test("renders the permission host's MCP config and prompt-tool args", () => {
+    expect(buildPermissionMcpConfig("convoy", "convoy-mcp", ["permission"])).toEqual({
+      mcpServers: { convoy: { command: "convoy-mcp", args: ["permission"] } },
+    })
+    expect(permissionPromptArgs("mcp__convoy__permission")).toEqual(["--permission-prompt-tool", "mcp__convoy__permission"])
   })
 })
