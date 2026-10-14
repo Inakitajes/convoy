@@ -74,3 +74,27 @@ above, and no authorization changes global credentials.
 - **Release gate:** every mandatory parity-matrix cell in `design.md` D4 must
   have passing automated tests plus consented real-harness acceptance before
   release; advanced exceptions must name exact versions/modes.
+
+## Real acceptance (bounded, 2026-10-15)
+
+Claude CLI `2.1.296`, subscription (claude.ai, Pro). No `ANTHROPIC_API_KEY` in the environment.
+
+Bounded smoke (deliberately minimal spend):
+
+- Command shape: `claude -p "<read note.txt>" --model haiku --settings <PreToolUse hook> --mcp-config <permission host> --permission-prompt-tool mcp__convoy__permission --output-format json`, run in a disposable scratch dir with `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` unset.
+- Result: exit 0, `result` = the file contents, `permission_mode` `default`, **subscription** auth (no API key, no token extraction).
+- The **`PreToolUse` hook fired** for `tool_name: Read` (proves per-invocation `--settings` load and mandatory interception).
+- The **MCP permission host loaded** from `--mcp-config` without error; it was not invoked because the hook allowed the call.
+- Cost: **$0.0048**.
+
+Coverage by matrix cell:
+
+| Cell | Status |
+|---|---|
+| Claude subscription single turn + hook + MCP host | Verified (bounded smoke above) |
+| Claude API-key execution | **Not run** — no API key available in this environment |
+| OpenCode v2 | Verified via `nan/deepseek-v4-flash` live tests (auth, session, prompt/`idle`, streaming, continuation) |
+| Mixed plan (Claude + OpenCode in one group) | Verified at the scheduler/planning level (`test/runner-mixed-parallel.test.ts`); a real mixed full-cycle was not run to bound spend |
+| Full-cycle (reports/advisor/parallel/abort/recovery) on real Claude | **Deferred** — cost |
+
+`with explicit consent, a bounded real-harness smoke result` (task 1.3) is satisfied by the subscription smoke. Cells that need an API key or a full paid cycle remain explicitly deferred rather than claimed.
