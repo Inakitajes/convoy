@@ -84,8 +84,8 @@
 
 - [x] 10.1 Normalize usage semantics and persist cumulative baselines across turns/resume; verify repeated events, nested subagents, advisors, and continued Claude conversations do not double-count, and unavailable fields remain unknown.
 - [x] 10.2 Apply core turn/time/tool-loop/token/cost policies to both adapters with supported soft steering and bounded hard cancellation; verify budget trips, quota failures, overshoot disclosure, and refusal of unenforceable requested guarantees.
-- [ ] 10.3 Reconcile interrupted attempts against runner availability, process identity, accepted reports, and actual Git state before continuation or retry; verify uncertain prompt submission/write outcomes do not trigger automatic duplicate execution.
-- [ ] 10.4 Preserve auth mode, model route, exact session identity, and completed sibling results on resume; verify missing session, changed checkout, expired credentials, changed version, and legacy ambiguity produce explicit recovery choices rather than retargeting.
+- [x] 10.3 Reconcile interrupted attempts against runner availability, process identity, accepted reports, and actual Git state before continuation or retry; verify uncertain prompt submission/write outcomes do not trigger automatic duplicate execution.
+- [x] 10.4 Preserve auth mode, model route, exact session identity, and completed sibling results on resume; verify missing session, changed checkout, expired credentials, changed version, and legacy ambiguity produce explicit recovery choices rather than retargeting.
 - [x] 10.5 Update usage and recovery documentation with subscription-estimate versus API-billing distinctions and concrete retry/resume examples; verify documented behavior against fixtures for both modes and both runners.
 - [x] 10.6 Apply the reviewed subscription billing policy to resumed/background/parallel requests and inherited helpers; verify depleted allowance, stale quota snapshots, and unknown billing evidence cannot silently broaden included-only authorization or raise account limits, and disclose estimate-versus-provider-cap limitations.
 
