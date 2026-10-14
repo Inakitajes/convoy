@@ -176,12 +176,23 @@ describe("built-in implement pipeline", () => {
 })
 
 describe("built-in pipeline catalog", () => {
-  test("offers the six consolidated pipelines without private model providers", () => {
-    expect(Object.keys(builtInPipelines).sort()).toEqual(["fixer", "full-cycle", "hunter", "implement", "review", "ship"])
+  test("offers the consolidated pipelines without private model providers", () => {
+    expect(Object.keys(builtInPipelines).sort()).toEqual(["claude-review", "fixer", "full-cycle", "hunter", "implement", "review", "ship"])
     expect(JSON.stringify(builtInPipelines)).not.toMatch(/nan\//i)
     for (const [name, spec] of Object.entries(builtInPipelines)) {
       expect(() => resolvePipeline({ name, spec, agents: builtInAgents })).not.toThrow()
     }
+  })
+
+  test("ships a Claude-only preset with no OpenCode steps", () => {
+    const pipeline = resolvePipeline({ name: "claude-review", spec: builtInPipelines["claude-review"]!, agents: builtInAgents })
+    const agents = pipeline.steps.filter((step): step is AgentStep => step.type === "agent")
+    expect(agents.length).toBeGreaterThan(0)
+    expect(agents.every((step) => step.runner === "claude-code")).toBe(true)
+    // The audits fan out across Claude models; no step inherits an OpenCode model.
+    expect(agents.some((step) => step.stepName === "clean-code" && step.model === "sonnet")).toBe(true)
+    expect(agents.every((step) => !step.model.includes("/"))).toBe(true)
+    expect(pipeline.defaultPrompt).toBeTruthy()
   })
 })
 
@@ -1129,8 +1140,10 @@ describe("claude-code runner steps", () => {
     expect(steps[0]?.model).toContain("/")
   })
 
-  test("rejects claude-code on a step that can write (v1 is audit-only)", () => {
-    expect(() => agentSteps({ steps: [{ agent: "implementer", runner: "claude-code" }] })).toThrow(/read-only/)
+  test("accepts claude-code on a step that can write", () => {
+    const steps = agentSteps({ steps: [{ agent: "implementer", runner: "claude-code" }] })
+    expect(steps[0]?.runner).toBe("claude-code")
+    expect(steps[0]?.readOnly).toBeUndefined()
   })
 
   test("accepts claude-code inside a parallel block (forced read-only)", () => {
@@ -1151,8 +1164,10 @@ describe("claude-code runner steps", () => {
     expect(claude?.readOnly).toBe(true)
   })
 
-  test("rejects claude-code on a verifying step, which needs bash it cannot give", () => {
-    expect(() => agentSteps({ steps: [{ agent: "review-validator", name: "validator", runner: "claude-code", verify: true }] })).toThrow(/can't run commands/)
+  test("accepts claude-code on a verifying step with bash", () => {
+    const steps = agentSteps({ steps: [{ agent: "review-validator", name: "validator", runner: "claude-code", verify: true }] })
+    expect(steps[0]?.runner).toBe("claude-code")
+    expect(steps[0]?.verify).toBe(true)
   })
 
   test("accepts claude-code on a verifying step forced read-only, where bash is dropped anyway", () => {
@@ -1173,12 +1188,26 @@ describe("claude-code runner steps", () => {
     expect(claude?.verify).toBeUndefined()
   })
 
-  test("rejects claude-code combined with a models: fan-out", () => {
+  test("fans claude-code out across Claude models, normalizing each", () => {
+    const steps = agentSteps({
+      steps: [{ agent: "bug-auditor", runner: "claude-code", models: ["opus", "anthropic/claude-sonnet-4-5"], reports: "none", diff: true }],
+    })
+
+    expect(steps).toHaveLength(2)
+    expect(steps.map((step) => step.runner)).toEqual(["claude-code", "claude-code"])
+    expect(steps.map((step) => step.model)).toEqual(["opus", "claude-sonnet-4-5"])
+    // Every fan-out member is forced read-only and keeps its own session/report.
+    expect(steps.every((step) => step.readOnly)).toBe(true)
+    expect(new Set(steps.map((step) => step.name)).size).toBe(2)
+    expect(new Set(steps.map((step) => step.reportPath)).size).toBe(2)
+  })
+
+  test("rejects a Claude fan-out entry that is not a Claude model, instead of dropping it", () => {
     expect(() =>
       agentSteps({
-        steps: [{ agent: "bug-auditor", runner: "claude-code", models: ["openai/gpt-5.5#xhigh", "anthropic/claude-opus-4-8"] }],
+        steps: [{ agent: "bug-auditor", runner: "claude-code", models: ["opus", "openai/gpt-5.6"] }],
       }),
-    ).toThrow(/models/)
+    ).toThrow("runner claude-code executes Anthropic models")
   })
 })
 

@@ -497,7 +497,7 @@ describe("pipeline selection", () => {
     expect(selectPipelineSpec(config, "implement").steps).toEqual(["tests"])
     expect(selectPipelineSpec(undefined, "implement").steps.length).toBeGreaterThan(1)
     expect(() => selectPipelineSpec(config, "ghost")).toThrow(
-      'unknown pipeline "ghost" (available: fixer, full-cycle, hunter, implement, quick, review, ship)',
+      'unknown pipeline "ghost" (available: claude-review, fixer, full-cycle, hunter, implement, quick, review, ship)',
     )
     expect(() => selectPipelineSpec(config, "ghost")).toThrow(ConfigError)
   })
@@ -1342,7 +1342,25 @@ describe("runner field on steps", () => {
     )
   })
 
-  test("rejects runner: claude-code with a models fan-out", () => {
+  test("accepts runner: claude-code with a models fan-out and normalizes each entry", () => {
+    const config = parse(
+      [
+        "pipelines:",
+        "  p:",
+        "    steps:",
+        "      - agent: bug-auditor",
+        "        runner: claude-code",
+        "        models:",
+        "          - opus",
+        "          - anthropic/claude-opus-4-8",
+      ].join("\n"),
+    )
+    expect(config.pipelines.p?.steps).toEqual([
+      { agent: "bug-auditor", runner: "claude-code", models: ["opus", "claude-opus-4-8"] },
+    ])
+  })
+
+  test("rejects an OpenCode model in a Claude fan-out instead of dropping it", () => {
     expect(() =>
       parse(
         [
@@ -1352,11 +1370,11 @@ describe("runner field on steps", () => {
           "      - agent: bug-auditor",
           "        runner: claude-code",
           "        models:",
-          "          - openai/gpt-5.5#xhigh",
-          "          - anthropic/claude-opus-4-8",
+          "          - opus",
+          "          - openai/gpt-5.5",
         ].join("\n"),
       ),
-    ).toThrow('pipelines.p.steps[0] can\'t combine runner: claude-code with "models"')
+    ).toThrow("pipelines.p.steps[0].models[1] runner claude-code executes Anthropic models")
   })
 })
 

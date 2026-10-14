@@ -31,7 +31,7 @@ import {
   type PipelineSpec,
   type StepSpec,
 } from "./pipeline"
-import { isStepRunnerId, normalizeStepRunnerModel, stepRunnerFor, type StepRunnerId } from "./step-runners"
+import { isStepRunnerId, normalizeStepRunnerModel, stepRunnerCapabilityReason, stepRunnerFor, type StepRunnerId } from "./step-runners"
 import type { NotificationSettings } from "./notifications"
 import type { AdvisorAuditPolicy } from "./advisor-events"
 import type { AgentSpec, HookSet, HookSpec, HooksConfig, HookWhen, PermissionAdditions } from "./types"
@@ -344,6 +344,8 @@ defaults:
 #   fixer                turn a list of findings into proven regression tests, minimal fixes, and a verdict each
 #   review               report-only: parallel audits across two models, one prioritized report, then a verified score
 #   hunter               report-only repo audit: six tracks on five models each (30 audits), then consensus
+#   claude-review        report-only review that runs entirely on the local Claude CLI (no OpenCode);
+#                        set \`authMode: subscription\` (default) or an explicit \`authMode: api-key\` route
 # The \`implement\` pipeline is inlined below as an editable starting point; redefining a name here overrides the built-in.
 pipelines:
   implement:
@@ -943,7 +945,7 @@ function validateStep(v: Validator, raw: unknown, path: string, context: StepCon
 
   const runner = record.runner !== undefined ? validateRunner(v, record.runner, `${path}.runner`) : undefined
   if (!stepRunnerFor(runner).capabilities.modelFanout && record.models !== undefined) {
-    v.fail(path, `can't combine runner: ${runner} with "models"; give the step a single model (or none for the CLI default)`)
+    v.fail(path, `can't combine runner: ${runner} with "models" (${stepRunnerCapabilityReason(runner ?? "opencode", "model-fanout")}); give the step a single model (or none for the CLI default)`)
   }
   if (!stepRunnerFor(runner).capabilities.advisor && record.advisor !== undefined && record.advisor !== false) {
     v.fail(`${path}.advisor`, `runner: ${runner} does not support an advisor; remove it or drop the runner`)
@@ -956,9 +958,12 @@ function validateStep(v: Validator, raw: unknown, path: string, context: StepCon
 
   let models: string[] | undefined
   if (record.models !== undefined) {
-    models = v.stringArray(record.models, `${path}.models`)
-    if (models.length < 2) v.fail(`${path}.models`, `must have at least 2 entries; use "model" for a single model`)
-    models.forEach((model, index) => v.model(model, `${path}.models[${index}]`))
+    const rawModels = v.stringArray(record.models, `${path}.models`)
+    if (rawModels.length < 2) v.fail(`${path}.models`, `must have at least 2 entries; use "model" for a single model`)
+    // Each entry is validated (and normalized) in the step runner's own model
+    // namespace, so a Claude fan-out of CLI aliases is accepted and an
+    // OpenCode model on a Claude step fails here rather than mid-run.
+    models = rawModels.map((model, index) => validateStepRunnerModel(v, runner ?? "opencode", model, `${path}.models[${index}]`))
   }
 
   const model =

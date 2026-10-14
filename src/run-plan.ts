@@ -1,7 +1,8 @@
 import { resolveModel, type ModelGateway, type ModelRoutingOverrides } from "./model-routing"
 import type { OpenSpecBundle } from "./openspec"
 import type { PrdHistoryPreview } from "./prd-history"
-import { stepRunnerFor } from "./step-runners"
+import type { AuthenticationMode } from "./runners/contracts"
+import { modelOverrideTargetsRunner, normalizeStepRunnerModel, parseModelOverride, stepRunnerFor, type ModelOverride } from "./step-runners"
 import type { AgentStep, FeaturePlanLink, Pipeline, ResolvedGoalPlan, RunOptions, RunPlan, Step } from "./types"
 
 export type BuildRunPlanInput = RunOptions & {
@@ -19,6 +20,29 @@ export type BuildRunPlanInput = RunOptions & {
   openspec?: OpenSpecBundle
   /** Precomputed feature link (verified by the caller); frozen into the plan for execution-time revalidation. */
   feature?: FeaturePlanLink
+  /**
+   * The reviewed Claude authentication mode (design D3). New Claude routes
+   * default to `subscription`; an explicit `api-key` selection is recorded so
+   * the plan preview shows the billing route per Claude step. The credential
+   * value itself never enters the plan.
+   */
+  claudeAuthMode?: AuthenticationMode
+}
+
+/**
+ * The resolved Claude auth mode per planned Claude step. A WeakMap keyed by the
+ * frozen step objects keeps the plan type vendor-neutral without adding fields
+ * to `AgentStep`; a Claude step that was never annotated resolves to the
+ * documented `subscription` default.
+ */
+const claudeAuthModes = new WeakMap<AgentStep, AuthenticationMode>()
+
+function registerClaudeAuth(pipeline: Pipeline, mode: AuthenticationMode): void {
+  const steps: Step[] = [
+    ...pipeline.steps,
+    ...(pipeline.goalPlan ? [...pipeline.goalPlan.improve.steps, ...pipeline.goalPlan.measure.steps] : []),
+  ]
+  for (const step of steps) if (step.type === "agent" && step.runner === "claude-code") claudeAuthModes.set(step, mode)
 }
 
 /** Purely resolves the complete execution shape; it performs no filesystem or process effects. */
@@ -33,6 +57,7 @@ export function buildRunPlan(input: BuildRunPlanInput): RunPlan {
     advisorOverride: input.advisorOverride,
     advisorDisabled: input.advisorDisabled,
   })
+  if (input.claudeAuthMode) registerClaudeAuth(pipeline, input.claudeAuthMode)
   const judge = input.smart
     ? resolveModel(input.smartJudgeModel, gateway, overrides)
     : undefined
@@ -84,17 +109,18 @@ export function routePipeline(
   modelOverride = "",
   advisor: AdvisorPlanOverrides = {},
 ): Pipeline {
+  const override = parseModelOverride(modelOverride)
   return {
     ...pipeline,
-    steps: pipeline.steps.map((step): Step => routeStep(step, gateway, overrides, modelOverride, advisor)),
+    steps: pipeline.steps.map((step): Step => routeStep(step, gateway, overrides, override, advisor)),
     // The goal fragments are frozen with the plan: their models and advisors
     // route exactly once, so every iteration runs the reviewed models.
     ...(pipeline.goalPlan
       ? {
           goalPlan: {
             ...pipeline.goalPlan,
-            improve: { steps: pipeline.goalPlan.improve.steps.map((step) => routeStep(step, gateway, overrides, modelOverride, advisor) as AgentStep) },
-            measure: { steps: pipeline.goalPlan.measure.steps.map((step) => routeStep(step, gateway, overrides, modelOverride, advisor) as AgentStep) },
+            improve: { steps: pipeline.goalPlan.improve.steps.map((step) => routeStep(step, gateway, overrides, override, advisor) as AgentStep) },
+            measure: { steps: pipeline.goalPlan.measure.steps.map((step) => routeStep(step, gateway, overrides, override, advisor) as AgentStep) },
           },
         }
       : {}),
@@ -105,11 +131,22 @@ function routeStep(
   step: Step,
   gateway: ModelGateway,
   overrides: ModelRoutingOverrides,
-  modelOverride: string,
+  override: ModelOverride,
   advisor: AdvisorPlanOverrides,
 ): Step {
-  if (step.type !== "agent" || stepRunnerFor(step.runner).id !== "opencode") return structuredClone(step)
-  const configured = modelOverride || `${step.model}${step.variant ? `#${step.variant}` : ""}`
+  if (step.type !== "agent") return structuredClone(step)
+  if (stepRunnerFor(step.runner).id !== "opencode") {
+    // Claude's CLI identifier is opaque to the gateway router; only a
+    // Claude-scoped override replaces it. An unqualified override is
+    // OpenCode-only and leaves Claude steps untouched (design D5).
+    if (!modelOverrideTargetsRunner(override, "claude-code")) return structuredClone(step)
+    return { ...structuredClone(step), model: normalizeStepRunnerModel("claude-code", override.model), variant: undefined }
+  }
+  // A runner-scoped override that names another runner does not replace the
+  // OpenCode model; the step still routes its own configured model normally.
+  const configured = modelOverrideTargetsRunner(override, "opencode")
+    ? override.model
+    : `${step.model}${step.variant ? `#${step.variant}` : ""}`
   const resolvedModel = resolveModel(configured, gateway, overrides)
   return {
     ...step,
@@ -170,8 +207,20 @@ function deepFreeze<T>(value: T): T {
   return value
 }
 
+/**
+ * The reviewed auth mode for a Claude step. Only Claude routes carry one;
+ * OpenCode uses its own provider credentials and reports `undefined`.
+ */
+export function plannedStepAuthMode(step: AgentStep): AuthenticationMode | undefined {
+  if (step.runner !== "claude-code") return undefined
+  return claudeAuthModes.get(step) ?? "subscription"
+}
+
 export function plannedStepModel(step: AgentStep): string {
-  if (step.runner === "claude-code") return `claude-code/${step.model || "default"}`
+  if (step.runner === "claude-code") {
+    const auth = plannedStepAuthMode(step)
+    return `claude-code/${step.model || "default"} · auth ${auth}`
+  }
   return step.resolvedModel?.target ?? `${step.model}${step.variant ? `#${step.variant}` : ""}`
 }
 

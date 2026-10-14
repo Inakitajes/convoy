@@ -20,7 +20,6 @@ import {
 import { listModels, type ModelChoice } from "./model-catalog"
 import {
   builtInPipelines,
-  agentAliases,
   humanReviewStep,
   humanStepType,
   isGoalStepSpec,
@@ -106,7 +105,18 @@ type Modal =
       normalize?: (value: string) => string
       commit: (value: string | undefined) => void
     }
-  | { kind: "models"; title: string; filter: string; loading: boolean; options: ModelChoice[]; index: number; selected: string[]; commit: (values: string[]) => void }
+  | {
+      kind: "models"
+      title: string
+      filter: string
+      loading: boolean
+      options: ModelChoice[]
+      index: number
+      selected: string[]
+      /** Runner-specific normalization/validation of a typed or selected model. */
+      normalize?: (value: string) => string
+      commit: (values: string[]) => void
+    }
   | { kind: "choose"; title: string; filter: string; options: ChooseItem[]; index: number; commit: (value: string) => void }
   | { kind: "confirm"; title: string; message: string; onYes: () => void }
   | { kind: "message"; title: string; message: string }
@@ -494,7 +504,10 @@ export class ConfigEditor {
   private commitOption(modal: Modal & { kind: "model" | "models" | "choose" }, filtered: Array<ModelChoice | ChooseItem>) {
     if (modal.kind === "models") {
       this.modal = undefined
-      modal.commit([...modal.selected])
+      const values = modal.selected
+        .map((value) => this.normalizedModelValue(modal, value))
+        .filter((value): value is string => value !== undefined)
+      modal.commit(values)
       this.render()
       return
     }
@@ -541,11 +554,26 @@ export class ConfigEditor {
       const extras: ModelChoice[] = modal.selected.filter((value) => !known.has(value)).map((value) => ({ value, label: "not in catalog", providerID: "" }))
       const filtered = [...extras, ...modal.options].filter((option) => matches(modal.filter, option.value, option.label))
       const typed = modal.filter.trim()
-      if (filtered.length === 0 && isValidModelString(typed)) return [{ value: typed, label: "typed", providerID: "" }]
+      if (filtered.length === 0 && typed) {
+        const value = this.normalizedModelValue(modal, typed)
+        if (value !== undefined) return [{ value, label: "typed", providerID: "" }]
+      }
       return filtered
     }
     if (modal.kind === "choose") return modal.options.filter((option) => matches(modal.filter, option.value, option.label, option.hint ?? ""))
     return []
+  }
+
+  /** Validates/normalizes a model for a picker, honoring a runner-specific `normalize` when set. */
+  private normalizedModelValue(modal: Modal & { kind: "model" | "models" }, value: string): string | undefined {
+    if (modal.normalize) {
+      try {
+        return modal.normalize(value)
+      } catch {
+        return undefined
+      }
+    }
+    return isValidModelString(value) ? value : undefined
   }
 
   // ---- actions ------------------------------------------------------------
@@ -768,7 +796,7 @@ export class ConfigEditor {
     if (!at) return
     const obj = asStepObject(at.spec)
     if (!stepRunnerFor(obj.runner).capabilities.advisor) {
-      this.message("Advisor unavailable", "Claude Code owns its own loop and exposes no advisor hook. Switch to OpenCode with Shift+R first.")
+      this.message("Advisor unavailable", "The advisor route is not available for this runner yet. Switch to OpenCode with Shift+R first.")
       return
     }
     const { pipeline, index, member } = at.meta
@@ -795,37 +823,35 @@ export class ConfigEditor {
     if (!at) return
     const obj = asStepObject(at.spec)
     if (!stepRunnerFor(obj.runner).capabilities.modelFanout) {
-      this.message("Model fan-out unavailable", "Claude Code steps use one CLI model. Switch to OpenCode with Shift+R first.")
+      this.message("Model fan-out unavailable", "This runner does not support a multi-model fan-out; give the step a single model.")
       return
     }
     const current = obj.models ?? (obj.model !== undefined ? [obj.model] : [])
-    this.openModelsPicker(`${stepLabel(at.meta.pipeline, at.meta.index, at.meta.member)}.models`, current, (values) => {
+    const title = `${stepLabel(at.meta.pipeline, at.meta.index, at.meta.member)}.models`
+    const commit = (values: string[]) => {
       setSpecAt(at.steps, at.meta.index, at.meta.member, collapseStep(applyModelsSelection(obj, values)))
       this.markDirty()
-    })
+    }
+    // Claude has its own model namespace, so a fan-out there picks from the
+    // Claude CLI aliases/IDs rather than the OpenCode catalog.
+    if (stepRunnerFor(obj.runner).id === "claude-code") {
+      this.openModelsPicker(title, current, commit, {
+        choices: claudeModelPickerState(undefined).options.filter((choice) => choice.value !== ""),
+        normalize: (value) => normalizeStepRunnerModel("claude-code", value),
+      })
+      return
+    }
+    this.openModelsPicker(title, current, commit)
   }
 
   private toggleStepRunner() {
     const at = this.agentStepUnderCursor()
     if (!at) return
     const spec = asStepObject(at.spec)
-    const agentName = agentAliases[spec.agent] ?? spec.agent
-    const agent = buildAgentRegistry(this.effectiveConfig()).find((candidate) => candidate.name === agentName)
-    // A verifying step needs bash, which Claude Code's fixed tool envelope has
-    // no way to give it — unless the step is a parallel member, where the
-    // pipeline drops verify anyway. Mirrors resolveAgentStepSpec's own check.
-    const supportsReadOnlyRunner = at.meta.member !== undefined || (agent?.readOnly === true && spec.verify !== true)
-    const result = toggleStepRunnerSpec(spec, supportsReadOnlyRunner)
-    if (!result.ok) {
-      const detail =
-        result.reason === "model-fanout"
-          ? "Remove the models fan-out before switching this step to Claude Code."
-          : spec.verify === true
-            ? "Claude Code can't run commands, and this step has verify: true. Drop verify, or place the step in a parallel audit group."
-            : "Claude Code currently supports read-only steps only. Use a read-only agent or place the step in a parallel audit group."
-      this.message("Can't switch runner", detail)
-      return
-    }
+    // Every advertised runner now accepts writes, commands, and fan-outs, so a
+    // switch never needs to refuse: the only cost is clearing the model keys,
+    // which belong to the other runner's namespace.
+    const result = toggleStepRunnerSpec(spec)
     const apply = () => {
       setSpecAt(at.steps, at.meta.index, at.meta.member, collapseStep(result.spec))
       this.markDirty()
@@ -837,7 +863,7 @@ export class ConfigEditor {
     this.modal = {
       kind: "confirm",
       title: "Switch step runner",
-      message: "The current model belongs to the other runner and will be cleared. Continue? [y/n]",
+      message: "The current model selection belongs to the other runner and will be cleared. Continue? [y/n]",
       onYes: apply,
     }
     this.render()
@@ -1267,10 +1293,34 @@ export class ConfigEditor {
     this.render()
   }
 
-  private openModelsPicker(title: string, current: string[], commit: (values: string[]) => void) {
-    const modal: Modal = { kind: "models", title, filter: "", loading: true, options: [], index: 0, selected: [...current], commit }
+  private openModelsPicker(
+    title: string,
+    current: string[],
+    commit: (values: string[]) => void,
+    options: { choices?: ModelChoice[]; normalize?: (value: string) => string } = {},
+  ) {
+    const modal: Modal = {
+      kind: "models",
+      title,
+      filter: "",
+      loading: options.choices === undefined,
+      options: options.choices ? [...options.choices] : [],
+      index: 0,
+      selected: [...current],
+      ...(options.normalize ? { normalize: options.normalize } : {}),
+      commit,
+    }
     this.modal = modal
     this.render()
+    // A static runner-specific list needs no provider lookup.
+    if (options.choices !== undefined) {
+      if (current.length > 0) {
+        const at = modal.options.findIndex((choice) => choice.value === current[0])
+        if (at >= 0) modal.index = at
+      }
+      this.render()
+      return
+    }
     // Same provider resolution as the single picker: the global tab has no repo of its own.
     const dir = this.tab().validateDir === convoyRoot() ? process.cwd() : this.tab().validateDir
     listModels(dir)
@@ -2009,18 +2059,20 @@ export function applyModelsSelection(spec: AgentStepSpec, values: string[]): Age
   return next
 }
 
-export type ToggleStepRunnerResult =
-  | { ok: true; spec: AgentStepSpec; clearedModel: boolean }
-  | { ok: false; reason: "model-fanout" | "writable-agent" }
+export type ToggleStepRunnerResult = { ok: true; spec: AgentStepSpec; clearedModel: boolean }
 
-export function toggleStepRunnerSpec(spec: AgentStepSpec, supportsReadOnlyRunner: boolean): ToggleStepRunnerResult {
+/**
+ * Switches a step between the default OpenCode runner and Claude Code. Both
+ * runners now support writes, commands, and model fan-out, so the switch is
+ * always accepted; the model keys are cleared because model identifiers belong
+ * to the runner's own namespace (`opencode` provider/model vs a Claude alias).
+ */
+export function toggleStepRunnerSpec(spec: AgentStepSpec): ToggleStepRunnerResult {
   const current = stepRunnerFor(spec.runner)
-  if (current.id === "opencode" && spec.models !== undefined) return { ok: false, reason: "model-fanout" }
-  if (current.id === "opencode" && !supportsReadOnlyRunner) return { ok: false, reason: "writable-agent" }
-
   const next = { ...spec }
-  const clearedModel = next.model !== undefined
+  const clearedModel = next.model !== undefined || next.models !== undefined
   delete next.model
+  delete next.models
   if (current.id === "claude-code") delete next.runner
   else next.runner = "claude-code"
   return { ok: true, spec: next, clearedModel }

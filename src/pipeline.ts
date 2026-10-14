@@ -1,4 +1,4 @@
-import { normalizeStepRunnerModel, stepRunnerFor } from "./step-runners"
+import { normalizeStepRunnerModel, stepRunnerCapabilityReason, stepRunnerFor } from "./step-runners"
 import { defaultGoalMaxIterations, defaultGoalPlateau } from "./quality-score"
 import type { AgentSpec, AgentStep, DeliverableContract, HumanStep, Pipeline, ResolvedGoalPlan, ResolvedPipelineFragment, Step, StepRunner } from "./types"
 
@@ -541,6 +541,29 @@ export const builtInPipelines: Record<string, PipelineSpec> = {
       { agent: "quality-score-report", name: "score-report", model: glm53HighModel, reports: "all", verify: true, prdHistory: true },
     ],
   },
+  // Claude-only preset: no OpenCode session, catalog, or credentials. Every
+  // step runs the local `claude` CLI on subscription auth by default, and the
+  // audits fan out across Claude aliases through the same scheduler as any
+  // other pipeline. Report-only, so it never writes. Copy it into
+  // `.convoy/config.yaml` and adjust the model aliases (or set an explicit
+  // `authMode: api-key` route) to match the installation.
+  "claude-review": {
+    description:
+      "Claude-only report: scope the diff, fan clean-code/security/bug audits across Claude models, then synthesize one prioritized findings report. Makes no changes.",
+    defaultPrompt: "Review the current branch with Claude only and report prioritized findings.",
+    suggestedPrompts: ["Review the open PR for this branch", "Review only the last commit's diff"],
+    steps: [
+      { agent: "review-scope", name: "scope", runner: "claude-code", model: "sonnet", reports: "none", diff: true, verify: true, prdHistory: true },
+      {
+        parallel: [
+          { agent: "clean-code-auditor", name: "clean-code", runner: "claude-code", models: ["opus", "sonnet"], reports: ["scope"] },
+          { agent: "security-reviewer", name: "security", runner: "claude-code", models: ["opus", "sonnet"], reports: ["scope"] },
+          { agent: "bug-auditor", name: "bugs", runner: "claude-code", models: ["opus", "sonnet"], reports: ["scope"] },
+        ],
+      },
+      { agent: "review-report", name: "report", runner: "claude-code", model: "opus", reports: "all" },
+    ],
+  },
   // The close of the process: the branch is synced with its base, reviewed and
   // fixed, recapped, then driven to the quality bar. Sync lands the advanced
   // base first, so the review and the scorers grade the branch as it will
@@ -1078,18 +1101,21 @@ function resolveAgentStepSpec(raw: string | AgentStepSpec, ctx: ResolveStepConte
   // "opencode" is accepted for symmetry but resolves to the default (no runner field).
   const runner: StepRunner | undefined = runnerDefinition.id === "claude-code" ? "claude-code" : undefined
   if (!runnerDefinition.capabilities.modelFanout && spec.models !== undefined) {
+    const reason = stepRunnerCapabilityReason(runnerDefinition.id, "model-fanout")
     throw new Error(
-      `pipeline "${ctx.input.name}": step ${ctx.position} ("${baseName}") can't combine runner: ${runnerDefinition.id} with a "models" fan-out; give the step a single model (or none for the CLI default)`,
+      `pipeline "${ctx.input.name}": step ${ctx.position} ("${baseName}") can't combine runner: ${runnerDefinition.id} with a "models" fan-out (${reason}); give the step a single model (or none for the CLI default)`,
     )
   }
   if (!runnerDefinition.capabilities.writeSteps && !ctx.forcedReadOnly && !agent.readOnly) {
+    const reason = stepRunnerCapabilityReason(runnerDefinition.id, "write")
     throw new Error(
-      `pipeline "${ctx.input.name}": step ${ctx.position} ("${baseName}") uses runner: ${runnerDefinition.id}, which currently supports read-only audit steps only — agent "${agent.name}" can modify the repo`,
+      `pipeline "${ctx.input.name}": step ${ctx.position} ("${baseName}") uses runner: ${runnerDefinition.id}, which cannot write (${reason}) — agent "${agent.name}" can modify the repo`,
     )
   }
   if (!runnerDefinition.capabilities.verifySteps && verify) {
+    const reason = stepRunnerCapabilityReason(runnerDefinition.id, "verify")
     throw new Error(
-      `pipeline "${ctx.input.name}": step ${ctx.position} ("${baseName}") uses runner: ${runnerDefinition.id}, which can't run commands — this step has verify: true and needs bash to check its claims`,
+      `pipeline "${ctx.input.name}": step ${ctx.position} ("${baseName}") uses runner: ${runnerDefinition.id}, which cannot run commands (${reason}) — this step has verify: true and needs bash to check its claims`,
     )
   }
 
@@ -1116,11 +1142,15 @@ function resolveAgentStepSpec(raw: string | AgentStepSpec, ctx: ResolveStepConte
     )
   }
 
-  // Runners without global override support own their model namespace and use
-  // an empty string for their own configured default.
-  const variants = runnerDefinition.capabilities.globalModelOverride
-    ? (models ?? [spec.model ?? agent.model ?? ctx.input.defaultModel ?? agent.defaultModel ?? fallbackModel])
-    : [spec.model ? normalizeStepRunnerModel(runnerDefinition.id, spec.model) : ""]
+  // OpenCode inherits the run-wide defaults chain; Claude's models live in the
+  // CLI's own namespace, so a Claude step uses only its own model and otherwise
+  // defers to the CLI default (""). A `models:` fan-out is expanded for either
+  // runner, and each Claude entry is normalized now so an incompatible model
+  // fails visibly instead of being dropped.
+  const variants: string[] =
+    runnerDefinition.id === "claude-code"
+      ? (models ?? (spec.model !== undefined ? [spec.model] : [""])).map((value) => (value ? normalizeStepRunnerModel("claude-code", value) : ""))
+      : (models ?? [spec.model ?? agent.model ?? ctx.input.defaultModel ?? agent.defaultModel ?? fallbackModel])
   // Agent configs are registered per agent name. A verifying step that shares
   // its agent with a non-verifying use in this pipeline needs its own variant
   // so bash does not leak. Forced writable steps still get `__ro`.
