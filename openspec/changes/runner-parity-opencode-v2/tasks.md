@@ -39,9 +39,9 @@
 
 - [ ] 5.1 Replace fixed read-only invocation with reviewed per-attempt CLI settings and tool availability for read-only, verification, and writable modes, gated on mandatory policy enforcement; verify argv/settings fixtures preserve subscription auth and load required Convoy integrations.
 - [x] 5.2 Normalize Claude streaming, session initialization, tool activity, terminal results, and errors into the neutral event/outcome contract; verify malformed lines, missing result, startup-hook output, nested messages, and partial streams cannot fabricate completion.
-- [ ] 5.3 Generalize shared process ownership utilities for Claude children and bridge resources while preserving OpenCode contracts; verify PID reuse, incomplete evidence, independent processes, and concurrent reconciliation are never unsafe kill targets.
-- [ ] 5.4 Add bounded interrupt/stop/escalation and observation for Claude attempts, including attributable descendant work; verify hanging commands, blocked permissions, repeat abort, cancellation during startup, and unknown descendant state settle within the shared deadline with truthful outcomes.
-- [ ] 5.5 Separate runtime release, view detachment, explicit cancellation, and finished controller holds; verify active detached executions retain claims, the existing lease timing holds, and independent authoring survives run cleanup.
+- [x] 5.3 Generalize shared process ownership utilities for Claude children and bridge resources while preserving OpenCode contracts; verify PID reuse, incomplete evidence, independent processes, and concurrent reconciliation are never unsafe kill targets.
+- [x] 5.4 Add bounded interrupt/stop/escalation and observation for Claude attempts, including attributable descendant work; verify hanging commands, blocked permissions, repeat abort, cancellation during startup, and unknown descendant state settle within the shared deadline with truthful outcomes.
+- [x] 5.5 Separate runtime release, view detachment, explicit cancellation, and finished controller holds; verify active detached executions retain claims, the existing lease timing holds, and independent authoring survives run cleanup.
 - [ ] 5.6 Document Claude execution modes, customization loading, supported restrictions, and lifecycle limits; verify examples and lifecycle fixtures do not claim an OS sandbox or assume child exit proves all descendant termination.
 
 ## 6. Deliver shared permission enforcement and approvals
