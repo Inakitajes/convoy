@@ -47,10 +47,10 @@
 ## 6. Deliver shared permission enforcement and approvals
 
 - [x] 6.1 Extract runner-neutral action/policy evaluation from the current permission gate while retaining hard-denial, verification, and smart-judge semantics; verify the same policy fixtures pass for equivalent Claude and OpenCode actions.
-- [ ] 6.2 Implement Claude mandatory pre-action hooks plus authenticated MCP ask-level permission hosting, and map OpenCode v2 enforcement to the same decisions; verify native allow rules and Auto-accept cannot bypass hard denials or first-write checkpoints.
+- [x] 6.2 Implement Claude mandatory pre-action hooks plus authenticated MCP ask-level permission hosting, and map OpenCode v2 enforcement to the same decisions; verify native allow rules and Auto-accept cannot bypass hard denials or first-write checkpoints.
 - [ ] 6.3 Scope permission requests/replies to exact execution identity and generation; verify stale, duplicate, foreign, cancelled, and timed-out replies cannot authorize another attempt and sibling requests remain independently responsive.
 - [ ] 6.4 Cover indirect mutation through shell, delegated agents, and external tools with conservative enforcement or disabled unsupported paths; verify adversarial read-only and verification tests deny disallowed effects before execution.
-- [ ] 6.5 Implement startup enforcement-health checks and runtime failure handling; verify unavailable hooks/bridges fail closed without enabling unrestricted bypass or leaving an unbounded approval wait.
+- [x] 6.5 Implement startup enforcement-health checks and runtime failure handling; verify unavailable hooks/bridges fail closed without enabling unrestricted bypass or leaving an unbounded approval wait.
 - [ ] 6.6 Route smart judges through the selected runner/auth/model and update launcher review while keeping its selector cycle/default/flags; verify Claude-only smart approval without OpenCode, explicit-judge compatibility, judge timeout handling, and the modified launcher spec scenarios. Document the safety mappings and failure modes.
 
 ## 7. Deliver structured reports and advisor parity
