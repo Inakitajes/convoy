@@ -30,7 +30,7 @@
 
 - [ ] 4.1 Replace the legacy SDK integration with a pinned released `@opencode/client` inside the adapter; verify dependency install, typecheck, and HTTP fixture tests use v2 routes and reject HTML/incorrect envelopes despite HTTP 200.
 - [ ] 4.2 Implement authenticated owned-server startup, readiness/version checks, explicit locations, and private reattachment credentials; verify startup cancellation, malformed output, unauthorized responses, client-construction failure, and bounded cleanup preserve existing lifecycle tests.
-- [ ] 4.3 Translate logical agents/models/policies into v2 runtime configuration without rewriting supported user V1 config; verify concurrent runs retain independent injected settings and do not mutate parent environment or global files.
+- [x] 4.3 Translate logical agents/models/policies into v2 runtime configuration without rewriting supported user V1 config; verify concurrent runs retain independent injected settings and do not mutate parent environment or global files.
 - [ ] 4.4 Implement v2 session creation, prompting, continuation, outcome reconciliation, event decoding, and history backfill; verify accepted prompts are not treated as completed and disconnect/idle/error races cannot fabricate success or replay uncertain prompts.
 - [ ] 4.5 Port actual Convoy report/advisor tools and mandatory permission integration to the v2 public extension surface; verify registration health is checked before prompting and legacy plugin code is not loaded as if compatible.
 - [ ] 4.6 Update explicit-server terminal invocation and helper/authoring server ownership without adding a shared-service mode; verify exact-session opening, auth redaction, independent authoring lifetime, and documented v2 installation requirements.

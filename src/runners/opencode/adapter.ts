@@ -38,6 +38,8 @@ export type OpencodeRunnerOptions = {
   /** Root the owned server runs from (the run's checkout). */
   cwd: string
   env?: NodeJS.ProcessEnv
+  /** Rendered V2 config injected as `OPENCODE_CONFIG_CONTENT` (task 4.3). */
+  configContent?: string
   deps?: {
     boot?: typeof bootOwnedServer
     checkRuntime?: typeof assertSupportedOpencodeRuntime
@@ -45,7 +47,11 @@ export type OpencodeRunnerOptions = {
 }
 
 /** The execution adapter plus the lifecycle edge the composition root calls. */
-export type OpencodeRunner = ExecutionAdapter & { close(): Promise<void> }
+export type OpencodeRunner = ExecutionAdapter & {
+  close(): Promise<void>
+  /** Agent names the runtime actually registered from the injected config. */
+  registeredAgents(): Promise<string[]>
+}
 
 /** The capabilities this adapter advertises (described, never bare booleans, D4). */
 export function opencodeCapabilities(version?: string): RunnerCapabilities {
@@ -140,7 +146,11 @@ export function createOpencodeRunner(options: OpencodeRunnerOptions): OpencodeRu
       const boot = options.deps?.boot ?? bootOwnedServer
       serverPromise = (async () => {
         await checkRuntime()
-        return await boot({ cwd: options.cwd, ...(options.env ? { env: options.env } : {}) })
+        const baseEnv = options.env ?? process.env
+        const env = options.configContent
+          ? { ...baseEnv, OPENCODE_CONFIG_CONTENT: options.configContent }
+          : baseEnv
+        return await boot({ cwd: options.cwd, env })
       })()
     }
     const server = await serverPromise
@@ -153,6 +163,21 @@ export function createOpencodeRunner(options: OpencodeRunnerOptions): OpencodeRu
 
     async capabilities() {
       return opencodeCapabilities()
+    },
+
+    async registeredAgents() {
+      const { client: c } = await ensureServer()
+      const input = { location: { directory: options.cwd } } as unknown as Parameters<OpencodeV2Client["config"]["get"]>[0]
+      const documents = await c.config.get(input)
+      if (!Array.isArray(documents)) return []
+      const names = new Set<string>()
+      for (const document of documents as Array<{ info?: { agents?: unknown; agent?: unknown } }>) {
+        for (const key of ["agents", "agent"] as const) {
+          const map = document.info?.[key]
+          if (map && typeof map === "object") for (const name of Object.keys(map)) names.add(name)
+        }
+      }
+      return [...names]
     },
 
     async executeAttempt(request: ExecutionRequest, sink: (event: RunnerEvent) => void): Promise<AttemptOutcome> {
