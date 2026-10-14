@@ -23,6 +23,7 @@ import type {
   Usage,
 } from "../contracts"
 import { bootOwnedServer, type OwnedServer } from "./boot"
+import { reconstructFromMessages } from "./history"
 import { mapOpencodeEvent } from "./log-events"
 import { assertSupportedOpencodeRuntime } from "./runtime"
 import {
@@ -53,6 +54,8 @@ export type OpencodeRunner = ExecutionAdapter & {
   close(): Promise<void>
   /** Agent names the runtime actually registered from the injected config. */
   registeredAgents(): Promise<string[]>
+  /** Reconstructs a recorded session's transcript for late attachment. */
+  backfillEvents(sessionId: string, attempt: number): Promise<RunnerEvent[]>
 }
 
 /** The capabilities this adapter advertises (described, never bare booleans, D4). */
@@ -182,6 +185,12 @@ export function createOpencodeRunner(options: OpencodeRunnerOptions): OpencodeRu
       return [...names]
     },
 
+    async backfillEvents(sessionId, attempt) {
+      const { client: c } = await ensureServer()
+      const messages = await listMessages(c, sessionId)
+      return reconstructFromMessages(messages.data, attempt)
+    },
+
     async executeAttempt(request: ExecutionRequest, sink: (event: RunnerEvent) => void): Promise<AttemptOutcome> {
       if (request.runner !== "opencode") {
         return { status: "failed", error: `opencode adapter received a ${request.runner} request` }
@@ -190,7 +199,10 @@ export function createOpencodeRunner(options: OpencodeRunnerOptions): OpencodeRu
       let streamAbort: AbortController | undefined
       try {
         const { client: c } = await ensureServer()
-        const session = await createSession(c, { directory: request.checkout, title: `convoy ${request.phaseName}` })
+        const session =
+          request.continueSession && request.continueSession.runner === "opencode"
+            ? { id: request.continueSession.sessionId }
+            : await createSession(c, { directory: request.checkout, title: `convoy ${request.phaseName}` })
         activeSessions.set(attempt, session.id)
         sink({ type: "session", runner: "opencode", attempt, session: { runner: "opencode", sessionId: session.id } })
 

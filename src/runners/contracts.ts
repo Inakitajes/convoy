@@ -159,6 +159,8 @@ export type ExecutionRequest = {
   attachments?: readonly AttachmentDescriptor[]
   /** Opaque per-attempt deliverable contract id, validated by core. */
   deliverableContract?: string
+  /** Continue this exact recorded session instead of creating a new one (D11). */
+  continueSession?: RunnerSessionRef
   signal: AbortSignal
 }
 

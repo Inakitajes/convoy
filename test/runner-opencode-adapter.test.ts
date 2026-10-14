@@ -95,4 +95,34 @@ describe.if(live)("opencode v2 adapter (live, nan/deepseek-v4-flash)", () => {
       await runner.close()
     }
   }, 120_000)
+
+  test("continues an exact recorded session and reconstructs its transcript", async () => {
+    const dir = await tempDir()
+    const runner = createOpencodeRunner({ cwd: dir })
+    const base: ExecutionRequest = {
+      runId: "run-live",
+      phaseName: "implement",
+      attempt: 1,
+      runner: "opencode",
+      checkout: dir,
+      agent: { name: "implementer", mode: "write", model: { runner: "opencode", modelId: "nan/deepseek-v4-flash" } },
+      prompt: "Reply with exactly: ONE",
+      auth: { mode: "subscription" },
+      mode: "write",
+      approvals: "auto",
+      signal: new AbortController().signal,
+    }
+    try {
+      const first = await runner.executeAttempt(base, () => {})
+      expect(first.session?.runner).toBe("opencode")
+      const sessionId = first.session!.sessionId
+
+      const second = await runner.executeAttempt({ ...base, attempt: 2, prompt: "Reply with exactly: TWO", continueSession: { runner: "opencode", sessionId } }, () => {})
+      expect(second.session?.sessionId).toBe(sessionId)
+
+      await expect(runner.backfillEvents(sessionId, 1)).resolves.toBeArray()
+    } finally {
+      await runner.close()
+    }
+  }, 120_000)
 })
