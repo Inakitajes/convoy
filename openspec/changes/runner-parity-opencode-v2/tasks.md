@@ -11,7 +11,7 @@
 ## 2. Define neutral ports and compatibility records
 
 - [x] 2.1 Define Convoy-owned execution requests, attachment descriptors, model references, events, outcomes, and runner-qualified sessions plus optional conversation/control ports; verify typecheck and contract tests use no vendor SDK types.
-- [ ] 2.2 Introduce the adapter registry and runtime/attempt ownership seam around existing dispatch; verify a fake adapter executes through the scheduler and no core context requires `OpencodeClient`.
+- [x] 2.2 Introduce the adapter registry and runtime/attempt ownership seam around existing dispatch; verify a fake adapter executes through the scheduler and no core context requires `OpencodeClient`.
 - [x] 2.3 Extract logical agent instructions and attachment preparation from OpenCode configuration rendering; verify both adapters receive equivalent source context and unsupported attachments cause an explicit error rather than silent omission.
 - [x] 2.4 Add versioned runner/auth/model/session/attempt provenance with compatibility readers for old records; verify legacy Claude/OpenCode fixtures remain readable, ambiguous sessions are not guessed, and coordinator PIDs retain their old meanings.
 - [x] 2.5 Introduce shared adapter conformance fixtures and dependency-boundary checks; verify vendor imports outside adapter boundaries fail the check and document the ports/ownership responsibilities in the development guide.
@@ -28,7 +28,7 @@
 
 ## 4. Migrate the OpenCode adapter to released v2
 
-- [ ] 4.1 Replace the legacy SDK integration with a pinned released `@opencode/client` inside the adapter; verify dependency install, typecheck, and HTTP fixture tests use v2 routes and reject HTML/incorrect envelopes despite HTTP 200.
+- [x] 4.1 Replace the legacy SDK integration with a pinned released `@opencode/client` inside the adapter; verify dependency install, typecheck, and HTTP fixture tests use v2 routes and reject HTML/incorrect envelopes despite HTTP 200.
 - [x] 4.2 Implement authenticated owned-server startup, readiness/version checks, explicit locations, and private reattachment credentials; verify startup cancellation, malformed output, unauthorized responses, client-construction failure, and bounded cleanup preserve existing lifecycle tests.
 - [x] 4.3 Translate logical agents/models/policies into v2 runtime configuration without rewriting supported user V1 config; verify concurrent runs retain independent injected settings and do not mutate parent environment or global files.
 - [x] 4.4 Implement v2 session creation, prompting, continuation, outcome reconciliation, event decoding, and history backfill; verify accepted prompts are not treated as completed and disconnect/idle/error races cannot fabricate success or replay uncertain prompts.
@@ -103,4 +103,4 @@
 - [ ] 12.2 With explicit operator approval and bounded spend, exercise real Claude subscription-only, Claude API-key-only, OpenCode-only, and mixed full-cycle fixtures including reports/advisor, parallel nodes, approvals, detach/reattach, abort, and recovery; verify disposable checkout outcomes and auth/cost provenance, recording exact commands/results without secrets.
 - [x] 12.3 Run `bun run typecheck`, `bun test`, and `bun run build`, plus compiled CLI smoke checks on supported macOS/Linux targets; verify all pass and bridges/hooks resolve correctly outside the source checkout.
 - [x] 12.4 Exercise legacy config/history and migration/rollback fixtures alongside Git, goal, finalization, publication, and conversation regression suites; verify no global credential/config/database rewrites, no lost history, and no replay of uncertain writes.
-- [ ] 12.5 Audit the final dependency graph, generated artifacts, public logs, and user-facing parity documentation; verify vendor types stay behind adapter boundaries, Claude-only paths never initialize OpenCode, no secrets leak, and all disclosed functionality matches tested behavior before marking the change complete.
+- [x] 12.5 Audit the final dependency graph, generated artifacts, public logs, and user-facing parity documentation; verify vendor types stay behind adapter boundaries, Claude-only paths never initialize OpenCode, no secrets leak, and all disclosed functionality matches tested behavior before marking the change complete.
