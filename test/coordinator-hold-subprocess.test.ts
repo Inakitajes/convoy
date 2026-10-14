@@ -35,7 +35,7 @@ async function scratchDir(): Promise<string> {
   return dir
 }
 
-const READY_LINE = 'console.log("opencode server listening on http://127.0.0.1:1")\n'
+const READY_LINE = `console.log("server listening on http://127.0.0.1:1")\nconsole.log("server password fixture-pw")\n`
 
 function pidAlive(pid: number): boolean {
   try {

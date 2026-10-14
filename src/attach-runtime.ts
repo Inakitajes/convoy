@@ -6,7 +6,7 @@ import { readRunMetadata, type PhaseMetadata, type RunMetadata } from "./metadat
 import { progressPhases, watchSession, backfillSessionTranscript, withGoalPhases, type SessionWatcher } from "./runner"
 import { progressMessageFromRunnerEvent, type CoordinatorEventItem, type CoordinatorEvents } from "./runners/coordinator-events"
 
-import type { OpencodeClient } from "@opencode-ai/sdk/v2"
+import type { OpencodeClient } from "./opencode-client"
 import type { GoalLoopView, ProgressPhaseSnapshot, ProgressUI } from "./progress"
 
 const pollMs = 1_000

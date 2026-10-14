@@ -103,7 +103,8 @@ export class LoopGuardError extends Error {
 }
 
 export type LoopGuardObservation =
-  | { kind: "call"; name: string; input?: unknown; callID?: string }
+  | { kind: "call"; name?: string; input?: unknown; callID?: string }
+  | { kind: "named"; name: string; callID: string }
   | { kind: "result"; name?: string; failed: boolean; callID?: string }
   | { kind: "step" }
   | { kind: "cost"; messageID: string; cost: number }
@@ -117,10 +118,9 @@ export class LoopGuard {
   private readonly messageCosts = new Map<string, number>()
   private totalCost = 0
   /**
-   * Tool name for each in-flight callID. The OpenCode SDK pins a `callID` on
-   * every tool event but only the `called` event carries the tool name, so
-   * success/failed results must be correlated back through the call that
-   * started them. Without this, distinct tools' failures collapse into one
+   * Tool name for each in-flight callID. OpenCode pins a call id on every tool
+   * event but only `input.started` carries the tool name, so the call and its
+   * success/failed result must be correlated back through that id. Without this, distinct tools' failures collapse into one
    * synthetic `"tool"` and false-trip the same-tool fuse.
    */
   private readonly callIDToTool = new Map<string, string>()
@@ -143,8 +143,11 @@ export class LoopGuard {
   observe(observation: LoopGuardObservation): LoopGuardTrip | undefined {
     if (!this.config.enabled) return undefined
     switch (observation.kind) {
+      case "named":
+        this.callIDToTool.set(observation.callID, observation.name)
+        return undefined
       case "call":
-        return this.observeCall(observation.name, observation.input, observation.callID)
+        return this.observeCall(observation.name ?? (observation.callID ? this.callIDToTool.get(observation.callID) : undefined) ?? "tool", observation.input, observation.callID)
       case "result":
         return this.observeResult(observation.name, observation.callID, observation.failed)
       case "step":
@@ -292,10 +295,17 @@ function targetHint(name: string, input: unknown): string {
  */
 export function observationFromSessionEvent(type: string, properties: Record<string, unknown>): LoopGuardObservation | undefined {
   switch (type) {
-    case "session.next.tool.called":
-      // The called event carries the tool name; pin it to the callID so the
-      // result events (which only carry callID) can resolve back to it.
-      return { kind: "call", name: toolName(properties), input: properties.input, callID: pickCallID(properties) }
+    case "session.next.tool.input.started": {
+      // V2 names the tool only here; the guard pins it to the call id so the
+      // called and result events (which carry only the id) resolve back to it.
+      const callID = pickCallID(properties)
+      const name = toolName(properties)
+      return callID && name ? { kind: "named", name, callID } : undefined
+    }
+    case "session.next.tool.called": {
+      const name = toolName(properties)
+      return { kind: "call", ...(name ? { name } : {}), input: properties.input, callID: pickCallID(properties) }
+    }
     case "session.next.tool.failed":
       // SDK contract: success/failed carry callID but no tool/name. The guard
       // correlates through callID; a result with no seen callID is ignored
@@ -317,8 +327,15 @@ export function observationFromSessionEvent(type: string, properties: Record<str
  * place as opencode updates them. Feeding the per-message cost (not a
  * watcher-scoped total) lets the guard accumulate exactly across the advisor's
  * follow-up watcher, whose totals restart near zero.
+ *
+ * V2's `session.usage.updated` (aliased to `message.updated`) instead carries
+ * the session's cumulative cost with no message id; keyed per session, the
+ * same delta accounting counts it exactly once.
  */
 function costFromMessageUpdate(properties: Record<string, unknown>): LoopGuardObservation | undefined {
+  if (properties.info === undefined && typeof properties.sessionID === "string" && typeof properties.cost === "number") {
+    return { kind: "cost", messageID: `session:${properties.sessionID}`, cost: properties.cost }
+  }
   const info = properties.info
   if (!info || typeof info !== "object") return undefined
   const message = info as { role?: unknown; id?: unknown; cost?: unknown }
@@ -327,13 +344,14 @@ function costFromMessageUpdate(properties: Record<string, unknown>): LoopGuardOb
   return { kind: "cost", messageID: message.id, cost }
 }
 
-function toolName(properties: Record<string, unknown>): string {
+function toolName(properties: Record<string, unknown>): string | undefined {
   if (typeof properties.tool === "string" && properties.tool) return properties.tool
   if (typeof properties.name === "string" && properties.name) return properties.name
-  return "tool"
+  return undefined
 }
 
-/** The callID the SDK pins on every tool event; empty for malformed payloads. */
+/** The call id OpenCode pins on every tool event (V2 names it `id`); empty for malformed payloads. */
 function pickCallID(properties: Record<string, unknown>): string | undefined {
-  return typeof properties.callID === "string" && properties.callID ? properties.callID : undefined
+  const value = properties.callID ?? properties.id
+  return typeof value === "string" && value ? value : undefined
 }

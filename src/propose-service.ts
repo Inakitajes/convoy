@@ -16,20 +16,20 @@
  * a real server or TUI.
  */
 
-export type AuthoringServiceHandle = { url: string }
+export type AuthoringServiceHandle = { url: string; password?: string }
 
 export type AuthoringConversationRef = { harness: "opencode"; sessionId: string }
 
 /** The server availability the caller resolved before invoking the workflow. */
 export type ProposalServer =
-  | { kind: "independent"; url: string }
-  | { kind: "helper"; url: string }
+  | { kind: "independent"; url: string; password?: string }
+  | { kind: "helper"; url: string; password?: string }
 
 export type ProposalCommandDeps = {
   /** The project's authoring commands on a server; `"unknown"` means unreadable. */
   listCommands: (server: AuthoringServiceHandle) => Promise<string[] | "unknown">
   /** Publishes or reuses the repository's independent authoring service. */
-  transfer: () => Promise<{ status: "live"; url: string } | { status: "unavailable" | "uncertain"; reason: string }>
+  transfer: () => Promise<{ status: "live"; url: string; password?: string } | { status: "unavailable" | "uncertain"; reason: string }>
   /** Stops the owned temporary helper; idempotent and only called for a helper. */
   stopHelper: () => Promise<unknown>
   /** Takes the checkout's managed-writer claim; `ok: false` carries the guidance. */
@@ -75,7 +75,7 @@ export async function startProposalCommand(server: ProposalServer, deps: Proposa
   // explicit calls on the return paths remain the primary stop and this is the
   // safety net for a throw.
   try {
-    const commands = await deps.listCommands({ url: server.url })
+    const commands = await deps.listCommands({ url: server.url, ...(server.password ? { password: server.password } : {}) })
     if (commands === "unknown") {
       await stopOwnedHelper()
       return { status: "blocked", reason: "the project's authoring commands could not be discovered", remediation: checkCommandsRemediation }
@@ -96,7 +96,7 @@ export async function startProposalCommand(server: ProposalServer, deps: Proposa
       return { status: "blocked", reason: claim.reason, remediation: claim.remediation }
     }
 
-    let service: AuthoringServiceHandle = { url: server.url }
+    let service: AuthoringServiceHandle = { url: server.url, ...(server.password ? { password: server.password } : {}) }
     try {
       if (owned) {
         // The helper may only discover. Publish or reuse the independent service
@@ -112,7 +112,7 @@ export async function startProposalCommand(server: ProposalServer, deps: Proposa
             remediation: manualRemediation,
           }
         }
-        service = { url: transfer.url }
+        service = { url: transfer.url, ...(transfer.password ? { password: transfer.password } : {}) }
       }
       const ref = await deps.createConversation(service)
       await deps.invokeCommand({ ref, server: service, command })

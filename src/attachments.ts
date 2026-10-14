@@ -2,7 +2,7 @@ import { stat } from "node:fs/promises"
 import { basename, extname, isAbsolute, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
 
-import type { FilePartInput } from "@opencode-ai/sdk/v2"
+import type { FilePartInput } from "./opencode-client"
 
 type MissingMode = "skip" | "error"
 

@@ -1,4 +1,5 @@
 import { bootOpencodeServerFrom, connectOpencode } from "./opencode"
+import { resolveOpencodeBin } from "./opencode-runtime"
 import { openSessionCommand, runForegroundChild, shellQuote, type SessionWindowBackend } from "./terminal-host"
 
 /**
@@ -26,7 +27,7 @@ export type AuthoringSessionRef = {
  * is stopped only through the service's explicit, guarded stop. Adapters
  * never close an injected handle.
  */
-type ServerHandle = { url: string; close?(): void | Promise<unknown> }
+type ServerHandle = { url: string; password?: string; close?(): void | Promise<unknown> }
 
 /**
  * Boots a bounded server rooted at the checkout, creates a session, and
@@ -45,7 +46,7 @@ export async function createAuthoringConversation(input: {
 }): Promise<AuthoringSessionRef> {
   const server = input.server ?? (await bootOpencodeServerFrom(input.checkout, input.bootTimeoutMs))
   try {
-    const client = connectOpencode(server.url)
+    const client = connectOpencode(server.url, server.password)
     const created = await client.session.create(input.title ? { title: input.title } : {})
     if (created.error || !created.data) {
       throw new Error(`opencode session create failed: ${JSON.stringify(created.error ?? "no session returned")}`)
@@ -73,7 +74,7 @@ export async function validateAuthoringSession(input: {
   }
   const server = input.server ?? (await bootOpencodeServerFrom(input.checkout))
   try {
-    const client = connectOpencode(server.url)
+    const client = connectOpencode(server.url, server.password)
     const got = await client.session.get({ sessionID: input.ref.sessionId })
     if (got.error || !got.data) {
       return { status: "unavailable", reason: `the linked session could not be opened through the harness (${JSON.stringify(got.error ?? "not found")})` }
@@ -91,7 +92,9 @@ export async function validateAuthoringSession(input: {
  * to the child; shell-based external backends receive the quoted command.
  */
 export function authoringClientArgv(input: { checkout: string; ref: AuthoringSessionRef }): string[] {
-  return ["opencode", input.checkout, "--session", input.ref.sessionId]
+  // --standalone keeps V1's own-server behavior; V2 otherwise joins the
+  // user's background service.
+  return [resolveOpencodeBin(), input.checkout, "--standalone", "--session", input.ref.sessionId]
 }
 
 /**
@@ -171,7 +174,7 @@ export async function sessionActivity(input: {
   if (input.ref.harness !== "opencode") return "unknown"
   const server = input.server ?? (await bootOpencodeServerFrom(input.checkout))
   try {
-    const client = connectOpencode(server.url)
+    const client = connectOpencode(server.url, server.password)
     const status = await client.session.status()
     if (status.error || !status.data) return "unknown"
     const entry = (status.data as Record<string, { type?: string }>)[input.ref.sessionId]
@@ -196,7 +199,7 @@ export async function listAuthoringCommands(input: {
 }): Promise<string[] | "unknown"> {
   const server = input.server ?? (await bootOpencodeServerFrom(input.checkout))
   try {
-    const client = connectOpencode(server.url)
+    const client = connectOpencode(server.url, server.password)
     const commands = await client.command.list()
     if (commands.error || !commands.data) return "unknown"
     return (commands.data as Array<{ name?: string }>).map((entry) => entry.name).filter((name): name is string => typeof name === "string")
@@ -221,7 +224,7 @@ export async function invokeAuthoringCommand(input: {
   command: string
   arguments?: string
 }): Promise<void> {
-  const client = connectOpencode(input.server.url)
+  const client = connectOpencode(input.server.url, input.server.password)
   const sent = await client.session.command({
     sessionID: input.ref.sessionId,
     command: input.command,

@@ -2,7 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import type { OpencodeClient } from "@opencode-ai/sdk/v2"
+import type { OpencodeClient } from "../src/opencode-client"
 
 import { LiveAttach } from "../src/attach-runtime"
 import { ControlPendingQueue, type ControlServer } from "../src/control-server"

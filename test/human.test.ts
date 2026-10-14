@@ -75,7 +75,7 @@ describe("runHumanReviewGate", () => {
     const { workspace, options } = await fixture()
     const { calls, progress } = progressWithActions(["continue"])
 
-    await runHumanReviewGate(workspace, options, "http://127.0.0.1:1234", progress)
+    await runHumanReviewGate(workspace, options, { url: "http://127.0.0.1:1234" }, progress)
 
     expect(calls.suspend).toBe(0)
     expect(calls.resume).toBe(0)
@@ -97,7 +97,7 @@ describe("runHumanReviewGate", () => {
     await runHumanReviewGate(
       workspace,
       options,
-      "http://127.0.0.1:1234",
+      { url: "http://127.0.0.1:1234" },
       progress,
       undefined,
       "human-review",
@@ -131,7 +131,7 @@ describe("runHumanReviewGate", () => {
     await runHumanReviewGate(
       workspace,
       options,
-      "http://127.0.0.1:1234",
+      { url: "http://127.0.0.1:1234" },
       progress,
       {
         stop: async () => {},
@@ -157,6 +157,32 @@ describe("runHumanReviewGate", () => {
     await expect(readFile(join(workspace.dir, "reports", "human-review.md"), "utf8")).resolves.toContain("- Manual OpenCode iterations: 1")
   })
 
+  // The run's V2 server is password-protected; the iteration window has to
+  // carry the password or the OpenCode client is rejected at connect.
+  test("opens the iteration window with the run server's password", async () => {
+    const { workspace, options } = await fixture()
+    const opened: unknown[] = []
+    const { progress } = progressWithActions(["iterate", "continue"])
+
+    await runHumanReviewGate(
+      workspace,
+      options,
+      { url: "http://127.0.0.1:1234", password: "s3cret" },
+      progress,
+      undefined,
+      "human-review",
+      {
+        openInteractiveOpencodeWindow: async (input) => {
+          opened.push(input)
+          return "terminal"
+        },
+        runInteractiveOpencode: async () => {},
+      },
+    )
+
+    expect(opened).toEqual([{ url: "http://127.0.0.1:1234", password: "s3cret", targetDir: options.targetDir }])
+  })
+
   test("falls back to suspended same-terminal iteration when the TUI window cannot open", async () => {
     const { workspace, options } = await fixture()
     const events: string[] = []
@@ -166,7 +192,7 @@ describe("runHumanReviewGate", () => {
     await runHumanReviewGate(
       workspace,
       options,
-      "http://127.0.0.1:1234",
+      { url: "http://127.0.0.1:1234" },
       progress,
       {
         stop: async () => {},

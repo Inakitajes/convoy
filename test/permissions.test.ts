@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
-import type { OpencodeClient } from "@opencode-ai/sdk/v2"
+import type { OpencodeClient } from "../src/opencode-client"
 
 import { askHumanAction } from "../src/human"
 import { startPermissionGate, type AdvisorCheckpoint } from "../src/permissions"
@@ -584,5 +584,30 @@ describe("permission gate terminal-input arbiter", () => {
     expect(order).toEqual(["start", "end", "start", "end"])
 
     await gate.stop()
+  })
+})
+
+describe("permissionRequestFrom (V2 event envelope)", () => {
+  test("normalizes a V2 permission.asked event (data + action/resources)", async () => {
+    const { permissionRequestFrom } = await import("../src/permissions")
+    const request = permissionRequestFrom({
+      type: "permission.asked",
+      data: { id: "perm_1", sessionID: "ses_1", action: "bash", resources: ["git push"], metadata: { command: "git push" } },
+    })
+    expect(request).toMatchObject({ id: "perm_1", sessionID: "ses_1", permission: "bash", patterns: ["git push"] })
+  })
+
+  test("still normalizes the V1 shape (properties + permission/patterns)", async () => {
+    const { permissionRequestFrom } = await import("../src/permissions")
+    const request = permissionRequestFrom({
+      type: "permission.asked",
+      properties: { id: "perm_2", sessionID: "ses_2", permission: "edit", patterns: ["src/**"] },
+    })
+    expect(request).toMatchObject({ id: "perm_2", permission: "edit", patterns: ["src/**"] })
+  })
+
+  test("ignores non-permission events", async () => {
+    const { permissionRequestFrom } = await import("../src/permissions")
+    expect(permissionRequestFrom({ type: "session.idle", data: { sessionID: "s" } })).toBeUndefined()
   })
 })

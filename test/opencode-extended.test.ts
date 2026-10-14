@@ -10,17 +10,20 @@ afterEach(() => {
 
 describe("connectOpencode", () => {
   test("sends SDK requests to the provided base URL", async () => {
-    let requestUrl = ""
+    const urls: string[] = []
     globalThis.fetch = Object.assign(
       async (input: string | URL | Request) => {
-        requestUrl = input instanceof Request ? input.url : String(input)
-        return Response.json({ data: { all: [], connected: [] } })
+        urls.push(input instanceof Request ? input.url : String(input))
+        return Response.json({ location: { directory: "/repo" }, data: [] })
       },
       { preconnect: originalFetch.preconnect },
     ) as typeof fetch
 
     await connectOpencode("http://127.0.0.1:54321/custom").provider.list({ directory: "/repo" })
 
-    expect(requestUrl).toBe("http://127.0.0.1:54321/custom/provider?directory=%2Frepo")
+    // The boundary issues the split V2 provider/model inventory against the
+    // caller's base URL, never the process default.
+    expect(urls.length).toBeGreaterThan(0)
+    expect(urls.every((url) => url.startsWith("http://127.0.0.1:54321/custom/"))).toBe(true)
   })
 })

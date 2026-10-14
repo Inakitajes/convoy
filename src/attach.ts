@@ -1,4 +1,4 @@
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { stdout } from "node:process"
 
 import { LiveAttach, goalLoopViewFrom, overallStatus, reconcileAdvisorJournal, replayHistory, waitForServerUrl } from "./attach-runtime"
@@ -8,6 +8,7 @@ import { goalProgressPhases } from "./goal-phases"
 import { compactRunRow, compactRunRowName, withGoalPhases } from "./runner"
 import { readRunMetadata, type RunMetadata } from "./metadata"
 import { connectOpencode } from "./opencode"
+import { readServerAuth } from "./server-auth"
 import type { AutoAccept, PermissionPromptInfo, ProgressPhase, ProgressUI, RunFinalizationView } from "./progress"
 import { isControlLive, isServerLive } from "./runs"
 import { progressPhases } from "./runner"
@@ -267,7 +268,10 @@ export async function openRunDashboard(runID: string, options: AttachOptions = {
     const url = serverUrl ?? (await waitForServerUrl(next.metaPath, leaving))
     if (sessionOver || generation !== viewGeneration || !url) return
     tui.serverReady(url)
-    const fresh = new LiveAttach(connectOpencode(url), tui, next.targetDir, next.metaPath, liveAttachPhases(next.phases))
+    // The connection password rides a private 0600 file next to the metadata,
+    // never the generic navigation metadata (design D2).
+    const auth = await readServerAuth(dirname(next.metaPath))
+    const fresh = new LiveAttach(connectOpencode(url, auth?.password), tui, next.targetDir, next.metaPath, liveAttachPhases(next.phases))
     attach = fresh
     // Completed phases' session tabs reconstruct their transcripts through the
     // attach that owns the run's live server; each view rebinds the seam (the

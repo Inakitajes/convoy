@@ -15,7 +15,7 @@ import { compactRunRowName } from "../src/runner"
 
 import type { GoalRunState } from "../src/metadata"
 import type { GoalLoopView } from "../src/progress"
-import type { OpencodeClient } from "@opencode-ai/sdk/v2"
+import type { OpencodeClient } from "../src/opencode-client"
 
 const dirs: string[] = []
 afterAll(async () => {

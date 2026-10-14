@@ -1,4 +1,4 @@
-import type { AgentConfig, Config, OpencodeClient } from "@opencode-ai/sdk/v2"
+import { toolPermissions, type AgentConfig, type Config, type OpencodeClient } from "./opencode-client"
 
 import { capSubjectWithin, firstMeaningfulLine, maxCommitSubjectLength } from "./commit-text"
 import { log } from "./log"
@@ -7,6 +7,9 @@ import type { StopPolicy } from "./process-stop"
 import { splitModelVariant } from "./pipeline"
 import { parseModel } from "./runner"
 import { excerpt } from "./worktree"
+
+/** Read-only tools for the commit writer; translated to V2 session permissions at create. */
+const writerTools: Record<string, boolean> = { read: true, list: true, glob: true, grep: true, webfetch: false, write: false, edit: false, bash: false, todoread: false, todowrite: false }
 
 /**
  * Writes the conventional-commit message for the single commit automatic run compaction
@@ -164,7 +167,7 @@ export async function askForCommitMessage(client: OpencodeClient, input: CommitM
 
   let sessionID: string | undefined
   try {
-    const session = await client.session.create({ directory: input.targetDir, title: "convoy commit writer" }, { signal: controller.signal })
+    const session = await client.session.create({ directory: input.targetDir, title: "convoy commit writer", permissions: toolPermissions(writerTools) }, { signal: controller.signal })
     if (session.error || !session.data?.id) throw new Error("couldn't open a commit message session")
     sessionID = session.data.id
 
@@ -178,7 +181,7 @@ export async function askForCommitMessage(client: OpencodeClient, input: CommitM
         // Sent as well as the agent prompt so an unresolved agent name still
         // yields the contract rather than a free-form answer.
         system: commitMessageSystemPrompt,
-        tools: { read: true, list: true, glob: true, grep: true, webfetch: false, write: false, edit: false, bash: false, todoread: false, todowrite: false },
+        tools: writerTools,
         parts: [{ type: "text", text: commitMessagePrompt(input) }],
       },
       { signal: controller.signal },

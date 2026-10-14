@@ -1,4 +1,4 @@
-import type { AssistantMessage, Config, OpencodeClient, Part } from "@opencode-ai/sdk/v2"
+import { toolPermissions, type AssistantMessage, type Config, type OpencodeClient, type Part } from "./opencode-client"
 
 import { builtInPrompts } from "./built-in-prompts"
 import { log } from "./log"
@@ -128,7 +128,7 @@ export async function consultAdvisor(input: ConsultAdvisorInput): Promise<Adviso
     input.onTranscript?.(transcript)
 
     const session = await input.client.session.create(
-      { directory: input.directory, title: `convoy advisor (${input.reason})` },
+      { directory: input.directory, title: `convoy advisor (${input.reason})`, permissions: toolPermissions(advisorTools()) },
       { signal: controller.signal },
     )
     if (session.error || !session.data?.id) throw new Error("advisor couldn't open a session")

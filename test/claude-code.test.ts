@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { basename, join } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 
-import type { FilePartInput } from "@opencode-ai/sdk/v2"
+import type { FilePartInput } from "../src/opencode-client"
 
 import {
   claudeArgs,

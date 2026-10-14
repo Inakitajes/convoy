@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 
 import { listModels } from "../src/model-catalog"
-import type { Provider } from "@opencode-ai/sdk/v2"
+import type { Provider } from "../src/opencode-client"
 
 type CatalogDeps = NonNullable<Parameters<typeof listModels>[1]>
 type SdkScenario = "success" | "empty" | "error" | "reject" | "list-reject"

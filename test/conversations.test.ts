@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test"
 
-import type { OpencodeClient } from "@opencode-ai/sdk/v2"
+import type { OpencodeClient } from "../src/opencode-client"
 
 /**
  * Task 4.6 (capability work-conversations, design D4/D5): explicit external
@@ -190,8 +190,22 @@ describe("openConversationExternal (task 4.6 explicit external presentation)", (
 })
 
 describe("authoringClientArgv / openConversationForeground (task 4.6)", () => {
+  // --standalone: like the V1 TUI, the conversation runs on its own server,
+  // never on the user's V2 background service.
   test("builds structured argv for the exact session (no shell string re-parsed on the way in)", () => {
-    expect(authoringClientArgv({ checkout: "/repo", ref: SESSION })).toEqual(["opencode", "/repo", "--session", "ses_1"])
+    expect(authoringClientArgv({ checkout: "/repo", ref: SESSION })).toEqual(["opencode", "/repo", "--standalone", "--session", "ses_1"])
+  })
+
+  // The client must be the same binary the runtime gate verified.
+  test("launches the operator's explicit OpenCode binary when one is configured", () => {
+    const original = process.env.CONVOY_OPENCODE_BIN
+    process.env.CONVOY_OPENCODE_BIN = "/opt/opencode-v2/bin/opencode"
+    try {
+      expect(authoringClientArgv({ checkout: "/repo", ref: SESSION })[0]).toBe("/opt/opencode-v2/bin/opencode")
+    } finally {
+      if (original === undefined) delete process.env.CONVOY_OPENCODE_BIN
+      else process.env.CONVOY_OPENCODE_BIN = original
+    }
   })
 
   test("routes through the foreground host with the exact ref, cwd, and env override", async () => {
@@ -208,7 +222,7 @@ describe("authoringClientArgv / openConversationForeground (task 4.6)", () => {
     })
 
     const [argv, options] = spawn.mock.calls[0]! as [string[], Record<string, unknown>]
-    expect(argv).toEqual(["opencode", "/repo", "--session", "ses_1"])
+    expect(argv).toEqual(["opencode", "/repo", "--standalone", "--session", "ses_1"])
     expect(options).toMatchObject({ cwd: "/repo", env: { FOO: "bar" } })
   })
 })

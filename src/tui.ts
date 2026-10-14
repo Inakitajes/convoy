@@ -22,6 +22,8 @@ import { openRouterLowBalance, startLimitsPoller } from "./limits"
 import { log } from "./log"
 import { markdownInlineChunks, markdownLines, parseMarkdown, renderMarkdownDoc, type MarkdownDoc } from "./markdown-render"
 import { openIterateOpencodeWindow, openOpencodeSessionWindow, openStoredSessionWindow, type SessionWindowBackend } from "./opencode"
+import { readServerAuth } from "./server-auth"
+import { validateAuthoringSession } from "./conversations"
 import { formatTerminalTitle } from "./run-status"
 import { stepRunnerFor, type StepRunnerId } from "./step-runners"
 import { autoAcceptModeLabel, comparePaletteActions, dashboardActions, shortcutGroupOrder, shortcutGroupTitle } from "./tui-actions"
@@ -131,12 +133,34 @@ type RunnerSessionContext = {
   offlineSessions: boolean
 }
 
+/**
+ * Opens a session on the run's live server. Its generated password comes from
+ * the run's private server-auth record, so an in-process and an attached
+ * dashboard reach it the same way; a record for another URL is stale.
+ */
+async function openLiveSessionWindow(input: { url: string; runDir: string; targetDir: string; sessionID: string }): Promise<SessionWindowBackend> {
+  const auth = input.runDir ? await readServerAuth(input.runDir) : undefined
+  const password = auth?.url === input.url ? auth.password : undefined
+  return openOpencodeSessionWindow({ url: input.url, ...(password ? { password } : {}), targetDir: input.targetDir, sessionID: input.sessionID })
+}
+
+/**
+ * V2's `--session <id>` creates a missing session, so a stored session is
+ * verified first, the same way authoring conversations are, and refused when
+ * it is gone instead of opening an empty replacement.
+ */
+async function openVerifiedStoredSessionWindow(input: { targetDir: string; sessionID: string; runDir: string }): Promise<SessionWindowBackend> {
+  const verified = await validateAuthoringSession({ ref: { harness: "opencode", sessionId: input.sessionID }, checkout: input.targetDir })
+  if (verified.status !== "available") throw new Error(`session ${input.sessionID} is no longer available: ${verified.reason}`)
+  return openStoredSessionWindow(input)
+}
+
 const runnerSessionOpeners: Record<StepRunnerId, (context: RunnerSessionContext) => Promise<SessionWindowBackend> | undefined> = {
   opencode: (context) =>
     context.serverUrl
-      ? openOpencodeSessionWindow({ url: context.serverUrl, targetDir: context.targetDir, sessionID: context.sessionID })
+      ? openLiveSessionWindow({ url: context.serverUrl, runDir: context.runDir, targetDir: context.targetDir, sessionID: context.sessionID })
       : context.offlineSessions
-        ? openStoredSessionWindow({ targetDir: context.targetDir, sessionID: context.sessionID, runDir: context.runDir })
+        ? openVerifiedStoredSessionWindow({ targetDir: context.targetDir, sessionID: context.sessionID, runDir: context.runDir })
         : undefined,
   "claude-code": (context) => openClaudeSessionWindow({ targetDir: context.targetDir, sessionID: context.sessionID, runDir: context.runDir }),
 }
@@ -2363,7 +2387,7 @@ export class TuiProgress implements ProgressUI {
     }
     const targetDir = this.targetDir || process.cwd()
     this.addEvent("convoy", "permission", `[i]: opening session ${shortID(pending.info.sessionID)}`)
-    openOpencodeSessionWindow({ url: this.serverUrl, targetDir, sessionID: pending.info.sessionID })
+    openLiveSessionWindow({ url: this.serverUrl, runDir: this.runDir, targetDir, sessionID: pending.info.sessionID })
       .then((backend) => {
         pending.inspect = { backend }
         this.render()

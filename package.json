@@ -18,7 +18,6 @@
     "release": "bun run scripts/release.ts"
   },
   "dependencies": {
-    "@opencode-ai/sdk": "1.18.4",
     "@opencode/client": "2.0.26",
     "@opencode/plugin": "2.0.26",
     "@opencode/schema": "2.0.26",

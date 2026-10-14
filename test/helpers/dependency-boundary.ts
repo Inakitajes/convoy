@@ -14,11 +14,14 @@ export const vendorPackages = ["@opencode-ai/sdk", "@opencode/client", "@opencod
 /** Files under this prefix are adapter boundaries and may import vendor packages. */
 export const adapterBoundaryPrefix = "src/runners/"
 
+/** Individual core modules that are themselves harness boundaries. */
+export const adapterBoundaryFiles = ["src/opencode-client.ts"] as const
+
 export type ModuleSource = { path: string; text: string }
 export type VendorImport = { path: string; pkg: string }
 
 export function isAdapterBoundary(path: string): boolean {
-  return path.startsWith(adapterBoundaryPrefix)
+  return path.startsWith(adapterBoundaryPrefix) || (adapterBoundaryFiles as readonly string[]).includes(path)
 }
 
 function vendorFor(specifier: string): string | undefined {

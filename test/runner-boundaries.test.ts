@@ -9,20 +9,8 @@ import { adapterBoundaryPrefix, boundaryViolations, findVendorImports, isAdapter
  * is removed. A new entry is a review failure, not a fix.
  */
 const allowlist = [
-  "src/advisor-runtime.ts",
-  "src/advisor.ts",
-  "src/agents.ts",
-  "src/attach-runtime.ts",
-  "src/attachments.ts",
-  "src/claude-code.ts",
-  "src/commit-message.ts",
-  "src/event-hub.ts",
-  "src/model-catalog.ts",
-  "src/opencode.ts",
-  "src/permissions.ts",
-  "src/runner.ts",
-  "src/safety-judge.ts",
-  "src/worktree.ts",
+  "src/advisor-bridge.ts",
+  "src/report-bridge.ts",
 ]
 
 async function readSources(): Promise<{ path: string; text: string }[]> {
@@ -43,7 +31,7 @@ describe("vendor dependency boundary", () => {
   test("the keep-list only names non-adapter modules and never grows silently", () => {
     expect(allowlist.every((path) => !isAdapterBoundary(path))).toBe(true)
     // Ratchet guard: if the count changes, a reviewer must reconcile the diff.
-    expect(allowlist.length).toBe(14)
+    expect(allowlist.length).toBe(2)
   })
 
   test("detects a vendor import outside the adapter boundary", () => {

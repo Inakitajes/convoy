@@ -4,7 +4,7 @@ import { join } from "node:path"
 
 import { describe, expect, test } from "bun:test"
 
-import { createWorkspace, isValidRunID, convoyRoot, convoyHome, globalConfigPath, globalAgentsDir, runsRoot, opencodeConfigDir, runDir } from "../src/workspace"
+import { createWorkspace, isValidRunID, convoyRoot, convoyHome, globalConfigPath, globalAgentsDir, runsRoot, runDir } from "../src/workspace"
 
 function restoreEnv(name: string, value: string | undefined) {
   if (value === undefined) delete process.env[name]
@@ -82,14 +82,6 @@ describe("runsRoot", () => {
     const root = runsRoot()
     expect(root.endsWith("runs")).toBe(true)
     expect(root).toContain(".convoy")
-  })
-})
-
-describe("opencodeConfigDir", () => {
-  test("returns the opencode directory under convoyHome", () => {
-    const dir = opencodeConfigDir()
-    expect(dir.endsWith("opencode")).toBe(true)
-    expect(dir).toContain(".convoy")
   })
 })
 

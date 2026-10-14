@@ -1,13 +1,13 @@
 import { readFileSync, statSync } from "node:fs"
 import { join } from "node:path"
 
-import type { AgentConfig, Config, PermissionActionConfig } from "@opencode-ai/sdk/v2"
+import type { AgentConfig, Config, PermissionActionConfig } from "./opencode-client"
 import { advisorFeedbackToolName, advisorProviderOverride, advisorToolName, type ModelSelection } from "./advisor"
 import { bashPolicy, noAdditions } from "./bash-policy"
 import { builtInPrompts } from "./built-in-prompts"
 import { builtInAgents, readOnlyAgentSuffix, verifyAgentSuffix } from "./pipeline"
 import type { AgentSpec, PermissionAdditions } from "./types"
-import { globalAgentsDir } from "./workspace"
+import { globalAgentsDir, runPrivateDir } from "./workspace"
 import { writeReportToolName } from "./report"
 
 const runtimeSafetyPrompt = "runtime-safety"
@@ -44,6 +44,8 @@ export type OpencodeConfigOptions = {
    * OpenCode config, so the user's global config keeps its default routing.
    */
   throughputModels?: readonly ModelSelection[]
+  /** Convoy's runtime plugin packages (write_report, advisor tools) the run server loads. */
+  plugins?: readonly string[]
 }
 
 export function opencodeConfig(
@@ -85,6 +87,7 @@ export function opencodeConfig(
       question: "deny",
       doom_loop: doomLoopPermission,
     },
+    ...(options.plugins?.length ? { plugins: [...options.plugins] } : {}),
   }
 }
 
@@ -194,6 +197,18 @@ function providerTimeouts(): Config["provider"] {
   }
 }
 
+// Agents read and write the run dir (reports, attachments), but never its
+// private dir: with the server password or a bridge token an agent could drive
+// the server or the bridges past Convoy's gate. The last matching rule wins,
+// and V2 matches a file by its directory, so the secrets need their own dir.
+function runDirAccess(runDir: string): Record<string, "allow" | "deny"> {
+  return {
+    "*": "deny",
+    [join(runDir, "**")]: "allow",
+    [join(runPrivateDir(runDir), "**")]: "deny",
+  }
+}
+
 function agentConfig(
   description: string,
   temperature: number | undefined,
@@ -243,10 +258,7 @@ function agentConfig(
         webfetch: webfetch ? "allow" : "deny",
         websearch: "deny",
         doom_loop: doomLoopPermission,
-        external_directory: {
-          "*": "deny",
-          [join(runDir, "**")]: "allow",
-        },
+        external_directory: runDirAccess(runDir),
       },
       prompt,
     }
@@ -275,10 +287,7 @@ function agentConfig(
       question: "deny",
       doom_loop: doomLoopPermission,
       bash: bashPolicy(targetDir, permissions),
-      external_directory: {
-        "*": "deny",
-        [join(runDir, "**")]: "allow",
-      },
+      external_directory: runDirAccess(runDir),
     },
     prompt,
   }

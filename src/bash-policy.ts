@@ -282,15 +282,19 @@ export function projectScriptAllowPatterns(targetDir = process.cwd()): string[] 
  * Config additions only ever extend the lists: a project can deny more and
  * allow more, but a config allow can never resurrect a denied pattern.
  */
+/**
+ * Insertion order is the evaluation order: OpenCode V2 turns this map into an
+ * ordered ruleset where the last matching rule wins. The ask fallback comes
+ * first, allows refine it, and denials come last so they always win.
+ */
 function assembleBashPolicy(targetDir: string, additions: PermissionAdditions): Record<string, "allow" | "deny" | "ask"> {
-  const policy: Record<string, "allow" | "deny" | "ask"> = {}
+  const policy: Record<string, "allow" | "deny" | "ask"> = { "*": "ask" }
   const denied = new Set([...denyBashPatterns, ...additions.deny])
-  for (const pattern of denied) policy[pattern] = "deny"
   for (const pattern of [...baseAllowBashPatterns, ...projectScriptAllowPatterns(targetDir), ...additions.allow]) {
     if (denied.has(pattern)) continue
     policy[pattern] = "allow"
   }
-  policy["*"] = "ask"
+  for (const pattern of denied) policy[pattern] = "deny"
   return policy
 }
 
