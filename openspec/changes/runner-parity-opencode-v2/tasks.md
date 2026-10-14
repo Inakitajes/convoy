@@ -18,7 +18,7 @@
 
 ## 3. Implement explicit Claude authentication and configuration routing
 
-- [ ] 3.1 Add runner defaults, per-step auth overrides, helper/advisor routes, and authoring selection to configuration parsing/serialization; verify round-trip tests preserve existing runner IDs and reject embedded secret values or invalid mode combinations.
+- [x] 3.1 Add runner defaults, per-step auth overrides, helper/advisor routes, and authoring selection to configuration parsing/serialization; verify round-trip tests preserve existing runner IDs and reject embedded secret values or invalid mode combinations.
 - [x] 3.2 Build child-local subscription/API-key environment and settings preparation with effective-auth validation; verify ambient keys, key helpers, OAuth overrides, third-party settings, absent login, and organization-policy conflicts cannot silently change billing or mutate global state.
 - [x] 3.3 Preserve supported CLI subscription execution and add explicit API-key CLI execution without introducing an SDK dependency for the baseline; verify both modes through protocol fixtures and that quota/auth failures never trigger cross-mode fallback.
 - [x] 3.4 Implement explicit-mode migration errors for ambiguous legacy noninteractive configurations and freeze resolved non-secret auth in plans; verify missing mode and resumed-run cases either preserve verified subscription behavior or request explicit mode selection without inferring API consent.

@@ -32,6 +32,7 @@ import {
   type StepSpec,
 } from "./pipeline"
 import { isStepRunnerId, normalizeStepRunnerModel, stepRunnerCapabilityReason, stepRunnerFor, type StepRunnerId } from "./step-runners"
+import type { AuthenticationMode } from "./runners/contracts"
 import type { NotificationSettings } from "./notifications"
 import type { AdvisorAuditPolicy } from "./advisor-events"
 import type { AgentSpec, HookSet, HookSpec, HooksConfig, HookWhen, PermissionAdditions } from "./types"
@@ -105,6 +106,19 @@ export type ConvoyDefaults = {
   advisorMaxCalls?: number
   /** Advisor content retained in events/advisor.jsonl. Hash-only by default. */
   advisorAuditPolicy?: AdvisorAuditPolicy
+  /** Default runner for steps that do not set their own. */
+  runner?: StepRunnerId
+  /** Default Claude authentication mode; api-key requires the env var holding the key. */
+  claudeAuth?: { authMode: AuthenticationMode; credentialRef?: string }
+  /** Explicit helper-inference routes; unspecified roles inherit the run's route. */
+  helperRoutes?: {
+    branchName?: { runner?: StepRunnerId; model?: string }
+    commitMessage?: { runner?: StepRunnerId; model?: string }
+  }
+  /** Explicit advisor route; unspecified inherits the run's route. */
+  advisorRoute?: { runner?: StepRunnerId; model?: string; authMode?: AuthenticationMode }
+  /** Authoring conversation runner and auth. */
+  authoring?: { runner?: StepRunnerId; authMode?: AuthenticationMode }
 }
 
 /** A project agent definition, or model/temperature/readOnly overrides for a built-in one. */
@@ -688,6 +702,11 @@ function validateDefaults(v: Validator, raw: unknown): ConvoyDefaults {
     "advisor",
     "advisorMaxCalls",
     "advisorAuditPolicy",
+    "runner",
+    "claudeAuth",
+    "helperRoutes",
+    "advisorRoute",
+    "authoring",
   ])
 
   const defaults: ConvoyDefaults = {}
@@ -709,7 +728,81 @@ function validateDefaults(v: Validator, raw: unknown): ConvoyDefaults {
     if (policy !== "summary" && policy !== "redacted" && policy !== "full") v.fail("defaults.advisorAuditPolicy", "must be summary, redacted, or full")
     defaults.advisorAuditPolicy = policy as AdvisorAuditPolicy
   }
+  if (record.runner !== undefined) defaults.runner = validateRunnerId(v, record.runner, "defaults.runner")
+  if (record.claudeAuth !== undefined) defaults.claudeAuth = validateClaudeAuth(v, record.claudeAuth, "defaults.claudeAuth")
+  if (record.helperRoutes !== undefined) defaults.helperRoutes = validateHelperRoutes(v, record.helperRoutes)
+  if (record.advisorRoute !== undefined) defaults.advisorRoute = validateAdvisorRoute(v, record.advisorRoute)
+  if (record.authoring !== undefined) defaults.authoring = validateAuthoringRoute(v, record.authoring)
   return defaults
+}
+
+const envVarNamePattern = /^[A-Za-z_][A-Za-z0-9_]*$/
+const secretShapedPattern = /^(sk-|ghp_|xox[baprs]-|AKIA)/i
+
+function validateRunnerId(v: Validator, value: unknown, path: string): StepRunnerId {
+  if (!isStepRunnerId(value)) v.fail(path, 'must be "opencode" or "claude-code"')
+  return value as StepRunnerId
+}
+
+function validateAuthMode(v: Validator, value: unknown, path: string): AuthenticationMode {
+  if (value !== "subscription" && value !== "api-key") v.fail(path, 'must be "subscription" or "api-key"')
+  return value as AuthenticationMode
+}
+
+/** A credential reference names an environment variable, never a secret value. */
+function validateCredentialRef(v: Validator, value: unknown, path: string): string {
+  const ref = v.nonEmptyString(value, path)
+  if (!envVarNamePattern.test(ref) || secretShapedPattern.test(ref)) {
+    v.fail(path, "must name an environment variable (e.g. CONVOY_ANTHROPIC_KEY), not a secret value")
+  }
+  return ref
+}
+
+function validateClaudeAuth(v: Validator, raw: unknown, path: string): { authMode: AuthenticationMode; credentialRef?: string } {
+  const record = v.record(raw, path)
+  v.knownKeys(record, path, ["authMode", "credentialRef"])
+  if (record.authMode === undefined) v.fail(`${path}.authMode`, "is required")
+  const authMode = validateAuthMode(v, record.authMode, `${path}.authMode`)
+  const credentialRef = record.credentialRef !== undefined ? validateCredentialRef(v, record.credentialRef, `${path}.credentialRef`) : undefined
+  if (authMode === "api-key" && credentialRef === undefined) v.fail(path, "api-key mode requires credentialRef")
+  if (authMode === "subscription" && credentialRef !== undefined) v.fail(path, "subscription mode must not set credentialRef")
+  return { authMode, ...(credentialRef ? { credentialRef } : {}) }
+}
+
+function validateHelperRoutes(v: Validator, raw: unknown): NonNullable<ConvoyDefaults["helperRoutes"]> {
+  const record = v.record(raw, "defaults.helperRoutes")
+  v.knownKeys(record, "defaults.helperRoutes", ["branchName", "commitMessage"])
+  const routes: NonNullable<ConvoyDefaults["helperRoutes"]> = {}
+  for (const role of ["branchName", "commitMessage"] as const) {
+    const value = record[role]
+    if (value === undefined) continue
+    const entry = v.record(value, `defaults.helperRoutes.${role}`)
+    v.knownKeys(entry, `defaults.helperRoutes.${role}`, ["runner", "model"])
+    const route: { runner?: StepRunnerId; model?: string } = {}
+    if (entry.runner !== undefined) route.runner = validateRunnerId(v, entry.runner, `defaults.helperRoutes.${role}.runner`)
+    if (entry.model !== undefined) route.model = v.nonEmptyString(entry.model, `defaults.helperRoutes.${role}.model`)
+    routes[role] = route
+  }
+  return routes
+}
+
+function validateAdvisorRoute(v: Validator, raw: unknown): NonNullable<ConvoyDefaults["advisorRoute"]> {
+  const record = v.record(raw, "defaults.advisorRoute")
+  v.knownKeys(record, "defaults.advisorRoute", ["runner", "model", "authMode"])
+  const route: NonNullable<ConvoyDefaults["advisorRoute"]> = {}
+  if (record.runner !== undefined) route.runner = validateRunnerId(v, record.runner, "defaults.advisorRoute.runner")
+  if (record.model !== undefined) route.model = v.nonEmptyString(record.model, "defaults.advisorRoute.model")
+  if (record.authMode !== undefined) route.authMode = validateAuthMode(v, record.authMode, "defaults.advisorRoute.authMode")
+  return route
+}
+
+function validateAuthoringRoute(v: Validator, raw: unknown): NonNullable<ConvoyDefaults["authoring"]> {
+  const record = v.record(raw, "defaults.authoring")
+  v.knownKeys(record, "defaults.authoring", ["runner", "authMode"])
+  const route: NonNullable<ConvoyDefaults["authoring"]> = {}
+  if (record.runner !== undefined) route.runner = validateRunnerId(v, record.runner, "defaults.authoring.runner")
+  if (record.authMode !== undefined) route.authMode = validateAuthMode(v, record.authMode, "defaults.authoring.authMode")
+  return route
 }
 
 function validateAgents(v: Validator, raw: unknown, targetDir: string): Record<string, ConfigAgent> {
