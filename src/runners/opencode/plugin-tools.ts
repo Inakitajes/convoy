@@ -56,6 +56,25 @@ function pluginFileName(name: string): string {
   return `${name.replace(/[^a-zA-Z0-9._-]/g, "_")}.ts`
 }
 
+/**
+ * The module a rendered tool belongs to. The advisor plugin registers both
+ * `advisor` and `advisor_feedback`, so feedback is owned by the advisor module
+ * rather than a file of its own.
+ */
+function ownerToolName(toolName: string): string {
+  return toolName === advisorFeedbackToolName ? advisorToolName : toolName
+}
+
+/** The plugin id that registers `toolName` in a rendered module. */
+export function pluginIdForTool(toolName: string): string {
+  return pluginId(ownerToolName(toolName))
+}
+
+/** The module file name that registers `toolName` in a planned directory. */
+export function pluginFileNameForTool(toolName: string): string {
+  return pluginFileName(ownerToolName(toolName))
+}
+
 /** Renders the `write_report` plugin: one tool that persists the phase report through Convoy. */
 export function renderWriteReportPlugin(spec: PluginToolSpec): string {
   const urlLiteral = sourceLiteral(spec.bridgeUrl)
@@ -252,3 +271,14 @@ export function pluginHealth(descriptors: readonly PluginToolHealth[]): { ok: bo
 
 /** The advisor tool names a rendered advisor plugin registers, in order. */
 export const advisorPluginToolNames = [advisorToolName, advisorFeedbackToolName] as const
+
+/**
+ * Every tool name the given specs will actually register: a report spec
+ * registers one tool, an advisor spec registers two. Used to build the
+ * registration-health list that is checked before any prompt is admitted.
+ */
+export function requiredToolNames(specs: readonly PluginToolSpec[]): string[] {
+  return specs.flatMap((spec) =>
+    spec.name === writeReportToolName ? [spec.name] : [advisorToolName, advisorFeedbackToolName],
+  )
+}

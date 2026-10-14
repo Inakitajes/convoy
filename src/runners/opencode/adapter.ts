@@ -12,6 +12,9 @@
  * success.
  */
 
+import { mkdir, writeFile } from "node:fs/promises"
+import { join } from "node:path"
+
 import type {
   AttemptOutcome,
   Capability,
@@ -25,7 +28,18 @@ import type {
 import { bootOwnedServer, type OwnedServer } from "./boot"
 import { reconstructFromMessages } from "./history"
 import { mapOpencodeEvent } from "./log-events"
+import {
+  planPluginRegistration,
+  pluginFileNameForTool,
+  pluginHealth,
+  pluginIdForTool,
+  requiredToolNames,
+  type PluginRegistration,
+  type PluginToolHealth,
+  type PluginToolSpec,
+} from "./plugin-tools"
 import { assertSupportedOpencodeRuntime } from "./runtime"
+import { openV2Terminal, type OpenV2TerminalDeps, type OpenV2TerminalInput } from "./terminal"
 import {
   createSession,
   createV2Client,
@@ -43,10 +57,144 @@ export type OpencodeRunnerOptions = {
   env?: NodeJS.ProcessEnv
   /** Rendered V2 config injected as `OPENCODE_CONFIG_CONTENT` (task 4.3). */
   configContent?: string
+  /**
+   * Ready-made v2 `plugins` entries merged into the injected config. `plugins`
+   * belongs on the config `src/runners/opencode/config.ts` renders, but that
+   * module is owned elsewhere; this adapter accepts the finished list instead
+   * (task 4.5). The materialized per-run plugin directory is appended to it.
+   */
+  plugins?: readonly string[]
+  /**
+   * The run's own directory. Each run materializes its v2 plugin modules under
+   * `<pluginBaseDir>/plugins`, so two runs never share a mutable tool module.
+   */
+  pluginBaseDir?: string
+  /**
+   * The Convoy report/advisor tools to expose through per-run v2 plugins. When
+   * set, the adapter materializes them (not the legacy v1 tool shims) and
+   * verifies their registration before any prompt is admitted.
+   */
+  pluginTools?: readonly PluginToolSpec[]
   deps?: {
     boot?: typeof bootOwnedServer
     checkRuntime?: typeof assertSupportedOpencodeRuntime
+    /**
+     * Registration-health probe for the required plugin tools. Defaults to
+     * reading the server's plugin list. Fail closed: a probe that cannot verify
+     * registration must report the tool as unregistered.
+     */
+    checkPluginHealth?: (required: readonly string[]) => Promise<readonly PluginToolHealth[]>
   }
+}
+
+/** Raised when a required Convoy tool did not register with the v2 runtime. */
+export class PluginRegistrationError extends Error {
+  readonly missing: readonly string[]
+
+  constructor(missing: readonly string[], required: readonly string[]) {
+    super(
+      `opencode v2 plugin tools are not registered before prompting: ${missing.join(", ")} ` +
+        `(required: ${required.join(", ")})`,
+    )
+    this.name = "PluginRegistrationError"
+    this.missing = missing
+  }
+}
+
+/**
+ * Writes a planned registration to disk: a `0700` directory holding `0600`
+ * module files. Materialization is per run because the directory is the run
+ * root, so two runs never share a mutable tool shim.
+ */
+export async function materializePluginModules(registration: PluginRegistration): Promise<string[]> {
+  await mkdir(registration.dir, { recursive: true, mode: 0o700 })
+  const written: string[] = []
+  for (const [fileName, source] of Object.entries(registration.files)) {
+    const path = join(registration.dir, fileName)
+    await writeFile(path, source, { mode: 0o600 })
+    written.push(path)
+  }
+  return written
+}
+
+/**
+ * Merges plugin entries into the injected config content. Accepts an opaque
+ * ready-made JSON string (task 4.5); a non-JSON or non-object value fails closed
+ * rather than silently clobbering the caller's configuration.
+ */
+export function mergePluginConfigContent(
+  configContent: string | undefined,
+  plugins: readonly string[],
+): string | undefined {
+  if (plugins.length === 0) return configContent
+  let base: Record<string, unknown> = {}
+  if (configContent) {
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(configContent)
+    } catch {
+      throw new Error("opencode configContent must be JSON to merge plugin entries")
+    }
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      throw new Error("opencode configContent must be a JSON object to merge plugin entries")
+    }
+    base = parsed as Record<string, unknown>
+  }
+  const existing = Array.isArray(base.plugins) ? (base.plugins as unknown[]) : []
+  return JSON.stringify({ ...base, plugins: [...existing, ...plugins] })
+}
+
+/**
+ * Fails closed unless every required tool has a positive registration
+ * descriptor. A missing descriptor is treated exactly like a negative one so a
+ * partial probe cannot be read as health.
+ */
+export function assertPluginToolsRegistered(
+  required: readonly string[],
+  descriptors: readonly PluginToolHealth[],
+): void {
+  const seen = new Map(descriptors.map((descriptor) => [descriptor.name, descriptor.registered]))
+  const health = pluginHealth(required.map((name) => ({ name, registered: seen.get(name) === true })))
+  if (!health.ok) throw new PluginRegistrationError(health.missing, required)
+}
+
+/** Best-effort default probe: a plugin must be listed active, by id or file. */
+async function probePluginHealth(
+  client: OpencodeV2Client,
+  directory: string,
+  required: readonly string[],
+  registration: PluginRegistration,
+): Promise<PluginToolHealth[]> {
+  let infos: Array<{ id?: string; source?: { type?: string; path?: string }; state?: { status?: string } }> = []
+  try {
+    const listed = await client.plugin.list({ location: { directory } })
+    if (Array.isArray(listed?.data)) infos = listed.data as typeof infos
+  } catch {
+    // An unverifiable registration is not a healthy one.
+    return required.map((name) => ({ name, registered: false }))
+  }
+  const active = infos.filter((info) => info.state?.status === "active")
+  const activeIds = new Set(active.map((info) => info.id).filter((id): id is string => typeof id === "string"))
+  const activePaths = new Set(
+    active
+      .filter((info) => info.source?.type === "local")
+      .map((info) => info.source?.path)
+      .filter((path): path is string => typeof path === "string"),
+  )
+  return required.map((name) => ({
+    name,
+    registered: activeIds.has(pluginIdForTool(name)) || activePaths.has(join(registration.dir, pluginFileNameForTool(name))),
+  }))
+}
+
+/**
+ * The app-callable terminal edge (task 4.6): opens a terminal for a run's owned
+ * v2 server, staging the `0600` password file and keeping the password out of
+ * argv. The `exec`/`stagePassword` seams let callers test the built command
+ * without opening a window.
+ */
+export function openRunTerminal(input: OpenV2TerminalInput, deps?: OpenV2TerminalDeps): Promise<void> {
+  return openV2Terminal(input, deps)
 }
 
 /** The execution adapter plus the lifecycle edge the composition root calls. */
@@ -141,6 +289,18 @@ export function summarizeAssistant(entry: unknown): AssistantSummary {
 }
 
 export function createOpencodeRunner(options: OpencodeRunnerOptions): OpencodeRunner {
+  const pluginSpecs = options.pluginTools ?? []
+  if (pluginSpecs.length > 0 && !options.pluginBaseDir) {
+    throw new Error("opencode runner: pluginBaseDir is required when pluginTools are provided")
+  }
+  const pluginRegistration =
+    pluginSpecs.length > 0 ? planPluginRegistration(options.pluginBaseDir as string, pluginSpecs) : undefined
+  const requiredTools = pluginRegistration ? requiredToolNames(pluginSpecs) : []
+  const configContent = mergePluginConfigContent(options.configContent, [
+    ...(options.plugins ?? []),
+    ...(pluginRegistration ? [pluginRegistration.dir] : []),
+  ])
+
   let serverPromise: Promise<OwnedServer> | undefined
   let client: OpencodeV2Client | undefined
   const activeSessions = new Map<number, string>()
@@ -151,9 +311,13 @@ export function createOpencodeRunner(options: OpencodeRunnerOptions): OpencodeRu
       const boot = options.deps?.boot ?? bootOwnedServer
       serverPromise = (async () => {
         await checkRuntime()
+        // Materialize this run's plugin modules before the server loads config,
+        // then inject the directory through the config's `plugins` list. The
+        // legacy v1 tool shims in Convoy's config dir are never used here.
+        if (pluginRegistration) await materializePluginModules(pluginRegistration)
         const baseEnv = options.env ?? process.env
-        const env = options.configContent
-          ? { ...baseEnv, OPENCODE_CONFIG_CONTENT: options.configContent }
+        const env = configContent
+          ? { ...baseEnv, OPENCODE_CONFIG_CONTENT: configContent }
           : baseEnv
         return await boot({ cwd: options.cwd, env })
       })()
@@ -161,6 +325,16 @@ export function createOpencodeRunner(options: OpencodeRunnerOptions): OpencodeRu
     const server = await serverPromise
     client ??= createV2Client({ baseUrl: server.url, password: server.password })
     return { server, client }
+  }
+
+  // Required Convoy tools must actually register before a prompt is admitted;
+  // otherwise the agent would silently run without its report/advisor tools.
+  const ensurePluginToolsRegistered = async (c: OpencodeV2Client): Promise<void> => {
+    if (!pluginRegistration) return
+    const descriptors = options.deps?.checkPluginHealth
+      ? await options.deps.checkPluginHealth(requiredTools)
+      : await probePluginHealth(c, options.cwd, requiredTools, pluginRegistration)
+    assertPluginToolsRegistered(requiredTools, descriptors)
   }
 
   return {
@@ -199,6 +373,7 @@ export function createOpencodeRunner(options: OpencodeRunnerOptions): OpencodeRu
       let streamAbort: AbortController | undefined
       try {
         const { client: c } = await ensureServer()
+        await ensurePluginToolsRegistered(c)
         const session =
           request.continueSession && request.continueSession.runner === "opencode"
             ? { id: request.continueSession.sessionId }

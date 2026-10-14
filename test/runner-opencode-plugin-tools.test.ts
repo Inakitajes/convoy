@@ -5,9 +5,12 @@ import { advisorFeedbackToolName, advisorToolName } from "../src/advisor"
 import { writeReportToolName } from "../src/report"
 import {
   planPluginRegistration,
+  pluginFileNameForTool,
   pluginHealth,
+  pluginIdForTool,
   renderAdvisorPlugin,
   renderWriteReportPlugin,
+  requiredToolNames,
   type PluginToolSpec,
 } from "../src/runners/opencode/plugin-tools"
 
@@ -117,5 +120,16 @@ describe("opencode v2 plugin tool rendering (task 4.5)", () => {
     ])).toEqual({ ok: false, missing: [writeReportToolName, advisorFeedbackToolName] })
 
     expect(pluginHealth([])).toEqual({ ok: true, missing: [] })
+  })
+
+  test("expands required tool names and maps each tool to its owning module", () => {
+    // A report spec registers one tool; an advisor spec registers two.
+    expect(requiredToolNames([reportSpec])).toEqual([writeReportToolName])
+    expect(requiredToolNames([advisorSpec])).toEqual([advisorToolName, advisorFeedbackToolName])
+
+    // The advisor feedback tool shares the advisor module and plugin id.
+    expect(pluginIdForTool(advisorFeedbackToolName)).toBe(pluginIdForTool(advisorToolName))
+    expect(pluginFileNameForTool(advisorFeedbackToolName)).toBe("advisor.ts")
+    expect(pluginFileNameForTool(writeReportToolName)).toBe("write_report.ts")
   })
 })
