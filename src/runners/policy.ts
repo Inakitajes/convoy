@@ -47,7 +47,8 @@ export type PolicyState = {
   advisorSatisfied?: boolean
 }
 
-const mutating: ReadonlySet<ActionIntent> = new Set(["write", "execute", "delegate"])
+const readOnlyDenied: ReadonlySet<ActionIntent> = new Set(["write", "execute", "delegate", "network"])
+const verifyDenied: ReadonlySet<ActionIntent> = new Set(["write", "delegate", "network"])
 const askWorthy: ReadonlySet<ActionIntent> = new Set(["write", "execute", "delegate", "network"])
 
 function matchesRule(request: ActionRequest, rule: HardDenyRule): boolean {
@@ -72,12 +73,17 @@ export function evaluateAction(request: ActionRequest, config: PolicyConfig, sta
     }
   }
 
-  if (config.mode === "read-only" && mutating.has(request.intent)) {
+  // An unclassifiable action never gains access by default, in any mode.
+  if (request.intent === "other") {
+    return { effect: "deny", reason: `unclassifiable action ${request.tool}` }
+  }
+
+  if (config.mode === "read-only" && readOnlyDenied.has(request.intent)) {
     return { effect: "deny", reason: `read-only step may not ${request.intent}` }
   }
 
   if (config.mode === "verify") {
-    if (request.intent === "write" || request.intent === "delegate") {
+    if (verifyDenied.has(request.intent)) {
       return { effect: "deny", reason: `verification step may not ${request.intent}` }
     }
     if (request.intent === "execute" && !isVerifyAllowed(request, config.verifyAllow ?? [])) {
