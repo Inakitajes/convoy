@@ -33,19 +33,31 @@ Newly added coverage for this change (all deterministic, all passing):
   `runner-adapter-direction.test.ts`, `runner-session-handles.test.ts` — the
   common dispatch, the extensibility fixture and the boundary audit.
 
-## Blocked (no live claim)
+## Live acceptance (bounded, explicitly authorized)
 
-- **Claude live calls** — not run. Spending usage requires explicit authorization
-  and account credentials; no `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` was
-  available for an api-key cell. Owner-subscription cells are covered by
-  `scripts/runner-acceptance.ts` (`CONVOY_ACCEPT=1`) when the operator authorizes
-  a bounded run.
-- **OpenCode live tool/service parity** — not run. The authorized free model
-  (`nan/deepseek-v4-flash`) currently routes to no tool-capable endpoint, so a
-  live turn can only exercise protocol/auth/session, not `write_report`, advisor
-  or tool use. Enabling `CONVOY_V2_LIVE=1` without such an endpoint would prove
-  nothing about service parity.
+Run with `CONVOY_ACCEPT=1 bun run scripts/runner-acceptance.ts` — one tiny Claude
+write turn plus one OpenCode turn in a disposable scratch directory. Refuses to
+run without the opt-in flag; never part of `bun test`.
 
-Neither blocked cell is counted as passed anywhere in this change. The
-deterministic fixtures remain the evidence for the contract, the services and the
-dispatch.
+| Cell | Command | Result |
+|---|---|---|
+| Claude (haiku, subscription, enforcement) | `CONVOY_ACCEPT=1 bun run scripts/runner-acceptance.ts` | `status=completed cost=0.0049715`; `hook-fired=true`; wrote `out.txt` = `CLAUDE-ACCEPT` |
+| OpenCode (`nan/deepseek-v4-flash`) | same run | `status=completed cost=0.00897575`; session returned |
+
+What this proves: the Claude adapter's mandatory enforcement (PreToolUse hook +
+MCP permission host) fires on a real turn, and the attempt completes and writes
+the file. The OpenCode cell proves protocol/auth/session only — the free model
+has no tool-capable endpoint, so it is **not** evidence of report/advisor/tool
+parity. No paid API-key cell was run, and the Claude figure is a subscription
+**estimate**, not an invoice line.
+
+## Still not claimed
+
+- **Claude api-key cells** — not run: no `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN`
+  was available.
+- **OpenCode tool/service parity (live)** — not run: the authorized free model
+  routes to no tool-capable endpoint, so enabling `CONVOY_V2_LIVE=1` would prove
+  nothing about `write_report`, the advisor or tool use.
+
+Neither is counted as passed anywhere in this change. The deterministic fixtures
+remain the evidence for the contract, the services and the dispatch.
