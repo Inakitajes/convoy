@@ -28,6 +28,6 @@
 
 ## 5. Close out
 
-- [ ] 5.1 Update `docs/runners.md`/`docs/development.md` to describe the single port and service capabilities; verify examples parse.
-- [ ] 5.2 Run `bun run typecheck`, `bun test`, and `bun run build`; verify all green and the acceptance script still completes a bounded mixed run.
-- [ ] 5.3 Audit that no harness-specific branch remains in core and that vendor types stay behind adapter boundaries; verify the dependency-boundary test passes.
+- [x] 5.1 Update `docs/runners.md`/`docs/development.md` to describe the single port and service capabilities; verify examples parse.
+- [x] 5.2 Run `bun run typecheck`, `bun test`, and `bun run build`; verify all green and the acceptance script still completes a bounded mixed run.
+- [x] 5.3 Audit that no harness-specific branch remains in core and that vendor types stay behind adapter boundaries; verify the dependency-boundary test passes.
