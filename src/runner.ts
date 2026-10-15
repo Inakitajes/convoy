@@ -2,6 +2,7 @@ import { existsSync } from "node:fs"
 import { appendFile, link, mkdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises"
 import { randomUUID } from "node:crypto"
 import { dirname, join } from "node:path"
+import { fileURLToPath } from "node:url"
 import { stdin, stdout } from "node:process"
 import { createInterface } from "node:readline/promises"
 
@@ -12,10 +13,15 @@ import { installAdvisorTool, startAdvisorBridge, type AdvisorBridge } from "./ad
 import { readAdvisorSplit, renderAdvisorSplit } from "./advisor-report"
 import { createAdvisorRuntime, totalAdvisorUsage, type AdvisorPhaseHandle, type AdvisorRuntime } from "./advisor-runtime"
 import { aggregateAdvisorEvents, createAdvisorEventJournal, readAdvisorEvents, type AdvisorEvent, type AdvisorEventJournal } from "./advisor-events"
-import { opencodeConfig } from "./agents"
+import { opencodeConfig, loadAgentPrompt } from "./agents"
 import { fileParts } from "./attachments"
 import { Caffeinate } from "./caffeinate"
 import { ensureClaudeAvailable, openClaudeSessionWindow, promptClaudePhase } from "./claude-code"
+import { baseAgentName } from "./runners/agent-source"
+import { buildEnforcementPlan } from "./runners/compose"
+import { createClaudeRunner } from "./runners/claude/adapter"
+import type { EnforcementPlan } from "./runners/claude/enforcement"
+import type { AttachmentDescriptor, ExecutionMode, ExecutionRequest, RunnerEvent } from "./runners/contracts"
 import { addAllAndCommit, createCleanRepoSnapshot, currentBranch, currentHead, describeRepoSnapshotDifference, dirtyFilesPreview, dirtyTreeError, ensureRepoReady, restoreRepoSnapshot, type RepoSnapshot, statusPorcelain, writeDiff } from "./git"
 import { gitCommonDir, protectAttemptTip, runRefPrefix } from "./finalization/refs"
 import { recordLedgeredCommit } from "./finalization/ledger"
@@ -2330,26 +2336,80 @@ async function executeOpenCodePhaseAttempt(input: PhaseAttemptInput): Promise<Ph
  * assistant text), executed by the local `claude` CLI instead of a session.
  */
 async function executeClaudeCodePhaseAttempt(input: PhaseAttemptInput): Promise<PhaseAttemptResult> {
-  const result = await promptClaudePhase({
-    phase: input.phase,
-    workspace: input.workspace,
-    targetDir: input.targetDir,
-    prompt: input.prepared.prompt,
-    attachments: input.prepared.attachments,
-    attempt: input.attempt,
-    progress: input.progress,
-    shutdown: input.shutdown,
-    ...(input.sessionRef ? { sessionRef: input.sessionRef } : {}),
+  const phase = input.phase
+  const base = baseAgentName(phase.agentName)
+  const mode: ExecutionMode = phase.readOnly ? (phase.verify ? "verify" : "read-only") : "write"
+  const enforcement = claudeEnforcementFromEnv()
+  const runner = createClaudeRunner({
+    cwd: input.targetDir,
+    env: process.env,
+    ...(enforcement ? { enforcement } : {}),
   })
-  return {
-    assistantText: result.assistantText,
-    sessionID: result.sessionID,
-    model: stepRunnerFor(input.phase.runner).modelLabel(input.phase.model),
-    finish: result.finish,
-    cost: result.cost,
-    tokens: result.tokens,
-    error: result.error,
+
+  const request: ExecutionRequest = {
+    runId: input.workspace.runID,
+    phaseName: phase.name,
+    attempt: input.attempt,
+    runner: "claude-code",
+    checkout: input.targetDir,
+    agent: {
+      name: base,
+      mode,
+      model: { runner: "claude-code", modelId: phase.model && phase.model.length > 0 ? phase.model : "default" },
+      instructions: loadAgentPrompt(base, input.targetDir),
+    },
+    prompt: input.prepared.prompt,
+    auth: { mode: "subscription" },
+    mode,
+    approvals: "auto",
+    attachments: claudeAttachmentDescriptors(input.prepared.attachments),
+    signal: input.shutdown.signal,
   }
+
+  const outcome = await runner.executeAttempt(request, (event) => {
+    if (event.type === "session") input.progress.phaseSession(phase.name, event.session.sessionId)
+    else if (event.type === "text") input.progress.phaseMessage(phase.name, { channel: "response", text: event.text })
+    else if (event.type === "reasoning") input.progress.phaseMessage(phase.name, { channel: "reasoning", text: event.text })
+    else if (event.type === "tool") input.progress.phaseActivity(phase.name, `tool: ${event.name}`, "tool")
+  })
+
+  if (input.sessionRef && outcome.session) input.sessionRef.id = outcome.session.sessionId
+
+  return {
+    assistantText: outcome.assistantText ?? "",
+    ...(outcome.session ? { sessionID: outcome.session.sessionId } : {}),
+    model: stepRunnerFor("claude-code").modelLabel(phase.model),
+    ...(outcome.finish !== undefined ? { finish: outcome.finish } : {}),
+    ...(outcome.usage?.costEstimate !== undefined ? { cost: outcome.usage.costEstimate } : {}),
+    ...(outcome.usage ? { tokens: outcome.usage } : {}),
+    ...(outcome.error !== undefined ? { error: outcome.error } : {}),
+  }
+}
+
+/** The enforcement plan from the environment, when the app exposes hook/MCP commands. */
+function claudeEnforcementFromEnv(): EnforcementPlan | undefined {
+  const hookCommand = process.env.CONVOY_CLAUDE_HOOK_COMMAND
+  const permissionCommand = process.env.CONVOY_CLAUDE_MCP_COMMAND
+  if (!hookCommand || !permissionCommand) return undefined
+  return buildEnforcementPlan({ hookCommand, permissionCommand })
+}
+
+/** FilePartInput (OpenCode parts) → neutral attachment descriptors. */
+function claudeAttachmentDescriptors(files: readonly FilePartInput[]): AttachmentDescriptor[] {
+  const descriptors: AttachmentDescriptor[] = []
+  for (const file of files) {
+    try {
+      descriptors.push({
+        kind: file.mime === "application/x-directory" ? "directory" : "file",
+        path: fileURLToPath(file.url),
+        mime: file.mime,
+        ...(file.filename ? { filename: file.filename } : {}),
+      })
+    } catch {
+      // A non-file URL cannot be delivered to the CLI; skip it here.
+    }
+  }
+  return descriptors
 }
 
 /** Validates a candidate deliverable; on failure keeps it as forensics and throws. */
