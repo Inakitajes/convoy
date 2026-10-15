@@ -15,9 +15,9 @@ function doubleAdapter(id: RunnerId): ExecutionAdapter {
       return { runner: id, version: "double", capabilities: [{ id: "write", availability: "available" }] }
     },
     async executeAttempt(request: ExecutionRequest, sink: (event: RunnerEvent) => void) {
-      sink({ type: "session", runner: id, attempt: request.attempt, session: { runner: id, sessionId: "ses_double" } })
-      sink({ type: "text", runner: id, attempt: request.attempt, text: "ok" })
-      sink({ type: "terminal", runner: id, attempt: request.attempt, outcome: { status: "completed", finish: "stop" } })
+      sink({ type: "session", runner: id, attempt: request.identity.attempt, session: { runner: id, sessionId: "ses_double" } })
+      sink({ type: "text", runner: id, attempt: request.identity.attempt, text: "ok" })
+      sink({ type: "terminal", runner: id, attempt: request.identity.attempt, outcome: { status: "completed", finish: "stop" } })
       return { status: "completed", finish: "stop" }
     },
     async cancelAttempt() {},

@@ -13,9 +13,7 @@ import type { AttemptOutcome, ExecutionAdapter, ExecutionRequest, RunnerEvent, R
 
 export function makeRequest(overrides: Partial<ExecutionRequest> = {}): ExecutionRequest {
   return {
-    runId: "run-conformance",
-    phaseName: "implement",
-    attempt: 1,
+    identity: { runId: "run-conformance", phaseName: "implement", attempt: 1 },
     runner: "opencode",
     checkout: "/tmp/checkout",
     agent: { name: "implementer", mode: "write", model: { runner: "opencode", modelId: "openai/gpt" } },
@@ -52,14 +50,14 @@ export function runExecutionConformance(id: RunnerId, makeAdapter: () => Executi
       expect(terminalStatuses).toContain(outcome.status)
       expect(events.length).toBeGreaterThan(0)
       expect(events.every((event) => event.runner === id)).toBe(true)
-      expect(events.every((event) => event.attempt === request.attempt)).toBe(true)
+      expect(events.every((event) => event.attempt === request.identity.attempt)).toBe(true)
       if (outcome.status === "completed") {
         expect(events.some((event) => event.type === "terminal")).toBe(true)
       }
     })
 
     test("cancellation resolves without throwing for an unknown attempt", async () => {
-      await expect(makeAdapter().cancelAttempt({ runId: "run-conformance", attempt: 99 })).resolves.toBeUndefined()
+      await expect(makeAdapter().cancelAttempt({ runId: "run-conformance", phaseName: "implement", attempt: 99 })).resolves.toBeUndefined()
     })
   })
 }

@@ -23,6 +23,31 @@ export type RunnerSessionRef = {
   sessionId: string
 }
 
+/**
+ * Collision-free attempt identity (change `unify-runner-system`, design D2).
+ *
+ * A phase's local attempt ordinal is not unique on its own: two phases running
+ * in parallel in one run can both be on attempt 1. Run + phase + attempt names
+ * exactly one attempt, so cancellation, pending decisions and service closures
+ * are scoped to the attempt rather than to a bare number.
+ */
+export type AttemptIdentity = {
+  /** Originating run. */
+  runId: string
+  /** Phase the attempt belongs to. */
+  phaseName: string
+  /** Local attempt ordinal within the phase; never unique on its own. */
+  attempt: number
+}
+
+/**
+ * Stable key for one attempt across a run. Mirrors the journal's record key so
+ * two parallel phases with the same local ordinal never collide.
+ */
+export function attemptKey(identity: AttemptIdentity): string {
+  return `${identity.runId}:${identity.phaseName}:${identity.attempt}`
+}
+
 // ---------------------------------------------------------------------------
 // Capabilities
 // ---------------------------------------------------------------------------
@@ -146,9 +171,8 @@ export type ApprovalMode = "interactive" | "auto" | "smart"
 // ---------------------------------------------------------------------------
 
 export type ExecutionRequest = {
-  runId: string
-  phaseName: string
-  attempt: number
+  /** The exact attempt this request executes, collision-free across a run. */
+  identity: AttemptIdentity
   runner: RunnerId
   /** Verified checkout the attempt may operate in. */
   checkout: string
@@ -243,7 +267,7 @@ export interface ExecutionAdapter {
     services?: ExecutionServices,
   ): Promise<AttemptOutcome>
   /** Cancel the identified attempt if this adapter is currently running it. */
-  cancelAttempt(attempt: { runId: string; attempt: number }): Promise<void>
+  cancelAttempt(attempt: AttemptIdentity): Promise<void>
 }
 
 /** Optional conversation/control surface; only implemented where honored. */

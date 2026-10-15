@@ -2350,9 +2350,7 @@ async function executeClaudeCodePhaseAttempt(input: PhaseAttemptInput): Promise<
   })
 
   const request: ExecutionRequest = {
-    runId: input.workspace.runID,
-    phaseName: phase.name,
-    attempt: input.attempt,
+    identity: { runId: input.workspace.runID, phaseName: phase.name, attempt: input.attempt },
     runner: "claude-code",
     checkout: input.targetDir,
     agent: {

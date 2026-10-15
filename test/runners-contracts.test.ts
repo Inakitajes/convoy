@@ -27,9 +27,9 @@ function fakeAdapter(id: "opencode" | "claude-code", outcome: AttemptOutcome): E
       return capabilities
     },
     async executeAttempt(request: ExecutionRequest, sink: (event: RunnerEvent) => void): Promise<AttemptOutcome> {
-      sink({ type: "session", runner: id, attempt: request.attempt, session: { runner: id, sessionId: "ses_fake" } })
-      sink({ type: "text", runner: id, attempt: request.attempt, text: "hello" })
-      sink({ type: "terminal", runner: id, attempt: request.attempt, outcome })
+      sink({ type: "session", runner: id, attempt: request.identity.attempt, session: { runner: id, sessionId: "ses_fake" } })
+      sink({ type: "text", runner: id, attempt: request.identity.attempt, text: "hello" })
+      sink({ type: "terminal", runner: id, attempt: request.identity.attempt, outcome })
       return outcome
     },
     async cancelAttempt() {},
@@ -38,9 +38,7 @@ function fakeAdapter(id: "opencode" | "claude-code", outcome: AttemptOutcome): E
 
 function request(): ExecutionRequest {
   return {
-    runId: "run-1",
-    phaseName: "implement",
-    attempt: 1,
+    identity: { runId: "run-1", phaseName: "implement", attempt: 1 },
     runner: "claude-code",
     checkout: "/tmp/checkout",
     agent: { name: "implementer", mode: "write", model: { runner: "claude-code", modelId: "sonnet" } },

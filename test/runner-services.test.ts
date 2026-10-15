@@ -58,9 +58,7 @@ describe("attempt service delivery", () => {
   }
 
   const request: ExecutionRequest = {
-    runId: "r",
-    phaseName: "p",
-    attempt: 1,
+    identity: { runId: "r", phaseName: "p", attempt: 1 },
     runner: "claude-code",
     checkout: "/tmp",
     agent: { name: "a", mode: "write", model: { runner: "claude-code", modelId: "haiku" } },

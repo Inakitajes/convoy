@@ -25,6 +25,7 @@ import type {
   RunnerEvent,
   Usage,
 } from "../contracts"
+import { attemptKey } from "../contracts"
 import { bootOwnedServer, type OwnedServer } from "./boot"
 import { reconstructFromMessages } from "./history"
 import { mapOpencodeEvent } from "./log-events"
@@ -308,7 +309,7 @@ export function createOpencodeRunner(options: OpencodeRunnerOptions): OpencodeRu
 
   let serverPromise: Promise<OwnedServer> | undefined
   let client: OpencodeV2Client | undefined
-  const activeSessions = new Map<number, string>()
+  const activeSessions = new Map<string, string>()
 
   const ensureServer = async (): Promise<{ server: OwnedServer; client: OpencodeV2Client }> => {
     if (!serverPromise) {
@@ -374,7 +375,7 @@ export function createOpencodeRunner(options: OpencodeRunnerOptions): OpencodeRu
       if (request.runner !== "opencode") {
         return { status: "failed", error: `opencode adapter received a ${request.runner} request` }
       }
-      const attempt = request.attempt
+      const attempt = request.identity.attempt
       let streamAbort: AbortController | undefined
       try {
         const { client: c } = await ensureServer()
@@ -382,8 +383,8 @@ export function createOpencodeRunner(options: OpencodeRunnerOptions): OpencodeRu
         const session =
           request.continueSession && request.continueSession.runner === "opencode"
             ? { id: request.continueSession.sessionId }
-            : await createSession(c, { directory: request.checkout, title: `convoy ${request.phaseName}` })
-        activeSessions.set(attempt, session.id)
+            : await createSession(c, { directory: request.checkout, title: `convoy ${request.identity.phaseName}` })
+        activeSessions.set(attemptKey(request.identity), session.id)
         sink({ type: "session", runner: "opencode", attempt, session: { runner: "opencode", sessionId: session.id } })
 
         // Stream this attempt's live events (text/reasoning deltas, usage).
@@ -465,12 +466,12 @@ export function createOpencodeRunner(options: OpencodeRunnerOptions): OpencodeRu
         return outcome
       } finally {
         streamAbort?.abort()
-        activeSessions.delete(attempt)
+        activeSessions.delete(attemptKey(request.identity))
       }
     },
 
     async cancelAttempt(attempt) {
-      const sessionId = activeSessions.get(attempt.attempt)
+      const sessionId = activeSessions.get(attemptKey(attempt))
       if (!sessionId || !client) return
       await interruptSession(client, sessionId).catch(() => undefined)
     },

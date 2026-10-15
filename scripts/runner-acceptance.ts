@@ -44,9 +44,7 @@ const enforcement = buildEnforcementPlan({
 const composition = composeRunners({ cwd: dir, env: process.env, enforcement })
 
 const base = {
-  runId: "acceptance",
-  phaseName: "acceptance",
-  attempt: 1,
+  identity: { runId: "acceptance", phaseName: "acceptance", attempt: 1 },
   checkout: dir,
   auth: { mode: "subscription" as const },
   approvals: "auto" as const,
@@ -72,7 +70,7 @@ try {
   // OpenCode: one free turn on the authorized model.
   const opencodeRequest: ExecutionRequest = {
     ...base,
-    attempt: 2,
+    identity: { ...base.identity, attempt: 2 },
     runner: "opencode",
     mode: "write",
     agent: { name: "implementer", mode: "write", model: { runner: "opencode", modelId: "nan/deepseek-v4-flash" } },

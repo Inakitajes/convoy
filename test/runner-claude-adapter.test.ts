@@ -15,9 +15,7 @@ import { buildClaudeSettings, buildPermissionMcpConfig } from "../src/runners/cl
 
 function request(overrides: Partial<ExecutionRequest> = {}): ExecutionRequest {
   return {
-    runId: "run-claude",
-    phaseName: "implement",
-    attempt: 1,
+    identity: { runId: "run-claude", phaseName: "implement", attempt: 1 },
     runner: "claude-code",
     checkout: "/tmp/checkout",
     agent: { name: "implementer", mode: "write", model: { runner: "claude-code", modelId: "sonnet" } },

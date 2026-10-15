@@ -216,7 +216,7 @@ export function createClaudeRunner(options: ClaudeRunnerOptions): ClaudeRunner {
         invocation = buildClaudeInvocation(request, enforcement, { env: baseEnv })
       } catch (error) {
         const outcome: AttemptOutcome = { status: "failed", error: error instanceof Error ? error.message : String(error) }
-        sink({ type: "terminal", runner: "claude-code", attempt: request.attempt, outcome })
+        sink({ type: "terminal", runner: "claude-code", attempt: request.identity.attempt, outcome })
         return outcome
       }
 
@@ -251,7 +251,7 @@ export function createClaudeRunner(options: ClaudeRunnerOptions): ClaudeRunner {
           }
           for (const signal of describeClaudeEvent(parsed, state)) {
             if (signal.type === "session") sessionId = signal.sessionID
-            const mapped = signalsToEvents(signal, request.attempt)
+            const mapped = signalsToEvents(signal, request.identity.attempt)
             for (const event of mapped.events) {
               if (event.type === "tool") services?.loopGuard?.observe({ kind: "tool", detail: event.name })
               sink(event)
@@ -269,7 +269,7 @@ export function createClaudeRunner(options: ClaudeRunnerOptions): ClaudeRunner {
             ...(sessionId ? { session: { runner: "claude-code", sessionId } } : {}),
             ...(request.signal.aborted ? {} : { error: `claude exited with status ${exitCode} before reporting a result` }),
           }
-          sink({ type: "terminal", runner: "claude-code", attempt: request.attempt, outcome: result })
+          sink({ type: "terminal", runner: "claude-code", attempt: request.identity.attempt, outcome: result })
           return result
         }
         const final: AttemptOutcome = { ...outcome, ...(sessionId ? { session: { runner: "claude-code", sessionId } } : {}) }
@@ -287,7 +287,7 @@ export function createClaudeRunner(options: ClaudeRunnerOptions): ClaudeRunner {
           ...(sessionId ? { session: { runner: "claude-code", sessionId } } : {}),
           error: error instanceof Error ? error.message : String(error),
         }
-        sink({ type: "terminal", runner: "claude-code", attempt: request.attempt, outcome: result })
+        sink({ type: "terminal", runner: "claude-code", attempt: request.identity.attempt, outcome: result })
         return result
       } finally {
         request.signal.removeEventListener("abort", kill)

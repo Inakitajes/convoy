@@ -41,9 +41,7 @@ describe("adapter composition", () => {
     const events: RunnerEvent[] = []
     const outcome = await registry.require("claude-code").execution.executeAttempt(
       {
-        runId: "r",
-        phaseName: "p",
-        attempt: 1,
+        identity: { runId: "r", phaseName: "p", attempt: 1 },
         runner: "claude-code",
         checkout: "/tmp",
         agent: { name: "a", mode: "write", model: { runner: "claude-code", modelId: "sonnet" } },

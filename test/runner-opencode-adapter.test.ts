@@ -124,9 +124,7 @@ describe("opencode v2 plugin wiring (task 4.5)", () => {
 
     const events: RunnerEvent[] = []
     const request: ExecutionRequest = {
-      runId: "run-plugin",
-      phaseName: "implement",
-      attempt: 1,
+      identity: { runId: "run-plugin", phaseName: "implement", attempt: 1 },
       runner: "opencode",
       checkout: dir,
       agent: { name: "implementer", mode: "write", model: { runner: "opencode", modelId: "nan/deepseek-v4-flash" } },
@@ -159,9 +157,7 @@ describe.if(live)("opencode v2 adapter (live, nan/deepseek-v4-flash)", () => {
     const runner = createOpencodeRunner({ cwd: dir })
     const events: RunnerEvent[] = []
     const request: ExecutionRequest = {
-      runId: "run-live",
-      phaseName: "implement",
-      attempt: 1,
+      identity: { runId: "run-live", phaseName: "implement", attempt: 1 },
       runner: "opencode",
       checkout: dir,
       agent: { name: "implementer", mode: "write", model: { runner: "opencode", modelId: "nan/deepseek-v4-flash" } },
@@ -194,9 +190,7 @@ describe.if(live)("opencode v2 adapter (live, nan/deepseek-v4-flash)", () => {
     const dir = await tempDir()
     const runner = createOpencodeRunner({ cwd: dir })
     const base: ExecutionRequest = {
-      runId: "run-live",
-      phaseName: "implement",
-      attempt: 1,
+      identity: { runId: "run-live", phaseName: "implement", attempt: 1 },
       runner: "opencode",
       checkout: dir,
       agent: { name: "implementer", mode: "write", model: { runner: "opencode", modelId: "nan/deepseek-v4-flash" } },
@@ -211,7 +205,7 @@ describe.if(live)("opencode v2 adapter (live, nan/deepseek-v4-flash)", () => {
       expect(first.session?.runner).toBe("opencode")
       const sessionId = first.session!.sessionId
 
-      const second = await runner.executeAttempt({ ...base, attempt: 2, prompt: "Reply with exactly: TWO", continueSession: { runner: "opencode", sessionId } }, () => {})
+      const second = await runner.executeAttempt({ ...base, identity: { ...base.identity, attempt: 2 }, prompt: "Reply with exactly: TWO", continueSession: { runner: "opencode", sessionId } }, () => {})
       expect(second.session?.sessionId).toBe(sessionId)
 
       await expect(runner.backfillEvents(sessionId, 1)).resolves.toBeArray()
