@@ -2036,11 +2036,6 @@ function releasePhaseSession(sessionRef: SessionRef, reports?: ReportRuntime, ad
   advisors?.handleFor(sessionID)?.end()
 }
 
-type PhaseGateDeps = {
-  openWindow: typeof openOpencodeSessionWindow
-  openClaudeWindow?: typeof openClaudeSessionWindow
-}
-
 type PhaseGateOptions = {
   kind: PhaseGateKind
   error?: string
@@ -2049,15 +2044,39 @@ type PhaseGateOptions = {
   signal?: AbortSignal
   /** A gate-level abort must also stop live siblings in a parallel batch. */
   onAbort?: () => void
-  /** Claude Code sessions reopen through its own CLI, not the OpenCode server. */
+  /** Which runner's session the gate reopens; resolved through the opener table. */
   runner?: StepRunnerId
   runDir?: string
 }
 
-const defaultPhaseGateDeps: Required<PhaseGateDeps> = {
-  openWindow: openOpencodeSessionWindow,
-  openClaudeWindow: openClaudeSessionWindow,
+type SessionWindowInput = { targetDir: string; sessionID: string; runDir: string; url?: string; password?: string }
+
+type PhaseGateDeps = {
+  /** Legacy test seam: the OpenCode session-window opener. */
+  openWindow?: typeof openOpencodeSessionWindow
+  /** Legacy test seam: the Claude session-window opener. */
+  openClaudeWindow?: typeof openClaudeSessionWindow
+  /** Openers by runner id; a runner absent here cannot reopen a window. */
+  openers?: Partial<Record<StepRunnerId, (input: SessionWindowInput) => Promise<string>>>
 }
+
+/**
+ * The session-window openers by runner id. This is a registration, not a core
+ * branch: core looks a runner up in the table and never compares a runner name
+ * (change `unify-runner-system`, task 4.2).
+ */
+function sessionWindowOpeners(deps: PhaseGateDeps): Partial<Record<StepRunnerId, (input: SessionWindowInput) => Promise<string>>> {
+  if (deps.openers) return deps.openers
+  const opencode = deps.openWindow ?? openOpencodeSessionWindow
+  const claude = deps.openClaudeWindow ?? openClaudeSessionWindow
+  return {
+    "opencode": (input) =>
+      opencode({ url: input.url ?? "", ...(input.password ? { password: input.password } : {}), targetDir: input.targetDir, sessionID: input.sessionID }),
+    "claude-code": (input) => claude({ targetDir: input.targetDir, sessionID: input.sessionID, runDir: input.runDir }),
+  }
+}
+
+const defaultPhaseGateDeps: PhaseGateDeps = {}
 
 type PhaseGateKind = "interactive" | "failure" | "budget-gate"
 
@@ -2152,15 +2171,19 @@ export async function waitForPhaseGate(
         continue
       }
       try {
-        const backend =
-          options.runner === "claude-code"
-            ? await (deps.openClaudeWindow ?? openClaudeSessionWindow)({ targetDir, sessionID, runDir: options.runDir ?? "" })
-            : await deps.openWindow({
-                url: takeover?.serverUrl ?? "",
-                ...(takeover?.serverPassword ? { password: takeover.serverPassword } : {}),
-                targetDir,
-                sessionID,
-              })
+        const runnerId = stepRunnerFor(options.runner).id
+        const open = sessionWindowOpeners(deps)[runnerId]
+        if (!open) {
+          progress.phaseActivity(phaseName, `no session-window opener is registered for ${runnerId}`, "error")
+          continue
+        }
+        const backend = await open({
+          targetDir,
+          sessionID,
+          runDir: options.runDir ?? "",
+          ...(takeover?.serverUrl ? { url: takeover.serverUrl } : {}),
+          ...(takeover?.serverPassword ? { password: takeover.serverPassword } : {}),
+        })
         if (kind === "failure") {
           // Only a successfully opened session proves the user took control.
           // Until then, keep [c] unavailable and preserve [r].

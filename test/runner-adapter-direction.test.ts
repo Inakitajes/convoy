@@ -55,4 +55,11 @@ describe("adapter dependency direction", () => {
     // Core still dispatches through the registry, not a runner-name branch.
     expect(core).toContain("attemptFor(")
   })
+
+  test("core resolves a session-window opener from a table, not a runner branch (task 4.2)", async () => {
+    const core = await Bun.file("src/runner.ts").text()
+    expect(core).toContain("sessionWindowOpeners")
+    // The old `options.runner === "claude-code" ? ... : ...` gate branch is gone.
+    expect(core).not.toContain('options.runner === "claude-code"')
+  })
 })
