@@ -7,7 +7,7 @@
  * hardcoding "Claude cannot write".
  */
 
-import type { AuthenticationSelection, Capability, CapabilityId, RunnerCapabilities, RunnerId, ServiceId } from "./contracts"
+import type { AuthenticationSelection, Capability, CapabilityId, RunnerCapabilities, RunnerId, ServiceId, SessionOperation } from "./contracts"
 
 export type CapabilityInput = {
   /** Resolved harness version, when known. */
@@ -139,4 +139,32 @@ export function filterSupportedServices<T extends Partial<Record<ServiceId, unkn
     else unsupported.push(service)
   }
   return { supported, unsupported }
+}
+
+/** Maps a session operation to the capability that advertises it. */
+const sessionCapability: Record<SessionOperation, CapabilityId> = {
+  history: "live-observation",
+  resume: "post-exit-resume",
+  attach: "native-live-attach",
+}
+
+export function supportsSessionOperation(resolved: RunnerCapabilities, operation: SessionOperation): boolean {
+  return capabilityAvailable(resolved, sessionCapability[operation])
+}
+
+export class UnsupportedSessionOperationError extends Error {
+  constructor(
+    readonly runner: RunnerId,
+    readonly operation: SessionOperation,
+  ) {
+    super(`runner ${runner} does not support the ${operation} session operation`)
+    this.name = "UnsupportedSessionOperationError"
+  }
+}
+
+/** Refuses a session operation the selected runner cannot honor. */
+export function assertSessionOperationSupported(resolved: RunnerCapabilities, operation: SessionOperation): void {
+  if (!supportsSessionOperation(resolved, operation)) {
+    throw new UnsupportedSessionOperationError(resolved.runner, operation)
+  }
 }

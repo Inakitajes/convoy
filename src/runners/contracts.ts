@@ -208,10 +208,43 @@ export type AttemptOutcome = {
   session?: RunnerSessionRef
   /** Harness-reported finish reason, when exposed (e.g. `length`, `stop`). */
   finish?: string
+  /**
+   * Executor usage for the attempt. When `cumulative`, fold it with
+   * {@link foldUsage} instead of adding it to a running total.
+   */
   usage?: Usage
+  /** Advisor usage, attributed separately from the executor's own usage. */
+  advisorUsage?: Usage
   /** Final assistant text when the harness reports it. */
   assistantText?: string
   error?: string
+}
+
+/**
+ * Folds an updated usage report into a running total. A `cumulative` report
+ * already includes earlier turns, so it replaces the total; a delta is added.
+ * Fields absent from both sides stay absent rather than becoming a false zero.
+ */
+export function foldUsage(total: Usage | undefined, update: Usage): Usage {
+  if (update.cumulative) {
+    const { cumulative: _cumulative, ...rest } = update
+    return rest
+  }
+  const folded: Usage = {}
+  const add = (a?: number, b?: number): number | undefined => (a === undefined && b === undefined ? undefined : (a ?? 0) + (b ?? 0))
+  const input = add(total?.input, update.input)
+  const output = add(total?.output, update.output)
+  const reasoning = add(total?.reasoning, update.reasoning)
+  const cacheRead = add(total?.cacheRead, update.cacheRead)
+  const cacheWrite = add(total?.cacheWrite, update.cacheWrite)
+  const costEstimate = add(total?.costEstimate, update.costEstimate)
+  if (input !== undefined) folded.input = input
+  if (output !== undefined) folded.output = output
+  if (reasoning !== undefined) folded.reasoning = reasoning
+  if (cacheRead !== undefined) folded.cacheRead = cacheRead
+  if (cacheWrite !== undefined) folded.cacheWrite = cacheWrite
+  if (costEstimate !== undefined) folded.costEstimate = costEstimate
+  return folded
 }
 
 // ---------------------------------------------------------------------------
@@ -364,6 +397,63 @@ export type ExecutionServices = {
   loopGuard?: LoopGuardService
 }
 
+// ---------------------------------------------------------------------------
+// Lifecycle and session facets (design D6)
+// ---------------------------------------------------------------------------
+
+/**
+ * The observed result of releasing a runner's owned runtime. A submitted stop
+ * is not termination: `unresolved` means Convoy could not confirm the process
+ * exited and must retain the evidence rather than claim success.
+ */
+export type ReleaseOutcome =
+  | { status: "released" }
+  | { status: "not-owned" }
+  | { status: "unresolved"; reason: string }
+
+/** True only when the adapter's owned runtime is confirmed gone. */
+export function isConfirmedRelease(outcome: ReleaseOutcome): boolean {
+  return outcome.status === "released" || outcome.status === "not-owned"
+}
+
+/**
+ * Session operations Convoy may request from a runner. Each is capability-gated
+ * (`capabilities.ts`): a runner that cannot honour one is never asked, and the
+ * operation is refused by capability rather than silently degraded.
+ */
+export type SessionOperation = "history" | "resume" | "attach"
+
+/** An operation addressed to one exact, runner-qualified session. */
+export type SessionAddress = { session: RunnerSessionRef }
+
+export type SessionHistoryResult = { ok: true; events: readonly RunnerEvent[] } | { ok: false; error: string }
+
+export type SessionResumeRequest = {
+  session: RunnerSessionRef
+  prompt: string
+  identity: AttemptIdentity
+  signal: AbortSignal
+}
+
+export type SessionResumeResult = { ok: true; outcome: AttemptOutcome } | { ok: false; error: string }
+
+export type SessionAttachResult = { ok: true; detail?: string } | { ok: false; error: string }
+
+/**
+ * The optional session surface. An adapter implements only what it can honor:
+ * a recorded transcript is reconstructed, never fabricated; a resume continues
+ * the exact session; an attach reports a truthful outcome rather than page
+ * visibility.
+ */
+export type SessionControls = {
+  /** Recorded transcript for the exact session; never invents missing history. */
+  history(address: SessionAddress): Promise<SessionHistoryResult>
+  /** Continue an exact recorded session (post-exit resume). */
+  resume?(request: SessionResumeRequest): Promise<SessionResumeResult>
+  /** Open/attach a live session for a human, where the runner honors it. */
+  attach?(address: SessionAddress): Promise<SessionAttachResult>
+}
+
 /**
  * The execution port. An adapter prepares its own runtime internally and never
  * leaks vendor clients into the core (design D1). Optional services are passed
@@ -381,6 +471,12 @@ export interface ExecutionAdapter {
   ): Promise<AttemptOutcome>
   /** Cancel the identified attempt if this adapter is currently running it. */
   cancelAttempt(attempt: AttemptIdentity): Promise<void>
+  /**
+   * Release the adapter's owned runtime, reporting an observed outcome. Omit
+   * when the adapter owns no long-lived process; a runner that owns one must
+   * not report `released` without evidence it exited.
+   */
+  release?(): Promise<ReleaseOutcome>
 }
 
 /** Optional conversation/control surface; only implemented where honored. */
@@ -395,6 +491,8 @@ export interface ConversationAdapter {
 export type RunnerRegistration = {
   id: RunnerId
   execution: ExecutionAdapter
+  /** Capability-gated session operations (history/resume/attach). */
+  session?: SessionControls
   conversation?: ConversationAdapter
 }
 
