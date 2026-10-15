@@ -21,6 +21,9 @@ import { baseAgentName } from "./runners/agent-source"
 import { attemptCompositionFor } from "./runners/attempt-composition"
 import { claudeEnforcementFromEnv } from "./runners/claude/enforcement-plan"
 import { resolveAttempt, type AttemptContext } from "./runners/attempt"
+import { supportsService } from "./runners/capabilities"
+import type { ExecutionServices } from "./runners/contracts"
+import { createOpencodeLoopGuardService } from "./runners/opencode/loop-guard"
 import { releaseSessionHandles } from "./runners/session-handles"
 import { progressSink } from "./runners/attempt-sink"
 import type { AttemptResult } from "./runners/attempt"
@@ -2257,12 +2260,19 @@ async function runPhaseAttempt(
   })
 
   const registration = composition.registry.require(runnerId)
+  const capabilities = await registration.execution.capabilities()
+  // The guard is Convoy policy owned by the engine; the attempt gets only the
+  // services this runner actually honors (task 6.2).
+  const guard = loopGuard ?? new LoopGuard(prepared.loopGuard)
+  const services: ExecutionServices = {}
+  if (supportsService(capabilities, "loop-guard")) services.loopGuard = createOpencodeLoopGuardService(guard)
+
   // Validate the phase's required services against this runner's own
   // capabilities and resolve its registered attempt, before anything runs.
   const attemptRunner = await resolveAttempt({
     runner: runnerId,
     contract,
-    capabilities: () => registration.execution.capabilities(),
+    capabilities: async () => capabilities,
     attempt: composition.attemptFor(runnerId),
   })
 
@@ -2290,13 +2300,13 @@ async function runPhaseAttempt(
     },
     signal: shutdown.signal,
     attempt,
-    loopGuardConfig: prepared.loopGuard,
+
     ...(sessionRef ? { sessionRef } : {}),
     ...(advisors ? { advisors } : {}),
     ...(reports ? { reports } : {}),
     ...(deliverableContract ? { deliverableContract } : {}),
     ...(rubricWeights ? { rubricWeights } : {}),
-    ...(loopGuard ? { loopGuard } : {}),
+    services,
     env: process.env,
     client,
   }

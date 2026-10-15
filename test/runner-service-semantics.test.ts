@@ -107,6 +107,8 @@ describe("loop-guard service semantics", () => {
     switch (observation.kind) {
       case "call":
         return { kind: "call", name: observation.tool, input: observation.args, callID: observation.callId }
+      case "named":
+        return { kind: "named", name: observation.tool, callID: observation.callId }
       case "result":
         return { kind: "result", name: observation.tool, callID: observation.callId, failed: observation.failed }
       case "step":

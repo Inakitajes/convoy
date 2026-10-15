@@ -24,7 +24,7 @@ import type { QualityDimension } from "../quality-score"
 import type { ReportRuntime } from "../report-runtime"
 import type { AgentStep, DeliverableContract } from "../types"
 import type { Workspace } from "../workspace"
-import type { AttemptIdentity, ExecutionRequest, RunnerCapabilities, RunnerId, ServiceId } from "./contracts"
+import type { AttemptIdentity, ExecutionRequest, ExecutionServices, RunnerCapabilities, RunnerId, ServiceId } from "./contracts"
 import { assertServicesSupported } from "./capabilities"
 import type { AttemptSink } from "./attempt-sink"
 import type { SessionRef } from "./opencode/session"
@@ -52,10 +52,8 @@ export type AttemptContext = {
   reports?: ReportRuntime
   deliverableContract?: DeliverableContract
   rubricWeights?: Record<QualityDimension, number>
-  /** The resolved guard configuration, already resolved by the engine. */
-  loopGuardConfig: LoopGuardConfig
-  /** Reused only after a budget-gate reset; ordinary attempts receive a fresh guard. */
-  loopGuard?: LoopGuard
+  /** The optional services this runner honors; the engine supplies only these. */
+  services: ExecutionServices
   /** Process environment for a CLI harness (Claude). */
   env?: NodeJS.ProcessEnv
   /** The run's OpenCode client, when the runner is OpenCode. */

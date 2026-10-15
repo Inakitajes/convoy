@@ -28,8 +28,8 @@ export async function executeOpencodeAttempt(context: AttemptContext): Promise<A
     signal: context.signal,
     sessionRef: context.sessionRef,
     attempt: context.attempt,
-    loopGuardConfig: context.loopGuardConfig,
-    ...(context.loopGuard ? { loopGuard: context.loopGuard } : {}),
+    ...(context.services.loopGuard ? { loopGuard: context.services.loopGuard } : {}),
+
     ...(context.advisors ? { advisors: context.advisors } : {}),
     ...(context.reports ? { reports: context.reports } : {}),
     ...(context.deliverableContract ? { deliverableContract: context.deliverableContract } : {}),

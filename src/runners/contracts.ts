@@ -435,6 +435,8 @@ export type AdvisorService = {
  */
 export type LoopObservation =
   | { kind: "call"; tool: string; args?: unknown; callId?: string }
+  /** Binds a call id to its tool name, so a later result without a name correlates. */
+  | { kind: "named"; tool: string; callId: string }
   | { kind: "result"; tool?: string; callId?: string; failed: boolean }
   | { kind: "step" }
   | { kind: "usage"; usage: Usage; messageId?: string }

@@ -17,6 +17,8 @@ export function toGuardObservation(observation: LoopObservation): LoopGuardObser
   switch (observation.kind) {
     case "call":
       return { kind: "call", name: observation.tool, input: observation.args, callID: observation.callId }
+    case "named":
+      return { kind: "named", name: observation.tool, callID: observation.callId }
     case "result":
       return { kind: "result", name: observation.tool, callID: observation.callId, failed: observation.failed }
     case "step":
@@ -28,6 +30,22 @@ export function toGuardObservation(observation: LoopObservation): LoopGuardObser
       if (typeof cost !== "number") return undefined
       return { kind: "cost", messageID: observation.messageId ?? "message", cost }
     }
+  }
+}
+
+/** Maps the guard's own observation onto the neutral vocabulary (the inverse). */
+export function toNeutralObservation(observation: LoopGuardObservation): LoopObservation {
+  switch (observation.kind) {
+    case "call":
+      return { kind: "call", tool: observation.name ?? "tool", args: observation.input, callId: observation.callID }
+    case "named":
+      return { kind: "named", tool: observation.name, callId: observation.callID }
+    case "result":
+      return { kind: "result", tool: observation.name, callId: observation.callID, failed: observation.failed }
+    case "step":
+      return { kind: "step" }
+    case "cost":
+      return { kind: "usage", usage: { costEstimate: observation.cost }, messageId: observation.messageID }
   }
 }
 

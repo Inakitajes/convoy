@@ -49,6 +49,7 @@ import {
 import type { AgentStep, DeliverableContract, HumanStep, Pipeline, Step } from "../src/types"
 import type { Workspace } from "../src/workspace"
 import { LoopGuard, LoopGuardError, resolveLoopGuard } from "../src/loop-guard"
+import { createOpencodeLoopGuardService } from "../src/runners/opencode/loop-guard"
 import { createReportRuntime, type ReportPhaseHandle } from "../src/report-runtime"
 import { startReportBridge } from "../src/report-bridge"
 import { writeCommitSidecar } from "../src/step-commit"
@@ -2593,7 +2594,7 @@ describe("watchSession turn scoping", () => {
         phaseActivity: (_name, detail) => void activities.push(detail),
       },
       signal: new AbortController().signal,
-      loopGuard: new LoopGuard(resolveLoopGuard({ identicalCalls: 4 })),
+      loopGuard: createOpencodeLoopGuardService(new LoopGuard(resolveLoopGuard({ identicalCalls: 4 }))),
     })
 
     await expect(watcher.result).rejects.toBeInstanceOf(LoopGuardError)
@@ -2669,7 +2670,7 @@ describe("loopGuard seam regressions", () => {
       sessionID: "ses_1",
       progress: noopProgress,
       signal: new AbortController().signal,
-      ...(loopGuard ? { loopGuard } : {}),
+      ...(loopGuard ? { loopGuard: createOpencodeLoopGuardService(loopGuard) } : {}),
     })
     return { watcher }
   }
@@ -2705,7 +2706,6 @@ describe("loopGuard seam regressions", () => {
       progress: noopProgress,
       signal: trackedShutdown().signal,
       attempt: 1,
-      loopGuardConfig: resolveLoopGuard({ maxPhaseCost: false }),
     })
 
     expect(result.info.id).toBe("msg_1")
@@ -2753,7 +2753,7 @@ describe("loopGuard seam regressions", () => {
       progress: { ...noopProgress, phaseActivity: (_name, detail) => void activities.push(detail) },
       signal: trackedShutdown().signal,
       attempt: 1,
-      loopGuardConfig: resolveLoopGuard({ maxSteps: 200 }),
+      loopGuard: createOpencodeLoopGuardService(new LoopGuard(resolveLoopGuard({ maxSteps: 200 }))),
     })
 
     await Promise.resolve()
@@ -2810,7 +2810,7 @@ describe("loopGuard seam regressions", () => {
       },
       signal: trackedShutdown().signal,
       attempt: 1,
-      loopGuardConfig: resolveLoopGuard({ maxSteps: 200 }),
+      loopGuard: createOpencodeLoopGuardService(new LoopGuard(resolveLoopGuard({ maxSteps: 200 }))),
     })
 
     // Give the rejected nudge's catch handler a chance to (wrongly) act.
@@ -2842,7 +2842,7 @@ describe("loopGuard seam regressions", () => {
   })
 
   test("SC-3: a loop-guard trip in the follow-up turn rejects instead of keeping the phase", async () => {
-    const loopGuard = new LoopGuard(resolveLoopGuard({ identicalCalls: 2 }))
+    const loopGuard = createOpencodeLoopGuardService(new LoopGuard(resolveLoopGuard({ identicalCalls: 2 })))
     const advisor = {
       consult: async () => ({ text: "redo the tests", ok: true as const, callId: "call_1" }),
       delivered: async () => {},
@@ -2959,7 +2959,7 @@ describe("applyCompletionCheckpoint lastAssistantParts", () => {
     progress: noopProgress,
     signal: trackedShutdown().signal,
     sessionID: "ses_1",
-    loopGuard: new LoopGuard(resolveLoopGuard()),
+    loopGuard: createOpencodeLoopGuardService(new LoopGuard(resolveLoopGuard())),
   })
 
   test("a read-only phase with an unchanged follow-up keeps the first turn's last parts", async () => {
@@ -3094,7 +3094,7 @@ describe("applyReportCheckpoint", () => {
     progress: noopProgress,
     signal: trackedShutdown().signal,
     sessionID: "ses_1",
-    loopGuard: new LoopGuard(resolveLoopGuard()),
+    loopGuard: createOpencodeLoopGuardService(new LoopGuard(resolveLoopGuard())),
   })
 
   test("never nudges a phase whose contract explicitly owns no deliverable", async () => {
@@ -3142,7 +3142,7 @@ describe("applyReportCheckpoint", () => {
         progress: noopProgress,
         signal: trackedShutdown().signal,
         sessionID: "ses_1",
-        loopGuard: new LoopGuard(resolveLoopGuard()),
+        loopGuard: createOpencodeLoopGuardService(new LoopGuard(resolveLoopGuard())),
       },
       first,
       report as never,

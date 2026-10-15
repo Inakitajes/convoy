@@ -18,6 +18,7 @@ import type { OpencodeClient, FilePartInput } from "../../opencode-client"
 import type { ProgressUI } from "../../progress"
 import type { ReportRuntime } from "../../report-runtime"
 import type { AgentStep, DeliverableContract } from "../../types"
+import type { ExecutionServices, LoopGuardService } from "../contracts"
 import type { Workspace } from "../../workspace"
 import { isUserAbortError } from "../abort"
 import { formatSdkError } from "../errors"
@@ -52,10 +53,8 @@ export async function promptPhase(
     deliverableContract?: DeliverableContract
     rubricWeights?: Record<QualityDimension, number>
     attempt: number
-    /** The resolved guard configuration; already resolved by preparePhaseRun, never re-resolved here. */
-    loopGuardConfig: LoopGuardConfig
     /** A budget-gate reset reuses this guard so cost remains capped across prompts. */
-    loopGuard?: LoopGuard
+    loopGuard?: LoopGuardService
   },
 ): Promise<SessionResult> {
   throwIfAborted(input.signal)
@@ -78,7 +77,6 @@ export async function promptPhase(
   input.progress.phaseSession(input.phase.name, session.data.id)
   log.info(`[${input.phase.name}] session: ${session.data.id}`)
 
-  const loopGuard = input.loopGuard ?? new LoopGuard(input.loopGuardConfig)
 
   const watcher = watchSession(client, {
     directory: input.targetDir,
@@ -86,7 +84,7 @@ export async function promptPhase(
     sessionID: session.data.id,
     progress: input.progress,
     signal: input.signal,
-    loopGuard,
+    ...(input.loopGuard ? { loopGuard: input.loopGuard } : {}),
   })
 
   try {
@@ -105,9 +103,9 @@ export async function promptPhase(
     const first = await watcher.result
     throwIfAborted(input.signal)
 
-    const reviewed = advisor ? await applyCompletionCheckpoint(client, { ...input, sessionID: session.data.id, loopGuard }, first, advisor) : first
+    const reviewed = advisor ? await applyCompletionCheckpoint(client, { ...input, sessionID: session.data.id, ...(input.loopGuard ? { loopGuard: input.loopGuard } : {}) }, first, advisor) : first
     const reported = report
-      ? await applyReportCheckpoint(client, { ...input, sessionID: session.data.id, loopGuard }, reviewed, report)
+      ? await applyReportCheckpoint(client, { ...input, sessionID: session.data.id, ...(input.loopGuard ? { loopGuard: input.loopGuard } : {}) }, reviewed, report)
       : reviewed
 
     const usage = combinedAssistantUsage(reported.assistantInfos, session.data.id)

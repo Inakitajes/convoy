@@ -18,7 +18,8 @@ import type { AdvisorEvent } from "../../advisor-events"
 import type { AdvisorPhaseHandle } from "../../advisor-runtime"
 import { getSessionEventHub, payloadProperties } from "../../event-hub"
 import { log } from "../../log"
-import { LoopGuardError, observationFromSessionEvent, type LoopGuard, type LoopGuardObservation } from "../../loop-guard"
+import { LoopGuardError, observationFromSessionEvent, type LoopGuardObservation } from "../../loop-guard"
+import { toNeutralObservation } from "./loop-guard"
 import { deliverableContractForPhase } from "../../pipeline"
 import { qualityDimensionWeights, type QualityDimension } from "../../quality-score"
 import type { ReportPhaseHandle } from "../../report-runtime"
@@ -37,6 +38,7 @@ import type {
 } from "../../progress"
 import { UserAbortError, isUserAbortError } from "../abort"
 import { formatSdkError } from "../errors"
+import type { LoopGuardService } from "../contracts"
 import { validateDeliverableContract } from "../quality-contract"
 
 /** Last session created for a phase's attempts; opaque to the engine. */
@@ -80,7 +82,7 @@ export async function applyCompletionCheckpoint(
     signal: AbortSignal
     sessionID: string
     /** The live guard from the first turn; the follow-up watcher shares it so cost and repeats accumulate. */
-    loopGuard: LoopGuard
+    loopGuard?: LoopGuardService
   },
   first: SessionResult,
   advisor: AdvisorPhaseHandle,
@@ -167,7 +169,7 @@ export async function applyReportCheckpoint(
     progress: ProgressUI
     signal: AbortSignal
     sessionID: string
-    loopGuard: LoopGuard
+    loopGuard?: LoopGuardService
     deliverableContract?: DeliverableContract
     rubricWeights?: Record<QualityDimension, number>
   },
@@ -331,7 +333,7 @@ export function watchSession(
      * (repeats, steps, and per-message cost), so a fresh watcher for the
      * follow-up turn observes its own events but cannot reset the fuse.
      */
-    loopGuard?: LoopGuard
+    loopGuard?: LoopGuardService
     /**
      * Anchor for a watcher that covers a follow-up turn in an already-used
      * session: everything up to and including this assistant message belongs to
@@ -401,21 +403,21 @@ export function watchSession(
     else rejectResult(outcome.error)
   }
 
-  const tripLoopGuard = (observation: Parameters<LoopGuard["observe"]>[0]) => {
+  const tripLoopGuard = (observation: LoopGuardObservation) => {
     if (!input.loopGuard || settled) return
-    const trip = input.loopGuard.observe(observation)
-    if (!trip) return
-    if (trip.reason === "soft-nudge") {
+    const decision = input.loopGuard.observe(toNeutralObservation(observation))
+    if (decision.action === "continue") return
+    if (decision.action === "nudge") {
       // Queued delivery is model-only: don't add activity to the dashboard or
       // interrupt the current turn. The guard emits this exactly once per
       // budget cycle, and resetSteps deliberately makes it eligible again.
       void queueSoftBudgetNudge(client, input.sessionID, input.phaseName)
       return
     }
-    input.progress.phaseActivity(input.phaseName, trip.message, "error")
-    log.warn(`[${input.phaseName}] ${trip.message}`)
+    input.progress.phaseActivity(input.phaseName, decision.reason, "error")
+    log.warn(`[${input.phaseName}] ${decision.reason}`)
     void abortSessionQuietly(client, input.sessionID, input.directory, input.phaseName)
-    finish({ error: new LoopGuardError(trip) })
+    finish({ error: new LoopGuardError({ reason: decision.code, message: decision.reason, count: 0 }) })
   }
 
   const onExternalAbort = () => finish({ error: new UserAbortError() })
