@@ -101,6 +101,7 @@ source-facing summary.
 src/runners/
 ├── contracts.ts        # vendor-free ports: requests, events, outcomes, capabilities, registry
 ├── registry.ts         # composition root that registers the built-in adapters
+├── attempt.ts          # the common attempt context/result + attempt resolution
 ├── declarations.ts     # authoritative per-adapter capability declarations
 ├── capabilities.ts     # effective capability resolution from a declaration + evidence
 ├── policy.ts           # runner-neutral action policy (read/write/execute/delegate decisions)
@@ -114,11 +115,15 @@ src/runners/
 ├── redaction.ts        # secret registration and log redaction
 ├── abort.ts            # shared user-abort signal (engine, adapters, entrypoints)
 ├── errors.ts           # vendor/shape-tolerant error message extraction
-├── claude/             # Claude adapter: adapter, auth, effective-auth, mode, settings,
-│                       #   hook, enforcement, permission-broker, mcp-permission-server, mcp-stdio
-└── opencode/           # OpenCode v2 adapter: adapter, boot, runtime, v2-client, config,
-                        #   history, log-events, permission, server-auth, terminal,
-                        #   phase (attempt loop), session (watch/checkpoint/event runtime)
+├── shutdown-handle.ts  # the structural shutdown surface an attempt needs
+├── session-handles.ts  # common release of session-bound service handles
+├── claude/             # Claude adapter: adapter, attempt, session-controls, enforcement-plan,
+│                       #   auth, effective-auth, mode, settings, hook, enforcement,
+│                       #   permission-broker, mcp-permission-server, mcp-stdio
+└── opencode/           # OpenCode v2 adapter: adapter, attempt, phase, session,
+                        #   session-controls, deliverables, advisor, loop-guard, approvals,
+                        #   boot, runtime, v2-client, config, history, log-events, permission,
+                        #   server-auth, terminal
 ```
 
 ### Runner ports and ownership responsibilities

@@ -422,11 +422,14 @@ hook + permission host, and its resume continues the exact recorded session with
   Dependencies are one-way: an adapter never imports the engine
   (`src/runner.ts`), which `test/runner-adapter-direction.test.ts` enforces.
 
-> **In progress.** This contract is being completed by the OpenSpec change
-> `unify-runner-system`. Moving code beside an adapter is not by itself
-> completion: the engine still drives OpenCode through a legacy path until the
-> migration lands, and Claude's richer services are adapted incrementally. See
-> that change's `tasks.md` for the current state.
+> **Status.** The engine now starts every attempt through this contract: it
+> prepares one neutral attempt context, validates the phase's required services
+> against the runner's declared capabilities, and calls the runner's registered
+> attempt. The rich OpenCode attempt and the Claude attempt both live in their
+> adapter modules. One seam remains transitional: the engine still supplies its
+> policy objects (report/advisor runtimes, shutdown handle, progress target) to
+> the attempt, rather than only the neutral services. See the change's
+> `tasks.md` for the current state.
 
 ---
 
