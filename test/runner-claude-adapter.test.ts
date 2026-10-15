@@ -30,6 +30,14 @@ function request(overrides: Partial<ExecutionRequest> = {}): ExecutionRequest {
   }
 }
 
+/** A read-only, auto-approved request that needs no enforcement host. */
+function readOnly(): ExecutionRequest {
+  return request({
+    mode: "read-only",
+    agent: { name: "reviewer", mode: "read-only", model: { runner: "claude-code", modelId: "sonnet" } },
+  })
+}
+
 /** A reviewed plan that installs the hook and the permission host. */
 function enforcementPlan(): EnforcementPlan {
   return {
@@ -187,6 +195,34 @@ describe("claude adapter (fixture execution)", () => {
     )
     expect(spawned).toBe(true)
     expect(outcome.status).toBe("completed")
+  })
+
+  test("delivers the final report and reports loop observations", async () => {
+    const runner = createClaudeRunner({ cwd: "/tmp", env: {}, deps: { spawn: () => fakeProcess(fixture) } })
+    const observed: string[] = []
+    let submitted: { kind: string; body: string } | undefined
+    const outcome = await runner.executeAttempt(readOnly(), () => {}, {
+      deliverables: {
+        submit: async (submission) => {
+          submitted = submission
+          return { ok: true }
+        },
+      },
+      loopGuard: { observe: (observation) => observed.push(observation.kind) },
+    })
+    expect(outcome.status).toBe("completed")
+    expect(submitted?.body).toBe("Hello world")
+    expect(observed).toContain("usage")
+    expect(observed).toContain("tool")
+  })
+
+  test("a rejected deliverable fails the attempt", async () => {
+    const runner = createClaudeRunner({ cwd: "/tmp", env: {}, deps: { spawn: () => fakeProcess(fixture) } })
+    const outcome = await runner.executeAttempt(readOnly(), () => {}, {
+      deliverables: { submit: async () => ({ ok: false, error: "invalid score" }) },
+    })
+    expect(outcome.status).toBe("failed")
+    expect(outcome.error).toContain("invalid score")
   })
 })
 

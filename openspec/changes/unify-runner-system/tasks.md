@@ -22,9 +22,9 @@
 
 ## 4. Fold Claude onto the shared services
 
-- [ ] 4.1 Implement the deliverables service for Claude where the contract permits and verify report validation parity.
-- [ ] 4.2 Implement the advisor service for Claude (own bridge, not a native flag) or refuse it by capability with a clear reason; verify behaviour.
-- [ ] 4.3 Verify Claude still passes its adapter, invocation, enforcement, and lifecycle suites.
+- [x] 4.1 Implement the deliverables service for Claude where the contract permits and verify report validation parity.
+- [x] 4.2 Implement the advisor service for Claude (own bridge, not a native flag) or refuse it by capability with a clear reason; verify behaviour.
+- [x] 4.3 Verify Claude still passes its adapter, invocation, enforcement, and lifecycle suites.
 
 ## 5. Close out
 

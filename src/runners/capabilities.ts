@@ -42,7 +42,6 @@ const claudeAvailable: readonly CapabilityId[] = [
   "parallel",
   "approvals",
   "structured-deliverables",
-  "advisor-bridge",
   "live-observation",
   "post-exit-resume",
 ]
@@ -88,6 +87,7 @@ export function resolveRunnerCapabilities(runner: RunnerId, input: CapabilityInp
   }
   capabilities.push({ id: "native-live-attach", availability: "unavailable", reason: "print mode has no attachable live session" })
   capabilities.push(restricted("explicit-handoff", "requires a verified quiesced handoff", "use post-exit resume or observe"))
+  capabilities.push(restricted("advisor-bridge", "the Claude adapter has no advisor bridge yet", "use an OpenCode advisor or omit the advisor for this step"))
   capabilities.push(available("usage-reporting", "subscription values are estimates"))
   return { runner, ...(input.version ? { version: input.version } : {}), capabilities }
 }

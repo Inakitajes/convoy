@@ -22,7 +22,7 @@ import { resolveClaudeAuth } from "./auth"
 import { assertEnforcementReady, EnforcementNotReadyError, type EnforcementPlan } from "./enforcement"
 import { encodeClaudeMcpConfig, encodeClaudeSettings, permissionPromptArgs } from "./settings"
 
-import type { AttemptOutcome, ExecutionAdapter, ExecutionRequest, RunnerEvent, Usage } from "../contracts"
+import type { AttemptOutcome, ExecutionAdapter, ExecutionRequest, ExecutionServices, RunnerEvent, Usage } from "../contracts"
 import type { ProgressTokens } from "../../progress"
 
 export type ClaudeProcess = {
@@ -202,7 +202,11 @@ export function createClaudeRunner(options: ClaudeRunnerOptions): ClaudeRunner {
       }
     },
 
-    async executeAttempt(request: ExecutionRequest, sink: (event: RunnerEvent) => void): Promise<AttemptOutcome> {
+    async executeAttempt(
+      request: ExecutionRequest,
+      sink: (event: RunnerEvent) => void,
+      services?: ExecutionServices,
+    ): Promise<AttemptOutcome> {
       if (request.runner !== "claude-code") {
         return { status: "failed", error: `claude adapter received a ${request.runner} request` }
       }
@@ -248,8 +252,14 @@ export function createClaudeRunner(options: ClaudeRunnerOptions): ClaudeRunner {
           for (const signal of describeClaudeEvent(parsed, state)) {
             if (signal.type === "session") sessionId = signal.sessionID
             const mapped = signalsToEvents(signal, request.attempt)
-            for (const event of mapped.events) sink(event)
-            if (mapped.outcome) outcome = mapped.outcome
+            for (const event of mapped.events) {
+              if (event.type === "tool") services?.loopGuard?.observe({ kind: "tool", detail: event.name })
+              sink(event)
+            }
+            if (mapped.outcome) {
+              outcome = mapped.outcome
+              if (mapped.outcome.usage) services?.loopGuard?.observe({ kind: "usage", detail: JSON.stringify(mapped.outcome.usage) })
+            }
           }
         }
         const [exitCode] = await Promise.all([proc.exited, stderrPromise])
@@ -263,6 +273,13 @@ export function createClaudeRunner(options: ClaudeRunnerOptions): ClaudeRunner {
           return result
         }
         const final: AttemptOutcome = { ...outcome, ...(sessionId ? { session: { runner: "claude-code", sessionId } } : {}) }
+        // Deliverable service: submit the final assistant text for validation.
+        if (services?.deliverables && final.status === "completed" && (final.assistantText ?? "").trim().length > 0) {
+          const submitted = await services.deliverables.submit({ kind: "report", body: final.assistantText! })
+          if (!submitted.ok) {
+            return { ...final, status: "failed", error: submitted.error ?? "deliverable rejected" }
+          }
+        }
         return final
       } catch (error) {
         const result: AttemptOutcome = {
