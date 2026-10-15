@@ -47,3 +47,10 @@ Implement pending work in group order. Each slice must keep `bun run typecheck`,
 - [x] 5.2 Run final `bun run typecheck`, `bun test` and `bun run build` after the dispatch migration and record exact commands/results; verify all pass with skipped tests identified rather than counted as covered behavior.
 - [x] 5.3 Audit the final integration graph and common-engine test harness evidence; verify dependency/conformance tests exclude SDK leakage, adapter-to-engine cycles, privileged OpenCode execution/session paths and capability declarations disconnected from implementation.
 - [x] 5.4 Record bounded live acceptance coverage separately from fixture coverage, using `nan/deepseek-v4-flash` for authorized free OpenCode checks and no new Claude/paid live calls without explicit permission; verify results distinguish passed cells from missing credentials/authorization/tool endpoints and do not claim protocol-only checks prove tool/service parity.
+
+## 6. Residual hardening (not required by the shipped behaviour)
+
+These are the two documented transitional seams, tracked so they are not lost. The engine is correct without them; they narrow the migration further.
+
+- [ ] 6.1 Cache the run-lifetime composition for the whole run instead of rebuilding it inside `runPhaseAttempt` for each attempt; verify the engine constructs one composition per run and reuses it across phases.
+- [ ] 6.2 Re-express the OpenCode rich attempt on the neutral request, event sink and services alone, so the engine no longer supplies its own report/advisor runtimes, shutdown handle or progress target in the attempt context; verify the attempt context carries no engine-owned policy object and the full suite stays green.
