@@ -473,8 +473,12 @@ export function isConfirmedRelease(outcome: ReleaseOutcome): boolean {
  */
 export type SessionOperation = "history" | "resume" | "attach"
 
-/** An operation addressed to one exact, runner-qualified session. */
-export type SessionAddress = { session: RunnerSessionRef }
+/** An operation addressed to one exact, runner-qualified session and attempt. */
+export type SessionAddress = {
+  session: RunnerSessionRef
+  /** Tags reconstructed events and scopes the operation to the exact attempt. */
+  identity: AttemptIdentity
+}
 
 export type SessionHistoryResult = { ok: true; events: readonly RunnerEvent[] } | { ok: false; error: string }
 

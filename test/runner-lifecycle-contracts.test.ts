@@ -105,11 +105,12 @@ describe("exact session references", () => {
       },
     }
     const address: RunnerSessionRef = { runner: "opencode", sessionId: "ses_1" }
-    const accepted = await controls.history({ session: address })
+    const identity = { runId: "run-1", phaseName: "implement", attempt: 1 }
+    const accepted = await controls.history({ session: address, identity })
     expect(accepted.ok).toBe(true)
     if (accepted.ok) expect(accepted.events[0]?.type).toBe("text")
 
-    const foreign = await controls.history({ session: { runner: "claude-code", sessionId: "ses_1" } })
+    const foreign = await controls.history({ session: { runner: "claude-code", sessionId: "ses_1" }, identity })
     expect(foreign.ok).toBe(false)
     if (!foreign.ok) expect(foreign.error).toContain("not an opencode session")
   })
@@ -120,7 +121,7 @@ describe("exact session references", () => {
         return { ok: false, error: "session unavailable" }
       },
     }
-    const result = await controls.history({ session: { runner: "opencode", sessionId: "gone" } })
+    const result = await controls.history({ session: { runner: "opencode", sessionId: "gone" }, identity: { runId: "run-1", phaseName: "implement", attempt: 1 } })
     expect(result.ok).toBe(false)
     if (!result.ok) expect(result.error).toBe("session unavailable")
   })

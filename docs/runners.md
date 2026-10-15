@@ -381,6 +381,14 @@ are decided before any ask-level decision; an eligible ask is settled by the
 interactive/auto/smart decider and is cancellable, so a cancelled ask can never
 settle a sibling attempt's request.
 
+Session operations are capability-gated. OpenCode supports `history` (reconstruct
+the exact recorded session's transcript from the server, never fabricated),
+`resume` (continue that exact session), and `attach` (a live window); each is
+present only when the composition supplies the underlying mechanism, so the
+facade never claims a control it cannot honor. Claude supports history and
+post-exit resume but not a native attach. A session that belongs to another
+runner, or a server that cannot return it, is refused rather than guessed at.
+
 ### Where the pieces live
 
 - `src/runners/contracts.ts` — the neutral vocabulary (no vendor types).
