@@ -201,23 +201,32 @@ describe("claude adapter (fixture execution)", () => {
     let submitted: { kind: string; body: string } | undefined
     const outcome = await runner.executeAttempt(readOnly(), () => {}, {
       deliverables: {
+        expected: ["report"],
         submit: async (submission) => {
           submitted = submission
           return { ok: true }
         },
       },
-      loopGuard: { observe: (observation) => observed.push(observation.kind) },
+      loopGuard: {
+        observe: (observation) => {
+          observed.push(observation.kind)
+          return { action: "continue" }
+        },
+      },
     })
     expect(outcome.status).toBe("completed")
     expect(submitted?.body).toBe("Hello world")
     expect(observed).toContain("usage")
-    expect(observed).toContain("tool")
+    expect(observed).toContain("call")
   })
 
   test("a rejected deliverable fails the attempt", async () => {
     const runner = createClaudeRunner({ cwd: "/tmp", env: {}, deps: { spawn: () => fakeProcess(fixture) } })
     const outcome = await runner.executeAttempt(readOnly(), () => {}, {
-      deliverables: { submit: async () => ({ ok: false, error: "invalid score" }) },
+      deliverables: {
+        expected: ["report"],
+        submit: async () => ({ ok: false, error: "invalid score", retryable: false, preserved: true }),
+      },
     })
     expect(outcome.status).toBe("failed")
     expect(outcome.error).toContain("invalid score")

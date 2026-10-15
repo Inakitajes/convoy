@@ -253,12 +253,14 @@ export function createClaudeRunner(options: ClaudeRunnerOptions): ClaudeRunner {
             if (signal.type === "session") sessionId = signal.sessionID
             const mapped = signalsToEvents(signal, request.identity.attempt)
             for (const event of mapped.events) {
-              if (event.type === "tool") services?.loopGuard?.observe({ kind: "tool", detail: event.name })
+              // Claude does not advertise loop control (capability-gated), so a
+              // decision is not applied here; group 3 reconciles its features.
+              if (event.type === "tool") services?.loopGuard?.observe({ kind: "call", tool: event.name })
               sink(event)
             }
             if (mapped.outcome) {
               outcome = mapped.outcome
-              if (mapped.outcome.usage) services?.loopGuard?.observe({ kind: "usage", detail: JSON.stringify(mapped.outcome.usage) })
+              if (mapped.outcome.usage) services?.loopGuard?.observe({ kind: "usage", usage: mapped.outcome.usage })
             }
           }
         }

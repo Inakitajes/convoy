@@ -75,7 +75,7 @@ describe("attempt service delivery", () => {
     expect(none).toEqual([])
 
     const some: string[] = []
-    await adapter(some).executeAttempt(request, () => {}, { deliverables: { submit: async () => ({ ok: true }) } })
+    await adapter(some).executeAttempt(request, () => {}, { deliverables: { expected: [], submit: async () => ({ ok: true }) } })
     expect(some).toEqual(["deliverables"])
   })
 })

@@ -15,7 +15,13 @@
  * distinction lives here and in the validation, not in the harness.
  */
 
-export type DeliverableKind = "report" | "score" | "commit-description"
+import type { DeliverableKind } from "./contracts"
+
+/**
+ * The deliverable kinds are part of the neutral service vocabulary; the
+ * contract owns them so an adapter and this validator cannot drift apart.
+ */
+export type { DeliverableKind }
 
 /** Convoy-owned attempt identity. The submission cannot override it. */
 export type DeliverableAttempt = {

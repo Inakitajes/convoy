@@ -231,24 +231,137 @@ export type RunnerEvent =
   | (EventBase & { type: "terminal"; outcome: AttemptOutcome })
 
 // ---------------------------------------------------------------------------
-// Adapter
+// Optional per-attempt services (design D1–D3)
+//
+// A runner implements the subset it can honour; core passes only what the
+// runner advertises. Each contract carries the semantics the feature needs —
+// a submission can be rejected, a protected write can be blocked, a loop
+// observation can stop the attempt — not just a callback name.
 // ---------------------------------------------------------------------------
 
-/**
- * Optional Convoy services an attempt may be given. A runner implements the
- * subset it can; core passes only what the runner advertises (design D1/D2).
- */
+/** The optional services a runner may advertise and receive. */
 export type ServiceId = "approvals" | "deliverables" | "advisor" | "loop-guard"
 
+/** The artifacts a supported runner may submit for validation. */
+export type DeliverableKind = "report" | "score" | "commit-description"
+
+export type DeliverableSubmission = {
+  kind: DeliverableKind
+  /** Markdown report, JSON score, or free-form commit description body. */
+  body: string
+  /**
+   * Structured commit description for `commit-description`; preferred over the
+   * free-form body when present.
+   */
+  commit?: { subject: string; details?: readonly string[] }
+}
+
+export type DeliverableResult =
+  | { ok: true }
+  | {
+      ok: false
+      error: string
+      /** True when the same attempt may correct the submission and retry. */
+      retryable: boolean
+      /** True when the last accepted artifact was preserved, not replaced. */
+      preserved: boolean
+    }
+
+export type DeliverableService = {
+  /** Artifacts this attempt's contract expects (may be empty). */
+  readonly expected: readonly DeliverableKind[]
+  /** Validates and records one artifact; a rejection never replaces the last accepted one. */
+  submit(submission: DeliverableSubmission): Promise<DeliverableResult>
+}
+
+// --- Approvals ------------------------------------------------------------
+
+/** A normalized ask-level request. Hard policy denies are decided in core first. */
+export type ApprovalRequest = {
+  /** Stable id echoed on settlement/cancellation; a stale reply is refused. */
+  requestId: string
+  /** Native tool or action name, normalized for policy. */
+  tool: string
+  /** Normalized action kind used by policy (e.g. `read`, `write`, `bash`). */
+  action: string
+  /** Resources the action touches, when known. */
+  resources?: readonly string[]
+}
+
+export type ApprovalOutcome = "allow" | "deny" | "expired"
+
+export type ApprovalService = {
+  /** Decide exactly the request it is given, never a sibling's. */
+  decide(request: ApprovalRequest): Promise<ApprovalOutcome>
+  /** Cancel a pending request when its attempt stops; idempotent. */
+  cancel?(requestId: string): void
+  /** True while this attempt still holds the request, so a late reply is refused. */
+  isPending?(requestId: string): boolean
+}
+
+// --- Advisor --------------------------------------------------------------
+
+/** Why the advisor is being consulted. */
+export type AdvisorTrigger = "on-demand" | "first-write" | "completion"
+
+export type AdvisorConsultation = {
+  trigger: AdvisorTrigger
+  question: string
+  /** Bounded, normalized context supplied by core. */
+  context?: string
+}
+
+export type AdvisorAdvice = {
+  /** Advisor text: feedback, or correction guidance for a completion turn. */
+  text: string
+  /** True when this consultation satisfies the attempt's required checkpoint. */
+  satisfiesCheckpoint: boolean
+  /** Advisor usage, attributed separately from the executor's own usage. */
+  usage?: Usage
+}
+
+export type AdvisorService = {
+  /** When true, protected writes must wait for a satisfying consultation. */
+  readonly requireBeforeWrite: boolean
+  /** Whether the attempt's required checkpoint is satisfied right now. */
+  satisfied(): boolean
+  /** Runs one consultation; a failure throws and leaves the checkpoint unchanged. */
+  consult(consultation: AdvisorConsultation): Promise<AdvisorAdvice>
+}
+
+// --- Loop guard / budget --------------------------------------------------
+
+/**
+ * One loop observation. `call`/`result` carry the stable call id and effective
+ * arguments so repeated calls and repeated failures are detected even when a
+ * tool name alone would collide; `usage` carries the message id so cumulative
+ * figures are folded without double counting.
+ */
+export type LoopObservation =
+  | { kind: "call"; tool: string; args?: unknown; callId?: string }
+  | { kind: "result"; tool?: string; callId?: string; failed: boolean }
+  | { kind: "step" }
+  | { kind: "usage"; usage: Usage; messageId?: string }
+
+export type LoopStopCode = "identical-calls" | "same-tool-failures" | "max-steps" | "max-cost"
+
+/** The guard's decision for this attempt. An adapter must apply a `stop`. */
+export type LoopDecision =
+  | { action: "continue" }
+  | { action: "nudge"; reason: string }
+  | { action: "stop"; code: LoopStopCode; reason: string }
+
+export type LoopGuardService = {
+  /** Feeds one observation and returns the resulting decision for this attempt. */
+  observe(observation: LoopObservation): LoopDecision
+}
+
+/** Optional services an attempt may be given (design D1/D2). */
 export type ExecutionServices = {
-  /** Ask-level approval for one action; resolves allow/deny. */
-  approvals?: { decide(request: { tool: string; action: string; resource?: string }): Promise<"allow" | "deny"> }
-  /** Submit a deliverable for validation/acceptance. */
-  deliverables?: { submit(submission: { kind: string; body: string }): Promise<{ ok: boolean; error?: string }> }
-  /** Consult the configured advisor for this attempt. */
-  advisor?: { consult(question: string): Promise<{ text: string }> }
-  /** Report a loop observation (repeated call, usage, step). */
-  loopGuard?: { observe(observation: { kind: "tool" | "usage" | "step"; detail?: string }): void }
+  approvals?: ApprovalService
+  deliverables?: DeliverableService
+  advisor?: AdvisorService
+  loopGuard?: LoopGuardService
 }
 
 /**
