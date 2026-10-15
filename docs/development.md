@@ -101,19 +101,24 @@ source-facing summary.
 src/runners/
 ├── contracts.ts        # vendor-free ports: requests, events, outcomes, capabilities, registry
 ├── registry.ts         # composition root that registers the built-in adapters
-├── capabilities.ts     # effective capability resolution by runner/version/auth/policy
+├── declarations.ts     # authoritative per-adapter capability declarations
+├── capabilities.ts     # effective capability resolution from a declaration + evidence
 ├── policy.ts           # runner-neutral action policy (read/write/execute/delegate decisions)
 ├── deliverables.ts     # runner-neutral report/score/commit validator + ledger
+├── quality-contract.ts # contract-based validation of a phase's produced artifact
 ├── advisor-consult.ts  # normalized consultation context + first-write checkpoint
 ├── advisor-limits.ts   # advisor call/output/time/recursion limits and budget
 ├── journal.ts          # versioned append-only normalized event journal
 ├── provenance.ts       # per-attempt runner/auth/session/attempt record + legacy reader
 ├── usage.ts            # token/cost normalization and cumulative-delta subtraction
 ├── redaction.ts        # secret registration and log redaction
+├── abort.ts            # shared user-abort signal (engine, adapters, entrypoints)
+├── errors.ts           # vendor/shape-tolerant error message extraction
 ├── claude/             # Claude adapter: adapter, auth, effective-auth, mode, settings,
 │                       #   hook, enforcement, permission-broker, mcp-permission-server, mcp-stdio
 └── opencode/           # OpenCode v2 adapter: adapter, boot, runtime, v2-client, config,
-                        #   history, log-events, permission, server-auth, terminal
+                        #   history, log-events, permission, server-auth, terminal,
+                        #   phase (attempt loop), session (watch/checkpoint/event runtime)
 ```
 
 ### Runner ports and ownership responsibilities
@@ -125,6 +130,12 @@ src/runners/
   package may be imported. `test/runner-boundaries.test.ts` enforces this with a
   shrinking burn-down allowlist of the modules that still import one; a new
   off-boundary import fails the suite.
+- Dependencies are **one-way**: an adapter never imports the engine
+  (`src/runner.ts`). The OpenCode session/watch/checkpoint runtime lives with its
+  adapter (`src/runners/opencode/session.ts`) and the engine imports it back, so
+  there is no cycle; `test/runner-adapter-direction.test.ts` enforces the
+  direction. `ShutdownHandle` is the structural slice of the engine's
+  `RunShutdown` the runtime needs, which keeps the engine type out of the adapter.
 - `test/helpers/runner-conformance.ts` is the shared conformance suite every
   adapter must pass; real adapters run it from their own tests.
 - **Core keeps** scheduling, goal rounds, budgets, retries, Git coordination,

@@ -1,11 +1,11 @@
 /**
- * OpenCode phase execution (change `unify-runner-system`, step 2a).
+ * OpenCode phase execution (change `unify-runner-system`, tasks 2a/2.1).
  *
  * The OpenCode attempt loop — session creation, async prompt, event-stream
  * watching, advisor/report checkpoints, loop guard, usage — lives here so the
- * integration sits with the OpenCode adapter instead of inside the engine. The
- * shared helpers remain in `runner.ts` (the engine) and are imported; this is a
- * relocation, not a behaviour change.
+ * integration sits with the OpenCode adapter instead of inside the engine. It
+ * imports the session runtime from its own directory and never imports
+ * `runner.ts`, so there is no adapter-to-engine dependency.
  */
 
 import { log } from "../../log"
@@ -19,21 +19,21 @@ import type { ProgressUI } from "../../progress"
 import type { ReportRuntime } from "../../report-runtime"
 import type { AgentStep, DeliverableContract } from "../../types"
 import type { Workspace } from "../../workspace"
+import { isUserAbortError } from "../abort"
+import { formatSdkError } from "../errors"
 
 import {
   abortSessionQuietly,
   applyCompletionCheckpoint,
   applyReportCheckpoint,
   combinedAssistantUsage,
-  formatSdkError,
   formatUsageForLog,
-  isUserAbortError,
   sleep,
   watchSession,
-  type RunShutdown,
   type SessionRef,
   type SessionResult,
-} from "../../runner"
+  type ShutdownHandle,
+} from "./session"
 
 export async function promptPhase(
   client: OpencodeClient,
@@ -45,7 +45,7 @@ export async function promptPhase(
     model: ModelSelection
     attachments: FilePartInput[]
     progress: ProgressUI
-    shutdown: RunShutdown
+    shutdown: ShutdownHandle
     sessionRef?: SessionRef
     advisors?: AdvisorRuntime
     reports?: ReportRuntime

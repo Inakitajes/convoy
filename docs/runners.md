@@ -361,8 +361,11 @@ expressed by capability, not by a second kind of runner.
   authoritative declaration and its resolution.
 - `src/runners/opencode/**`, `src/runners/claude/**` — the adapters: protocol,
   sessions, plugin/hook/MCP exposure, event decoding, permissions, process
-  handling.
+  handling. The OpenCode attempt loop and session/checkpoint runtime live here,
+  beside the adapter, not in the engine.
 - Core keeps scheduling, budgets, Git boundaries, retries, and finalization.
+  Dependencies are one-way: an adapter never imports the engine
+  (`src/runner.ts`), which `test/runner-adapter-direction.test.ts` enforces.
 
 > **In progress.** This contract is being completed by the OpenSpec change
 > `unify-runner-system`. Moving code beside an adapter is not by itself
