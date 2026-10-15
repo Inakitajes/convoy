@@ -98,3 +98,19 @@ Coverage by matrix cell:
 | Full-cycle (reports/advisor/parallel/abort/recovery) on real Claude | **Deferred** — cost |
 
 `with explicit consent, a bounded real-harness smoke result` (task 1.3) is satisfied by the subscription smoke. Cells that need an API key or a full paid cycle remain explicitly deferred rather than claimed.
+
+### Adapter-level mixed acceptance (2026-10-15)
+
+`CONVOY_ACCEPT=1 bun run scripts/runner-acceptance.ts` — disposable scratch dir,
+`composeRunners` with a real enforcement plan (PreToolUse hook + MCP permission
+host), both adapters through the neutral registry:
+
+- **Claude (subscription, `haiku`, write mode):** `completed`, wrote `out.txt`
+  with the requested content, `PreToolUse` hook fired, cost **$0.0049**.
+- **OpenCode (`nan/deepseek-v4-flash`, write mode):** `completed`.
+- Both sessions returned real ids; nothing fabricated.
+
+This exercises the adapters end-to-end (auth, enforcement, tools, session,
+outcome) rather than only the CLI in isolation. A real *single-pipeline* mixed
+run (Claude + OpenCode steps in one Convoy run) still requires wiring the
+composition root into `runner.ts`'s dispatch, which is the remaining step.
