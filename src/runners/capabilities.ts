@@ -7,7 +7,7 @@
  * hardcoding "Claude cannot write".
  */
 
-import type { AuthenticationSelection, Capability, CapabilityId, RunnerCapabilities, RunnerId } from "./contracts"
+import type { AuthenticationSelection, Capability, CapabilityId, RunnerCapabilities, RunnerId, ServiceId } from "./contracts"
 
 export type CapabilityInput = {
   /** Resolved harness version, when known. */
@@ -31,6 +31,7 @@ const opencodeCapabilities: readonly CapabilityId[] = [
   "explicit-handoff",
   "post-exit-resume",
   "usage-reporting",
+  "loop-guard",
 ]
 
 const claudeAvailable: readonly CapabilityId[] = [
@@ -94,4 +95,48 @@ export function resolveRunnerCapabilities(runner: RunnerId, input: CapabilityInp
 /** True when a required capability is fully available for the selection. */
 export function capabilityAvailable(resolved: RunnerCapabilities, id: CapabilityId): boolean {
   return resolved.capabilities.some((entry) => entry.id === id && entry.availability === "available")
+}
+
+/** Maps an optional service to the capability that advertises it. */
+const serviceCapability: Record<ServiceId, CapabilityId> = {
+  approvals: "approvals",
+  deliverables: "structured-deliverables",
+  advisor: "advisor-bridge",
+  "loop-guard": "loop-guard",
+}
+
+export function supportsService(resolved: RunnerCapabilities, service: ServiceId): boolean {
+  return capabilityAvailable(resolved, serviceCapability[service])
+}
+
+export class UnsupportedServiceError extends Error {
+  constructor(
+    readonly runner: RunnerId,
+    readonly service: ServiceId,
+  ) {
+    super(`runner ${runner} does not implement the ${service} service`)
+    this.name = "UnsupportedServiceError"
+  }
+}
+
+/** Refuses a plan that requires a service the runner does not implement. */
+export function assertServicesSupported(resolved: RunnerCapabilities, required: readonly ServiceId[]): void {
+  for (const service of required) {
+    if (!supportsService(resolved, service)) throw new UnsupportedServiceError(resolved.runner, service)
+  }
+}
+
+/** Selects a subset of services the runner supports (drops unsupported). */
+export function filterSupportedServices<T extends Partial<Record<ServiceId, unknown>>>(
+  resolved: RunnerCapabilities,
+  services: T,
+): { supported: Partial<T>; unsupported: ServiceId[] } {
+  const supported: Partial<T> = {}
+  const unsupported: ServiceId[] = []
+  for (const service of Object.keys(services) as ServiceId[]) {
+    if (services[service] === undefined) continue
+    if (supportsService(resolved, service)) (supported as Record<string, unknown>)[service] = services[service]
+    else unsupported.push(service)
+  }
+  return { supported, unsupported }
 }

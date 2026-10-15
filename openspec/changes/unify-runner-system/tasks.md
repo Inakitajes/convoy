@@ -2,9 +2,9 @@
 
 ## 1. Port carries optional services (no behaviour change)
 
-- [ ] 1.1 Add `ExecutionServices` (progress, approvals, deliverables, advisor, loopGuard) to `src/runners/contracts.ts` and an optional third parameter to `ExecutionAdapter.executeAttempt`; verify typecheck and that existing adapters/tests compile unchanged.
-- [ ] 1.2 Add capability validation that refuses a plan requiring an unimplemented service, naming runner+service, in `src/runners/capabilities.ts`; verify unit tests for accept/refuse cases.
-- [ ] 1.3 Add a conformance test that a runner implementing no services runs with none, and one implementing a service receives it; verify the shared conformance suite passes.
+- [x] 1.1 Add `ExecutionServices` (progress, approvals, deliverables, advisor, loopGuard) to `src/runners/contracts.ts` and an optional third parameter to `ExecutionAdapter.executeAttempt`; verify typecheck and that existing adapters/tests compile unchanged.
+- [x] 1.2 Add capability validation that refuses a plan requiring an unimplemented service, naming runner+service, in `src/runners/capabilities.ts`; verify unit tests for accept/refuse cases.
+- [x] 1.3 Add a conformance test that a runner implementing no services runs with none, and one implementing a service receives it; verify the shared conformance suite passes.
 
 ## 2. Move OpenCode integration behind its adapter
 

@@ -41,6 +41,7 @@ export type CapabilityId =
   | "explicit-handoff"
   | "post-exit-resume"
   | "usage-reporting"
+  | "loop-guard"
 
 /**
  * A capability is a described capability, not a boolean brand flag (design D4):
@@ -210,17 +211,37 @@ export type RunnerEvent =
 // ---------------------------------------------------------------------------
 
 /**
+ * Optional Convoy services an attempt may be given. A runner implements the
+ * subset it can; core passes only what the runner advertises (design D1/D2).
+ */
+export type ServiceId = "approvals" | "deliverables" | "advisor" | "loop-guard"
+
+export type ExecutionServices = {
+  /** Ask-level approval for one action; resolves allow/deny. */
+  approvals?: { decide(request: { tool: string; action: string; resource?: string }): Promise<"allow" | "deny"> }
+  /** Submit a deliverable for validation/acceptance. */
+  deliverables?: { submit(submission: { kind: string; body: string }): Promise<{ ok: boolean; error?: string }> }
+  /** Consult the configured advisor for this attempt. */
+  advisor?: { consult(question: string): Promise<{ text: string }> }
+  /** Report a loop observation (repeated call, usage, step). */
+  loopGuard?: { observe(observation: { kind: "tool" | "usage" | "step"; detail?: string }): void }
+}
+
+/**
  * The execution port. An adapter prepares its own runtime internally and never
- * leaks vendor clients into the core (design D1). Optional control/conversation
- * operations are separate interfaces so adapters need not implement what they
- * cannot honor.
+ * leaks vendor clients into the core (design D1). Optional services are passed
+ * only when the runner advertises support for them.
  */
 export interface ExecutionAdapter {
   readonly id: RunnerId
   /** Resolve effective capabilities for the current install/auth (design D4). */
   capabilities(auth?: AuthenticationSelection): Promise<RunnerCapabilities>
   /** Run one attempt, emitting normalized events and resolving to its outcome. */
-  executeAttempt(request: ExecutionRequest, sink: (event: RunnerEvent) => void): Promise<AttemptOutcome>
+  executeAttempt(
+    request: ExecutionRequest,
+    sink: (event: RunnerEvent) => void,
+    services?: ExecutionServices,
+  ): Promise<AttemptOutcome>
   /** Cancel the identified attempt if this adapter is currently running it. */
   cancelAttempt(attempt: { runId: string; attempt: number }): Promise<void>
 }
