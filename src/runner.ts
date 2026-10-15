@@ -21,6 +21,7 @@ import { baseAgentName } from "./runners/agent-source"
 import { composeRunners } from "./runners/compose"
 import { claudeEnforcementFromEnv } from "./runners/claude/enforcement-plan"
 import { resolveAttempt, type AttemptContext } from "./runners/attempt"
+import { releaseSessionHandles } from "./runners/session-handles"
 import { createClaudeRunner } from "./runners/claude/adapter"
 import { promptPhase } from "./runners/opencode/phase"
 
@@ -2030,10 +2031,7 @@ export async function runPhaseUntilResolved(
  * released at the phase's decision point, never while the gate is open.
  */
 function releasePhaseSession(sessionRef: SessionRef, reports?: ReportRuntime, advisors?: AdvisorRuntime): void {
-  const sessionID = sessionRef.id
-  if (!sessionID) return
-  reports?.handleFor(sessionID)?.end()
-  advisors?.handleFor(sessionID)?.end()
+  releaseSessionHandles(sessionRef.id, reports, advisors)
 }
 
 type PhaseGateOptions = {
