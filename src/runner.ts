@@ -20,6 +20,9 @@ import { ensureClaudeAvailable, openClaudeSessionWindow, promptClaudePhase } fro
 import { baseAgentName } from "./runners/agent-source"
 import { buildEnforcementPlan } from "./runners/compose"
 import { createClaudeRunner } from "./runners/claude/adapter"
+import { promptPhase } from "./runners/opencode/phase"
+
+export { promptPhase }
 import type { EnforcementPlan } from "./runners/claude/enforcement"
 import type { AttachmentDescriptor, ExecutionMode, ExecutionRequest, RunnerEvent } from "./runners/contracts"
 import { addAllAndCommit, createCleanRepoSnapshot, currentBranch, currentHead, describeRepoSnapshotDifference, dirtyFilesPreview, dirtyTreeError, ensureRepoReady, restoreRepoSnapshot, type RepoSnapshot, statusPorcelain, writeDiff } from "./git"
@@ -2029,7 +2032,7 @@ export async function runPhaseUntilResolved(
 }
 
 /** Last session created for the phase's attempts, so the interactive gate can reopen its window. */
-type SessionRef = { id?: string }
+export type SessionRef = { id?: string }
 
 /**
  * Ends the report/advisor handles of the phase's last live session. Idempotent:
@@ -2595,130 +2598,8 @@ export async function assertPendingReadOnlyResumeBaselines(metadata: RunMetadata
   }
 }
 
-export async function promptPhase(
-  client: OpencodeClient,
-  input: {
-    phase: AgentStep
-    workspace: Workspace
-    targetDir: string
-    prompt: string
-    model: ModelSelection
-    attachments: FilePartInput[]
-    progress: ProgressUI
-    shutdown: RunShutdown
-    sessionRef?: SessionRef
-    advisors?: AdvisorRuntime
-    reports?: ReportRuntime
-    deliverableContract?: DeliverableContract
-    rubricWeights?: Record<QualityDimension, number>
-    attempt: number
-    /** The resolved guard configuration; already resolved by preparePhaseRun, never re-resolved here. */
-    loopGuardConfig: LoopGuardConfig
-    /** A budget-gate reset reuses this guard so cost remains capped across prompts. */
-    loopGuard?: LoopGuard
-  },
-): Promise<SessionResult> {
-  input.shutdown.throwIfRequested()
-  const session = await client.session.create({
-    directory: input.targetDir,
-    title: `convoy ${input.workspace.runID} ${input.phase.name}`,
-    metadata: { convoyRunID: input.workspace.runID, convoyPhase: input.phase.name },
-  }, { signal: input.shutdown.signal })
-  if (session.error) throw new Error(formatSdkError(session.error))
-  if (!session.data?.id) throw new Error("opencode didn't return session id")
 
-  if (input.sessionRef) input.sessionRef.id = session.data.id
-  // Registered here and not earlier: the permission gate and the on-demand tool
-  // both find a phase by its live session, which only exists now.
-  const advisor = input.advisors?.begin(session.data.id, input.phase, input.attempt)
-  const report = input.reports?.begin(
-    session.data.id,
-    input.phase,
-    input.deliverableContract ?? deliverableContractForPhase(input.phase),
-    input.rubricWeights ?? qualityDimensionWeights,
-  )
-  input.progress.phaseSession(input.phase.name, session.data.id)
-  input.shutdown.setActiveSession({ client, sessionID: session.data.id, directory: input.targetDir, phaseName: input.phase.name })
-  log.info(`[${input.phase.name}] session: ${session.data.id}`)
-
-  // One guard for the whole attempt, including the advisor's follow-up turn:
-  // that turn is the same session still spending money. The config is already
-  // resolved (preparePhaseRun) — resolving again would re-arm the defaults over
-  // a user's `maxPhaseCost: false`, which is why LoopGuardConfig can't be fed
-  // back into resolveLoopGuard.
-  const loopGuard = input.loopGuard ?? new LoopGuard(input.loopGuardConfig)
-
-  // The prompt is fired asynchronously and completion is detected through the
-  // event stream plus status polling. A single blocking HTTP request can't
-  // survive a phase that runs for an hour (Bun kills idle sockets after 5min).
-  const watcher = watchSession(client, {
-    directory: input.targetDir,
-    phaseName: input.phase.name,
-    sessionID: session.data.id,
-    progress: input.progress,
-    signal: input.shutdown.signal,
-    loopGuard,
-  })
-
-  try {
-    // Don't fire the prompt until the event stream is listening, or the first
-    // events of a fast-failing session are lost.
-    await Promise.race([watcher.ready, sleep(3_000)])
-    input.shutdown.throwIfRequested()
-
-    const accepted = await client.session.promptAsync({
-      sessionID: session.data.id,
-      directory: input.targetDir,
-      agent: input.phase.agentName,
-      model: { providerID: input.model.providerID, modelID: input.model.modelID },
-      variant: input.model.variant,
-      parts: [...input.attachments, { type: "text", text: input.prompt }],
-    }, { signal: input.shutdown.signal })
-    if (accepted.error) throw new Error(formatSdkError(accepted.error))
-    const first = await watcher.result
-    input.shutdown.throwIfRequested()
-
-    // The deliverable is durable by now — the phase wrote its report or edited
-    // the repo before going idle — which is what makes this the right place for
-    // the "is it actually done?" consultation: a session that dies during the
-    // call loses nothing.
-    const reviewed = advisor ? await applyCompletionCheckpoint(client, { ...input, sessionID: session.data.id, loopGuard }, first, advisor) : first
-    const reported = report
-      ? await applyReportCheckpoint(client, { ...input, sessionID: session.data.id, loopGuard }, reviewed, report)
-      : reviewed
-
-    const usage = combinedAssistantUsage(reported.assistantInfos, session.data.id)
-    if (usage) {
-      input.progress.phaseUsageTotal(input.phase.name, usage)
-      log.info(`[${input.phase.name}] usage: ${formatUsageForLog(usage)}`)
-    }
-    return {
-      ...reported,
-      ...(advisor && advisor.usage.length > 0 ? { advisorUsage: [...advisor.usage] } : {}),
-      ...(advisor && advisor.events.length > 0 ? { advisorEvents: [...advisor.events] } : {}),
-    }
-  } catch (error) {
-    if (!input.shutdown.aborted && !isUserAbortError(error)) {
-      await abortSessionQuietly(client, session.data.id, input.targetDir, input.phase.name)
-    }
-    throw error
-  } finally {
-    // The report/advisor handles must outlive the idle/failed prompt: the human
-    // gate reopens the SAME session with [o] and writes through write_report, so
-    // ending them here would answer 404/400 during the gate. Only a run-wide
-    // abort tears the attempt down immediately; normal cleanup happens when
-    // runPhaseUntilResolved resolves the gate (continue/retry/success).
-    if (input.shutdown.aborted) {
-      report?.end()
-      advisor?.end()
-      await input.shutdown.abortActiveSessions(input.progress)
-    }
-    input.shutdown.clearActiveSession(input.phase.name, session.data.id)
-    await watcher.stop()
-  }
-}
-
-type SessionResult = {
+export type SessionResult = {
   info: AssistantMessage
   parts: Part[]
   assistantInfos: AssistantMessage[]
@@ -3248,7 +3129,7 @@ export function watchSession(
   }
 }
 
-async function abortSessionQuietly(client: OpencodeClient, sessionID: string, directory: string, phaseName: string) {
+export async function abortSessionQuietly(client: OpencodeClient, sessionID: string, directory: string, phaseName: string) {
   try {
     const response = await client.session.abort({ sessionID, directory })
     if (response.error) log.warn(`[${phaseName}] couldn't abort session ${sessionID}: ${formatSdkError(response.error)}`)
@@ -3257,7 +3138,7 @@ async function abortSessionQuietly(client: OpencodeClient, sessionID: string, di
   }
 }
 
-function sleep(ms: number, signal?: AbortSignal) {
+export function sleep(ms: number, signal?: AbortSignal) {
   return new Promise<void>((resolve) => {
     if (signal?.aborted) {
       resolve()
@@ -3879,7 +3760,7 @@ function messageUsageSignal(properties: Record<string, unknown>, state: Activity
   return { type: "usage", usage: { cost: totalCost, tokens: total, sessionID, model } }
 }
 
-function combinedAssistantUsage(infos: AssistantMessage[], sessionID: string): ProgressUsage | undefined {
+export function combinedAssistantUsage(infos: AssistantMessage[], sessionID: string): ProgressUsage | undefined {
   if (infos.length === 0) return undefined
   let cost = 0
   let tokens = emptyTokens()
@@ -3908,7 +3789,7 @@ function payloadID(payload: unknown) {
   return typeof id === "string" ? id : undefined
 }
 
-function formatUsageForLog(usage: ProgressUsage) {
+export function formatUsageForLog(usage: ProgressUsage) {
   const cost = typeof usage.cost === "number" ? `$${usage.cost.toFixed(4)}` : "cost unavailable"
   const tokens = usage.tokens ? `tokens ${usage.tokens.input}/${usage.tokens.output}${usage.tokens.reasoning ? `/${usage.tokens.reasoning}` : ""}` : "tokens unavailable"
   const model = usage.model ? ` model ${usage.model}` : ""
@@ -4278,7 +4159,7 @@ async function exists(path: string) {
   }
 }
 
-function formatSdkError(error: unknown): string {
+export function formatSdkError(error: unknown): string {
   if (error instanceof Error) return error.message
   if (typeof error === "object" && error && "data" in error) {
     const data = (error as { data?: unknown }).data
