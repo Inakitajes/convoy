@@ -23,6 +23,7 @@ import { claudeEnforcementFromEnv } from "./runners/claude/enforcement-plan"
 import { resolveAttempt, type AttemptContext } from "./runners/attempt"
 import { releaseSessionHandles } from "./runners/session-handles"
 import { progressSink } from "./runners/attempt-sink"
+import type { AttemptResult } from "./runners/attempt"
 import { createClaudeRunner } from "./runners/claude/adapter"
 import { promptPhase } from "./runners/opencode/phase"
 
@@ -2265,6 +2266,12 @@ async function runPhaseAttempt(
     attempt: composition.attemptFor(runnerId),
   })
 
+  // The engine renders the attempt's neutral events, so the attempt never
+  // receives the engine's progress target. It also learns the session from the
+  // attempt's own `session` event, which is why no shutdown handle is passed.
+  const render = progressSink(progress, { runId: workspace.runID, phaseName: phase.name, attempt })
+  let activeSessionID: string | undefined
+
   const context: AttemptContext = {
     identity: { runId: workspace.runID, phaseName: phase.name, attempt },
     runner: runnerId,
@@ -2274,9 +2281,14 @@ async function runPhaseAttempt(
     prompt: prepared.prompt,
     model: prepared.model,
     attachments: prepared.attachments,
-    sink: progressSink(progress, { runId: workspace.runID, phaseName: phase.name, attempt }),
-    progress,
-    shutdown,
+    sink: (event) => {
+      if (event.type === "session") {
+        activeSessionID = event.session.sessionId
+        shutdown.setActiveSession({ client, sessionID: activeSessionID, directory: targetDir, phaseName: phase.name })
+      }
+      render(event)
+    },
+    signal: shutdown.signal,
     attempt,
     loopGuardConfig: prepared.loopGuard,
     ...(sessionRef ? { sessionRef } : {}),
@@ -2289,7 +2301,12 @@ async function runPhaseAttempt(
     client,
   }
 
-  const result = await attemptRunner(context)
+  let result: AttemptResult
+  try {
+    result = await attemptRunner(context)
+  } finally {
+    if (activeSessionID) shutdown.clearActiveSession(phase.name, activeSessionID)
+  }
 
   await writeAttemptLog(workspace, phase, attempt, {
     session: result.sessionID,

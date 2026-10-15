@@ -29,10 +29,10 @@ import {
   combinedAssistantUsage,
   formatUsageForLog,
   sleep,
+  throwIfAborted,
   watchSession,
   type SessionRef,
   type SessionResult,
-  type ShutdownHandle,
 } from "./session"
 
 export async function promptPhase(
@@ -45,7 +45,7 @@ export async function promptPhase(
     model: ModelSelection
     attachments: FilePartInput[]
     progress: ProgressUI
-    shutdown: ShutdownHandle
+    signal: AbortSignal
     sessionRef?: SessionRef
     advisors?: AdvisorRuntime
     reports?: ReportRuntime
@@ -58,12 +58,12 @@ export async function promptPhase(
     loopGuard?: LoopGuard
   },
 ): Promise<SessionResult> {
-  input.shutdown.throwIfRequested()
+  throwIfAborted(input.signal)
   const session = await client.session.create({
     directory: input.targetDir,
     title: `convoy ${input.workspace.runID} ${input.phase.name}`,
     metadata: { convoyRunID: input.workspace.runID, convoyPhase: input.phase.name },
-  }, { signal: input.shutdown.signal })
+  }, { signal: input.signal })
   if (session.error) throw new Error(formatSdkError(session.error))
   if (!session.data?.id) throw new Error("opencode didn't return session id")
 
@@ -76,7 +76,6 @@ export async function promptPhase(
     input.rubricWeights ?? qualityDimensionWeights,
   )
   input.progress.phaseSession(input.phase.name, session.data.id)
-  input.shutdown.setActiveSession({ client, sessionID: session.data.id, directory: input.targetDir, phaseName: input.phase.name })
   log.info(`[${input.phase.name}] session: ${session.data.id}`)
 
   const loopGuard = input.loopGuard ?? new LoopGuard(input.loopGuardConfig)
@@ -86,13 +85,13 @@ export async function promptPhase(
     phaseName: input.phase.name,
     sessionID: session.data.id,
     progress: input.progress,
-    signal: input.shutdown.signal,
+    signal: input.signal,
     loopGuard,
   })
 
   try {
     await Promise.race([watcher.ready, sleep(3_000)])
-    input.shutdown.throwIfRequested()
+    throwIfAborted(input.signal)
 
     const accepted = await client.session.promptAsync({
       sessionID: session.data.id,
@@ -101,10 +100,10 @@ export async function promptPhase(
       model: { providerID: input.model.providerID, modelID: input.model.modelID },
       variant: input.model.variant,
       parts: [...input.attachments, { type: "text", text: input.prompt }],
-    }, { signal: input.shutdown.signal })
+    }, { signal: input.signal })
     if (accepted.error) throw new Error(formatSdkError(accepted.error))
     const first = await watcher.result
-    input.shutdown.throwIfRequested()
+    throwIfAborted(input.signal)
 
     const reviewed = advisor ? await applyCompletionCheckpoint(client, { ...input, sessionID: session.data.id, loopGuard }, first, advisor) : first
     const reported = report
@@ -122,17 +121,15 @@ export async function promptPhase(
       ...(advisor && advisor.events.length > 0 ? { advisorEvents: [...advisor.events] } : {}),
     }
   } catch (error) {
-    if (!input.shutdown.aborted && !isUserAbortError(error)) {
+    if (!input.signal.aborted && !isUserAbortError(error)) {
       await abortSessionQuietly(client, session.data.id, input.targetDir, input.phase.name)
     }
     throw error
   } finally {
-    if (input.shutdown.aborted) {
+    if (input.signal.aborted) {
       report?.end()
       advisor?.end()
-      await input.shutdown.abortActiveSessions(input.progress)
     }
-    input.shutdown.clearActiveSession(input.phase.name, session.data.id)
     await watcher.stop()
   }
 }

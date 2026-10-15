@@ -42,8 +42,10 @@ import { validateDeliverableContract } from "../quality-contract"
 /** Last session created for a phase's attempts; opaque to the engine. */
 export type SessionRef = { id?: string }
 
-import type { ShutdownHandle } from "../shutdown-handle"
-export type { ShutdownHandle }
+/** Throws the run's abort reason when the attempt's signal has fired. */
+export function throwIfAborted(signal: AbortSignal): void {
+  if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new UserAbortError()
+}
 export type SessionResult = {
   info: AssistantMessage
   parts: Part[]
@@ -75,7 +77,7 @@ export async function applyCompletionCheckpoint(
     targetDir: string
     model: ModelSelection
     progress: ProgressUI
-    shutdown: ShutdownHandle
+    signal: AbortSignal
     sessionID: string
     /** The live guard from the first turn; the follow-up watcher shares it so cost and repeats accumulate. */
     loopGuard: LoopGuard
@@ -85,7 +87,7 @@ export async function applyCompletionCheckpoint(
 ): Promise<SessionResult> {
   const advice = await advisor.consult("completion", completionQuestion(Boolean(input.phase.readOnly)))
   if (!advice.ok) return first
-  input.shutdown.throwIfRequested()
+  throwIfAborted(input.signal)
 
   input.progress.phaseActivity(input.phase.name, "advisor reviewed the finished phase", "info")
 
@@ -94,7 +96,7 @@ export async function applyCompletionCheckpoint(
     phaseName: input.phase.name,
     sessionID: input.sessionID,
     progress: input.progress,
-    signal: input.shutdown.signal,
+    signal: input.signal,
     loopGuard: input.loopGuard,
     // Second turn of a session that already has one: anchored so the result is
     // this turn alone, which is what the composition below assumes.
@@ -109,7 +111,7 @@ export async function applyCompletionCheckpoint(
       model: { providerID: input.model.providerID, modelID: input.model.modelID },
       variant: input.model.variant,
       parts: [{ type: "text", text: completionFollowUp(input.phase, advice.text) }],
-    }, { signal: input.shutdown.signal })
+    }, { signal: input.signal })
     if (accepted.error) throw new Error(formatSdkError(accepted.error))
     await advisor.delivered(advice.callId, "follow-up")
 
@@ -138,7 +140,7 @@ export async function applyCompletionCheckpoint(
     // first turn makes: the attempt must fail through the normal decision gate.
     // Only genuine review-turn failures (a dead provider, a wedged session) are
     // absorbed, because the phase already produced a durable deliverable.
-    if (input.shutdown.aborted || isUserAbortError(error) || error instanceof LoopGuardError) throw error
+    if (input.signal.aborted || isUserAbortError(error) || error instanceof LoopGuardError) throw error
     return keepCompletedPhase(input.phase.name, first, error instanceof Error ? error.message : String(error))
   } finally {
     await watcher.stop()
@@ -163,7 +165,7 @@ export async function applyReportCheckpoint(
     targetDir: string
     model: ModelSelection
     progress: ProgressUI
-    shutdown: ShutdownHandle
+    signal: AbortSignal
     sessionID: string
     loopGuard: LoopGuard
     deliverableContract?: DeliverableContract
@@ -180,14 +182,14 @@ export async function applyReportCheckpoint(
 
   let latest = first
   for (let reminder = 0; reminder < 2; reminder++) {
-    input.shutdown.throwIfRequested()
+    throwIfAborted(input.signal)
     input.progress.phaseActivity(input.phase.name, `reminding the agent to save its report (${reminder + 1}/2)`, "info")
     const watcher = watchSession(client, {
       directory: input.targetDir,
       phaseName: input.phase.name,
       sessionID: input.sessionID,
       progress: input.progress,
-      signal: input.shutdown.signal,
+      signal: input.signal,
       loopGuard: input.loopGuard,
       sinceMessageID: latest.info.id,
     })
@@ -200,7 +202,7 @@ export async function applyReportCheckpoint(
         model: { providerID: input.model.providerID, modelID: input.model.modelID },
         variant: input.model.variant,
         parts: [{ type: "text", text: writeReportReminder }],
-      }, { signal: input.shutdown.signal })
+      }, { signal: input.signal })
       if (accepted.error) throw new Error(formatSdkError(accepted.error))
       const next = await watcher.result
       if (next.info.error) return keepCompletedPhase(input.phase.name, latest, formatSdkError(next.info.error), "report reminder turn")
@@ -212,7 +214,7 @@ export async function applyReportCheckpoint(
       }
       if (await hasValidReportWrite(input.workspace, input.phase, contract, weights, report)) return latest
     } catch (error) {
-      if (input.shutdown.aborted || isUserAbortError(error) || error instanceof LoopGuardError) throw error
+      if (input.signal.aborted || isUserAbortError(error) || error instanceof LoopGuardError) throw error
       return keepCompletedPhase(input.phase.name, latest, error instanceof Error ? error.message : String(error), "report reminder turn")
     } finally {
       await watcher.stop()

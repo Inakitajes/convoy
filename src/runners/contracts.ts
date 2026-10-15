@@ -12,7 +12,7 @@
  */
 
 import type { StepRunnerId } from "../step-runners"
-import type { ActivityKind, ProgressDiffSummary, ProgressStepUsage, ProgressTodo } from "../progress"
+import type { ActivityKind, ProgressDiffSummary, ProgressMessageChannel, ProgressStepUsage, ProgressTodo } from "../progress"
 
 /** Re-exported so core code can name a runner without reaching into a vendor. */
 export type RunnerId = StepRunnerId
@@ -306,8 +306,11 @@ export type RunnerEvent =
   | (EventBase & { type: "reasoning"; text: string; partId?: string })
   | (EventBase & { type: "tool"; name: string; detail?: string })
   | (EventBase & { type: "usage"; usage: Usage })
+  /** A transcript message carrying its channel verbatim (reasoning/response/tool/bash). */
+  | (EventBase & { type: "message"; channel: ProgressMessageChannel; text: string; partId?: string })
   /** A summarized progress line; `stepUsage` rides along with the step it closes. */
   | (EventBase & { type: "activity"; message: string; kind?: ActivityKind; pulse?: boolean; stepUsage?: ProgressStepUsage })
+  | (EventBase & { type: "step-usage"; usage: ProgressStepUsage })
   | (EventBase & { type: "todos"; todos: readonly ProgressTodo[]; message?: string })
   | (EventBase & { type: "diff"; summary: ProgressDiffSummary })
   | (EventBase & { type: "permission-request"; requestId: string; action: string; resources?: readonly string[] })

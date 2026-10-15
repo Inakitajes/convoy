@@ -63,7 +63,7 @@ export async function executeClaudeAttempt(context: AttemptContext): Promise<Att
     mode,
     approvals: "auto",
     attachments: claudeAttachmentDescriptors(context.attachments),
-    signal: context.shutdown.signal,
+    signal: context.signal,
   }
 
   // The adapter emits neutral events; the engine's sink renders them.

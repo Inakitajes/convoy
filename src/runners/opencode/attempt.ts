@@ -8,11 +8,15 @@
  */
 
 import type { AttemptContext, AttemptResult } from "../attempt"
+import { sinkProgress } from "../attempt-sink"
 import { promptPhase } from "./phase"
 import { combinedAssistantUsage, extractAssistantText } from "./session"
 
 export async function executeOpencodeAttempt(context: AttemptContext): Promise<AttemptResult> {
   if (!context.client) throw new Error("opencode attempt requires the run's client")
+  // The attempt renders through the neutral sink; it never receives the
+  // engine's progress target (task 6.2).
+  const progress = sinkProgress(context.sink, context.runner, context.attempt)
   const result = await promptPhase(context.client, {
     phase: context.phase,
     workspace: context.workspace,
@@ -20,8 +24,8 @@ export async function executeOpencodeAttempt(context: AttemptContext): Promise<A
     prompt: context.prompt,
     model: context.model,
     attachments: context.attachments,
-    progress: context.progress,
-    shutdown: context.shutdown,
+    progress,
+    signal: context.signal,
     sessionRef: context.sessionRef,
     attempt: context.attempt,
     loopGuardConfig: context.loopGuardConfig,

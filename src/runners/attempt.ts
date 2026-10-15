@@ -27,7 +27,7 @@ import type { Workspace } from "../workspace"
 import type { AttemptIdentity, ExecutionRequest, RunnerCapabilities, RunnerId, ServiceId } from "./contracts"
 import { assertServicesSupported } from "./capabilities"
 import type { AttemptSink } from "./attempt-sink"
-import type { SessionRef, ShutdownHandle } from "./opencode/session"
+import type { SessionRef } from "./opencode/session"
 
 /** Everything one attempt needs; prepared once by the engine, consumed by the adapter. */
 export type AttemptContext = {
@@ -42,9 +42,8 @@ export type AttemptContext = {
   attachments: FilePartInput[]
   /** The neutral event sink the attempt emits to; the engine renders it. */
   sink: AttemptSink
-  /** The engine's progress target, still used by the OpenCode rich attempt (task 6.2). */
-  progress: ProgressUI
-  shutdown: ShutdownHandle
+  /** Cancellation for the attempt; the engine owns the shutdown machinery. */
+  signal: AbortSignal
   attempt: number
   sessionRef?: SessionRef
   /** Absent when no step in the run has an advisor. */
@@ -122,7 +121,7 @@ export function prepareAttemptRequest(context: AttemptContext): ExecutionRequest
     mode: phase.readOnly ? (phase.verify ? "verify" : "read-only") : "write",
     approvals: "auto",
     ...(context.deliverableContract ? { deliverableContract: context.deliverableContract.kind } : {}),
-    signal: context.shutdown.signal,
+    signal: context.signal,
   }
 }
 

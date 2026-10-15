@@ -2703,7 +2703,7 @@ describe("loopGuard seam regressions", () => {
       model: { providerID: "openai", modelID: "gpt-5.5" },
       attachments: [],
       progress: noopProgress,
-      shutdown: trackedShutdown(),
+      signal: trackedShutdown().signal,
       attempt: 1,
       loopGuardConfig: resolveLoopGuard({ maxPhaseCost: false }),
     })
@@ -2751,7 +2751,7 @@ describe("loopGuard seam regressions", () => {
       model: { providerID: "openai", modelID: "gpt-5.5" },
       attachments: [],
       progress: { ...noopProgress, phaseActivity: (_name, detail) => void activities.push(detail) },
-      shutdown: trackedShutdown(),
+      signal: trackedShutdown().signal,
       attempt: 1,
       loopGuardConfig: resolveLoopGuard({ maxSteps: 200 }),
     })
@@ -2808,7 +2808,7 @@ describe("loopGuard seam regressions", () => {
           activities.push(`${level}:${detail}`)
         },
       },
-      shutdown: trackedShutdown(),
+      signal: trackedShutdown().signal,
       attempt: 1,
       loopGuardConfig: resolveLoopGuard({ maxSteps: 200 }),
     })
@@ -2875,7 +2875,7 @@ describe("loopGuard seam regressions", () => {
           targetDir: "/repo",
           model: { providerID: "openai", modelID: "gpt-5.5" },
           progress: noopProgress,
-          shutdown: trackedShutdown(),
+          signal: trackedShutdown().signal,
           sessionID: "ses_1",
           loopGuard,
         },
@@ -2957,7 +2957,7 @@ describe("applyCompletionCheckpoint lastAssistantParts", () => {
     targetDir: "/repo",
     model: { providerID: "openai", modelID: "gpt-5.5" },
     progress: noopProgress,
-    shutdown: trackedShutdown(),
+    signal: trackedShutdown().signal,
     sessionID: "ses_1",
     loopGuard: new LoopGuard(resolveLoopGuard()),
   })
@@ -3092,7 +3092,7 @@ describe("applyReportCheckpoint", () => {
     targetDir: "/repo",
     model: { providerID: "openai", modelID: "gpt-5.5" },
     progress: noopProgress,
-    shutdown: trackedShutdown(),
+    signal: trackedShutdown().signal,
     sessionID: "ses_1",
     loopGuard: new LoopGuard(resolveLoopGuard()),
   })
@@ -3140,7 +3140,7 @@ describe("applyReportCheckpoint", () => {
         targetDir: "/repo",
         model: { providerID: "openai", modelID: "gpt-5.5" },
         progress: noopProgress,
-        shutdown: trackedShutdown(),
+        signal: trackedShutdown().signal,
         sessionID: "ses_1",
         loopGuard: new LoopGuard(resolveLoopGuard()),
       },
