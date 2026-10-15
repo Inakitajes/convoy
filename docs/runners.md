@@ -354,6 +354,15 @@ expressed by capability, not by a second kind of runner.
 | approvals | a normalized request identity with a cancellable, session-scoped decision |
 | loop guard | typed observations (call id + arguments, results, steps, usage) and a continue/nudge/stop decision the adapter must apply |
 
+Submission semantics differ per harness while the guarantees do not. OpenCode
+submits a report and its optional structured commit metadata in one
+`write_report` call, and a scoring agent supplies its dimensions in that same
+call — Convoy derives the numeric score — so a raw `{ score }` body or a
+separate commit-description artifact is rejected, exactly as the tool boundary
+does. A submission is bound to one exact session: after that session's handle is
+released (a retry, an abort, or the phase decision), a late submission is
+refused as stale rather than accepted into a later attempt.
+
 ### Where the pieces live
 
 - `src/runners/contracts.ts` — the neutral vocabulary (no vendor types).

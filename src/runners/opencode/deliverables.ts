@@ -1,0 +1,91 @@
+/**
+ * OpenCode deliverable service (change `unify-runner-system`, task 2.2).
+ *
+ * Adapts the OpenCode `write_report` transport (`ReportRuntime`) to the neutral
+ * deliverable service, reusing its existing payload validation, its atomic
+ * report + commit-sidecar persistence, and its candidate precedence. A
+ * submission is addressed to one exact session: once that session's handle is
+ * released (retry, abort or the phase decision), a late submission is refused
+ * rather than accepted into a later attempt.
+ */
+
+import type { ReportRuntime } from "../../report-runtime"
+import type { DeliverableKind, DeliverableResult, DeliverableService, DeliverableSubmission } from "../contracts"
+
+export type OpencodeDeliverableService = DeliverableService & {
+  /** Release the attempt's session; every later submission is refused as stale. */
+  release(): void
+}
+
+export type OpencodeDeliverableOptions = {
+  runtime: ReportRuntime
+  sessionID: string
+  /** Artifacts this attempt's contract expects; defaults to a report. */
+  expected?: readonly DeliverableKind[]
+}
+
+type Mapped = { ok: true; payload: unknown } | { ok: false; error: string }
+
+/**
+ * Maps a neutral submission onto the OpenCode `write_report` call. OpenCode has
+ * one call: a report carries its optional structured commit metadata, and a
+ * scoring agent supplies its dimensions in that same call (Convoy derives the
+ * numeric score). A separate commit-description artifact does not exist here,
+ * and a raw `{ score }` body is rejected exactly as the tool boundary does.
+ */
+export function toWriteReportPayload(submission: DeliverableSubmission): Mapped {
+  if (submission.kind === "commit-description") {
+    return { ok: false, error: "OpenCode carries commit metadata on the report submission, not as a separate artifact" }
+  }
+  const commit = submission.commit
+    ? { subject: submission.commit.subject, ...(submission.commit.details ? { details: [...submission.commit.details] } : {}) }
+    : undefined
+  if (submission.kind === "report") {
+    return { ok: true, payload: { markdown: submission.body, ...(commit ? { commit } : {}) } }
+  }
+
+  // score: the OpenCode tool takes the dimension fields, not a raw score.
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(submission.body)
+  } catch {
+    return { ok: false, error: "score must be valid JSON" }
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return { ok: false, error: "score JSON must be an object" }
+  }
+  if (typeof (parsed as { markdown?: unknown }).markdown !== "string") {
+    return { ok: false, error: "score must include the report markdown" }
+  }
+  return { ok: true, payload: parsed }
+}
+
+export function createOpencodeDeliverableService(options: OpencodeDeliverableOptions): OpencodeDeliverableService {
+  const { runtime, sessionID } = options
+  let released = false
+
+  return {
+    expected: options.expected ?? ["report"],
+    release() {
+      released = true
+    },
+    async submit(submission: DeliverableSubmission): Promise<DeliverableResult> {
+      if (released) {
+        return { ok: false, error: "the attempt's report session was released", retryable: false, preserved: false }
+      }
+      const handle = runtime.handleFor(sessionID)
+      if (!handle) {
+        return { ok: false, error: "no live report session for this attempt", retryable: false, preserved: false }
+      }
+      const mapped = toWriteReportPayload(submission)
+      if (!mapped.ok) {
+        return { ok: false, error: mapped.error, retryable: true, preserved: handle.candidate !== undefined }
+      }
+      const written = await handle.write(mapped.payload)
+      if ("error" in written) {
+        return { ok: false, error: written.error, retryable: true, preserved: handle.candidate !== undefined }
+      }
+      return { ok: true }
+    },
+  }
+}
