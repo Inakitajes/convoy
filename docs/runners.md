@@ -365,6 +365,14 @@ does. A submission is bound to one exact session: after that session's handle is
 released (a retry, an abort, or the phase decision), a late submission is
 refused as stale rather than accepted into a later attempt.
 
+The loop guard is fed per observation and returns a decision the adapter must
+apply. OpenCode supplies the stable call id and effective arguments (so repeated
+calls and repeated failures are correlated, not collapsed into one tool name)
+and the assistant message id with its cumulative cost (so the delta is counted
+once and not double-counted across the advisor's follow-up turn). A step-budget
+reset renews only the step allowance; the cost and repetition history are
+retained.
+
 ### Where the pieces live
 
 - `src/runners/contracts.ts` — the neutral vocabulary (no vendor types).
