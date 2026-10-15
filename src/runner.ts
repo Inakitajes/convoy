@@ -18,7 +18,10 @@ import { fileParts } from "./attachments"
 import { Caffeinate } from "./caffeinate"
 import { ensureClaudeAvailable, openClaudeSessionWindow, promptClaudePhase } from "./claude-code"
 import { baseAgentName } from "./runners/agent-source"
-import { buildEnforcementPlan } from "./runners/compose"
+import { composeRunners } from "./runners/compose"
+import { claudeEnforcementFromEnv } from "./runners/claude/enforcement-plan"
+import { assertServicesSupported } from "./runners/capabilities"
+import { requiredServicesFor, type AttemptContext } from "./runners/attempt"
 import { createClaudeRunner } from "./runners/claude/adapter"
 import { promptPhase } from "./runners/opencode/phase"
 
@@ -2199,6 +2202,12 @@ function awaitActionOrAbort<T>(action: Promise<T>, signal?: AbortSignal): Promis
   })
 }
 
+/**
+ * Dispatches one phase attempt through the registered composition: the engine
+ * prepares a single neutral context, validates the required services by
+ * capability, and calls the runner's registered attempt. There is no
+ * harness-specific execution branch left in core (tasks 4.1/4.4).
+ */
 async function runPhaseAttempt(
   client: OpencodeClient,
   workspace: Workspace,
@@ -2215,188 +2224,76 @@ async function runPhaseAttempt(
   rubricWeights?: Record<QualityDimension, number>,
   loopGuard?: LoopGuard,
 ) {
-  const input = { client, workspace, phase, targetDir, prepared, attempt, progress, shutdown, sessionRef, advisors, reports, deliverableContract, rubricWeights, loopGuard }
-  const runner = phaseAttemptRunners[stepRunnerFor(phase.runner).id]
-  const result = await runner.executeAttempt(input)
-
-  await writeAttemptLog(workspace, phase, attempt, {
-    session: result.sessionID,
-    agent: phase.agentName,
-    model: result.model,
-    attachments: prepared.attachments.map((file) => ({ filename: file.filename, mime: file.mime, url: file.url })),
-    finish: result.finish,
-    cost: result.cost,
-    tokens: result.tokens,
-    error: result.error,
-    // Logged as its own line, never folded into the executor's totals: the whole
-    // economic claim of the pattern is that this stays a small fraction.
-    ...(result.advisorUsage ? { advisor: totalAdvisorUsage(result.advisorUsage) } : {}),
-    // Fallback copy for writeAttemptLog's journal merge; it is replaced by the
-    // merged event list before the log is written.
-    ...(result.advisorEvents && result.advisorEvents.length > 0 ? { advisorEvents: result.advisorEvents } : {}),
-    text: result.assistantText,
-  })
-
-  if (result.error) {
-    if (isMessageAbortedError(result.error)) throw new SessionAbortedError(result.error)
-    throw new LoggedAttemptError(formatSdkError(result.error), { cause: result.error })
-  }
-  return result.assistantText
-}
-
-type PhaseAttemptInput = {
-  client: OpencodeClient
-  workspace: Workspace
-  phase: AgentStep
-  targetDir: string
-  prepared: PreparedPhaseRun
-  attempt: number
-  progress: ProgressUI
-  shutdown: RunShutdown
-  sessionRef?: SessionRef
-  /** Absent when no step in the run has an advisor. */
-  advisors?: AdvisorRuntime
-  /** Present for OpenCode runs; Claude Code keeps its assistant-text fallback. */
-  reports?: ReportRuntime
-  deliverableContract?: DeliverableContract
-  rubricWeights?: Record<QualityDimension, number>
-  /** Reused only after a budget-gate reset; ordinary attempts receive a fresh guard. */
-  loopGuard?: LoopGuard
-}
-
-type PhaseAttemptResult = {
-  assistantText: string
-  sessionID?: string
-  model: ModelSelection | string
-  finish?: unknown
-  cost?: number
-  tokens?: unknown
-  error?: unknown
-  advisorUsage?: readonly AdvisorUsage[]
-  advisorEvents?: readonly AdvisorEvent[]
-}
-
-const phaseAttemptRunners: Record<StepRunnerId, StepRunnerImpl<PhaseAttemptInput, PhaseAttemptResult>> = {
-  opencode: createStepRunnerImpl("opencode", executeOpenCodePhaseAttempt),
-  "claude-code": createStepRunnerImpl("claude-code", executeClaudeCodePhaseAttempt),
-}
-
-async function executeOpenCodePhaseAttempt(input: PhaseAttemptInput): Promise<PhaseAttemptResult> {
-  const result = await promptPhase(input.client, {
-    phase: input.phase,
-    workspace: input.workspace,
-    targetDir: input.targetDir,
-    prompt: input.prepared.prompt,
-    model: input.prepared.model,
-    attachments: input.prepared.attachments,
-    progress: input.progress,
-    shutdown: input.shutdown,
-    sessionRef: input.sessionRef,
-    attempt: input.attempt,
-    loopGuardConfig: input.prepared.loopGuard,
-    ...(input.loopGuard ? { loopGuard: input.loopGuard } : {}),
-    ...(input.advisors ? { advisors: input.advisors } : {}),
-    ...(input.reports ? { reports: input.reports } : {}),
-    ...(input.deliverableContract ? { deliverableContract: input.deliverableContract } : {}),
-    ...(input.rubricWeights ? { rubricWeights: input.rubricWeights } : {}),
-  })
-  const assistantText = extractAssistantText(result.lastAssistantParts)
-  // Totals for the whole attempt, not the final message: the attempt log's
-  // executor figures are what the advisor split is measured against, and a
-  // headline ratio computed from one message of a many-message phase would
-  // understate the executor by however much it happened to do first.
-  const usage = combinedAssistantUsage(result.assistantInfos, result.info.sessionID)
-  return {
-    assistantText,
-    sessionID: result.info.sessionID,
-    model: input.prepared.model,
-    finish: result.info.finish,
-    cost: usage?.cost ?? result.info.cost,
-    tokens: usage?.tokens ?? result.info.tokens,
-    error: result.info.error,
-    ...(result.advisorUsage && result.advisorUsage.length > 0 ? { advisorUsage: result.advisorUsage } : {}),
-    ...(result.advisorEvents && result.advisorEvents.length > 0 ? { advisorEvents: result.advisorEvents } : {}),
-  }
-}
-
-/**
- * The claude-code twin of the OpenCode attempt: same prompt, same attempt log
- * shape, same report contract (read-only step → the report is the final
- * assistant text), executed by the local `claude` CLI instead of a session.
- */
-async function executeClaudeCodePhaseAttempt(input: PhaseAttemptInput): Promise<PhaseAttemptResult> {
-  const phase = input.phase
-  const base = baseAgentName(phase.agentName)
-  const mode: ExecutionMode = phase.readOnly ? (phase.verify ? "verify" : "read-only") : "write"
-  const enforcement = claudeEnforcementFromEnv()
-  const runner = createClaudeRunner({
-    cwd: input.targetDir,
+  const runnerId = stepRunnerFor(phase.runner).id
+  const contract = deliverableContract ?? deliverableContractForPhase(phase)
+  const enforcement = claudeEnforcementFromEnv(process.env)
+  const composition = composeRunners({
+    cwd: targetDir,
     env: process.env,
     ...(enforcement ? { enforcement } : {}),
   })
 
-  const request: ExecutionRequest = {
-    identity: { runId: input.workspace.runID, phaseName: phase.name, attempt: input.attempt },
-    runner: "claude-code",
-    checkout: input.targetDir,
-    agent: {
-      name: base,
-      mode,
-      model: { runner: "claude-code", modelId: phase.model && phase.model.length > 0 ? phase.model : "default" },
-      instructions: loadAgentPrompt(base, input.targetDir),
-    },
-    prompt: input.prepared.prompt,
-    auth: { mode: "subscription" },
-    mode,
-    approvals: "auto",
-    attachments: claudeAttachmentDescriptors(input.prepared.attachments),
-    signal: input.shutdown.signal,
-  }
+  try {
+    const registration = composition.registry.require(runnerId)
+    const capabilities = await registration.execution.capabilities()
+    // Refuse a plan that requires a service the runner does not implement,
+    // before any attempt runs.
+    assertServicesSupported(capabilities, requiredServicesFor(contract))
 
-  const outcome = await runner.executeAttempt(request, (event) => {
-    if (event.type === "session") input.progress.phaseSession(phase.name, event.session.sessionId)
-    else if (event.type === "text") input.progress.phaseMessage(phase.name, { channel: "response", text: event.text })
-    else if (event.type === "reasoning") input.progress.phaseMessage(phase.name, { channel: "reasoning", text: event.text })
-    else if (event.type === "tool") input.progress.phaseActivity(phase.name, `tool: ${event.name}`, "tool")
-  })
+    const attemptRunner = composition.attemptFor(runnerId)
+    if (!attemptRunner) throw new Error(`no phase attempt registered for runner: ${runnerId}`)
 
-  if (input.sessionRef && outcome.session) input.sessionRef.id = outcome.session.sessionId
-
-  return {
-    assistantText: outcome.assistantText ?? "",
-    ...(outcome.session ? { sessionID: outcome.session.sessionId } : {}),
-    model: stepRunnerFor("claude-code").modelLabel(phase.model),
-    ...(outcome.finish !== undefined ? { finish: outcome.finish } : {}),
-    ...(outcome.usage?.costEstimate !== undefined ? { cost: outcome.usage.costEstimate } : {}),
-    ...(outcome.usage ? { tokens: outcome.usage } : {}),
-    ...(outcome.error !== undefined ? { error: outcome.error } : {}),
-  }
-}
-
-/** The enforcement plan from the environment, when the app exposes hook/MCP commands. */
-function claudeEnforcementFromEnv(): EnforcementPlan | undefined {
-  const hookCommand = process.env.CONVOY_CLAUDE_HOOK_COMMAND
-  const permissionCommand = process.env.CONVOY_CLAUDE_MCP_COMMAND
-  if (!hookCommand || !permissionCommand) return undefined
-  return buildEnforcementPlan({ hookCommand, permissionCommand })
-}
-
-/** FilePartInput (OpenCode parts) → neutral attachment descriptors. */
-function claudeAttachmentDescriptors(files: readonly FilePartInput[]): AttachmentDescriptor[] {
-  const descriptors: AttachmentDescriptor[] = []
-  for (const file of files) {
-    try {
-      descriptors.push({
-        kind: file.mime === "application/x-directory" ? "directory" : "file",
-        path: fileURLToPath(file.url),
-        mime: file.mime,
-        ...(file.filename ? { filename: file.filename } : {}),
-      })
-    } catch {
-      // A non-file URL cannot be delivered to the CLI; skip it here.
+    const context: AttemptContext = {
+      identity: { runId: workspace.runID, phaseName: phase.name, attempt },
+      runner: runnerId,
+      workspace,
+      phase,
+      targetDir,
+      prompt: prepared.prompt,
+      model: prepared.model,
+      attachments: prepared.attachments,
+      progress,
+      shutdown,
+      attempt,
+      loopGuardConfig: prepared.loopGuard,
+      ...(sessionRef ? { sessionRef } : {}),
+      ...(advisors ? { advisors } : {}),
+      ...(reports ? { reports } : {}),
+      ...(deliverableContract ? { deliverableContract } : {}),
+      ...(rubricWeights ? { rubricWeights } : {}),
+      ...(loopGuard ? { loopGuard } : {}),
+      env: process.env,
+      client,
     }
+
+    const result = await attemptRunner(context)
+
+    await writeAttemptLog(workspace, phase, attempt, {
+      session: result.sessionID,
+      agent: phase.agentName,
+      model: result.model,
+      attachments: prepared.attachments.map((file) => ({ filename: file.filename, mime: file.mime, url: file.url })),
+      finish: result.finish,
+      cost: result.cost,
+      tokens: result.tokens,
+      error: result.error,
+      // Logged as its own line, never folded into the executor's totals: the whole
+      // economic claim of the pattern is that this stays a small fraction.
+      ...(result.advisorUsage ? { advisor: totalAdvisorUsage(result.advisorUsage) } : {}),
+      // Fallback copy for writeAttemptLog's journal merge; it is replaced by the
+      // merged event list before the log is written.
+      ...(result.advisorEvents && result.advisorEvents.length > 0 ? { advisorEvents: result.advisorEvents } : {}),
+      text: result.assistantText,
+    })
+
+    if (result.error) {
+      if (isMessageAbortedError(result.error)) throw new SessionAbortedError(result.error)
+      throw new LoggedAttemptError(formatSdkError(result.error), { cause: result.error })
+    }
+    return result.assistantText
+  } finally {
+    await composition.close().catch(() => undefined)
   }
-  return descriptors
 }
 
 /** Validates a candidate deliverable; on failure keeps it as forensics and throws. */

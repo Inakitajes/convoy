@@ -45,4 +45,14 @@ describe("adapter dependency direction", () => {
     expect(engineImports(`import { log } from "../../log"`)).toEqual([])
     expect(engineImports(`import { runner } from "../../runner-utils"`)).toEqual([])
   })
+
+  test("core has no harness-specific attempt dispatch left (task 4.4)", async () => {
+    const core = await Bun.file("src/runner.ts").text()
+    // The superseded per-harness attempt implementations moved to the adapters.
+    expect(core).not.toContain("phaseAttemptRunners")
+    expect(core).not.toContain("executeOpenCodePhaseAttempt")
+    expect(core).not.toContain("executeClaudeCodePhaseAttempt")
+    // Core still dispatches through the registry, not a runner-name branch.
+    expect(core).toContain("attemptFor(")
+  })
 })

@@ -7,34 +7,18 @@
  * adapters behind the neutral registry.
  */
 
-import { buildPermissionPromptTool } from "./claude/permission-broker"
-import { buildClaudeSettings, buildPermissionMcpConfig } from "./claude/settings"
 import { createClaudeRunner, type ClaudeRunnerOptions } from "./claude/adapter"
 import { createOpencodeRunner } from "./opencode/adapter"
-import { RunnerRegistry } from "./contracts"
+import { executeClaudeAttempt } from "./claude/attempt"
+import { executeOpencodeAttempt } from "./opencode/attempt"
+import { RunnerRegistry, type RunnerId } from "./contracts"
 
+import { buildEnforcementPlan, type EnforcementCommands } from "./claude/enforcement-plan"
 import type { EnforcementPlan } from "./claude/enforcement"
+import type { PhaseAttemptRunner } from "./attempt"
 
-export type EnforcementCommands = {
-  /** Shell command Claude runs before every tool call (the PreToolUse hook). */
-  hookCommand: string
-  /** Executable that runs the MCP permission host. */
-  permissionCommand: string
-  permissionArgs?: readonly string[]
-  serverName?: string
-  toolName?: string
-}
-
-/** Renders a ready-to-use enforcement plan from concrete commands. */
-export function buildEnforcementPlan(input: EnforcementCommands): EnforcementPlan {
-  const serverName = input.serverName ?? "convoy"
-  const toolName = input.toolName ?? "permission"
-  return {
-    settings: buildClaudeSettings({ preToolUse: { command: input.hookCommand } }),
-    mcpConfig: buildPermissionMcpConfig(serverName, input.permissionCommand, input.permissionArgs ?? []),
-    permissionPromptTool: buildPermissionPromptTool(serverName, toolName),
-  }
-}
+export { buildEnforcementPlan }
+export type { EnforcementCommands }
 
 export type ComposeOptions = {
   cwd: string
@@ -47,7 +31,12 @@ export type ComposeOptions = {
   opencode?: Omit<Parameters<typeof createOpencodeRunner>[0], "cwd" | "env" | "configContent">
 }
 
-export type Composition = { registry: RunnerRegistry; close(): Promise<void> }
+export type Composition = {
+  registry: RunnerRegistry
+  /** The registered rich phase attempt for a runner, so core has no harness branch. */
+  attemptFor(id: RunnerId): PhaseAttemptRunner | undefined
+  close(): Promise<void>
+}
 
 /** Registers the built-in adapters with the assembled options. */
 export function composeRunners(options: ComposeOptions): Composition {
@@ -66,8 +55,13 @@ export function composeRunners(options: ComposeOptions): Composition {
   })
   registry.register({ id: "opencode", execution: opencode })
   registry.register({ id: "claude-code", execution: claude })
+  const attempts: Partial<Record<RunnerId, PhaseAttemptRunner>> = {
+    "opencode": executeOpencodeAttempt,
+    "claude-code": executeClaudeAttempt,
+  }
   return {
     registry,
+    attemptFor: (id) => attempts[id],
     async close() {
       await opencode.close().catch(() => undefined)
     },

@@ -42,18 +42,8 @@ import { validateDeliverableContract } from "../quality-contract"
 /** Last session created for a phase's attempts; opaque to the engine. */
 export type SessionRef = { id?: string }
 
-/**
- * The shutdown surface the OpenCode session runtime needs. The engine's
- * `RunShutdown` satisfies it structurally, so this module never imports it.
- */
-export type ShutdownHandle = {
-  readonly signal: AbortSignal
-  readonly aborted: boolean
-  throwIfRequested(): void
-  setActiveSession(session: { client: OpencodeClient; sessionID: string; directory: string; phaseName: string }): void
-  clearActiveSession(phaseName: string, sessionID: string): void
-  abortActiveSessions(progress?: ProgressUI): Promise<void>
-}
+import type { ShutdownHandle } from "../shutdown-handle"
+export type { ShutdownHandle }
 export type SessionResult = {
   info: AssistantMessage
   parts: Part[]
