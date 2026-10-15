@@ -22,6 +22,7 @@ import { attemptCompositionFor } from "./runners/attempt-composition"
 import { claudeEnforcementFromEnv } from "./runners/claude/enforcement-plan"
 import { resolveAttempt, type AttemptContext } from "./runners/attempt"
 import { releaseSessionHandles } from "./runners/session-handles"
+import { progressSink } from "./runners/attempt-sink"
 import { createClaudeRunner } from "./runners/claude/adapter"
 import { promptPhase } from "./runners/opencode/phase"
 
@@ -2273,6 +2274,7 @@ async function runPhaseAttempt(
     prompt: prepared.prompt,
     model: prepared.model,
     attachments: prepared.attachments,
+    sink: progressSink(progress, { runId: workspace.runID, phaseName: phase.name, attempt }),
     progress,
     shutdown,
     attempt,

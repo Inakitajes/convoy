@@ -12,6 +12,7 @@
  */
 
 import type { StepRunnerId } from "../step-runners"
+import type { ActivityKind, ProgressDiffSummary, ProgressStepUsage, ProgressTodo } from "../progress"
 
 /** Re-exported so core code can name a runner without reaching into a vendor. */
 export type RunnerId = StepRunnerId
@@ -241,6 +242,10 @@ export type Usage = {
   costEstimate?: number
   /** True when the value includes earlier turns (requires baseline subtraction). */
   cumulative?: boolean
+  /** Session the usage belongs to, when the harness reports per-session totals. */
+  sessionID?: string
+  /** Model that produced the usage, when reported. */
+  model?: string
 }
 
 export type TerminalStatus = "completed" | "failed" | "interrupted" | "uncertain"
@@ -301,6 +306,10 @@ export type RunnerEvent =
   | (EventBase & { type: "reasoning"; text: string; partId?: string })
   | (EventBase & { type: "tool"; name: string; detail?: string })
   | (EventBase & { type: "usage"; usage: Usage })
+  /** A summarized progress line; `stepUsage` rides along with the step it closes. */
+  | (EventBase & { type: "activity"; message: string; kind?: ActivityKind; pulse?: boolean; stepUsage?: ProgressStepUsage })
+  | (EventBase & { type: "todos"; todos: readonly ProgressTodo[]; message?: string })
+  | (EventBase & { type: "diff"; summary: ProgressDiffSummary })
   | (EventBase & { type: "permission-request"; requestId: string; action: string; resources?: readonly string[] })
   | (EventBase & { type: "permission-settled"; requestId: string; decision: "allow" | "deny" | "expired" })
   | (EventBase & { type: "terminal"; outcome: AttemptOutcome })

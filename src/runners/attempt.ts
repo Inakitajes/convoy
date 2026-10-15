@@ -26,6 +26,7 @@ import type { AgentStep, DeliverableContract } from "../types"
 import type { Workspace } from "../workspace"
 import type { AttemptIdentity, ExecutionRequest, RunnerCapabilities, RunnerId, ServiceId } from "./contracts"
 import { assertServicesSupported } from "./capabilities"
+import type { AttemptSink } from "./attempt-sink"
 import type { SessionRef, ShutdownHandle } from "./opencode/session"
 
 /** Everything one attempt needs; prepared once by the engine, consumed by the adapter. */
@@ -39,6 +40,9 @@ export type AttemptContext = {
   model: ModelSelection
   /** OpenCode file parts; a CLI adapter converts them to its own attachments. */
   attachments: FilePartInput[]
+  /** The neutral event sink the attempt emits to; the engine renders it. */
+  sink: AttemptSink
+  /** The engine's progress target, still used by the OpenCode rich attempt (task 6.2). */
   progress: ProgressUI
   shutdown: ShutdownHandle
   attempt: number

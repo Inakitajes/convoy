@@ -66,12 +66,8 @@ export async function executeClaudeAttempt(context: AttemptContext): Promise<Att
     signal: context.shutdown.signal,
   }
 
-  const outcome = await runner.executeAttempt(request, (event) => {
-    if (event.type === "session") context.progress.phaseSession(phase.name, event.session.sessionId)
-    else if (event.type === "text") context.progress.phaseMessage(phase.name, { channel: "response", text: event.text })
-    else if (event.type === "reasoning") context.progress.phaseMessage(phase.name, { channel: "reasoning", text: event.text })
-    else if (event.type === "tool") context.progress.phaseActivity(phase.name, `tool: ${event.name}`, "tool")
-  })
+  // The adapter emits neutral events; the engine's sink renders them.
+  const outcome = await runner.executeAttempt(request, (event) => context.sink(event))
 
   if (context.sessionRef && outcome.session) context.sessionRef.id = outcome.session.sessionId
 
