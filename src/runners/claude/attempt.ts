@@ -69,8 +69,6 @@ export async function executeClaudeAttempt(context: AttemptContext): Promise<Att
   // The adapter emits neutral events; the engine's sink renders them.
   const outcome = await runner.executeAttempt(request, (event) => context.sink(event))
 
-  if (context.sessionRef && outcome.session) context.sessionRef.id = outcome.session.sessionId
-
   return {
     assistantText: outcome.assistantText ?? "",
     ...(outcome.session ? { sessionID: outcome.session.sessionId } : {}),

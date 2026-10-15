@@ -62,4 +62,17 @@ describe("adapter dependency direction", () => {
     // The old `options.runner === "claude-code" ? ... : ...` gate branch is gone.
     expect(core).not.toContain('options.runner === "claude-code"')
   })
+
+  test("the attempt context carries no engine-owned policy object (task 6.2)", async () => {
+    const source = await Bun.file("src/runners/attempt.ts").text()
+    const context = source.slice(source.indexOf("export type AttemptContext"), source.indexOf("/** The normalized attempt result"))
+    for (const field of ["workspace", "progress", "shutdown", "reports", "advisors", "sessionRef", "loopGuard", "loopGuardConfig", "deliverableContract", "rubricWeights"]) {
+      expect(context).not.toContain(`${field}:`)
+      expect(context).not.toContain(`${field}?:`)
+    }
+    // It carries the neutral sink, signal and services instead.
+    expect(context).toContain("sink: AttemptSink")
+    expect(context).toContain("signal: AbortSignal")
+    expect(context).toContain("services: ExecutionServices")
+  })
 })

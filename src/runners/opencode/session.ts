@@ -15,7 +15,7 @@ import { join } from "node:path"
 import type { AssistantMessage, OpencodeClient, Part } from "../../opencode-client"
 import { completionQuestion, type AdvisorUsage, type ModelSelection } from "../../advisor"
 import type { AdvisorEvent } from "../../advisor-events"
-import type { AdvisorPhaseHandle } from "../../advisor-runtime"
+import type { AdvisorService } from "../contracts"
 import { getSessionEventHub, payloadProperties } from "../../event-hub"
 import { log } from "../../log"
 import { LoopGuardError, observationFromSessionEvent, type LoopGuardObservation } from "../../loop-guard"
@@ -38,7 +38,7 @@ import type {
 } from "../../progress"
 import { UserAbortError, isUserAbortError } from "../abort"
 import { formatSdkError } from "../errors"
-import type { LoopGuardService } from "../contracts"
+import type { DeliverableService, LoopGuardService } from "../contracts"
 import { validateDeliverableContract } from "../quality-contract"
 
 /** Last session created for a phase's attempts; opaque to the engine. */
@@ -85,9 +85,9 @@ export async function applyCompletionCheckpoint(
     loopGuard?: LoopGuardService
   },
   first: SessionResult,
-  advisor: AdvisorPhaseHandle,
+  advisor: AdvisorService,
 ): Promise<SessionResult> {
-  const advice = await advisor.consult("completion", completionQuestion(Boolean(input.phase.readOnly)))
+  const advice = await advisor.consult({ trigger: "completion", question: completionQuestion(Boolean(input.phase.readOnly)) })
   if (!advice.ok) return first
   throwIfAborted(input.signal)
 
@@ -115,7 +115,7 @@ export async function applyCompletionCheckpoint(
       parts: [{ type: "text", text: completionFollowUp(input.phase, advice.text) }],
     }, { signal: input.signal })
     if (accepted.error) throw new Error(formatSdkError(accepted.error))
-    await advisor.delivered(advice.callId, "follow-up")
+
 
     const second = await watcher.result
     // The watcher resolves on a terminal error as readily as on a completion, so
@@ -163,24 +163,19 @@ export async function applyReportCheckpoint(
   client: OpencodeClient,
   input: {
     phase: AgentStep
-    workspace: Workspace
     targetDir: string
     model: ModelSelection
     progress: ProgressUI
     signal: AbortSignal
     sessionID: string
     loopGuard?: LoopGuardService
-    deliverableContract?: DeliverableContract
-    rubricWeights?: Record<QualityDimension, number>
   },
   first: SessionResult,
-  report: ReportPhaseHandle,
+  deliverables: DeliverableService,
 ): Promise<SessionResult> {
-  const contract = input.deliverableContract ?? deliverableContractForPhase(input.phase)
-  const weights = input.rubricWeights ?? qualityDimensionWeights
-  // An explicit `none` contract owns no deliverable; there is nothing to remind about.
-  if (contract.kind === "none") return first
-  if (await hasValidReportWrite(input.workspace, input.phase, contract, weights, report)) return first
+  // A contract expecting nothing owns no deliverable; there is nothing to remind about.
+  if (deliverables.expected.length === 0) return first
+  if (deliverables.candidate?.() !== undefined) return first
 
   let latest = first
   for (let reminder = 0; reminder < 2; reminder++) {
@@ -214,7 +209,7 @@ export async function applyReportCheckpoint(
         assistantInfos: [...latest.assistantInfos, ...next.assistantInfos],
         lastAssistantParts: next.lastAssistantParts,
       }
-      if (await hasValidReportWrite(input.workspace, input.phase, contract, weights, report)) return latest
+      if (deliverables.candidate?.() !== undefined) return latest
     } catch (error) {
       if (input.signal.aborted || isUserAbortError(error) || error instanceof LoopGuardError) throw error
       return keepCompletedPhase(input.phase.name, latest, error instanceof Error ? error.message : String(error), "report reminder turn")
@@ -223,21 +218,6 @@ export async function applyReportCheckpoint(
     }
   }
   return latest
-}
-
-async function hasValidReportWrite(
-  workspace: Workspace,
-  phase: AgentStep,
-  contract: DeliverableContract,
-  weights: Record<QualityDimension, number>,
-  report: ReportPhaseHandle,
-): Promise<boolean> {
-  if (report.candidate !== undefined) return validateDeliverableContract(contract, report.candidate, weights).valid
-  try {
-    return validateDeliverableContract(contract, await readFile(join(workspace.dir, phase.reportPath), "utf8"), weights).valid
-  } catch {
-    return false
-  }
 }
 
 /** The phase already produced a durable deliverable; a failed follow-up turn must not discard it. */

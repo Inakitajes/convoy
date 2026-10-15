@@ -24,6 +24,8 @@ import { resolveAttempt, type AttemptContext } from "./runners/attempt"
 import { supportsService } from "./runners/capabilities"
 import type { ExecutionServices } from "./runners/contracts"
 import { createOpencodeLoopGuardService } from "./runners/opencode/loop-guard"
+import { createOpencodeAdvisorService } from "./runners/opencode/advisor"
+import { createOpencodeDeliverableService } from "./runners/opencode/deliverables"
 import { releaseSessionHandles } from "./runners/session-handles"
 import { progressSink } from "./runners/attempt-sink"
 import type { AttemptResult } from "./runners/attempt"
@@ -2264,8 +2266,16 @@ async function runPhaseAttempt(
   // The guard is Convoy policy owned by the engine; the attempt gets only the
   // services this runner actually honors (task 6.2).
   const guard = loopGuard ?? new LoopGuard(prepared.loopGuard)
+  // The engine owns the runtimes; the attempt gets services bound to the session
+  // it creates itself, and only those this runner honors (task 6.2).
+  let activeSessionID: string | undefined
+  const session = () => activeSessionID
   const services: ExecutionServices = {}
   if (supportsService(capabilities, "loop-guard")) services.loopGuard = createOpencodeLoopGuardService(guard)
+  if (advisors && supportsService(capabilities, "advisor")) services.advisor = createOpencodeAdvisorService({ runtime: advisors, session })
+  if (reports && supportsService(capabilities, "deliverables")) {
+    services.deliverables = createOpencodeDeliverableService({ runtime: reports, session, expected: contract.kind === "none" ? [] : ["report"] })
+  }
 
   // Validate the phase's required services against this runner's own
   // capabilities and resolve its registered attempt, before anything runs.
@@ -2280,12 +2290,10 @@ async function runPhaseAttempt(
   // receives the engine's progress target. It also learns the session from the
   // attempt's own `session` event, which is why no shutdown handle is passed.
   const render = progressSink(progress, { runId: workspace.runID, phaseName: phase.name, attempt })
-  let activeSessionID: string | undefined
 
   const context: AttemptContext = {
     identity: { runId: workspace.runID, phaseName: phase.name, attempt },
     runner: runnerId,
-    workspace,
     phase,
     targetDir,
     prompt: prepared.prompt,
@@ -2300,12 +2308,6 @@ async function runPhaseAttempt(
     },
     signal: shutdown.signal,
     attempt,
-
-    ...(sessionRef ? { sessionRef } : {}),
-    ...(advisors ? { advisors } : {}),
-    ...(reports ? { reports } : {}),
-    ...(deliverableContract ? { deliverableContract } : {}),
-    ...(rubricWeights ? { rubricWeights } : {}),
     services,
     env: process.env,
     client,

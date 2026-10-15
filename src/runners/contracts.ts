@@ -357,6 +357,8 @@ export type DeliverableResult =
 export type DeliverableService = {
   /** Artifacts this attempt's contract expects (may be empty). */
   readonly expected: readonly DeliverableKind[]
+  /** The last accepted artifact for the attempt, when one exists. */
+  candidate?(): string | undefined
   /** Validates and records one artifact; a rejection never replaces the last accepted one. */
   submit(submission: DeliverableSubmission): Promise<DeliverableResult>
 }

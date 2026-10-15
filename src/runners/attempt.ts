@@ -33,7 +33,7 @@ import type { SessionRef } from "./opencode/session"
 export type AttemptContext = {
   identity: AttemptIdentity
   runner: RunnerId
-  workspace: Workspace
+  /** The phase being run: Convoy data, not an engine policy object. */
   phase: AgentStep
   targetDir: string
   prompt: string
@@ -45,14 +45,7 @@ export type AttemptContext = {
   /** Cancellation for the attempt; the engine owns the shutdown machinery. */
   signal: AbortSignal
   attempt: number
-  sessionRef?: SessionRef
-  /** Absent when no step in the run has an advisor. */
-  advisors?: AdvisorRuntime
-  /** Present for OpenCode runs; Claude keeps its assistant-text fallback. */
-  reports?: ReportRuntime
-  deliverableContract?: DeliverableContract
-  rubricWeights?: Record<QualityDimension, number>
-  /** The optional services this runner honors; the engine supplies only these. */
+  /** The services this runner honors; the engine owns their implementations. */
   services: ExecutionServices
   /** Process environment for a CLI harness (Claude). */
   env?: NodeJS.ProcessEnv
@@ -118,7 +111,6 @@ export function prepareAttemptRequest(context: AttemptContext): ExecutionRequest
     auth: { mode: "subscription" },
     mode: phase.readOnly ? (phase.verify ? "verify" : "read-only") : "write",
     approvals: "auto",
-    ...(context.deliverableContract ? { deliverableContract: context.deliverableContract.kind } : {}),
     signal: context.signal,
   }
 }

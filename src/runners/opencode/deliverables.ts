@@ -19,7 +19,9 @@ export type OpencodeDeliverableService = DeliverableService & {
 
 export type OpencodeDeliverableOptions = {
   runtime: ReportRuntime
-  sessionID: string
+  /** A fixed session id, or a getter when the session is known only after creation. */
+  sessionID?: string
+  session?: () => string | undefined
   /** Artifacts this attempt's contract expects; defaults to a report. */
   expected?: readonly DeliverableKind[]
 }
@@ -61,7 +63,8 @@ export function toWriteReportPayload(submission: DeliverableSubmission): Mapped 
 }
 
 export function createOpencodeDeliverableService(options: OpencodeDeliverableOptions): OpencodeDeliverableService {
-  const { runtime, sessionID } = options
+  const { runtime } = options
+  const sessionOf = () => (options.session ? options.session() : options.sessionID)
   let released = false
 
   return {
@@ -69,11 +72,16 @@ export function createOpencodeDeliverableService(options: OpencodeDeliverableOpt
     release() {
       released = true
     },
+    candidate() {
+      const id = sessionOf()
+      return id ? runtime.handleFor(id)?.candidate : undefined
+    },
     async submit(submission: DeliverableSubmission): Promise<DeliverableResult> {
       if (released) {
         return { ok: false, error: "the attempt's report session was released", retryable: false, preserved: false }
       }
-      const handle = runtime.handleFor(sessionID)
+      const id = sessionOf()
+      const handle = id ? runtime.handleFor(id) : undefined
       if (!handle) {
         return { ok: false, error: "no live report session for this attempt", retryable: false, preserved: false }
       }

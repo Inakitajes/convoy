@@ -20,7 +20,9 @@ export type OpencodeAdvisorService = AdvisorService & {
 
 export type OpencodeAdvisorOptions = {
   runtime: AdvisorRuntime
-  sessionID: string
+  /** A fixed session id, or a getter when the session is known only after creation. */
+  sessionID?: string
+  session?: () => string | undefined
 }
 
 /** Folds the per-call advisor usage added during one consultation into neutral `Usage`. */
@@ -44,9 +46,14 @@ function usageOf(entries: readonly AdvisorCallUsage[]): Usage | undefined {
 }
 
 export function createOpencodeAdvisorService(options: OpencodeAdvisorOptions): OpencodeAdvisorService {
-  const { runtime, sessionID } = options
+  const { runtime } = options
+  const sessionID = () => (options.session ? options.session() : options.sessionID)
   let released = false
-  const handle = () => (released ? undefined : runtime.handleFor(sessionID))
+  const handle = () => {
+    if (released) return undefined
+    const id = sessionID()
+    return id ? runtime.handleFor(id) : undefined
+  }
 
   return {
     // A phase with no advisor has no gate to hold; an advised phase holds the

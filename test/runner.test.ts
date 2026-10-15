@@ -2697,8 +2697,9 @@ describe("loopGuard seam regressions", () => {
     // The config is resolved once by preparePhaseRun; promptPhase must not
     // resolve it again (which would re-arm the $20 default over `false`).
     const result = await promptPhase(client, {
+      identity: { runId: "test-run", phaseName: "implementer", attempt: 1 },
+      services: {},
       phase: agentStep("implementer"),
-      workspace: { dir: "/run", runID: "test-run" } as Workspace,
       targetDir: "/repo",
       prompt: "do the thing",
       model: { providerID: "openai", modelID: "gpt-5.5" },
@@ -2744,8 +2745,9 @@ describe("loopGuard seam regressions", () => {
     } as never
 
     const result = await promptPhase(client, {
+      identity: { runId: "test-run", phaseName: "implementer", attempt: 1 },
+      services: {},
       phase: agentStep("implementer"),
-      workspace: { dir: "/run", runID: "test-run" } as Workspace,
       targetDir: "/repo",
       prompt: "do the thing",
       model: { providerID: "openai", modelID: "gpt-5.5" },
@@ -2796,8 +2798,9 @@ describe("loopGuard seam regressions", () => {
     } as never
 
     const result = await promptPhase(client, {
+      identity: { runId: "test-run", phaseName: "implementer", attempt: 1 },
+      services: {},
       phase: agentStep("implementer"),
-      workspace: { dir: "/run", runID: "test-run" } as Workspace,
       targetDir: "/repo",
       prompt: "do the thing",
       model: { providerID: "openai", modelID: "gpt-5.5" },
@@ -3078,17 +3081,15 @@ describe("applyReportCheckpoint", () => {
     return { client, promptCount: () => prompts, sessionIDs }
   }
 
+  // Deliverable service double: no candidate yet, so the checkpoint must remind.
   const emptyReport = {
-    get candidate() {
-      return undefined
-    },
-    write: async () => ({ markdown: "unused" }),
-    end: () => {},
+    expected: ["report"] as const,
+    candidate: () => undefined,
+    submit: async () => ({ ok: true as const }),
   }
 
-  const inputFor = (workspace: Workspace, phase: AgentStep) => ({
+  const inputFor = (_workspace: Workspace, phase: AgentStep) => ({
     phase,
-    workspace,
     targetDir: "/repo",
     model: { providerID: "openai", modelID: "gpt-5.5" },
     progress: noopProgress,
@@ -3111,7 +3112,7 @@ describe("applyReportCheckpoint", () => {
     const phase = { ...agentStep("scope"), deliverableContract: { kind: "none" } as const }
     const first = firstResult()
 
-    const result = await applyReportCheckpoint(client, inputFor(workspace, phase), first, emptyReport as never)
+    const result = await applyReportCheckpoint(client, inputFor(workspace, phase), first, { expected: [], submit: async () => ({ ok: true }) } as never)
 
     // A `none` contract stays an explicit opt-out: no report, no reminders.
     expect(result).toBe(first)
@@ -3127,16 +3128,15 @@ describe("applyReportCheckpoint", () => {
       lastAssistantParts: [],
     } as never
     const report = {
-      candidate: "# Findings\n\nNo blockers.",
-      write: async () => ({ markdown: "unused" }),
-      end: () => {},
+      expected: ["report"] as const,
+      candidate: () => "# Findings\n\nNo blockers.",
+      submit: async () => ({ ok: true as const }),
     }
 
     const result = await applyReportCheckpoint(
       { session: { promptAsync: async () => { prompts++; return {} } } } as never,
       {
         phase: { ...agentStep("scope"), readOnly: true, deliverableContract: { kind: "markdown-report" } },
-        workspace: { dir: "/run", runID: "test-run" },
         targetDir: "/repo",
         model: { providerID: "openai", modelID: "gpt-5.5" },
         progress: noopProgress,
