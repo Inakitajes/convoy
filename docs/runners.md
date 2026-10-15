@@ -301,3 +301,24 @@ policy before its next request.
 ---
 
 [Back to documentation](README.md)
+
+## The runner port and its services
+
+Convoy drives every harness through one port (`src/runners/contracts.ts`):
+
+```
+ExecutionAdapter.executeAttempt(request, sink, services?)
+  request  — prompt, checkout, agent, model, auth, mode, approvals, attachments, cancellation
+  sink     — normalized events (session/text/reasoning/tool/usage/terminal)
+  services — optional: approvals, deliverables, advisor, loop-guard
+```
+
+- A runner implements the subset of services it can; Convoy passes only what the
+  runner advertises, and **refuses a plan that needs an unimplemented service**,
+  naming the runner and the service (`assertServicesSupported`).
+- The OpenCode integration lives beside its adapter (`src/runners/opencode/`);
+  the Claude adapter consumes the deliverables and loop-guard services and
+  declares its advisor restricted until a Claude bridge exists.
+- Harness specifics — protocol, sessions, event decoding, permissions, process
+  ownership — belong to the adapter; core keeps scheduling, budgets, git
+  boundaries, retries, and finalization.
