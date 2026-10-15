@@ -20,6 +20,7 @@ import type {
   ExecutionAdapter,
   ExecutionRequest,
   ModelReference,
+  ReleaseOutcome,
   RunnerCapabilities,
   RunnerEvent,
   Usage,
@@ -27,6 +28,7 @@ import type {
 import { attemptKey } from "../contracts"
 import { resolveEffectiveCapabilities } from "../capabilities"
 import { opencodeDeclaration } from "../declarations"
+import type { StopOutcome } from "../../process-stop"
 import { bootOwnedServer, type OwnedServer } from "./boot"
 import { reconstructFromMessages } from "./history"
 import { mapOpencodeEvent } from "./log-events"
@@ -205,11 +207,18 @@ export function openRunTerminal(input: OpenV2TerminalInput, deps?: OpenV2Termina
 
 /** The execution adapter plus the lifecycle edge the composition root calls. */
 export type OpencodeRunner = ExecutionAdapter & {
+  /** Bounded, observed release of the owned server; never claims termination it cannot see. */
+  release(): Promise<ReleaseOutcome>
   close(): Promise<void>
   /** Agent names the runtime actually registered from the injected config. */
   registeredAgents(): Promise<string[]>
   /** Reconstructs a recorded session's transcript for late attachment. */
   backfillEvents(sessionId: string, attempt: number): Promise<RunnerEvent[]>
+}
+
+/** Maps the process stop outcome onto the neutral release outcome (task 2.7). */
+export function releaseOutcomeOf(outcome: StopOutcome): ReleaseOutcome {
+  return outcome.status === "stopped" ? { status: "released" } : { status: "unresolved", reason: outcome.reason }
 }
 
 /** The capabilities this adapter advertises, resolved from its own declaration (task 1.7). */
@@ -458,11 +467,17 @@ export function createOpencodeRunner(options: OpencodeRunnerOptions): OpencodeRu
       await interruptSession(client, sessionId).catch(() => undefined)
     },
 
-    async close() {
+    async release(): Promise<ReleaseOutcome> {
       const server = await serverPromise?.catch(() => undefined)
-      await server?.stop().catch(() => undefined)
+      if (!server) return { status: "not-owned" }
+      const outcome = await server.stop().catch((): StopOutcome => ({ status: "unresolved", reason: "stop threw" }))
       serverPromise = undefined
       client = undefined
+      return releaseOutcomeOf(outcome)
+    },
+
+    async close() {
+      await this.release()
     },
   }
 }

@@ -389,6 +389,14 @@ facade never claims a control it cannot honor. Claude supports history and
 post-exit resume but not a native attach. A session that belongs to another
 runner, or a server that cannot return it, is refused rather than guessed at.
 
+Release ownership stays with the adapter. Releasing a runner's runtime reports an
+observed outcome — `released` only when the exit was observed, `not-owned` when
+it never started one, and `unresolved` (with a reason and retained evidence) when
+termination could not be confirmed — so a submitted stop is never reported as
+termination. Session-bound service handles (deliverables, advisor) are released
+at the phase decision; a late submission or consultation from a released session
+is refused.
+
 ### Where the pieces live
 
 - `src/runners/contracts.ts` — the neutral vocabulary (no vendor types).
