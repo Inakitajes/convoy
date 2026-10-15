@@ -386,20 +386,29 @@ export type AdvisorConsultation = {
 }
 
 export type AdvisorAdvice = {
-  /** Advisor text: feedback, or correction guidance for a completion turn. */
+  /** Advisor text: usable advice, or degradation guidance when `ok` is false. */
   text: string
-  /** True when this consultation satisfies the attempt's required checkpoint. */
-  satisfiesCheckpoint: boolean
+  /** True when the advisor produced usable advice rather than degradation text. */
+  ok: boolean
   /** Advisor usage, attributed separately from the executor's own usage. */
   usage?: Usage
 }
 
+/**
+ * How a protected first write is gated before consultation (design D3):
+ * `"block"` denies the write until `satisfied()`; `"hold"` consults once and
+ * then permits the write — a failed consultation still releases the hold so the
+ * executor does not lose a turn (the OpenCode gate); `"none"` when the phase
+ * requires no first-write consultation.
+ */
+export type FirstWriteGate = "none" | "hold" | "block"
+
 export type AdvisorService = {
-  /** When true, protected writes must wait for a satisfying consultation. */
-  readonly requireBeforeWrite: boolean
-  /** Whether the attempt's required checkpoint is satisfied right now. */
+  /** How the attempt's first protected write is gated before consultation. */
+  readonly firstWriteGate: FirstWriteGate
+  /** Whether the attempt's first-write gate is satisfied right now. */
   satisfied(): boolean
-  /** Runs one consultation; a failure throws and leaves the checkpoint unchanged. */
+  /** Runs one consultation; the runner applies its own limit and degradation policy. */
   consult(consultation: AdvisorConsultation): Promise<AdvisorAdvice>
 }
 

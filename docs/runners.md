@@ -170,9 +170,11 @@ Advisors are chosen independently of the executor:
   repository write authority and cannot recursively advise.
 - Consultation usage is attributed to the requesting attempt separately from
   executor usage.
-- A mandatory first-write checkpoint is enforced at the permission boundary in
-  both runners, so native auto-approval cannot bypass it and a failed
-  consultation leaves protected work blocked.
+- A first-write gate is enforced at the permission boundary. Its kind is
+  declared by the runner: `block` denies a protected write until a satisfying
+  consultation, `hold` consults once and then permits the write — releasing the
+  hold even when the consultation fails, so the executor never loses a turn
+  (the OpenCode gate) — and `none` when the phase requires no consultation.
 
 A native Claude advisor (`--advisor`) is used **only** when behavioural
 equivalence is demonstrated by tests covering routing, checkpoint enforcement,
@@ -350,7 +352,7 @@ expressed by capability, not by a second kind of runner.
 | Service | Contract carries |
 |---|---|
 | deliverables | the report/score/commit-description kinds, structured commit data, and a rejection that preserves the last accepted artifact |
-| advisor | on-demand / first-write / completion triggers, the checkpoint requirement and satisfaction, and separately attributed usage |
+| advisor | on-demand / first-write / completion triggers, the first-write gate kind (`none`/`hold`/`block`) and its satisfaction, plus separately attributed usage |
 | approvals | a normalized request identity with a cancellable, session-scoped decision |
 | loop guard | typed observations (call id + arguments, results, steps, usage) and a continue/nudge/stop decision the adapter must apply |
 

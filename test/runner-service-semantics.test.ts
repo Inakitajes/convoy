@@ -71,27 +71,27 @@ describe("advisor service semantics", () => {
   function service(): AdvisorService {
     const checkpoint = new AdvisorCheckpoint({ executor: "opencode", requireBeforeWrite: true })
     return {
-      requireBeforeWrite: checkpoint.requireBeforeWrite,
+      firstWriteGate: "block",
       satisfied: () => checkpoint.satisfied(attempt),
       async consult(consultation) {
         const result = await checkpoint.consult(attempt, async () => ({ runner: "claude-code", text: consultation.question }))
-        return { text: result.text, satisfiesCheckpoint: checkpoint.satisfied(attempt) }
+        return { text: result.text, ok: true }
       },
     }
   }
 
   /** The protected-work gate an adapter applies before a mutation. */
   function mayWrite(advisor: AdvisorService): boolean {
-    return !(advisor.requireBeforeWrite && !advisor.satisfied())
+    return advisor.firstWriteGate !== "block" || advisor.satisfied()
   }
 
-  test("a protected write is blocked until the checkpoint is satisfied", async () => {
+  test("a blocking gate holds a protected write until the checkpoint is satisfied", async () => {
     const advisor = service()
-    expect(advisor.requireBeforeWrite).toBe(true)
+    expect(advisor.firstWriteGate).toBe("block")
     expect(mayWrite(advisor)).toBe(false)
 
     const advice = await advisor.consult({ trigger: "first-write", question: "Proceed?" })
-    expect(advice.satisfiesCheckpoint).toBe(true)
+    expect(advice.ok).toBe(true)
     expect(mayWrite(advisor)).toBe(true)
   })
 
