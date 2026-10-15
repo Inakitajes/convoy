@@ -373,6 +373,14 @@ once and not double-counted across the advisor's follow-up turn). A step-budget
 reset renews only the step allowance; the cost and repetition history are
 retained.
 
+An OpenCode permission ask maps to the neutral policy through its native action:
+`edit`/`write`/`patch` → write, `bash`/`shell` → execute, `task`/`subagent` →
+delegate, `webfetch`/`websearch` → network, `read`/`grep`/`glob`/`list`/`view` →
+read, and anything else → other (denied). Hard policy and the advisor checkpoint
+are decided before any ask-level decision; an eligible ask is settled by the
+interactive/auto/smart decider and is cancellable, so a cancelled ask can never
+settle a sibling attempt's request.
+
 ### Where the pieces live
 
 - `src/runners/contracts.ts` — the neutral vocabulary (no vendor types).
