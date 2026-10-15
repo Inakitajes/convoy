@@ -82,6 +82,10 @@ export function buildClaudeArgs(request: ExecutionRequest): string[] {
   const flags = modeFlags(request.mode)
   if (flags.tools) args.push("--tools", flags.tools)
   args.push("--permission-mode", flags.permissionMode)
+  // Post-exit continuation: resume the exact recorded session (task 3.5/3.6).
+  if (request.continueSession && request.continueSession.runner === "claude-code") {
+    args.push("--resume", request.continueSession.sessionId)
+  }
   return args
 }
 
@@ -244,16 +248,10 @@ export function createClaudeRunner(options: ClaudeRunnerOptions): ClaudeRunner {
           for (const signal of describeClaudeEvent(parsed, state)) {
             if (signal.type === "session") sessionId = signal.sessionID
             const mapped = signalsToEvents(signal, request.identity.attempt)
-            for (const event of mapped.events) {
-              // Claude does not advertise loop control (capability-gated), so a
-              // decision is not applied here; group 3 reconciles its features.
-              if (event.type === "tool") services?.loopGuard?.observe({ kind: "call", tool: event.name })
-              sink(event)
-            }
-            if (mapped.outcome) {
-              outcome = mapped.outcome
-              if (mapped.outcome.usage) services?.loopGuard?.observe({ kind: "usage", usage: mapped.outcome.usage })
-            }
+            // Claude does not advertise loop control, so no loop observation is
+            // forwarded: a decision could not be applied (task 3.5).
+            for (const event of mapped.events) sink(event)
+            if (mapped.outcome) outcome = mapped.outcome
           }
         }
         const [exitCode] = await Promise.all([proc.exited, stderrPromise])
@@ -267,11 +265,17 @@ export function createClaudeRunner(options: ClaudeRunnerOptions): ClaudeRunner {
           return result
         }
         const final: AttemptOutcome = { ...outcome, ...(sessionId ? { session: { runner: "claude-code", sessionId } } : {}) }
-        // Deliverable service: submit the final assistant text for validation.
-        if (services?.deliverables && final.status === "completed" && (final.assistantText ?? "").trim().length > 0) {
+        // Deliverable service: the final assistant text is the only report this
+        // transport can carry, so it is submitted only for a contract that
+        // expects a report — and a missing required report fails the attempt.
+        if (services?.deliverables && final.status === "completed" && services.deliverables.expected.includes("report")) {
+          const body = (final.assistantText ?? "").trim()
+          if (body.length === 0) {
+            return { ...final, status: "failed", error: "the deliverable contract expects a report but the attempt produced none" }
+          }
           const submitted = await services.deliverables.submit({ kind: "report", body: final.assistantText! })
           if (!submitted.ok) {
-            return { ...final, status: "failed", error: submitted.error ?? "deliverable rejected" }
+            return { ...final, status: "failed", error: submitted.error }
           }
         }
         return final

@@ -28,6 +28,7 @@ export const opencodeDeclaration: CapabilityDeclaration = {
     "structured-deliverables",
     "advisor-bridge",
     "live-observation",
+    "session-history",
     "native-live-attach",
     "explicit-handoff",
     "post-exit-resume",
@@ -46,6 +47,7 @@ export const opencodeDeclaration: CapabilityDeclaration = {
         "structured-deliverables",
         "advisor-bridge",
         "live-observation",
+        "session-history",
         "native-live-attach",
         "explicit-handoff",
         "post-exit-resume",
@@ -79,7 +81,10 @@ export const claudeDeclaration: CapabilityDeclaration = {
     "live-observation": "streamed to the coordinator; not a native attach",
     "usage-reporting": "subscription values are estimates",
   },
-  unavailable: [{ id: "native-live-attach", reason: "print mode has no attachable live session" }],
+  unavailable: [
+    { id: "native-live-attach", reason: "print mode has no attachable live session" },
+    { id: "session-history", reason: "print mode does not expose a recorded transcript to reconstruct" },
+  ],
   restricted: [
     {
       id: "explicit-handoff",

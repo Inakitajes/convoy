@@ -62,6 +62,7 @@ export type CapabilityId =
   | "structured-deliverables"
   | "advisor-bridge"
   | "live-observation"
+  | "session-history"
   | "native-live-attach"
   | "explicit-handoff"
   | "post-exit-resume"

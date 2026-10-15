@@ -75,7 +75,8 @@ describe("release outcomes", () => {
 describe("capability-gated session operations", () => {
   test("attach is refused where the runner has no native live attach", () => {
     const claude = resolveRunnerCapabilities("claude-code", { enforcementReady: true })
-    expect(supportsSessionOperation(claude, "history")).toBe(true)
+    // Claude has no recorded-transcript reconstruction and no native attach.
+    expect(supportsSessionOperation(claude, "history")).toBe(false)
     expect(supportsSessionOperation(claude, "resume")).toBe(true)
     expect(supportsSessionOperation(claude, "attach")).toBe(false)
     try {

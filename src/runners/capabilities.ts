@@ -123,7 +123,7 @@ export function filterSupportedServices<T extends Partial<Record<ServiceId, unkn
 
 /** Maps a session operation to the capability that advertises it. */
 const sessionCapability: Record<SessionOperation, CapabilityId> = {
-  history: "live-observation",
+  history: "session-history",
   resume: "post-exit-resume",
   attach: "native-live-attach",
 }

@@ -66,6 +66,12 @@ const fixture = [
   `{"type":"result","subtype":"success","result":"Hello world","total_cost_usd":0.02,"usage":{"input_tokens":10,"output_tokens":5}}`,
 ]
 
+/** A completed turn that produced no assistant text. */
+const emptyResult = [
+  `{"type":"system","subtype":"init","session_id":"ses_claude_2"}`,
+  `{"type":"result","subtype":"success","result":"","total_cost_usd":0.01,"usage":{"input_tokens":3,"output_tokens":0}}`,
+]
+
 describe("claude adapter (unit)", () => {
   test("maps execution modes to tool and permission flags", () => {
     expect(modeFlags("read-only")).toEqual({ tools: "Read,Glob,Grep", permissionMode: "dontAsk" })
@@ -195,7 +201,7 @@ describe("claude adapter (fixture execution)", () => {
     expect(outcome.status).toBe("completed")
   })
 
-  test("delivers the final report and reports loop observations", async () => {
+  test("delivers the final report to a contract that expects it", async () => {
     const runner = createClaudeRunner({ cwd: "/tmp", env: {}, deps: { spawn: () => fakeProcess(fixture) } })
     const observed: string[] = []
     let submitted: { kind: string; body: string } | undefined
@@ -216,8 +222,25 @@ describe("claude adapter (fixture execution)", () => {
     })
     expect(outcome.status).toBe("completed")
     expect(submitted?.body).toBe("Hello world")
-    expect(observed).toContain("usage")
-    expect(observed).toContain("call")
+    // Loop control is not claimed, so no observation is forwarded.
+    expect(observed).toEqual([])
+  })
+
+  test("a contract that expects a report fails when the attempt produced none", async () => {
+    const runner = createClaudeRunner({ cwd: "/tmp", env: {}, deps: { spawn: () => fakeProcess(emptyResult) } })
+    let submitted = false
+    const outcome = await runner.executeAttempt(readOnly(), () => {}, {
+      deliverables: {
+        expected: ["report"],
+        submit: async () => {
+          submitted = true
+          return { ok: true }
+        },
+      },
+    })
+    expect(outcome.status).toBe("failed")
+    expect(outcome.error).toContain("expects a report")
+    expect(submitted).toBe(false)
   })
 
   test("a rejected deliverable fails the attempt", async () => {

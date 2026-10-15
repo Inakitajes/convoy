@@ -397,6 +397,18 @@ termination. Session-bound service handles (deliverables, advisor) are released
 at the phase decision; a late submission or consultation from a released session
 is refused.
 
+The Claude capability matrix is explicit, so an unsupported requirement is
+refused before execution rather than assumed: **available** — read-only, write,
+verify, model fan-out, parallel, approvals (only with the enforcement host),
+structured deliverables, live observation (streamed to the coordinator, not a
+native attach), post-exit resume, usage reporting (estimates). **Restricted** —
+explicit handoff (needs a verified quiesced handoff). **Unavailable** — native
+live attach, session history (print mode exposes no recorded transcript), and the
+advisor bridge (no bridge yet). Loop control is not claimed; the adapter does not
+consume a loop service it cannot apply. Claude's approvals are enforced by the
+hook + permission host, and its resume continues the exact recorded session with
+`--resume`.
+
 ### Where the pieces live
 
 - `src/runners/contracts.ts` — the neutral vocabulary (no vendor types).
