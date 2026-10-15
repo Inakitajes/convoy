@@ -18,7 +18,7 @@ import { fileParts } from "./attachments"
 import { Caffeinate } from "./caffeinate"
 import { ensureClaudeAvailable, openClaudeSessionWindow, promptClaudePhase } from "./claude-code"
 import { baseAgentName } from "./runners/agent-source"
-import { composeRunners } from "./runners/compose"
+import { attemptCompositionFor } from "./runners/attempt-composition"
 import { claudeEnforcementFromEnv } from "./runners/claude/enforcement-plan"
 import { resolveAttempt, type AttemptContext } from "./runners/attempt"
 import { releaseSessionHandles } from "./runners/session-handles"
@@ -2247,74 +2247,71 @@ async function runPhaseAttempt(
   const runnerId = stepRunnerFor(phase.runner).id
   const contract = deliverableContract ?? deliverableContractForPhase(phase)
   const enforcement = claudeEnforcementFromEnv(process.env)
-  const composition = composeRunners({
+  // One composition per run directory, reused across the run's attempts.
+  const composition = attemptCompositionFor({
     cwd: targetDir,
     env: process.env,
     ...(enforcement ? { enforcement } : {}),
   })
 
-  try {
-    const registration = composition.registry.require(runnerId)
-    // Validate the phase's required services against this runner's own
-    // capabilities and resolve its registered attempt, before anything runs.
-    const attemptRunner = await resolveAttempt({
-      runner: runnerId,
-      contract,
-      capabilities: () => registration.execution.capabilities(),
-      attempt: composition.attemptFor(runnerId),
-    })
+  const registration = composition.registry.require(runnerId)
+  // Validate the phase's required services against this runner's own
+  // capabilities and resolve its registered attempt, before anything runs.
+  const attemptRunner = await resolveAttempt({
+    runner: runnerId,
+    contract,
+    capabilities: () => registration.execution.capabilities(),
+    attempt: composition.attemptFor(runnerId),
+  })
 
-    const context: AttemptContext = {
-      identity: { runId: workspace.runID, phaseName: phase.name, attempt },
-      runner: runnerId,
-      workspace,
-      phase,
-      targetDir,
-      prompt: prepared.prompt,
-      model: prepared.model,
-      attachments: prepared.attachments,
-      progress,
-      shutdown,
-      attempt,
-      loopGuardConfig: prepared.loopGuard,
-      ...(sessionRef ? { sessionRef } : {}),
-      ...(advisors ? { advisors } : {}),
-      ...(reports ? { reports } : {}),
-      ...(deliverableContract ? { deliverableContract } : {}),
-      ...(rubricWeights ? { rubricWeights } : {}),
-      ...(loopGuard ? { loopGuard } : {}),
-      env: process.env,
-      client,
-    }
-
-    const result = await attemptRunner(context)
-
-    await writeAttemptLog(workspace, phase, attempt, {
-      session: result.sessionID,
-      agent: phase.agentName,
-      model: result.model,
-      attachments: prepared.attachments.map((file) => ({ filename: file.filename, mime: file.mime, url: file.url })),
-      finish: result.finish,
-      cost: result.cost,
-      tokens: result.tokens,
-      error: result.error,
-      // Logged as its own line, never folded into the executor's totals: the whole
-      // economic claim of the pattern is that this stays a small fraction.
-      ...(result.advisorUsage ? { advisor: totalAdvisorUsage(result.advisorUsage) } : {}),
-      // Fallback copy for writeAttemptLog's journal merge; it is replaced by the
-      // merged event list before the log is written.
-      ...(result.advisorEvents && result.advisorEvents.length > 0 ? { advisorEvents: result.advisorEvents } : {}),
-      text: result.assistantText,
-    })
-
-    if (result.error) {
-      if (isMessageAbortedError(result.error)) throw new SessionAbortedError(result.error)
-      throw new LoggedAttemptError(formatSdkError(result.error), { cause: result.error })
-    }
-    return result.assistantText
-  } finally {
-    await composition.close().catch(() => undefined)
+  const context: AttemptContext = {
+    identity: { runId: workspace.runID, phaseName: phase.name, attempt },
+    runner: runnerId,
+    workspace,
+    phase,
+    targetDir,
+    prompt: prepared.prompt,
+    model: prepared.model,
+    attachments: prepared.attachments,
+    progress,
+    shutdown,
+    attempt,
+    loopGuardConfig: prepared.loopGuard,
+    ...(sessionRef ? { sessionRef } : {}),
+    ...(advisors ? { advisors } : {}),
+    ...(reports ? { reports } : {}),
+    ...(deliverableContract ? { deliverableContract } : {}),
+    ...(rubricWeights ? { rubricWeights } : {}),
+    ...(loopGuard ? { loopGuard } : {}),
+    env: process.env,
+    client,
   }
+
+  const result = await attemptRunner(context)
+
+  await writeAttemptLog(workspace, phase, attempt, {
+    session: result.sessionID,
+    agent: phase.agentName,
+    model: result.model,
+    attachments: prepared.attachments.map((file) => ({ filename: file.filename, mime: file.mime, url: file.url })),
+    finish: result.finish,
+    cost: result.cost,
+    tokens: result.tokens,
+    error: result.error,
+    // Logged as its own line, never folded into the executor's totals: the whole
+    // economic claim of the pattern is that this stays a small fraction.
+    ...(result.advisorUsage ? { advisor: totalAdvisorUsage(result.advisorUsage) } : {}),
+    // Fallback copy for writeAttemptLog's journal merge; it is replaced by the
+    // merged event list before the log is written.
+    ...(result.advisorEvents && result.advisorEvents.length > 0 ? { advisorEvents: result.advisorEvents } : {}),
+    text: result.assistantText,
+  })
+
+  if (result.error) {
+    if (isMessageAbortedError(result.error)) throw new SessionAbortedError(result.error)
+    throw new LoggedAttemptError(formatSdkError(result.error), { cause: result.error })
+  }
+  return result.assistantText
 }
 
 /** Validates a candidate deliverable; on failure keeps it as forensics and throws. */

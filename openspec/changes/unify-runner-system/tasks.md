@@ -52,5 +52,5 @@ Implement pending work in group order. Each slice must keep `bun run typecheck`,
 
 These are the two documented transitional seams, tracked so they are not lost. The engine is correct without them; they narrow the migration further.
 
-- [ ] 6.1 Cache the run-lifetime composition for the whole run instead of rebuilding it inside `runPhaseAttempt` for each attempt; verify the engine constructs one composition per run and reuses it across phases.
+- [x] 6.1 Cache the run-lifetime composition for the whole run instead of rebuilding it inside `runPhaseAttempt` for each attempt; verify the engine constructs one composition per run and reuses it across phases.
 - [ ] 6.2 Re-express the OpenCode rich attempt on the neutral request, event sink and services alone, so the engine no longer supplies its own report/advisor runtimes, shutdown handle or progress target in the attempt context; verify the attempt context carries no engine-owned policy object and the full suite stays green.
