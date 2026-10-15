@@ -1,33 +1,49 @@
 # Tasks
 
-## 1. Port carries optional services (no behaviour change)
+Planning revision: the six checked entries below record previously completed groundwork, not completion of the expanded contract. No implementation tests were rerun by this planning edit. The `promptPhase` relocation is historical progress only: its engine import cycle must still be removed. The former close-out entries are reopened because final integration, documentation and architecture evidence must follow the actual dispatch migration.
 
-- [x] 1.1 Add `ExecutionServices` (progress, approvals, deliverables, advisor, loopGuard) to `src/runners/contracts.ts` and an optional third parameter to `ExecutionAdapter.executeAttempt`; verify typecheck and that existing adapters/tests compile unchanged.
-- [x] 1.2 Add capability validation that refuses a plan requiring an unimplemented service, naming runner+service, in `src/runners/capabilities.ts`; verify unit tests for accept/refuse cases.
-- [x] 1.3 Add a conformance test that a runner implementing no services runs with none, and one implementing a service receives it; verify the shared conformance suite passes.
+Implement pending work in group order. Each slice must keep `bun run typecheck`, `bun test` and `bun run build` green; the tests/docs named in a task land with that task rather than waiting for close-out.
 
-## 2. Move OpenCode integration behind its adapter
+## 1. Complete the rich common contract and its conformance tests
 
-- [ ] 2.1 Implement the deliverables service in `src/runners/opencode/**` (reusing the existing report runtime/bridge) and verify report/score/commit flows through the adapter in a fixture test.
-- [ ] 2.2 Implement the advisor service in the OpenCode adapter (on-demand + first-write checkpoint) and verify the checkpoint blocks an unconsulted write.
-- [ ] 2.3 Implement the loop-guard sink in the OpenCode adapter and verify repeated-call and cost observations reach the guard.
-- [ ] 2.4 Route approvals through the adapter's existing permission interception and verify ask-level decisions settle per policy.
-- [ ] 2.5 Keep the engine driving it: wire `runner.ts` to pass services to the OpenCode adapter while its dispatch still comes from the engine; verify the full suite stays green.
+- [x] 1.1 Add the initial approval, deliverable, advisor and loop-guard service types and optional third parameter to `ExecutionAdapter.executeAttempt`; baseline verification: typecheck and existing adapters/tests compile unchanged.
+- [x] 1.2 Add initial capability/service validation helpers in `src/runners/capabilities.ts`; baseline verification: unit tests accept supported services and identify runner plus missing service on refusal.
+- [x] 1.3 Add initial service-passing conformance coverage; baseline verification: a test adapter accepts no services or receives a supplied supported service.
+- [ ] 1.4 Model the required Convoy execution context and collision-free run/phase/attempt identity without passing workspace/UI/shutdown objects or SDK clients; verify type fixtures and parallel-phase tests with identical local attempt numbers.
+- [ ] 1.5 Complete typed service contracts for report/score/commit metadata, advisor checkpoints/limits, cancellable approvals and actionable loop decisions; verify fake-adapter conformance tests for validation rejection, protected-write blocking, nudge/stop and required-service refusal rather than callback invocation alone.
+- [ ] 1.6 Complete normalized event/outcome accounting, common cancellation/runtime-release outcomes and capability-gated session facets; verify type/conformance fixtures for cumulative usage, executor/advisor attribution, exact session references, unsupported controls and unresolved cleanup outcomes.
+- [ ] 1.7 Make adapter declarations plus runtime/auth/enforcement evidence authoritative, remove conflicting brand-based capability tables, and document the rich contract and support/requirement distinction in `docs/runners.md`; verify capability tests cover restricted bridges, native versus bridged semantics and no silent removal of required services.
 
-## 3. Point the engine at the port for OpenCode
+## 2. Bring rich OpenCode behavior through the common adapter
 
-- [ ] 3.1 Replace the OpenCode attempt path in `runner.ts` with the registered adapter through `composeRunners`; verify reports/advisor/loop-guard/approvals/live transcripts/resume still pass their suites.
-- [ ] 3.2 Retire the duplicated engine-side OpenCode integration and verify no dead code remains and the suite is green.
-- [ ] 3.3 Verify ownership/lifecycle: bounded stop, no orphan leak, cancellation during startup — existing lifecycle suites pass unchanged.
+- [ ] 2.1 Finish the real extraction of OpenCode phase/watch/checkpoint helpers, move reusable policy into shared vendor-independent service modules, and remove production adapter imports of `runner.ts`; verify an adapter-to-engine dependency test, existing helper suites and documented ownership boundaries.
+- [ ] 2.2 Connect the OpenCode report bridge to the common deliverable service, reusing existing validation, candidate precedence and recovery metadata; verify adapter fixtures for reports, scores, structured commit descriptions, invalid resubmission and stale-session rejection, and document the supported submission semantics.
+- [ ] 2.3 Connect on-demand advisor/feedback, first-write enforcement and completion correction to shared advisor services; verify adapter fixtures for blocked unconsulted writes, bounded consultation, same-session follow-up and separately attributed usage, and document checkpoint timing.
+- [ ] 2.4 Feed correlated tool arguments/results, model steps and stable usage/cost observations into the shared loop guard and apply continue/nudge/stop decisions; verify adapter fixtures for repeated calls, same-tool failures, soft nudges, hard stops, follow-up deduplication and step-only budget reset, and document guard semantics.
+- [ ] 2.5 Route OpenCode permission interception through hard policy/checkpoint checks and cancellable interactive/auto/smart decisions; verify deny precedence, ask settlement, cancellation and parallel-attempt isolation fixtures, and document how native requests map to Convoy policy.
+- [ ] 2.6 Implement the common session facets with the existing OpenCode history/reopen/continuation/control mechanisms; verify exact-session resume, live/backfill merge without duplication, honest unavailable history and capability distinctions, and document supported session controls.
+- [ ] 2.7 Expose OpenCode runtime release and session-bound service-handle lifetime through the common lifecycle; verify startup abort, bounded repeated stop, preserved human-iteration handles, phase-decision release and independent-service protection with adapter/lifecycle fixtures, and document release ownership.
 
-## 4. Fold Claude onto the shared services
+## 3. Reconcile Claude's groundwork before switching engine dispatch
 
-- [x] 4.1 Implement the deliverables service for Claude where the contract permits and verify report validation parity.
-- [x] 4.2 Implement the advisor service for Claude (own bridge, not a native flag) or refuse it by capability with a clear reason; verify behaviour.
-- [x] 4.3 Verify Claude still passes its adapter, invocation, enforcement, and lifecycle suites.
+- [x] 3.1 Add the initial Claude assistant-text deliverable callback for permitted report contracts; baseline verification: adapter tests cover accepted submission and validation rejection. This is not full structured-deliverable parity or engine wiring.
+- [x] 3.2 Declare Claude advisor consultation restricted until a bridge can honor its required semantics; baseline verification: capability tests refuse the unsupported advisor service with a reason.
+- [x] 3.3 Verify the baseline Claude adapter, invocation, enforcement and lifecycle suites before the rich-contract revision; revalidation against completed composition remains below.
+- [ ] 3.4 Adapt Claude's supported delivery/approval services to the completed contract, preserving hook/MCP enforcement and contract-specific fallback rules; verify composed-adapter/process fixtures for accepted/rejected/missing required deliverables, deny precedence and fail-closed write/verify behavior, and document supported versus restricted contracts.
+- [ ] 3.5 Reconcile Claude observations and session/lifecycle facets with effective capabilities: claim loop/checkpoint/live-control support only when the completed guarantees are met, otherwise refuse requirements explicitly; verify shared semantic conformance fixtures and document the resulting capability matrix.
+- [ ] 3.6 Re-run Claude's adapter, invocation, enforcement and lifecycle suites through registered composition before the engine switch, with fixture-based read-only/write/verify, cancellation and post-exit resume flows; verify the completed common adapter contract without paid live invocations.
 
-## 5. Close out
+## 4. Make the engine use only the registered common integration
 
-- [x] 5.1 Update `docs/runners.md`/`docs/development.md` to describe the single port and service capabilities; verify examples parse.
-- [x] 5.2 Run `bun run typecheck`, `bun test`, and `bun run build`; verify all green and the acceptance script still completes a bounded mixed run.
-- [x] 5.3 Audit that no harness-specific branch remains in core and that vendor types stay behind adapter boundaries; verify the dependency-boundary test passes.
+- [ ] 4.1 Construct run-lifetime composition and replace the special OpenCode/Claude attempt dispatch with common request/service preparation, capability validation and normalized result handling; verify engine fixtures for both runners, required-service refusal before prompt admission and attempt-log compatibility.
+- [ ] 4.2 Route phase-gate session opening, continuation/control and late transcript reconstruction through registered session facets rather than harness conditionals; verify gate, exact-session resume and transcript suites preserve human decisions, permission isolation and missing-history behavior.
+- [ ] 4.3 Wire run shutdown and phase/session handle release through common cancellation/lifecycle operations; verify engine-level startup cancellation, parallel abort, terminal-hold cleanup, retry/late-submission isolation and bounded observed or unresolved cleanup outcomes.
+- [ ] 4.4 Remove superseded `phaseAttemptRunners` implementations, native engine client/result/attachment handling and reverse helper dependencies once their common replacements pass; verify regression and dependency tests reject SDK leakage, adapter-to-engine imports and OpenCode- or Claude-specific engine execution/session paths.
+- [ ] 4.5 Run a minimal registered test harness through the same engine path, without a new dispatch branch or production harness integration, and update `docs/development.md` with the registration/conformance workflow; verify engine fixtures require only the test adapter and normal registration/declaration metadata.
+
+## 5. Final integration evidence and close-out
+
+- [ ] 5.1 Reconcile `docs/runners.md` and `docs/development.md` with the final implementation, removing any premature claim that file relocation completed unification; verify examples parse and every advertised capability maps to a tested common-contract guarantee.
+- [ ] 5.2 Run final `bun run typecheck`, `bun test` and `bun run build` after the dispatch migration and record exact commands/results; verify all pass with skipped tests identified rather than counted as covered behavior.
+- [ ] 5.3 Audit the final integration graph and common-engine test harness evidence; verify dependency/conformance tests exclude SDK leakage, adapter-to-engine cycles, privileged OpenCode execution/session paths and capability declarations disconnected from implementation.
+- [ ] 5.4 Record bounded live acceptance coverage separately from fixture coverage, using `nan/deepseek-v4-flash` for authorized free OpenCode checks and no new Claude/paid live calls without explicit permission; verify results distinguish passed cells from missing credentials/authorization/tool endpoints and do not claim protocol-only checks prove tool/service parity.

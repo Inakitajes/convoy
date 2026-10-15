@@ -2,29 +2,31 @@
 
 ## Why
 
-Convoy now runs OpenCode through its in-process engine (`runner.ts` + `src/opencode-client.ts`) and Claude through the neutral adapter (`src/runners/claude/adapter.ts`). Two different integration paths mean richer Convoy features (advisor, structured reports, loop guard, approvals, progress) are OpenCode-shaped and unavailable to any other runner without duplicating the engine. A third harness (e.g. Pi) would today have to reimplement them.
+Convoy still has separate engine integration paths for OpenCode and Claude, so rich features remain coupled to a harness instead of being reusable through the runner contract. This change establishes one rich, Convoy-owned harness contract for every runner, with differences expressed by effective capabilities rather than a privileged OpenCode path.
 
-This change unifies the integration on one runner port that can carry Convoy's optional services, so every harness — including OpenCode — is an adapter and feature parity is expressed by capability rather than by which code path a runner happens to use.
+Vendor-neutral does not mean domain-free or a lowest common denominator: the contract can describe Convoy's execution context, sessions, approvals, deliverables, advisor checkpoints, loop limits, and observations without exposing a vendor SDK. Moving OpenCode code to an adapter directory alone does not complete that integration.
 
 ## What Changes
 
-- Extend the runner port so an attempt can be given Convoy's optional services (progress UI, approval channel, deliverable/report contract, advisor consultation, loop-guard signals) instead of only prompting and streaming.
-- Move OpenCode's feature integration (advisor, reports, loop guard, approvals, progress, event decode) behind its adapter, so the engine drives runners only through the port.
-- Keep the owned OpenCode v2 server and the existing lifecycle/ownership guarantees; the port does not change who owns processes.
-- Capabilities become authoritative: a runner advertises which optional services it implements, and Convoy validates a plan against them before execution.
-- Behaviour for existing OpenCode and Claude pipelines is preserved; the change is about where the integration lives, not about new user-visible workflow.
+- Complete the common contract with typed execution context, normalized events/outcomes, cancellation and runtime release, plus capability-gated session operations and optional Convoy services. Organize these as cohesive interfaces within one integration system, not a thin generic runner beside a rich OpenCode-only runner.
+- Preserve rich service semantics: reports, scores and structured commit descriptions; on-demand and checkpoint advisor consultation; policy-controlled approvals; and actionable loop/budget observations. Normalize progress events rather than passing UI implementations through the contract.
+- Move OpenCode's protocol, session, plugin/bridge, permission and event integration behind its adapter. Keep reusable policy and validation in shared Convoy services; remove adapter dependencies back into the engine.
+- Route both OpenCode and Claude through the registered common contract, including the existing session controls used by phase gates and transcript reconstruction. Preserve owned-process shutdown and independent conversation lifetimes.
+- Make effective capabilities authoritative for the installed runtime, authentication and enforcement readiness. Refuse required unsupported behavior before execution; distinguish native and bridged semantics without silently weakening a guarantee.
+- Preserve existing pipeline behavior. No new user-facing workflow or real third-harness implementation is required; a registered test harness must demonstrate extensibility without another engine execution path.
 
 ## Capabilities
 
 ### New Capabilities
 
-- `runner-integration`: one runner port that carries Convoy's optional services, with capability-declared support and the engine driving all runners through it.
+- `runner-integration`: one rich, vendor-independent harness contract, with capability-declared support and the engine driving every runner through the same integration path.
 
 ### Modified Capabilities
 
-<!-- None: existing runner behaviour is preserved; this change relocates integration. -->
+<!-- None: existing permissions, transcripts, conversation, commit-message and server-lifecycle requirements are preserved, not replaced or weakened. -->
 
 ## Impact
 
-- `src/runners/contracts.ts` (port shape), `src/runners/compose.ts` (composition), `src/runners/opencode/**` (bridges), `src/runners/claude/**` (service adoption), `src/runner.ts` (engine delegates to the port), and the advisor/report/loop-guard/permission runtimes that move behind the adapter.
-- No dependency changes; no user-facing workflow change; the existing test suite is the regression gate at each step.
+- `src/runners/contracts.ts` (rich contract), capability resolution and registration/composition, both adapters, shared service implementations, and `src/runner.ts` (common orchestration instead of harness-specific dispatch).
+- Advisor/report/loop-guard/permission bridges, phase gates, transcript/session consumers, shutdown composition, conformance tests and runner architecture documentation.
+- No external dependency or pipeline syntax changes. The suite remains the regression gate, complemented by engine-path and dependency-direction tests: green behavior tests alone do not prove architectural completion.
