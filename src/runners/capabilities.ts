@@ -1,95 +1,75 @@
 /**
- * Effective capability resolution (change `runner-parity-opencode-v2`, task 8.1).
+ * Effective capability resolution (changes `runner-parity-opencode-v2` task 8.1
+ * and `unify-runner-system` task 1.7).
  *
- * Capabilities are described, not brand booleans: they depend on the resolved
- * runtime, the requested authentication, and whether mandatory enforcement is
- * installed. Core calls this to decide which selections are allowed, instead of
- * hardcoding "Claude cannot write".
+ * Capabilities are described, not brand booleans: the runner's own declaration
+ * (`declarations.ts`) is authoritative, and runtime/auth/enforcement evidence
+ * decides which declared capabilities are restricted. There is no second
+ * brand-based table, so the surface preflight quotes and the one the running
+ * adapter honors cannot disagree.
  */
 
-import type { AuthenticationSelection, Capability, CapabilityId, RunnerCapabilities, RunnerId, ServiceId, SessionOperation } from "./contracts"
+import { claudeDeclaration, opencodeDeclaration } from "./declarations"
+import type {
+  Capability,
+  CapabilityDeclaration,
+  CapabilityEvidence,
+  CapabilityId,
+  RunnerCapabilities,
+  RunnerId,
+  ServiceId,
+  SessionOperation,
+} from "./contracts"
 
-export type CapabilityInput = {
-  /** Resolved harness version, when known. */
-  version?: string
-  auth?: AuthenticationSelection
-  /** Whether the mandatory enforcement machinery is installed and healthy. */
-  enforcementReady?: boolean
+/** Runtime/auth/enforcement evidence; same shape as the contract's `CapabilityEvidence`. */
+export type CapabilityInput = CapabilityEvidence
+
+const declarations: Record<RunnerId, CapabilityDeclaration> = {
+  "opencode": opencodeDeclaration,
+  "claude-code": claudeDeclaration,
 }
 
-const opencodeCapabilities: readonly CapabilityId[] = [
-  "read-only",
-  "write",
-  "verify",
-  "model-fanout",
-  "parallel",
-  "approvals",
-  "structured-deliverables",
-  "advisor-bridge",
-  "live-observation",
-  "native-live-attach",
-  "explicit-handoff",
-  "post-exit-resume",
-  "usage-reporting",
-  "loop-guard",
-]
-
-const claudeAvailable: readonly CapabilityId[] = [
-  "read-only",
-  "write",
-  "verify",
-  "model-fanout",
-  "parallel",
-  "approvals",
-  "structured-deliverables",
-  "live-observation",
-  "post-exit-resume",
-]
-
-const available = (id: CapabilityId, semantics?: string): Capability => ({ id, availability: "available", ...(semantics ? { semantics } : {}) })
-const restricted = (id: CapabilityId, reason: string, remediation?: string): Capability => ({
-  id,
-  availability: "restricted",
-  reason,
-  ...(remediation ? { remediation } : {}),
-})
-
-function supportedMajor(version?: string): number | undefined {
-  if (!version) return undefined
-  const major = Number(version.split(".")[0])
-  return Number.isInteger(major) ? major : undefined
+/** The authoritative declaration for a runner. */
+export function declarationFor(runner: RunnerId): CapabilityDeclaration {
+  return declarations[runner]
 }
 
-export function resolveRunnerCapabilities(runner: RunnerId, input: CapabilityInput = {}): RunnerCapabilities {
-  if (runner === "opencode") {
-    const major = supportedMajor(input.version)
-    if (major !== undefined && major !== 2) {
+function reasonText(value: string | ((evidence: CapabilityEvidence) => string), evidence: CapabilityEvidence): string {
+  return typeof value === "function" ? value(evidence) : value
+}
+
+/**
+ * Resolves a declaration into described capabilities: an id hit by a matching
+ * evidence rule or an unconditional restriction becomes `restricted`, an
+ * unavailable id stays `unavailable`, and every other declared id is
+ * `available` with its disclosed semantics.
+ */
+export function resolveEffectiveCapabilities(declaration: CapabilityDeclaration, evidence: CapabilityInput = {}): RunnerCapabilities {
+  const capabilities: Capability[] = declaration.available.map((id) => {
+    const rule = declaration.restrictions?.find((candidate) => candidate.ids.includes(id) && candidate.when(evidence))
+    if (rule) {
       return {
-        runner,
-        ...(input.version ? { version: input.version } : {}),
-        capabilities: opencodeCapabilities.map((id) => restricted(id, `OpenCode ${input.version} is not a supported V2 runtime`)),
+        id,
+        availability: "restricted",
+        reason: reasonText(rule.reason, evidence),
+        ...(rule.remediation ? { remediation: reasonText(rule.remediation, evidence) } : {}),
       }
     }
-    return {
-      runner,
-      ...(input.version ? { version: input.version } : {}),
-      capabilities: opencodeCapabilities.map((id) => available(id)),
-    }
+    const semantics = declaration.semantics?.[id]
+    return { id, availability: "available", ...(semantics ? { semantics } : {}) }
+  })
+  for (const entry of declaration.restricted ?? []) {
+    capabilities.push({ id: entry.id, availability: "restricted", reason: entry.reason, ...(entry.remediation ? { remediation: entry.remediation } : {}) })
   }
+  for (const entry of declaration.unavailable ?? []) {
+    capabilities.push({ id: entry.id, availability: "unavailable", reason: entry.reason, ...(entry.remediation ? { remediation: entry.remediation } : {}) })
+  }
+  return { runner: declaration.runner, ...(evidence.version ? { version: evidence.version } : {}), capabilities }
+}
 
-  const capabilities: Capability[] = []
-  for (const id of claudeAvailable) {
-    if (id === "approvals" && input.enforcementReady === false) {
-      capabilities.push(restricted(id, "mandatory enforcement (hook + permission host) is not installed"))
-      continue
-    }
-    capabilities.push(available(id, id === "live-observation" ? "streamed to the coordinator; not a native attach" : undefined))
-  }
-  capabilities.push({ id: "native-live-attach", availability: "unavailable", reason: "print mode has no attachable live session" })
-  capabilities.push(restricted("explicit-handoff", "requires a verified quiesced handoff", "use post-exit resume or observe"))
-  capabilities.push(restricted("advisor-bridge", "the Claude adapter has no advisor bridge yet", "use an OpenCode advisor or omit the advisor for this step"))
-  capabilities.push(available("usage-reporting", "subscription values are estimates"))
-  return { runner, ...(input.version ? { version: input.version } : {}), capabilities }
+/** The effective capabilities for a runner, from its declaration and evidence. */
+export function resolveRunnerCapabilities(runner: RunnerId, input: CapabilityInput = {}): RunnerCapabilities {
+  return resolveEffectiveCapabilities(declarationFor(runner), input)
 }
 
 /** True when a required capability is fully available for the selection. */

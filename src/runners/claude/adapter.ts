@@ -23,6 +23,8 @@ import { assertEnforcementReady, EnforcementNotReadyError, type EnforcementPlan 
 import { encodeClaudeMcpConfig, encodeClaudeSettings, permissionPromptArgs } from "./settings"
 
 import type { AttemptOutcome, ExecutionAdapter, ExecutionRequest, ExecutionServices, RunnerEvent, Usage } from "../contracts"
+import { resolveEffectiveCapabilities } from "../capabilities"
+import { claudeDeclaration } from "../declarations"
 import type { ProgressTokens } from "../../progress"
 
 export type ClaudeProcess = {
@@ -187,19 +189,9 @@ export function createClaudeRunner(options: ClaudeRunnerOptions): ClaudeRunner {
     id: "claude-code",
 
     async capabilities() {
-      // Described capabilities; group 6/7 tighten which are available by version
-      // and enforcement health. Native live attach is not assumed.
-      return {
-        runner: "claude-code",
-        capabilities: [
-          { id: "read-only", availability: "available" },
-          { id: "write", availability: "available" },
-          { id: "verify", availability: "available" },
-          { id: "post-exit-resume", availability: "available" },
-          { id: "live-observation", availability: "available", semantics: "streamed to the coordinator; not a native terminal attach" },
-          { id: "native-live-attach", availability: "unavailable", reason: "print mode has no attachable live session" },
-        ],
-      }
+      // Resolved from the adapter's own declaration plus enforcement evidence
+      // (task 1.7), so preflight and this adapter never disagree.
+      return resolveEffectiveCapabilities(claudeDeclaration, { enforcementReady: enforcement !== undefined })
     },
 
     async executeAttempt(

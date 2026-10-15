@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test"
 
+import { buildEnforcementPlan } from "../src/runners/compose"
+import { createClaudeRunner } from "../src/runners/claude/adapter"
+import { opencodeCapabilities } from "../src/runners/opencode/adapter"
 import { capabilityAvailable, resolveRunnerCapabilities } from "../src/runners/capabilities"
+import { capability } from "../src/runners/contracts"
 
 describe("effective capability resolution", () => {
   test("OpenCode on a supported v2 exposes the full surface", () => {
@@ -29,5 +33,46 @@ describe("effective capability resolution", () => {
     expect(caps.capabilities.find((entry) => entry.id === "approvals")?.availability).toBe("restricted")
     // Read-only is still safe without enforcement.
     expect(capabilityAvailable(caps, "read-only")).toBe(true)
+  })
+})
+
+describe("the adapter declaration is the single authoritative source", () => {
+  test("the OpenCode adapter resolves from the shared declaration, including loop-guard", () => {
+    const declared = opencodeCapabilities("2.0.28")
+    expect(declared).toEqual(resolveRunnerCapabilities("opencode", { version: "2.0.28" }))
+    // The surface the adapter advertises matches the preflight surface.
+    expect(declared.capabilities.some((entry) => entry.id === "loop-guard")).toBe(true)
+  })
+
+  test("the Claude adapter resolves from the shared declaration and enforcement evidence", async () => {
+    const bare = createClaudeRunner({ cwd: "/tmp", env: {} })
+    const bareCaps = await bare.capabilities()
+    expect(bareCaps).toEqual(resolveRunnerCapabilities("claude-code", { enforcementReady: false }))
+    expect(capability(bareCaps, "approvals")?.availability).toBe("restricted")
+
+    const guarded = createClaudeRunner({
+      cwd: "/tmp",
+      env: {},
+      enforcement: buildEnforcementPlan({ hookCommand: "convoy hook", permissionCommand: "convoy mcp" }),
+    })
+    const guardedCaps = await guarded.capabilities()
+    expect(capability(guardedCaps, "approvals")?.availability).toBe("available")
+  })
+})
+
+describe("native versus bridged semantics", () => {
+  test("Claude discloses that live observation is not a native attach", () => {
+    const caps = resolveRunnerCapabilities("claude-code", { enforcementReady: true })
+    const live = capability(caps, "live-observation")
+    expect(live?.availability).toBe("available")
+    if (live?.availability === "available") expect(live.semantics).toContain("not a native attach")
+  })
+
+  test("a capability the runner cannot honor is advertised as restricted, never dropped", () => {
+    const caps = resolveRunnerCapabilities("claude-code", { enforcementReady: true })
+    expect(capability(caps, "advisor-bridge")?.availability).toBe("restricted")
+    if (capability(caps, "advisor-bridge")?.availability === "restricted") {
+      expect((capability(caps, "advisor-bridge") as { remediation?: string }).remediation).toBeTruthy()
+    }
   })
 })

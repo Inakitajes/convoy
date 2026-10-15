@@ -17,7 +17,6 @@ import { join } from "node:path"
 
 import type {
   AttemptOutcome,
-  Capability,
   ExecutionAdapter,
   ExecutionRequest,
   ModelReference,
@@ -26,6 +25,8 @@ import type {
   Usage,
 } from "../contracts"
 import { attemptKey } from "../contracts"
+import { resolveEffectiveCapabilities } from "../capabilities"
+import { opencodeDeclaration } from "../declarations"
 import { bootOwnedServer, type OwnedServer } from "./boot"
 import { reconstructFromMessages } from "./history"
 import { mapOpencodeEvent } from "./log-events"
@@ -211,28 +212,9 @@ export type OpencodeRunner = ExecutionAdapter & {
   backfillEvents(sessionId: string, attempt: number): Promise<RunnerEvent[]>
 }
 
-/** The capabilities this adapter advertises (described, never bare booleans, D4). */
+/** The capabilities this adapter advertises, resolved from its own declaration (task 1.7). */
 export function opencodeCapabilities(version?: string): RunnerCapabilities {
-  const available: Capability["id"][] = [
-    "read-only",
-    "write",
-    "verify",
-    "model-fanout",
-    "parallel",
-    "approvals",
-    "structured-deliverables",
-    "advisor-bridge",
-    "live-observation",
-    "native-live-attach",
-    "explicit-handoff",
-    "post-exit-resume",
-    "usage-reporting",
-  ]
-  return {
-    runner: "opencode",
-    ...(version ? { version } : {}),
-    capabilities: available.map((id) => ({ id, availability: "available" as const })),
-  }
+  return resolveEffectiveCapabilities(opencodeDeclaration, version ? { version } : {})
 }
 
 /** Splits a Convoy model reference (`provider/model[#variant]`) into a v2 ModelRef. */

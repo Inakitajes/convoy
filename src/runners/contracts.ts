@@ -97,6 +97,47 @@ export function isAvailable(resolved: RunnerCapabilities, id: CapabilityId): boo
 }
 
 // ---------------------------------------------------------------------------
+// Capability declarations (design D4)
+// ---------------------------------------------------------------------------
+
+/** Runtime, authentication, and enforcement evidence used to resolve capabilities. */
+export type CapabilityEvidence = {
+  /** Resolved harness version, when known. */
+  version?: string
+  auth?: AuthenticationSelection
+  /** Whether the mandatory enforcement machinery is installed and healthy. */
+  enforcementReady?: boolean
+}
+
+/** A restriction that applies only while an evidence rule holds. */
+export type EvidenceRestriction = {
+  /** Capabilities this rule restricts when it fires. */
+  ids: readonly CapabilityId[]
+  reason: string | ((evidence: CapabilityEvidence) => string)
+  remediation?: string | ((evidence: CapabilityEvidence) => string)
+  when: (evidence: CapabilityEvidence) => boolean
+}
+
+/**
+ * What a runner's adapter implements. This is the single authoritative
+ * declaration: preflight and the running adapter resolve from the same source,
+ * so a capability can never be advertised in one place and denied in another.
+ */
+export type CapabilityDeclaration = {
+  runner: RunnerId
+  /** Capabilities the runner honors when no restriction applies. */
+  available: readonly CapabilityId[]
+  /** Disclosed semantics for an available capability (native vs bridged, etc.). */
+  semantics?: Partial<Record<CapabilityId, string>>
+  /** Capabilities advertised but restricted unconditionally, with a reason. */
+  restricted?: readonly { id: CapabilityId; reason: string; remediation?: string }[]
+  /** Capabilities the runner cannot honor, with a reason. */
+  unavailable?: readonly { id: CapabilityId; reason: string; remediation?: string }[]
+  /** Evidence-dependent restrictions; any matching rule restricts its ids. */
+  restrictions?: readonly EvidenceRestriction[]
+}
+
+// ---------------------------------------------------------------------------
 // Authentication and billing (design D3)
 // ---------------------------------------------------------------------------
 

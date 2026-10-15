@@ -16,6 +16,7 @@ reports, advisors, cost labels, and recovery.
 - [Mixed-runner routes](#mixed-runner-routes)
 - [Usage and billing](#usage-and-billing)
 - [Retry and resume](#retry-and-resume)
+- [The runner port and its services](#the-runner-port-and-its-services)
 
 > **In progress.** The explicit runner ports and the Claude-parity capabilities
 > on this page come from the OpenSpec change `runner-parity-opencode-v2`; the
@@ -300,25 +301,75 @@ policy before its next request.
 
 ---
 
-[Back to documentation](README.md)
-
 ## The runner port and its services
 
-Convoy drives every harness through one port (`src/runners/contracts.ts`):
+Every runner integrates through one rich, vendor-independent contract
+(`src/runners/contracts.ts`). The contract may name Convoy's own concepts —
+sessions, phases, approvals, deliverables, advisors, limits — because
+"vendor-independent" excludes harness SDKs and protocol objects, not Convoy's
+domain. The same contract serves OpenCode, Claude, and any harness added later;
+there is no privileged OpenCode-only route.
+
+### What an attempt receives
 
 ```
-ExecutionAdapter.executeAttempt(request, sink, services?)
-  request  — prompt, checkout, agent, model, auth, mode, approvals, attachments, cancellation
-  sink     — normalized events (session/text/reasoning/tool/usage/terminal)
-  services — optional: approvals, deliverables, advisor, loop-guard
+execution.executeAttempt(request, sink, services?)
+  request  — run/phase/attempt identity, verified checkout, agent/model/auth/mode,
+             approvals mode, attachments, cancellation
+  sink     — normalized events: session/text/reasoning/tool/usage/permission/terminal
+  services — optional, capability-gated: approvals, deliverables, advisor, loop-guard
 ```
 
-- A runner implements the subset of services it can; Convoy passes only what the
-  runner advertises, and **refuses a plan that needs an unimplemented service**,
-  naming the runner and the service (`assertServicesSupported`).
-- The OpenCode integration lives beside its adapter (`src/runners/opencode/`);
-  the Claude adapter consumes the deliverables and loop-guard services and
-  declares its advisor restricted until a Claude bridge exists.
-- Harness specifics — protocol, sessions, event decoding, permissions, process
-  ownership — belong to the adapter; core keeps scheduling, budgets, git
-  boundaries, retries, and finalization.
+Optional session facets (history, resume, attach) and an observed runtime
+release live beside execution; a runner implements only what it honors.
+
+### Support versus requirement
+
+Support is declared once, by the adapter's own capability declaration, and
+resolved against runtime, authentication, and enforcement evidence
+(`src/runners/declarations.ts`, `resolveEffectiveCapabilities`). The surface
+preflight quotes and the surface the running adapter honors come from the same
+declaration, so they cannot disagree.
+
+- **Available** means the guarantee holds — a native *or* bridged implementation
+  that preserves the required timing and authority (for example, a checkpoint
+  that blocks *before* a write, not a post-hoc consultation).
+- **Restricted** means it can be honored only under some conditions (an
+  enforcement host, a supported harness version) or not yet at all, with a
+  reason and, usually, a remediation.
+- **Unavailable** means the runner cannot honor it.
+
+A plan that **requires** a service the runner does not advertise is refused
+before any writable work, naming the runner and the service
+(`assertServicesSupported`) — never silently dropped. A runner that simply lacks
+an unrequired capability still runs through the same path; the difference is
+expressed by capability, not by a second kind of runner.
+
+### The optional services
+
+| Service | Contract carries |
+|---|---|
+| deliverables | the report/score/commit-description kinds, structured commit data, and a rejection that preserves the last accepted artifact |
+| advisor | on-demand / first-write / completion triggers, the checkpoint requirement and satisfaction, and separately attributed usage |
+| approvals | a normalized request identity with a cancellable, session-scoped decision |
+| loop guard | typed observations (call id + arguments, results, steps, usage) and a continue/nudge/stop decision the adapter must apply |
+
+### Where the pieces live
+
+- `src/runners/contracts.ts` — the neutral vocabulary (no vendor types).
+- `src/runners/declarations.ts` + `src/runners/capabilities.ts` — the
+  authoritative declaration and its resolution.
+- `src/runners/opencode/**`, `src/runners/claude/**` — the adapters: protocol,
+  sessions, plugin/hook/MCP exposure, event decoding, permissions, process
+  handling.
+- Core keeps scheduling, budgets, Git boundaries, retries, and finalization.
+
+> **In progress.** This contract is being completed by the OpenSpec change
+> `unify-runner-system`. Moving code beside an adapter is not by itself
+> completion: the engine still drives OpenCode through a legacy path until the
+> migration lands, and Claude's richer services are adapted incrementally. See
+> that change's `tasks.md` for the current state.
+
+---
+
+[Back to documentation](README.md)
