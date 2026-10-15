@@ -14,7 +14,10 @@
  * permission host.
  */
 
+import { isAbsolute, relative } from "node:path"
+
 import { describeClaudeEvent, ndjsonLines, newClaudeStreamState, type ClaudeSignal } from "../../claude-code"
+import { externalAttachmentDirectories, withAttachmentSection } from "../agent-source"
 import { resolveClaudeAuth } from "./auth"
 import { assertEnforcementReady, EnforcementNotReadyError, type EnforcementPlan } from "./enforcement"
 import { encodeClaudeMcpConfig, encodeClaudeSettings, permissionPromptArgs } from "./settings"
@@ -54,6 +57,12 @@ export type ClaudeRunnerOptions = {
 export type ClaudeRunner = ExecutionAdapter
 
 const defaultBinary = "claude"
+
+/** True when `path` is inside `root` (or is `root` itself). */
+function isWithin(path: string, root: string): boolean {
+  const rel = relative(root, path)
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))
+}
 
 /** Tool and permission flags for an execution mode. */
 export function modeFlags(mode: ExecutionRequest["mode"]): { tools?: string; permissionMode: string } {
@@ -207,10 +216,14 @@ export function createClaudeRunner(options: ClaudeRunnerOptions): ClaudeRunner {
         return outcome
       }
 
-      const proc = spawn([binary, ...invocation.args], {
+      const attachments = request.attachments ?? []
+      const prompt = withAttachmentSection(request.prompt, attachments)
+      const extraDirs = externalAttachmentDirectories(attachments, (path) => isWithin(path, request.checkout))
+
+      const proc = spawn([binary, ...invocation.args, ...extraDirs.flatMap((dir) => ["--add-dir", dir])], {
         cwd: request.checkout,
         env: invocation.env,
-        stdin: new Blob([request.prompt]),
+        stdin: new Blob([prompt]),
         stdout: "pipe",
         stderr: "pipe",
       })

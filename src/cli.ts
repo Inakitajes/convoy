@@ -106,6 +106,8 @@ export type CliCommand =
   | { type: "version" }
   | { type: "update"; checkOnly: boolean }
   | { type: "coordinate"; launchPath: string }
+  | { type: "hook" }
+  | { type: "mcp" }
 
 export async function parseAndRun(argv: string[]) {
   if (shouldLaunchHome(argv, process.stdin.isTTY, process.stdout.isTTY)) {
@@ -153,6 +155,16 @@ export async function parseAndRun(argv: string[]) {
   if (command.type === "opencode-install") {
     const { runOpencodeInstallCommand } = await import("./opencode-install")
     await runOpencodeInstallCommand()
+    return
+  }
+  if (command.type === "hook") {
+    const { runHookCommand } = await import("./runners/commands")
+    await runHookCommand()
+    return
+  }
+  if (command.type === "mcp") {
+    const { runMcpCommand } = await import("./runners/commands")
+    await runMcpCommand()
     return
   }
   if (command.type === "close") {
@@ -2030,6 +2042,9 @@ export async function parseCommand(argv: string[]): Promise<CliCommand> {
     if (rest[0] !== "install" || rest.length > 1) throw new Error("usage: convoy opencode install")
     return { type: "opencode-install" }
   }
+
+  if (argv[0] === "hook") return { type: "hook" }
+  if (argv[0] === "mcp") return { type: "mcp" }
 
   const parsed = parseArgs(argv)
   if (parsed.help) return { type: "help", text: help() }
