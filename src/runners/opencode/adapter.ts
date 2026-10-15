@@ -28,6 +28,8 @@ import type {
 import { bootOwnedServer, type OwnedServer } from "./boot"
 import { reconstructFromMessages } from "./history"
 import { mapOpencodeEvent } from "./log-events"
+import { decideOpencodePermission } from "./permission"
+import type { PolicyConfig } from "../policy"
 import {
   planPluginRegistration,
   pluginFileNameForTool,
@@ -55,6 +57,8 @@ export type OpencodeRunnerOptions = {
   /** Root the owned server runs from (the run's checkout). */
   cwd: string
   env?: NodeJS.ProcessEnv
+  /** Reviewed action policy for permission interception; defaults to write+auto. */
+  policy?: PolicyConfig
   /** Rendered V2 config injected as `OPENCODE_CONFIG_CONTENT` (task 4.3). */
   configContent?: string
   /**
@@ -289,6 +293,7 @@ export function summarizeAssistant(entry: unknown): AssistantSummary {
 }
 
 export function createOpencodeRunner(options: OpencodeRunnerOptions): OpencodeRunner {
+  const policy: PolicyConfig = options.policy ?? { mode: "write", approvals: "auto" }
   const pluginSpecs = options.pluginTools ?? []
   if (pluginSpecs.length > 0 && !options.pluginBaseDir) {
     throw new Error("opencode runner: pluginBaseDir is required when pluginTools are provided")
@@ -389,6 +394,29 @@ export function createOpencodeRunner(options: OpencodeRunnerOptions): OpencodeRu
         const streamTask = (async () => {
           try {
             for await (const event of subscribeEvents(c, streamAbort!.signal)) {
+              const raw = event as {
+                type?: string
+                data?: { sessionID?: string; id?: string; action?: string; resources?: string[] }
+              }
+              // Mandatory interception: answer permission.asked for this attempt
+              // through Convoy's policy instead of leaving it unanswered.
+              if (raw.type === "permission.asked" && raw.data?.sessionID === session.id && raw.data.id && raw.data.action) {
+                const decision = decideOpencodePermission(raw.data.action, raw.data.resources, policy)
+                const reply = decision.effect === "deny" ? "reject" : "once"
+                await (c.permission.reply as (input: unknown) => Promise<void>)({
+                  sessionID: session.id,
+                  requestID: raw.data.id,
+                  reply,
+                }).catch(() => undefined)
+                sink({
+                  type: "permission-settled",
+                  runner: "opencode",
+                  attempt,
+                  requestId: raw.data.id,
+                  decision: decision.effect === "deny" ? "deny" : "allow",
+                })
+                continue
+              }
               const mapped = mapOpencodeEvent(event, attempt, session.id)
               if (!mapped || mapped.type === "terminal") continue
               if (mapped.type === "text") sawText = true
