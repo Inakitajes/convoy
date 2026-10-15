@@ -20,8 +20,7 @@ import { ensureClaudeAvailable, openClaudeSessionWindow, promptClaudePhase } fro
 import { baseAgentName } from "./runners/agent-source"
 import { composeRunners } from "./runners/compose"
 import { claudeEnforcementFromEnv } from "./runners/claude/enforcement-plan"
-import { assertServicesSupported } from "./runners/capabilities"
-import { requiredServicesFor, type AttemptContext } from "./runners/attempt"
+import { resolveAttempt, type AttemptContext } from "./runners/attempt"
 import { createClaudeRunner } from "./runners/claude/adapter"
 import { promptPhase } from "./runners/opencode/phase"
 
@@ -2235,13 +2234,14 @@ async function runPhaseAttempt(
 
   try {
     const registration = composition.registry.require(runnerId)
-    const capabilities = await registration.execution.capabilities()
-    // Refuse a plan that requires a service the runner does not implement,
-    // before any attempt runs.
-    assertServicesSupported(capabilities, requiredServicesFor(contract))
-
-    const attemptRunner = composition.attemptFor(runnerId)
-    if (!attemptRunner) throw new Error(`no phase attempt registered for runner: ${runnerId}`)
+    // Validate the phase's required services against this runner's own
+    // capabilities and resolve its registered attempt, before anything runs.
+    const attemptRunner = await resolveAttempt({
+      runner: runnerId,
+      contract,
+      capabilities: () => registration.execution.capabilities(),
+      attempt: composition.attemptFor(runnerId),
+    })
 
     const context: AttemptContext = {
       identity: { runId: workspace.runID, phaseName: phase.name, attempt },

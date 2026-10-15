@@ -39,7 +39,7 @@ Implement pending work in group order. Each slice must keep `bun run typecheck`,
 - [ ] 4.2 Route phase-gate session opening, continuation/control and late transcript reconstruction through registered session facets rather than harness conditionals; verify gate, exact-session resume and transcript suites preserve human decisions, permission isolation and missing-history behavior.
 - [ ] 4.3 Wire run shutdown and phase/session handle release through common cancellation/lifecycle operations; verify engine-level startup cancellation, parallel abort, terminal-hold cleanup, retry/late-submission isolation and bounded observed or unresolved cleanup outcomes.
 - [x] 4.4 Remove superseded `phaseAttemptRunners` implementations, native engine client/result/attachment handling and reverse helper dependencies once their common replacements pass; verify regression and dependency tests reject SDK leakage, adapter-to-engine imports and OpenCode- or Claude-specific engine execution/session paths.
-- [ ] 4.5 Run a minimal registered test harness through the same engine path, without a new dispatch branch or production harness integration, and update `docs/development.md` with the registration/conformance workflow; verify engine fixtures require only the test adapter and normal registration/declaration metadata.
+- [x] 4.5 Run a minimal registered test harness through the same engine path, without a new dispatch branch or production harness integration, and update `docs/development.md` with the registration/conformance workflow; verify engine fixtures require only the test adapter and normal registration/declaration metadata.
 
 ## 5. Final integration evidence and close-out
 

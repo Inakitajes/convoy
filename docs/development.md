@@ -144,4 +144,22 @@ src/runners/
   and harness process ownership, and translate all of it into the neutral
   vocabulary.
 
+### Adding a harness
+
+A new harness needs no engine change:
+
+1. An adapter under `src/runners/<harness>/` implementing `ExecutionAdapter`
+   (capabilities, `executeAttempt`, `cancelAttempt`, optional `release`) plus
+   optional `SessionControls` and Convoy services.
+2. Its capability declaration in `src/runners/declarations.ts`.
+3. Its phase attempt (`PhaseAttemptRunner`) and its registration in
+   `src/runners/compose.ts` (`registry.register` and `attemptFor`).
+4. Its conformance test: call `runExecutionConformance(id, makeAdapter)` from
+   `test/helpers/runner-conformance.ts`.
+
+The engine prepares one neutral `AttemptContext` and resolves the attempt through
+`resolveAttempt` (capability validation, then the registered attempt), so core
+carries no branch for the harness. See `test/runner-test-harness.test.ts` for a
+minimal example.
+
 [Back to documentation](README.md)

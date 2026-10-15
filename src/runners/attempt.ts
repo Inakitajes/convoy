@@ -24,7 +24,8 @@ import type { QualityDimension } from "../quality-score"
 import type { ReportRuntime } from "../report-runtime"
 import type { AgentStep, DeliverableContract } from "../types"
 import type { Workspace } from "../workspace"
-import type { AttemptIdentity, ExecutionRequest, RunnerId, ServiceId } from "./contracts"
+import type { AttemptIdentity, ExecutionRequest, RunnerCapabilities, RunnerId, ServiceId } from "./contracts"
+import { assertServicesSupported } from "./capabilities"
 import type { SessionRef, ShutdownHandle } from "./opencode/session"
 
 /** Everything one attempt needs; prepared once by the engine, consumed by the adapter. */
@@ -73,6 +74,28 @@ export type AttemptResult = {
 
 /** One runner's phase attempt. Registered per runner; no harness branch in core. */
 export type PhaseAttemptRunner = (context: AttemptContext) => Promise<AttemptResult>
+
+export type AttemptResolution = {
+  runner: RunnerId
+  contract: DeliverableContract
+  /** The runner's own declared capabilities. */
+  capabilities(): Promise<RunnerCapabilities>
+  /** The registered attempt, when the runner has one. */
+  attempt: PhaseAttemptRunner | undefined
+}
+
+/**
+ * Resolves the attempt to run: it validates the phase's required services
+ * against the runner's own capabilities (refusing before any attempt) and
+ * returns the registered attempt. Registering a new harness needs only its
+ * adapter, its capability declaration and this registration — no engine change.
+ */
+export async function resolveAttempt(input: AttemptResolution): Promise<PhaseAttemptRunner> {
+  const capabilities = await input.capabilities()
+  assertServicesSupported(capabilities, requiredServicesFor(input.contract))
+  if (!input.attempt) throw new Error(`no phase attempt registered for runner: ${input.runner}`)
+  return input.attempt
+}
 
 /** The neutral request derived from an attempt context. */
 export function prepareAttemptRequest(context: AttemptContext): ExecutionRequest {
