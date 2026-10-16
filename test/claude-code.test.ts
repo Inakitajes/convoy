@@ -360,6 +360,56 @@ describe("stageClaudeAttachments isolation", () => {
 })
 
 describe("promptClaudePhase lifecycle", () => {
+  test("strips HERDR_* from the legacy headless Claude child", async () => {
+    const runDir = await executionDir()
+    const targetDir = await mkdtemp(join(tmpdir(), "convoy-claude-target-"))
+    const previousEnv = process.env.HERDR_ENV
+    const previousPane = process.env.HERDR_PANE_ID
+    process.env.HERDR_ENV = "1"
+    process.env.HERDR_PANE_ID = "w1:p1"
+    let seenEnv: NodeJS.ProcessEnv | undefined
+    const resultEvent = JSON.stringify({ type: "result", subtype: "success", result: "done" })
+
+    try {
+      await promptClaudePhase({
+        phase: claudePhase,
+        workspace: { dir: runDir, runID: "test" },
+        targetDir,
+        prompt: "Review",
+        attachments: [],
+        attempt: 1,
+        progress: noopProgress,
+        shutdown: executionShutdown(new AbortController()),
+        deps: {
+          async stageAttachments(attachments) {
+            return [...attachments]
+          },
+          spawn(_command, options) {
+            seenEnv = options.env
+            return {
+              stdout: textStream(resultEvent),
+              stderr: textStream(),
+              exited: Promise.resolve(0),
+              exitCode: 0,
+              kill() {},
+            }
+          },
+        },
+      })
+
+      expect(seenEnv).not.toHaveProperty("HERDR_ENV")
+      expect(seenEnv).not.toHaveProperty("HERDR_PANE_ID")
+      expect(process.env.HERDR_ENV).toBe("1")
+      expect(process.env.HERDR_PANE_ID).toBe("w1:p1")
+    } finally {
+      if (previousEnv === undefined) delete process.env.HERDR_ENV
+      else process.env.HERDR_ENV = previousEnv
+      if (previousPane === undefined) delete process.env.HERDR_PANE_ID
+      else process.env.HERDR_PANE_ID = previousPane
+      await Promise.all([rm(runDir, { recursive: true, force: true }), rm(targetDir, { recursive: true, force: true })])
+    }
+  })
+
   test("kills a spawned child when abort lands while attachments are staged", async () => {
     const runDir = await executionDir()
     const targetDir = await mkdtemp(join(tmpdir(), "convoy-claude-target-"))

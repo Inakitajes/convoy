@@ -157,6 +157,36 @@ describe("claude adapter (fixture execution)", () => {
     expect(seenEnv?.PATH).toBe("/bin")
   })
 
+  test("strips HERDR_* from the headless child without mutating the parent env", async () => {
+    let seenEnv: NodeJS.ProcessEnv | undefined
+    const parentEnv = {
+      HERDR_ENV: "1",
+      HERDR_PANE_ID: "w1:p1",
+      HERDR_SOCKET_PATH: "/tmp/herdr.sock",
+      PATH: "/bin",
+    }
+    const runner = createClaudeRunner({
+      cwd: "/tmp",
+      env: parentEnv,
+      enforcement: enforcementPlan(),
+      deps: {
+        ...subscriptionLogin,
+        spawn: (_command, options) => {
+          seenEnv = options.env
+          return fakeProcess(fixture)
+        },
+      },
+    })
+
+    await runner.executeAttempt(request(), () => {})
+    expect(seenEnv).not.toHaveProperty("HERDR_ENV")
+    expect(seenEnv).not.toHaveProperty("HERDR_PANE_ID")
+    expect(seenEnv).not.toHaveProperty("HERDR_SOCKET_PATH")
+    expect(seenEnv?.PATH).toBe("/bin")
+    expect(parentEnv.HERDR_ENV).toBe("1")
+    expect(parentEnv.HERDR_PANE_ID).toBe("w1:p1")
+  })
+
   test("a pre-aborted attempt kills the child and reports interrupted", async () => {
     let killed = false
     const runner = createClaudeRunner({

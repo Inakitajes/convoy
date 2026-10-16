@@ -205,10 +205,14 @@ describe("run() with a hosted progress", () => {
     const repo = await cleanRepo()
     const dashboard = fakeDashboard()
     const commands: string[][] = []
+    let resolveRelease!: (code: number) => void
     const herdr = new HerdrReporter({
       env: { HERDR_ENV: "1", HERDR_PANE_ID: "w1:p1" },
       spawn: (command) => {
         commands.push(command)
+        if (command[2] === "release-agent") {
+          return { exited: new Promise<number>((resolve) => { resolveRelease = resolve }) }
+        }
         return { exited: Promise.resolve(0) }
       },
       now: () => 1_000,
@@ -225,9 +229,51 @@ describe("run() with a hosted progress", () => {
       const lastAgent = [...commands].reverse().find((command) => command[2] === "report-agent")
       expect(lastAgent?.[lastAgent.indexOf("--state") + 1]).toBe("idle")
 
-      await result.release?.()
+      let releaseSettled = false
+      const releasing = result.release?.().then(() => { releaseSettled = true })
+      await Bun.sleep(0)
       expect(verbs()).toContain("release-agent")
       expect(verbs().at(-1)).toBe("release-agent")
+      expect(verbs().slice(-2)).toEqual(["report-metadata", "release-agent"])
+      expect(releaseSettled).toBe(false)
+      resolveRelease(0)
+      await releasing
+      expect(releaseSettled).toBe(true)
+    } finally {
+      await rm(repo, { recursive: true, force: true })
+    }
+  })
+
+  test("starts Herdr release before a hosted server teardown rejects", async () => {
+    const repo = await cleanRepo()
+    const dashboard = fakeDashboard()
+    const commands: string[][] = []
+    const herdr = new HerdrReporter({
+      env: { HERDR_ENV: "1", HERDR_PANE_ID: "w1:p1" },
+      spawn: (command) => {
+        commands.push(command)
+        return { exited: Promise.resolve(0) }
+      },
+      now: () => 1_000,
+    })
+    const rejectingStop: RunDeps["startOpencode"] = async () => ({
+      client: fakeClient as never,
+      url: "http://127.0.0.1:41238",
+      pid: 0,
+      stop: async () => { throw new Error("server teardown failed") },
+      forceStop: () => {},
+      close: async () => { throw new Error("server teardown failed") },
+    })
+
+    try {
+      const result = await realRun(makeOptions(repo, { progress: dashboard.progress }), {
+        startOpencode: rejectingStop,
+        createHerdrReporter: () => herdr,
+      })
+      await expect(result.release?.()).rejects.toThrow(/server teardown failed/)
+
+      const verbs = commands.map((command) => command[2])
+      expect(verbs.slice(-2)).toEqual(["report-metadata", "release-agent"])
     } finally {
       await rm(repo, { recursive: true, force: true })
     }

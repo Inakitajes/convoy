@@ -1,4 +1,5 @@
 import type { RunStatus } from "./progress"
+import { log } from "./log"
 import { cleanText, truncateText } from "./run-status"
 
 /**
@@ -24,6 +25,20 @@ const maxTokenLength = 80
 
 /** A stalled herdr CLI is best effort, not permission to hold a run open. */
 const stopDrainMs = 250
+
+/** One local CLI cleanup attempt must not be able to stall process teardown. */
+const cleanupAttemptMs = 250
+
+/** Retry transient socket/process failures without making a run depend on Herdr. */
+const cleanupAttempts = 3
+
+/** Metadata should eventually disappear even after an uncatchable hard crash. */
+export const HERDR_METADATA_TTL_MS = 86_400_000
+
+/** Refresh well before expiry without turning unchanged UI events into churn. */
+const metadataHeartbeatMs = HERDR_METADATA_TTL_MS / 2
+
+export const HERDR_TOKEN_NAMES = ["pipeline", "progress", "step", "summary", "run_id"] as const
 
 // ---------------------------------------------------------------------------
 // Pure contract
@@ -130,6 +145,19 @@ export function reportMetadataArgv(bin: string, paneId: string, args: HerdrRepor
     ...(args.stateLabel ? ["--state-label", args.stateLabel] : []),
     ...Object.entries(args.tokens).flatMap(([name, value]) => ["--token", `${name}=${value}`]),
     "--seq", String(args.seq),
+    "--ttl-ms", String(HERDR_METADATA_TTL_MS),
+  ]
+}
+
+/** Clears every presentation field and token Convoy owns before lifecycle release. */
+export function clearMetadataArgv(bin: string, paneId: string, seq: number): string[] {
+  return [
+    bin, "pane", "report-metadata", paneId,
+    "--source", HERDR_SOURCE,
+    "--clear-display-agent",
+    "--clear-state-labels",
+    ...HERDR_TOKEN_NAMES.flatMap((name) => ["--clear-token", name]),
+    "--seq", String(seq),
   ]
 }
 
@@ -171,25 +199,38 @@ export type HerdrReporterOptions = {
   spawn?: HerdrSpawn
   now?: () => number
   runID?: string
+  cleanupAttemptMs?: number
+  cleanupAttempts?: number
+  metadataHeartbeatMs?: number
+  warn?: (message: string) => void
 }
 
 /**
- * Fire-and-forget lifecycle authority for the Herdr sidebar. A run constructs
- * one, feeds it statuses through the RunStatusTracker's `herdr` sink, and
- * calls `stop()` from its finally block so `release-agent` is the last
- * command for the source.
+ * Best-effort lifecycle authority for the Herdr sidebar. Live reports remain
+ * fire-and-forget; `stop()` drains them and observes bounded cleanup before it
+ * resolves. A run constructs one, feeds it statuses through the
+ * RunStatusTracker's `herdr` sink, and calls `stop()` from its finally block so
+ * `release-agent` is the last command for the source.
  */
 export class HerdrReporter {
   private readonly env: Record<string, string | undefined>
   private readonly spawn: HerdrSpawn
   private readonly now: () => number
   private readonly runID?: string
+  private readonly cleanupAttemptMs: number
+  private readonly cleanupAttempts: number
+  private readonly metadataHeartbeatMs: number
+  private readonly warn: (message: string) => void
   private readonly bin: string
   private readonly paneId: string
   private seq: number
   private lastKey?: string
   private released = false
   private stopped = false
+  private stopPromise?: Promise<void>
+  private forceReleasePromise?: Promise<void>
+  private metadataHeartbeat?: ReturnType<typeof setTimeout>
+  private lastMetadata?: HerdrReportMetadataArgs
   private readonly children = new Map<HerdrProcess, Promise<number>>()
 
   constructor(options: HerdrReporterOptions = {}) {
@@ -197,6 +238,10 @@ export class HerdrReporter {
     this.spawn = options.spawn ?? ((command) => Bun.spawn(command, { stdin: "ignore", stdout: "ignore", stderr: "ignore" }))
     this.now = options.now ?? (() => Date.now())
     this.runID = options.runID
+    this.cleanupAttemptMs = Math.max(1, Math.trunc(options.cleanupAttemptMs ?? cleanupAttemptMs))
+    this.cleanupAttempts = Math.max(1, Math.trunc(options.cleanupAttempts ?? cleanupAttempts))
+    this.metadataHeartbeatMs = Math.max(1, Math.trunc(options.metadataHeartbeatMs ?? metadataHeartbeatMs))
+    this.warn = options.warn ?? ((message) => log.warn(message))
     this.bin = this.env.HERDR_BIN_PATH?.trim() || "herdr"
     this.paneId = this.env.HERDR_PANE_ID ?? ""
     // Seed from the clock so a successor instance (a new coordinator for the
@@ -221,24 +266,47 @@ export class HerdrReporter {
     if (key === this.lastKey) return false
     this.lastKey = key
     this.dispatch(reportAgentArgv(this.bin, this.paneId, { state: mapped.state, message: mapped.message, seq: this.nextSeq() }))
-    this.dispatch(
-      reportMetadataArgv(this.bin, this.paneId, {
-        seq: this.nextSeq(),
-        displayAgent: HERDR_DISPLAY_AGENT,
-        stateLabel: mapped.stateLabel ? `${mapped.state}=${mapped.stateLabel}` : undefined,
-        tokens,
-      }),
-    )
+    this.lastMetadata = {
+      seq: this.nextSeq(),
+      displayAgent: HERDR_DISPLAY_AGENT,
+      stateLabel: mapped.stateLabel ? `${mapped.state}=${mapped.stateLabel}` : undefined,
+      tokens,
+    }
+    this.dispatch(reportMetadataArgv(this.bin, this.paneId, this.lastMetadata))
+    this.armMetadataHeartbeat()
     return true
   }
 
   /**
-   * Hands the pane's lifecycle authority back. Called once; a later `report()`
-   * is ignored so a late status after release can never resurrect the agent.
+   * Starts the same observed cleanup as `stop()`. Kept synchronous for callers
+   * that only need to schedule release; `stop()` awaits this shared work.
    */
   release(): boolean {
     if (!this.available || this.released || this.stopped) return false
-    return this.doRelease()
+    this.released = true
+    this.stopped = true
+    this.clearMetadataHeartbeat()
+    this.stopPromise = this.stopImpl()
+    return true
+  }
+
+  /**
+   * Starts lifecycle release immediately, bypassing report draining and
+   * metadata cleanup. The forced-shutdown observation window is only one
+   * second; normal `stop()` still performs and awaits the complete cleanup.
+   */
+  forceRelease(): Promise<void> {
+    this.stopped = true
+    this.released = true
+    this.clearMetadataHeartbeat()
+    if (!this.available) return Promise.resolve()
+    if (!this.forceReleasePromise) {
+      this.forceReleasePromise = this.retryCleanup(
+        "force-release the Convoy Herdr agent",
+        () => releaseAgentArgv(this.bin, this.paneId, this.nextSeq()),
+      )
+    }
+    return this.forceReleasePromise
   }
 
   /**
@@ -246,21 +314,29 @@ export class HerdrReporter {
    * then releases if the runner never did. Idempotent. A wedged `herdr` child
    * is killed after `stopDrainMs` so teardown cannot hang the run.
    */
-  async stop(): Promise<void> {
-    if (this.stopped) return
-    this.stopped = true
+  stop(): Promise<void> {
+    if (!this.stopPromise) {
+      this.stopped = true
+      this.released = true
+      this.clearMetadataHeartbeat()
+      this.stopPromise = this.stopImpl()
+    }
+    return this.stopPromise
+  }
+
+  private async stopImpl(): Promise<void> {
     if (!this.available) return
     const children = [...this.children]
     await Promise.all(children.map(([, exited]) => this.drain(exited)))
     for (const [child] of children) this.kill(child)
-    this.doRelease()
-  }
-
-  private doRelease(): boolean {
-    if (this.released) return false
-    this.released = true
-    this.dispatch(releaseAgentArgv(this.bin, this.paneId, this.nextSeq()))
-    return true
+    await this.retryCleanup(
+      "clear Convoy metadata from the Herdr pane",
+      () => clearMetadataArgv(this.bin, this.paneId, this.nextSeq()),
+    )
+    await this.retryCleanup(
+      "release the Convoy Herdr agent",
+      () => releaseAgentArgv(this.bin, this.paneId, this.nextSeq()),
+    )
   }
 
   /** Strictly increasing per source; each outgoing request consumes one. */
@@ -282,6 +358,55 @@ export class HerdrReporter {
     }
   }
 
+  private async retryCleanup(label: string, command: () => string[]): Promise<void> {
+    let reason = "unknown failure"
+    for (let attempt = 1; attempt <= this.cleanupAttempts; attempt++) {
+      const result = await this.runCleanupCommand(command())
+      if (result.ok) return
+      reason = result.reason
+    }
+    try {
+      this.warn(`couldn't ${label} after ${this.cleanupAttempts} attempts: ${reason}`)
+    } catch {
+      // Diagnostics are best effort too; an injected logger cannot fail a run.
+    }
+  }
+
+  private async runCleanupCommand(command: string[]): Promise<{ ok: true } | { ok: false; reason: string }> {
+    let child: HerdrProcess
+    try {
+      // Unlike live status reports, cleanup children remain referenced and are
+      // observed: process teardown must not outrun the release command.
+      child = this.spawn(command)
+    } catch (error) {
+      return { ok: false, reason: `spawn failed (${error instanceof Error ? error.message : String(error)})` }
+    }
+
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    const result = await Promise.race([
+      Promise.resolve(child.exited).then(
+        (code) => ({ type: "exit" as const, code }),
+        (error) => ({ type: "error" as const, error }),
+      ),
+      new Promise<{ type: "timeout" }>((resolve) => {
+        timeout = setTimeout(() => resolve({ type: "timeout" }), this.cleanupAttemptMs)
+      }),
+    ])
+    if (timeout) clearTimeout(timeout)
+
+    if (result.type === "exit") {
+      return result.code === 0 ? { ok: true } : { ok: false, reason: `exit ${result.code}` }
+    }
+    if (result.type === "error") {
+      this.kill(child, "SIGKILL")
+      child.unref?.()
+      return { ok: false, reason: `wait failed (${result.error instanceof Error ? result.error.message : String(result.error)})` }
+    }
+    this.kill(child, "SIGKILL")
+    child.unref?.()
+    return { ok: false, reason: `timed out after ${this.cleanupAttemptMs}ms` }
+  }
+
   private kill(child: HerdrProcess, signal?: NodeJS.Signals) {
     try {
       child.kill?.(signal)
@@ -298,5 +423,23 @@ export class HerdrReporter {
         resolve()
       })
     })
+  }
+
+  private armMetadataHeartbeat() {
+    this.clearMetadataHeartbeat()
+    this.metadataHeartbeat = setTimeout(() => {
+      this.metadataHeartbeat = undefined
+      if (this.stopped || !this.lastMetadata) return
+      this.lastMetadata = { ...this.lastMetadata, seq: this.nextSeq() }
+      this.dispatch(reportMetadataArgv(this.bin, this.paneId, this.lastMetadata))
+      this.armMetadataHeartbeat()
+    }, this.metadataHeartbeatMs)
+    this.metadataHeartbeat.unref?.()
+  }
+
+  private clearMetadataHeartbeat() {
+    if (!this.metadataHeartbeat) return
+    clearTimeout(this.metadataHeartbeat)
+    this.metadataHeartbeat = undefined
   }
 }

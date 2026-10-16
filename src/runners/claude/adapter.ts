@@ -18,6 +18,7 @@ import { randomUUID } from "node:crypto"
 import { isAbsolute, relative } from "node:path"
 
 import { claudeModelLabel, describeClaudeEvent, ndjsonLines, newClaudeStreamState, type ClaudeSignal } from "../../claude-code"
+import { withoutHerdrEnv } from "../../herdr"
 import { externalAttachmentDirectories, withAttachmentSection } from "../agent-source"
 import { resolveClaudeAuth, type ClaudeAuthResolution } from "./auth"
 import { startClaudeApprovalBridge, type ClaudeApprovalBridge } from "./approval-bridge"
@@ -169,7 +170,10 @@ export function buildClaudeInvocation(
 
   const baseEnv = options.env ?? process.env
   const resolution = resolveClaudeAuth({ selection: request.auth, env: baseEnv })
-  const env: NodeJS.ProcessEnv = { ...baseEnv }
+  // Headless Claude is an implementation detail of the Convoy pane. Letting it
+  // inherit HERDR_PANE_ID makes Claude's SessionStart hook claim Convoy's pane
+  // session identity, so isolate it exactly like the OpenCode child server.
+  const env: NodeJS.ProcessEnv = withoutHerdrEnv(baseEnv)
   for (const key of resolution.unset) delete env[key]
   Object.assign(env, resolution.set)
 

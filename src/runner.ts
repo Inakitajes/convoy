@@ -726,6 +726,12 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
     // Outside a Herdr pane this is a silent no-op; inside one it claims the
     // pane as agent "convoy" and publishes the live pipeline state.
     herdr = (deps.createHerdrReporter ?? ((input) => new HerdrReporter(input)))({ runID: workspace.runID })
+    // A repeated signal can force exit while pre-hooks or server boot are still
+    // running. Arm pane cleanup as soon as the reporter exists; once the owned
+    // server starts, the handler below is widened to force both resources.
+    shutdown.setForceHandler(() => {
+      void herdr?.forceRelease()
+    })
     statusTracker = new RunStatusTracker({
       phases,
       identity,
@@ -871,7 +877,12 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
     // A repeated abort or the shutdown deadline forces this owned server
     // before the process exits; without this edge a wedged cleanup would
     // abandon the child (design D3).
-    shutdown.setForceHandler(() => opencode?.forceStop())
+    shutdown.setForceHandler(() => {
+      // Start the bounded pane release before the last-resort exit timer. The
+      // normal finally still awaits the same idempotent promise when it wins.
+      void herdr?.forceRelease()
+      opencode?.forceStop()
+    })
     progress.serverReady(opencode.url)
     // Publish the private connection auth for the dashboard's attach path
     // (design D2): the password stays out of the generic run metadata.
@@ -1221,6 +1232,9 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
       // shared UI or restore the constructor abort handler yet.
       options.progress.setAbortHandler?.(undefined)
       deferredRelease = async () => {
+        // The finish hold has ended: release the pane first, before any server,
+        // workspace, or bridge cleanup that can reject or fail to settle.
+        await herdr?.stop()
         // Before the server: a tool call still in flight would otherwise hang on
         // a socket nobody is going to answer. The bridge goes first — the tool
         // source carries the URL and token embedded as string literals (not
@@ -1235,14 +1249,15 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
         // whether the workspace may go. In-process runs settle in the finally
         // below — they have already left their own finish screen.
         await settleRunWorkspace(workspace, options, progress, runErr)
-        // After the finish hold: publish happened at pipeline end, so this
-        // release-agent is the last Herdr command and the pane returns to spaces.
-        await herdr?.stop()
       }
       if (runErr && typeof runErr === "object") {
         hostedTeardowns.set(runErr, { release: deferredRelease, runDir: workspace.dir })
       }
     } else {
+      // Stop the tracker first so an interrupted run publishes its final
+      // stopped snapshot, then release Herdr before server teardown can stall.
+      progress.stop()
+      await herdr?.stop()
       // Before the server: a tool call still in flight would otherwise hang on a
       // socket nobody is going to answer. The bridge goes first — the tool source
       // carries the URL and token embedded as string literals (not process.env),
@@ -1253,11 +1268,9 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
       // The owned server stops and its exit is confirmed before the
       // live-server pointer and execution ownership are cleared (design D3).
       await stopOwnedServer()
-      progress.stop()
     }
-    // In-process runs stop the tracker (and publish idle/blocked) above;
-    // hosted runs keep Herdr claimed until release(), after the finish hold.
-    if (!options.progress) await herdr?.stop()
+    // In-process runs stop the tracker and Herdr above; hosted runs keep Herdr
+    // claimed until release(), after the coordinator's finish hold.
     // After the renderer is gone: restoring the title while it still owns the
     // alternate screen would be overwritten by its teardown.
     if (titleSaved) popTerminalTitle()
@@ -2908,4 +2921,3 @@ async function exists(path: string) {
     return false
   }
 }
-

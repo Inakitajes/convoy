@@ -283,6 +283,41 @@ describe("runCoordinateBoot", () => {
     expect(finished).toEqual([{ status: "failed", runDir: "/tmp/run", error: "phase tests failed" }])
   })
 
+  test("a rejecting completion hold still releases the successful hosted run", async () => {
+    const root = await scratch()
+    const pending = await writeBootLaunch(root)
+    let released = 0
+    let finishCalls = 0
+
+    await expect(
+      Promise.race([
+        runCoordinateBoot(pending.launchPath, pending.readyPath, {
+          launchRoot: root,
+          createProgress: (opts) => {
+            const progress = new ControlProgress(opts)
+            progress.runFinished = async () => {
+              finishCalls += 1
+              if (finishCalls === 1) throw new Error("finish hold failed")
+              return new Promise<void>(() => {})
+            }
+            return progress
+          },
+          run: async () => ({
+            runID: "20260101-000000-ab12",
+            dir: "/tmp/run",
+            release: async () => {
+              released += 1
+            },
+          }),
+        }),
+        Bun.sleep(500).then(() => { throw new Error("entered a second finish hold") }),
+      ]),
+    ).rejects.toThrow(/finish hold failed/)
+
+    expect(released).toBe(1)
+    expect(finishCalls).toBe(1)
+  })
+
   test("hands the reviewed plan to run so resolvedAdvisor survives the coordinator hop", async () => {
     // Mirrors a real launch.json: options.pipeline is the unresolved config
     // (advisor string only), while plan.pipeline carries the routed

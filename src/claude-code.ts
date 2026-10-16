@@ -5,6 +5,7 @@ import { fileURLToPath, pathToFileURL } from "node:url"
 import type { FilePartInput } from "./opencode-client"
 
 import { loadAgentPrompt } from "./agents"
+import { withoutHerdrEnv } from "./herdr"
 import { log } from "./log"
 import { openSessionCommand, shellQuote, type SessionWindowBackend } from "./opencode"
 import { baseAgentName } from "./runners/agent-source"
@@ -349,7 +350,7 @@ type ClaudeProcess = {
 }
 
 export type ClaudeExecutionDeps = {
-  spawn(command: string[], options: { cwd: string; stdin: Blob; stdout: "pipe"; stderr: "pipe" }): ClaudeProcess
+  spawn(command: string[], options: { cwd: string; env: NodeJS.ProcessEnv; stdin: Blob; stdout: "pipe"; stderr: "pipe" }): ClaudeProcess
   stageAttachments: typeof stageClaudeAttachments
 }
 
@@ -389,6 +390,9 @@ export async function promptClaudePhase(input: {
 
   const proc = deps.spawn([claudeBinaryName, ...args], {
     cwd: input.targetDir,
+    // The legacy headless runner must not let Claude's Herdr hook register its
+    // internal session against the enclosing Convoy pane.
+    env: withoutHerdrEnv(process.env),
     stdin: new Blob([prompt]),
     stdout: "pipe",
     stderr: "pipe",

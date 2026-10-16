@@ -3,8 +3,11 @@ import { describe, expect, test } from "bun:test"
 import {
   HERDR_AGENT,
   HERDR_DISPLAY_AGENT,
+  HERDR_METADATA_TTL_MS,
   HERDR_SOURCE,
+  HERDR_TOKEN_NAMES,
   HerdrReporter,
+  clearMetadataArgv,
   herdrEnabled,
   herdrTokens,
   mapHerdrState,
@@ -16,6 +19,7 @@ import {
   type HerdrSpawn,
 } from "../src/herdr"
 import type { RunStatus } from "../src/progress"
+import { RunShutdown } from "../src/runner"
 
 const identity = { project: "convoy", pipeline: "implement", branch: "feat/notify" }
 
@@ -154,12 +158,26 @@ describe("argv builders", () => {
       "--token", "summary=implement · 3/7 security",
       "--token", "run_id=20260519-103045-x7q2",
       "--seq", "9",
+      "--ttl-ms", String(HERDR_METADATA_TTL_MS),
     ])
     expect(reportMetadataArgv("herdr", "w1:p1", { seq: 10, stateLabel: "idle=paused", tokens: {} })).toEqual([
       "herdr", "pane", "report-metadata", "w1:p1",
       "--source", HERDR_SOURCE,
       "--agent", HERDR_AGENT,
       "--state-label", "idle=paused",
+      "--seq", "10",
+      "--ttl-ms", String(HERDR_METADATA_TTL_MS),
+    ])
+  })
+
+  test("clearMetadataArgv removes every Convoy presentation field and token", () => {
+    const command = clearMetadataArgv("herdr", "w1:p1", 10)
+    expect(command).toEqual([
+      "herdr", "pane", "report-metadata", "w1:p1",
+      "--source", HERDR_SOURCE,
+      "--clear-display-agent",
+      "--clear-state-labels",
+      ...HERDR_TOKEN_NAMES.flatMap((name) => ["--clear-token", name]),
       "--seq", "10",
     ])
   })
@@ -289,7 +307,28 @@ describe("HerdrReporter", () => {
     expect(commands).toHaveLength(2)
   })
 
-  test("release spawns release-agent with a greater seq and blocks later reports", () => {
+  test("refreshes unchanged metadata before its TTL expires", async () => {
+    const { commands, spawn } = recorder()
+    const reporter = new HerdrReporter({
+      env: herdrEnv,
+      spawn,
+      now: () => 1_000,
+      metadataHeartbeatMs: 10,
+    })
+
+    reporter.report(status())
+    await Bun.sleep(25)
+    const metadata = commands.filter((command) => command[2] === "report-metadata")
+    expect(metadata.length).toBeGreaterThanOrEqual(2)
+    expect(lastSeq(metadata.at(-1)!)).toBeGreaterThan(lastSeq(metadata[0]!))
+
+    await reporter.stop()
+    const afterStop = commands.length
+    await Bun.sleep(25)
+    expect(commands).toHaveLength(afterStop)
+  })
+
+  test("release schedules observed metadata cleanup and release-agent with greater seq values", async () => {
     const { commands, spawn } = recorder()
     const reporter = new HerdrReporter({ env: herdrEnv, spawn, now: () => 1_000 })
 
@@ -297,28 +336,41 @@ describe("HerdrReporter", () => {
     const reportSeq = Math.max(...commands.map(lastSeq))
 
     expect(reporter.release()).toBe(true)
-    expect(commands).toHaveLength(3)
-    expect(commands[2]![2]).toBe("release-agent")
+    await reporter.stop()
+    expect(commands).toHaveLength(4)
+    expect(commands[2]![2]).toBe("report-metadata")
+    expect(commands[2]).toContain("--clear-token")
+    expect(commands[3]![2]).toBe("release-agent")
     expect(lastSeq(commands[2]!)).toBeGreaterThan(reportSeq)
+    expect(lastSeq(commands[3]!)).toBeGreaterThan(lastSeq(commands[2]!))
 
     expect(reporter.report(status({ step: 5 }))).toBe(false)
-    expect(commands).toHaveLength(3)
+    expect(commands).toHaveLength(4)
   })
 
-  test("release twice spawns only one release", () => {
+  test("release twice schedules only one cleanup", async () => {
     const { commands, spawn } = recorder()
     const reporter = new HerdrReporter({ env: herdrEnv, spawn, now: () => 1_000 })
 
     reporter.report(status())
     expect(reporter.release()).toBe(true)
     expect(reporter.release()).toBe(false)
+    await reporter.stop()
     expect(commands.filter((command) => command[2] === "release-agent")).toHaveLength(1)
+    expect(commands.filter((command) => command.includes("--clear-display-agent"))).toHaveLength(1)
   })
 
-  test("a throwing spawn or a non-zero exit never throws to the caller", () => {
-    const throwing = new HerdrReporter({ env: herdrEnv, spawn: () => { throw new Error("no herdr binary") }, now: () => 1_000 })
+  test("a throwing spawn or a non-zero live-report exit never throws to the caller", async () => {
+    const throwing = new HerdrReporter({
+      env: herdrEnv,
+      spawn: () => { throw new Error("no herdr binary") },
+      now: () => 1_000,
+      cleanupAttempts: 1,
+      warn: () => {},
+    })
     expect(throwing.report(status())).toBe(true)
     expect(throwing.release()).toBe(true)
+    await expect(throwing.stop()).resolves.toBeUndefined()
 
     const { commands, spawn } = recorder([1, 1, 1])
     const failing = new HerdrReporter({ env: herdrEnv, spawn, now: () => 1_000 })
@@ -370,6 +422,150 @@ describe("HerdrReporter", () => {
     // The stopped reporter rejects both reports and explicit releases.
     expect(reporter.report(status({ step: 9 }))).toBe(false)
     expect(reporter.release()).toBe(false)
+  })
+
+  test("concurrent stop callers share one cleanup promise", async () => {
+    const { commands, spawn } = recorder()
+    const reporter = new HerdrReporter({ env: herdrEnv, spawn, now: () => 1_000 })
+    reporter.report(status())
+
+    const first = reporter.stop()
+    const second = reporter.stop()
+    expect(second).toBe(first)
+    await Promise.all([first, second])
+
+    expect(commands.filter((command) => command[2] === "release-agent")).toHaveLength(1)
+  })
+
+  test("stop waits for the observed release child to exit", async () => {
+    let resolveRelease!: (code: number) => void
+    let settled = false
+    const commands: string[][] = []
+    const spawn: HerdrSpawn = (command) => {
+      commands.push(command)
+      if (command[2] === "release-agent") {
+        return { exited: new Promise<number>((resolve) => { resolveRelease = resolve }) }
+      }
+      return { exited: Promise.resolve(0) }
+    }
+    const reporter = new HerdrReporter({ env: herdrEnv, spawn, now: () => 1_000 })
+    reporter.report(status())
+
+    const stopping = reporter.stop().then(() => { settled = true })
+    await Bun.sleep(0)
+    expect(commands.at(-1)?.[2]).toBe("release-agent")
+    expect(settled).toBe(false)
+
+    resolveRelease(0)
+    await stopping
+    expect(settled).toBe(true)
+  })
+
+  test("a rejected release retries with a fresh greater sequence", async () => {
+    const commands: string[][] = []
+    let releases = 0
+    const spawn: HerdrSpawn = (command) => {
+      commands.push(command)
+      if (command[2] === "release-agent") {
+        releases++
+        return { exited: Promise.resolve(releases === 1 ? 1 : 0) }
+      }
+      return { exited: Promise.resolve(0) }
+    }
+    const reporter = new HerdrReporter({ env: herdrEnv, spawn, now: () => 1_000 })
+    reporter.report(status())
+    await reporter.stop()
+
+    const attempts = commands.filter((command) => command[2] === "release-agent")
+    expect(attempts).toHaveLength(2)
+    expect(lastSeq(attempts[1]!)).toBeGreaterThan(lastSeq(attempts[0]!))
+  })
+
+  test("a hung release is killed within the bound and retried", async () => {
+    let releaseAttempts = 0
+    let kills = 0
+    let unrefs = 0
+    const signals: Array<NodeJS.Signals | undefined> = []
+    const commands: string[][] = []
+    const spawn: HerdrSpawn = (command) => {
+      commands.push(command)
+      if (command[2] !== "release-agent") return { exited: Promise.resolve(0) }
+      releaseAttempts++
+      if (releaseAttempts > 1) return { exited: Promise.resolve(0) }
+      return {
+        exited: new Promise<number>(() => {}),
+        kill(signal) { kills++; signals.push(signal) },
+        unref() { unrefs++ },
+      }
+    }
+    const reporter = new HerdrReporter({
+      env: herdrEnv,
+      spawn,
+      now: () => 1_000,
+      cleanupAttemptMs: 10,
+      cleanupAttempts: 2,
+    })
+
+    await Promise.race([
+      reporter.stop(),
+      Bun.sleep(500).then(() => { throw new Error("release retry exceeded its bound") }),
+    ])
+    expect(kills).toBe(1)
+    expect(signals).toEqual(["SIGKILL"])
+    expect(unrefs).toBe(1)
+    expect(commands.filter((command) => command[2] === "release-agent")).toHaveLength(2)
+  })
+
+  test("forced shutdown attempts release before its observation window exits", async () => {
+    const commands: string[][] = []
+    const exits: number[] = []
+    const reporter = new HerdrReporter({
+      env: herdrEnv,
+      spawn: (command) => {
+        commands.push(command)
+        // Simulate a status report that would consume stop()'s drain budget.
+        if (command[2] === "report-agent") return { exited: new Promise<number>(() => {}), unref() {} }
+        return { exited: Promise.resolve(0) }
+      },
+      now: () => 1_000,
+    })
+    reporter.report(status())
+    const shutdown = new RunShutdown({
+      exit: (code) => { exits.push(code) },
+      graceMs: 1_000,
+      forceObservationMs: 20,
+    })
+    shutdown.setForceHandler(() => { void reporter.forceRelease() })
+
+    try {
+      shutdown.request("SIGINT")
+      shutdown.request("SIGINT")
+      await Bun.sleep(0)
+      expect(commands.some((command) => command[2] === "release-agent")).toBe(true)
+      expect(exits).toEqual([])
+      await Bun.sleep(30)
+      expect(exits).toEqual([130])
+    } finally {
+      shutdown.dispose()
+    }
+  })
+
+  test("cleanup exhausts spawn failures safely and reports one warning per command", async () => {
+    let spawns = 0
+    const warnings: string[] = []
+    const reporter = new HerdrReporter({
+      env: herdrEnv,
+      spawn: () => { spawns++; throw new Error("socket unavailable") },
+      now: () => 1_000,
+      cleanupAttempts: 2,
+      warn: (message) => warnings.push(message),
+    })
+
+    await expect(reporter.stop()).resolves.toBeUndefined()
+    expect(spawns).toBe(4)
+    expect(warnings).toHaveLength(2)
+    expect(warnings[0]).toContain("clear Convoy metadata")
+    expect(warnings[1]).toContain("release the Convoy Herdr agent")
   })
 
   test("stop after an explicit release does not release again", async () => {
