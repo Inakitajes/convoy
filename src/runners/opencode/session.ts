@@ -300,7 +300,8 @@ type SessionSignal =
   | { type: "todos"; todos: ProgressTodo[]; message: string }
   | { type: "diff"; summary: ProgressDiffSummary }
   | { type: "idle" }
-  | { type: "error"; error: string }
+  /** `terminal`: the turn is over (V2 `session.execution.failed`); no `idle` follows. */
+  | { type: "error"; error: string; terminal?: boolean }
 
 const sessionPollMs = 30_000
 const maxConsecutivePollFailures = 10
@@ -469,7 +470,9 @@ export function watchSession(
       case "error":
         lastSessionError = signal.error
         input.progress.phaseActivity(input.phaseName, `session error: ${signal.error}`, "error")
-        await verifyCompletion()
+        // A V2 execution failure ends the turn without an idle: settle it now
+        // rather than waiting on a status poll that may keep reporting it active.
+        if (!(await verifyCompletion()) && signal.terminal) finish({ error: new Error(signal.error) })
         return
       case "idle":
         input.progress.phaseActivity(input.phaseName, "session idle; collecting results", "info")
@@ -762,7 +765,11 @@ export function describeSessionActivity(payload: unknown, state: ActivityState):
     case "session.diff":
       return { type: "diff", summary: diffSummaryFromEvent(properties.diff) }
     case "session.error":
-      return { type: "error", error: formatEventError(properties.error) }
+      return {
+        type: "error",
+        error: formatEventError(properties.error),
+        ...(payloadType(payload) === "session.execution.failed" ? { terminal: true } : {}),
+      }
     default:
       if (type.startsWith("session.next.")) return activity("info", type.replace(/^session\.next\./, ""))
       return undefined

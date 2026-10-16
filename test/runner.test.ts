@@ -2604,6 +2604,33 @@ describe("watchSession turn scoping", () => {
     await watcher.stop()
   })
 
+  test("a V2 execution failure settles the turn even while the server still lists the session as active", async () => {
+    // The live failure: compaction could not shrink an oversized prompt, the
+    // execution failed, and `session.active` kept reporting the session — the
+    // poll saw it busy and the phase waited until Ctrl+C.
+    async function* stream() {
+      yield { type: "session.execution.failed", data: { sessionID: "ses_1", error: { message: "The compaction request cannot be reduced further" } } }
+      await new Promise<void>(() => {})
+    }
+    const client = {
+      event: { subscribe: async () => ({ stream: stream() }) },
+      session: {
+        messages: async () => ({ data: [] }),
+        status: async () => ({ data: { ses_1: { type: "busy" } } }),
+      },
+    } as never
+    const watcher = watchSession(client, {
+      directory: "/repo",
+      phaseName: "score",
+      sessionID: "ses_1",
+      progress: noopProgress,
+      signal: new AbortController().signal,
+    })
+
+    await expect(watcher.result).rejects.toThrow("compaction request cannot be reduced further")
+    await watcher.stop()
+  })
+
   test("waits for the follow-up turn instead of resolving on the previous one", async () => {
     // Only the first turn exists: the anchored watcher has nothing of its own
     // yet, and resolving here would report an empty turn as a finished one.

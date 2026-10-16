@@ -85,7 +85,14 @@ describe("V2 event stream → settlement and usage", () => {
       type: "session.execution.failed",
       data: { sessionID: "ses_1", error: { message: "provider exploded" } },
     })
+    // Terminal: V2 sends no idle after a failed execution, so the watcher settles on it.
+    expect(signal).toMatchObject({ type: "error", terminal: true })
+  })
+
+  test("a V1 session.error is not terminal; its idle settles the turn", () => {
+    const signal = activity({ type: "session.error", properties: { sessionID: "ses_1", error: { message: "retrying" } } })
     expect(signal).toMatchObject({ type: "error" })
+    expect((signal as { terminal?: boolean }).terminal).toBeUndefined()
   })
 
   test("session.usage.updated reports the cumulative session usage", () => {
