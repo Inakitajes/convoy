@@ -5,7 +5,7 @@ import { dirname, join } from "node:path"
 import { opencodeConfig } from "../src/agents"
 import { validateAuthoringSession } from "../src/conversations"
 import { createOpencodeClient } from "../src/opencode-client"
-import { toModelChoices } from "../src/model-catalog"
+import { listServerModels } from "../src/model-catalog"
 import { builtInAgents } from "../src/pipeline"
 import { installWriteReportTool } from "../src/report-bridge"
 import { writeReportToolName } from "../src/report"
@@ -196,9 +196,9 @@ describe.if(opencodeAvailable)("Convoy V2 client boundary on the real runtime", 
 
   test("the catalog lists custom providers and their variants as soon as the server is up", async () => {
     const fixture = await boot(() => ({ text: "done" }))
-    const listed = await fixture.booted.client.provider.list({ directory: fixture.runtime.checkout })
-    expect(listed.error).toBeUndefined()
-    const choices = toModelChoices(listed.data!.all, listed.data!.connected).map((choice) => choice.value)
+    // The same read the model picker makes, warm-up included: a server can
+    // answer before its configured providers have loaded.
+    const choices = (await listServerModels(fixture.booted.client, fixture.runtime.checkout, { warmupMs: 15_000 })).map((choice) => choice.value)
     expect(choices).toContain("mock/mock-model")
     expect(choices).toContain("mock/mock-model#deep")
   }, 40_000)
