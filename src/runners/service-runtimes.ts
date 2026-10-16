@@ -9,9 +9,11 @@
 import type { AdvisorRuntime } from "../advisor-runtime"
 import type { LoopGuard } from "../loop-guard"
 import type { ReportRuntime } from "../report-runtime"
-import type { DeliverableKind } from "./contracts"
+import type { ApprovalService, DeliverableKind } from "./contracts"
 
 export type ServiceRuntimes = {
+  /** The operator's approval gate, for a runner whose asks arrive out of process. */
+  approvals?: ApprovalService
   reports?: ReportRuntime
   advisors?: AdvisorRuntime
   loopGuard: LoopGuard

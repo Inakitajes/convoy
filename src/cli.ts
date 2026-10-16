@@ -2332,6 +2332,9 @@ export async function resolveRunOptions(parsed: ParsedArgs): Promise<Omit<RunOpt
     yolo: parsed.yolo ?? false,
     smart: parsed.smart ?? false,
     smartJudgeModel,
+    ...(defaults.claudeAuth
+      ? { claudeAuth: { mode: defaults.claudeAuth.authMode, ...(defaults.claudeAuth.credentialRef ? { credentialRef: defaults.claudeAuth.credentialRef } : {}) } }
+      : {}),
     gateway: parsed.gateway ?? config?.modelRouting?.gateway ?? "configured",
     gatewayExplicit: parsed.gateway !== undefined,
     modelRoutingOverrides: config?.modelRouting?.overrides ?? {},

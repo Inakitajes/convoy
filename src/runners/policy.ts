@@ -12,7 +12,9 @@
  * concern; this module only decides.
  */
 
-import { isAbsolute, relative, resolve } from "node:path"
+import { realpathSync } from "node:fs"
+import { homedir } from "node:os"
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path"
 
 import type { ApprovalMode, ExecutionMode } from "./contracts"
 
@@ -27,6 +29,13 @@ export type ActionRequest = {
   intent: ActionIntent
   /** The resource the action targets (a path or a command), when known. */
   resource?: string
+  /**
+   * `tree` when the action reads everything below its path (a search), so an
+   * ancestor of a protected root reaches it too; a single file otherwise.
+   */
+  scope?: "file" | "tree"
+  /** The directory a relative resource is resolved against (the harness's cwd). */
+  cwd?: string
 }
 
 export type PolicyDecision = {
@@ -56,6 +65,13 @@ export type PolicyConfig = {
   writeRoots?: readonly string[]
   /** Absolute roots no action may touch (secrets), whatever the mode. */
   denyRoots?: readonly string[]
+  /**
+   * Absolute roots a read may target besides `writeRoots` (attachments). When
+   * set, a read anywhere else is denied, as OpenCode's `external_directory`.
+   */
+  readRoots?: readonly string[]
+  /** The step's checkout: relative resources resolve against it when the request names no cwd. */
+  cwd?: string
 }
 
 export type CommandEffect = "allow" | "deny" | "ask"
@@ -130,19 +146,80 @@ function chainedCommandEffect(command: string, rules: Readonly<Record<string, Co
   return worst
 }
 
+/** Compares filesystem forms, so `/tmp` and `/private/tmp` (or a linked root) agree. */
 function within(path: string, root: string): boolean {
-  const rel = relative(resolve(root), resolve(path))
+  const rel = relative(realpathDeep(resolve(root)), realpathDeep(resolve(path)))
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))
 }
 
-function touchesDeniedRoot(request: ActionRequest, roots: readonly string[]): boolean {
-  const resource = request.resource!
-  // A command names the protected path in its text; a file tool targets it directly.
-  if (request.intent === "execute") return roots.some((root) => resource.includes(root))
-  return isAbsolute(resource) && roots.some((root) => within(resource, root))
+/**
+ * The absolute, symlink-resolved form of a path resource: `~` and `$HOME`
+ * expand, a relative path resolves against `cwd`, and the deepest existing
+ * ancestor is realpath'd so a link inside the checkout cannot reach a
+ * protected root. Undefined for a relative path with no cwd to resolve it.
+ */
+export function resolvePathResource(resource: string, cwd?: string): string | undefined {
+  const expanded = resource.replace(/^(~|\$HOME|\$\{HOME\})(?=\/|$)/, homedir())
+  if (!isAbsolute(expanded) && cwd === undefined) return undefined
+  return realpathDeep(resolve(cwd ?? "/", expanded))
 }
 
-/** Decides one normalized action. Pure; no harness state is consulted. */
+function realpathDeep(path: string): string {
+  let head = path
+  const tail: string[] = []
+  for (;;) {
+    try {
+      return join(realpathSync(head), ...tail)
+    } catch {
+      const parent = dirname(head)
+      if (parent === head) return path
+      tail.unshift(basename(head))
+      head = parent
+    }
+  }
+}
+
+/** The fixed directory part of a glob, which is what the glob can reach. */
+export function staticGlobPrefix(pattern: string): string {
+  const segments = pattern.split("/")
+  const firstGlob = segments.findIndex((segment) => /[*?[{]/.test(segment))
+  return firstGlob === -1 ? pattern : segments.slice(0, firstGlob).join("/") || (pattern.startsWith("/") ? "/" : ".")
+}
+
+const pathLike = /^(\/|~|\.|\$HOME|\$\{HOME\})|\//
+
+/** The path-like words of a shell command (quotes stripped, `--opt=path` split). */
+export function commandPathTokens(command: string): string[] {
+  return command
+    .split(/[\s;|&()<>]+/)
+    .flatMap((word) => word.replace(/^['"]|['"]$/g, "").split("="))
+    .filter((word) => word.length > 0 && word !== "/" && pathLike.test(word))
+}
+
+function reaches(path: string, roots: readonly string[], tree: boolean): boolean {
+  return roots.some((root) => within(path, root) || (tree && within(root, path)))
+}
+
+function touchesDeniedRoot(request: ActionRequest, roots: readonly string[], cwd?: string): boolean {
+  if (roots.length === 0) return false
+  const resource = request.resource!
+  if (request.intent === "execute") {
+    // A command names the protected path in its text, or reaches it through a
+    // relative, `~`, linked, or ancestor path a recursive command walks.
+    if (roots.some((root) => resource.includes(root))) return true
+    return commandPathTokens(resource).some((token) => {
+      const target = resolvePathResource(staticGlobPrefix(token), cwd)
+      return target !== undefined && reaches(target, roots, true)
+    })
+  }
+  const target = resolvePathResource(resource, cwd)
+  return target !== undefined && reaches(target, roots, request.scope === "tree")
+}
+
+/**
+ * Decides one normalized action. No harness state is consulted; paths are
+ * compared in their resolved filesystem form.
+ */
 export function evaluateAction(request: ActionRequest, config: PolicyConfig, state: PolicyState = {}): PolicyDecision {
   for (const rule of config.hardDeny ?? []) {
     if (matchesRule(request, rule)) {
@@ -150,7 +227,8 @@ export function evaluateAction(request: ActionRequest, config: PolicyConfig, sta
     }
   }
 
-  if (request.resource !== undefined && touchesDeniedRoot(request, config.denyRoots ?? [])) {
+  const cwd = request.cwd ?? config.cwd
+  if (request.resource !== undefined && touchesDeniedRoot(request, config.denyRoots ?? [], cwd)) {
     return { effect: "deny", reason: `${request.tool} may not touch a protected path` }
   }
 
@@ -181,11 +259,20 @@ export function evaluateAction(request: ActionRequest, config: PolicyConfig, sta
     return { effect: "deny", reason: "blocked until the advisor consultation is satisfied" }
   }
 
-  if (request.intent === "read") return { effect: "allow", reason: "read allowed" }
+  if (request.intent === "read") {
+    if (config.readRoots) {
+      const target = request.resource === undefined ? cwd : resolvePathResource(request.resource, cwd)
+      const roots = [...(config.writeRoots ?? []), ...config.readRoots]
+      if (target === undefined || !roots.some((root) => within(target, root))) {
+        return { effect: "deny", reason: "read outside the step's checkout, run directory, and attachments" }
+      }
+    }
+    return { effect: "allow", reason: "read allowed" }
+  }
 
   if (request.intent === "write" && config.writeRoots) {
-    const target = request.resource
-    if (target !== undefined && isAbsolute(target) && config.writeRoots.some((root) => within(target, root))) {
+    const target = request.resource === undefined ? undefined : resolvePathResource(request.resource, cwd)
+    if (target !== undefined && config.writeRoots.some((root) => within(target, root))) {
       return { effect: "allow", reason: "write inside the step's checkout" }
     }
     return { effect: "deny", reason: "write outside the step's checkout and run directory" }

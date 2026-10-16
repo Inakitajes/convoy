@@ -1,6 +1,7 @@
 import { stdout } from "node:process"
 
 import type { OpencodeClient } from "./opencode-client"
+import type { ApprovalService } from "./runners/contracts"
 
 import { getSessionEventHub, payloadProperties } from "./event-hub"
 import { log } from "./log"
@@ -410,5 +411,70 @@ function serialQueue() {
   let tail: Promise<unknown> = Promise.resolve()
   return (job: () => Promise<unknown>) => {
     tail = tail.then(job, job)
+  }
+}
+
+export type OperatorApprovalOptions = {
+  /** The run's OpenCode client, which hosts the smart-mode judge. */
+  client: OpencodeClient
+  progress: ProgressUI
+  directory: string
+  /** The run's live auto-accept reference, read when each request arrives. */
+  autoAccept?: AutoAccept
+  judgeModel?: { providerID: string; modelID: string }
+  signal?: AbortSignal
+  /** The attempt's session, once known. */
+  session?: () => string | undefined
+}
+
+/**
+ * The approval service for a runner whose asks arrive out of process (Claude's
+ * permission host): the same decision order as the OpenCode gate above — live
+ * auto-accept, then the smart judge, then the operator — so an ask is never
+ * denied merely because it came from the other runner. With no operator UI at
+ * all it denies.
+ */
+export function createOperatorApprovalService(options: OperatorApprovalOptions): ApprovalService {
+  return {
+    async decide(request) {
+      const resource = request.resources?.[0]
+      const sessionID = options.session?.()
+      const info: PermissionPromptInfo = {
+        id: request.requestId,
+        permission: request.action,
+        patterns: [...(request.resources ?? [])].slice(0, 5),
+        ...(resource ? (request.action === "bash" ? { command: resource } : { target: resource }) : {}),
+        ...(sessionID ? { sessionID } : {}),
+      }
+      const summary = resource ? `${request.action}: ${truncate(resource, 200)}` : request.action
+
+      if (options.autoAccept?.mode === "all") {
+        log.info(`[permission] auto-allowed (auto-accept on): ${summary}`)
+        options.progress.message(`auto-allowed: ${summary}`)
+        return "allow"
+      }
+
+      let judgeReason: string | undefined
+      if (options.autoAccept?.mode === "smart" && options.judgeModel) {
+        options.progress.message(`evaluating safety: ${summary}`)
+        const verdict = await judgeCommand(options.client, { request: info, model: options.judgeModel, directory: options.directory, signal: options.signal })
+        if (verdict.safe) {
+          log.info(`[permission] smart-allowed: ${summary} — ${verdict.reason}`)
+          options.progress.message(`smart-allowed: ${summary} — ${verdict.reason}`)
+          return "allow"
+        }
+        log.info(`[permission] smart auto-accept escalating to user: ${summary} — ${verdict.reason}`)
+        judgeReason = `flagged by safety judge: ${verdict.reason}`
+      }
+
+      const ask = options.progress.askPermission?.bind(options.progress)
+      if (!ask) {
+        log.warn(`[permission] denying ${summary}: no operator UI`)
+        return "deny"
+      }
+      const answer = await ask({ ...info, ...(judgeReason ? { judgeReason } : {}) })
+      log.info(`[permission] replied ${answer} for ${request.action}`)
+      return answer === "reject" ? "deny" : "allow"
+    },
   }
 }

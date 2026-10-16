@@ -59,7 +59,7 @@ export async function executeClaudeAttempt(context: AttemptContext, adapter?: Cl
       instructions: loadAgentPrompt(base, context.targetDir),
     },
     prompt: context.prompt,
-    auth: { mode: "subscription" },
+    auth: context.auth ?? { mode: "subscription" },
     mode,
     approvals: context.policy?.approvals ?? "auto",
     ...(context.policy ? { policy: context.policy } : {}),

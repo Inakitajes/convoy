@@ -10,15 +10,24 @@
  *
  * Both read a reviewed policy from `CONVOY_RUNNER_POLICY` (JSON), which the
  * Claude adapter sets for every attempt. A missing or malformed policy fails
- * closed to read-only with interactive approvals; an `ask` with no operator
- * denies.
+ * closed to read-only with interactive approvals. The permission host forwards
+ * an `ask` to the attempt's approval bridge (`approval-bridge.ts`); with no
+ * bridge, or when it cannot be reached, the `ask` denies.
  */
 
+import { approvalBridgeProvider } from "./claude/approval-bridge"
 import { decideToolCall, preToolUseOutput, type PreToolUseInput } from "./claude/hook"
 import { serveMcpPermissionStdio } from "./claude/mcp-stdio"
 import { resolvePermission } from "./claude/permission-broker"
 
 import { runnerPolicyEnv, type PolicyConfig } from "./policy"
+
+/**
+ * How long a forwarded ask waits for the operator. Like OpenCode's gate, a
+ * prompt is held until someone answers rather than rejected because nobody is
+ * attached right now; the bound only keeps an abandoned host from living forever.
+ */
+const operatorWaitMs = 24 * 60 * 60_000
 
 /** The policy enforced when none was reviewed for the attempt: nothing but reads. */
 const failClosedPolicy: PolicyConfig = { mode: "read-only", approvals: "interactive" }
@@ -60,10 +69,11 @@ export async function runHookCommand(): Promise<void> {
 /** `convoy mcp`: runs the stdio permission host. */
 export async function runMcpCommand(): Promise<void> {
   const policy = policyFromEnv()
+  const requestApproval = approvalBridgeProvider()
   await serveMcpPermissionStdio(
     {
       resolve: async (call) => {
-        const resolved = await resolvePermission({ call, config: policy })
+        const resolved = await resolvePermission({ call, config: policy, ...(requestApproval ? { requestApproval, timeoutMs: operatorWaitMs } : {}) })
         return { decision: resolved.decision, reason: resolved.reason }
       },
     },

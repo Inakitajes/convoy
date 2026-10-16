@@ -11,12 +11,16 @@
  * permission events to the same intents.
  */
 
-import { evaluateAction, type ActionIntent, type ActionRequest, type PolicyConfig, type PolicyDecision, type PolicyState } from "../policy"
+import { isAbsolute, join } from "node:path"
+
+import { evaluateAction, staticGlobPrefix, type ActionIntent, type ActionRequest, type PolicyConfig, type PolicyDecision, type PolicyState } from "../policy"
 
 export type PreToolUseInput = {
   hook_event_name?: string
   tool_name?: string
   tool_input?: Record<string, unknown>
+  /** The session's working directory; relative tool paths resolve against it. */
+  cwd?: string
 }
 
 /** Maps a Claude built-in tool name to a neutral intent. */
@@ -47,13 +51,30 @@ export function toolToIntent(toolName: string): ActionIntent {
   }
 }
 
-/** Extracts the action's target resource from a hook's tool input. */
+function stringField(input: Record<string, unknown> | undefined, key: string): string | undefined {
+  const value = input?.[key]
+  return typeof value === "string" && value.length > 0 ? value : undefined
+}
+
+/**
+ * Extracts the action's target resource from a hook's tool input. A search
+ * targets its directory — Grep's `pattern` is a regex, never a path — and a
+ * Glob also reaches wherever its pattern's fixed prefix points.
+ */
 export function resourceOf(toolName: string, input?: Record<string, unknown>): string | undefined {
   if (!input) return undefined
-  const keys = toolName === "Bash" ? ["command"] : ["file_path", "path", "notebook_path", "command", "pattern", "query", "url"]
-  for (const key of keys) {
-    const value = input[key]
-    if (typeof value === "string" && value.length > 0) return value
+  if (toolName === "Bash") return stringField(input, "command")
+  if (toolName === "Grep") return stringField(input, "path") ?? "."
+  if (toolName === "Glob") {
+    const pattern = stringField(input, "pattern")
+    const base = stringField(input, "path") ?? "."
+    if (!pattern) return base
+    const prefix = staticGlobPrefix(pattern)
+    return isAbsolute(prefix) ? prefix : join(base, prefix)
+  }
+  for (const key of ["file_path", "path", "notebook_path", "command", "query", "url"]) {
+    const value = stringField(input, key)
+    if (value) return value
   }
   return undefined
 }
@@ -61,7 +82,13 @@ export function resourceOf(toolName: string, input?: Record<string, unknown>): s
 /** The neutral action request for a hook input. */
 export function toActionRequest(input: PreToolUseInput): ActionRequest {
   const tool = typeof input.tool_name === "string" && input.tool_name.length > 0 ? input.tool_name : "unknown"
-  return { tool, intent: toolToIntent(tool), resource: resourceOf(tool, input.tool_input) }
+  return {
+    tool,
+    intent: toolToIntent(tool),
+    resource: resourceOf(tool, input.tool_input),
+    ...(tool === "Grep" || tool === "Glob" ? { scope: "tree" as const } : {}),
+    ...(typeof input.cwd === "string" && input.cwd.length > 0 ? { cwd: input.cwd } : {}),
+  }
 }
 
 /** Convoy's decision for one tool call (used by the hook and by OpenCode). */

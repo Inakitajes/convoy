@@ -3,8 +3,8 @@
  *
  * Core decides the policy, adapters enforce it (see `policy.ts`). This builds
  * the same rules the OpenCode run config encodes — the bash allow/deny/ask
- * ruleset, writes confined to the checkout and the run directory, the run's
- * private directory off limits — so a harness that enforces through an
+ * ruleset, reads and writes confined to the checkout and the run directory
+ * (plus the attachments for reads), the run's private directory off limits — so a harness that enforces through an
  * out-of-process hook (Claude) applies exactly what OpenCode applies natively.
  */
 
@@ -27,6 +27,8 @@ export type PhasePolicyInput = {
   privateDir: string
   /** The assembled bash ruleset (`bashPolicy`), in evaluation order. */
   commands: Readonly<Record<string, CommandEffect>>
+  /** Absolute paths of the attempt's attachments (files or directories), readable wherever they live. */
+  attachments?: readonly string[]
 }
 
 /** Maps the auto-accept mode onto the approval mode an `ask` follows. */
@@ -58,5 +60,8 @@ export function phasePolicy(input: PhasePolicyInput): PolicyConfig {
     commands: input.commands,
     writeRoots: [...rootForms(input.checkout), ...rootForms(input.runDir)],
     denyRoots: rootForms(input.privateDir),
+    // Reads elsewhere are denied, as OpenCode's external_directory rule does.
+    readRoots: (input.attachments ?? []).flatMap(rootForms),
+    cwd: input.checkout,
   }
 }

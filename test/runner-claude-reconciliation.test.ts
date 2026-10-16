@@ -78,7 +78,11 @@ describe("Claude capability matrix (task 3.5)", () => {
 
 describe("Claude through registered composition (task 3.6)", () => {
   test("a read-only attempt completes through the registry", async () => {
-    const composition = composeRunners({ cwd: "/tmp", claude: { deps: { spawn: () => fakeProcess() } }, enforcement })
+    const composition = composeRunners({
+      cwd: "/tmp",
+      claude: { deps: { spawn: () => fakeProcess(), probeAuth: async () => ({ authMethod: "claude.ai" }) } },
+      enforcement,
+    })
     try {
       const adapter = composition.registry.require("claude-code").execution
       const caps = await adapter.capabilities()

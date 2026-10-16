@@ -25,6 +25,7 @@ export type FeaturePlanLink = {
 import type { AutoAccept, ProgressUI } from "./progress"
 import type { RunShutdown } from "./runner"
 import type { StepRunnerId } from "./step-runners"
+import type { AuthenticationSelection } from "./runners/contracts"
 import type { ModelGateway, ModelRoutingOverrides, ResolvedModel } from "./model-routing"
 
 export type RunOptions = {
@@ -35,6 +36,12 @@ export type RunOptions = {
   changes?: string[]
   /** The explicit no-change run mode (`--manual`); zero selected changes is valid only through it. */
   manual?: boolean
+  /**
+   * The configured Claude authentication (`defaults.claudeAuth`). Absent means
+   * subscription, which each attempt verifies before it runs. Only a
+   * non-secret credential reference is carried, never a key.
+   */
+  claudeAuth?: AuthenticationSelection
   files: string[]
   onlySteps: string[]
   skipSteps: string[]

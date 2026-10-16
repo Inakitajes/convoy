@@ -57,7 +57,8 @@ export function buildRunPlan(input: BuildRunPlanInput): RunPlan {
     advisorOverride: input.advisorOverride,
     advisorDisabled: input.advisorDisabled,
   })
-  if (input.claudeAuthMode) registerClaudeAuth(pipeline, input.claudeAuthMode)
+  const claudeAuthMode = input.claudeAuthMode ?? input.claudeAuth?.mode
+  if (claudeAuthMode) registerClaudeAuth(pipeline, claudeAuthMode)
   const judge = input.smart
     ? resolveModel(input.smartJudgeModel, gateway, overrides)
     : undefined

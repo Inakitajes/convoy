@@ -42,7 +42,7 @@ export { formatSdkError } from "./runners/errors"
 export { validateDeliverableContract as validateDeliverable } from "./runners/quality-contract"
 export * from "./runners/opencode/session"
 import type { EnforcementPlan } from "./runners/claude/enforcement"
-import type { AttachmentDescriptor, ExecutionMode, ExecutionRequest, RunnerEvent } from "./runners/contracts"
+import type { AttachmentDescriptor, AuthenticationSelection, ExecutionMode, ExecutionRequest, RunnerEvent } from "./runners/contracts"
 import { addAllAndCommit, createCleanRepoSnapshot, currentBranch, currentHead, describeRepoSnapshotDifference, dirtyFilesPreview, dirtyTreeError, ensureRepoReady, restoreRepoSnapshot, type RepoSnapshot, statusPorcelain, writeDiff } from "./git"
 import { gitCommonDir, protectAttemptTip, runRefPrefix } from "./finalization/refs"
 import { recordLedgeredCommit } from "./finalization/ledger"
@@ -59,7 +59,7 @@ import { clearServerAuth, writeServerAuth } from "./server-auth"
 import { defaultStopPolicy, type StopOutcome, type StopPolicy } from "./process-stop"
 import { HerdrReporter } from "./herdr"
 import { defaultNotificationSettings, Notifier } from "./notifications"
-import { startPermissionGate, type PermissionGate } from "./permissions"
+import { createOperatorApprovalService, startPermissionGate, type PermissionGate } from "./permissions"
 import { agentsForPipeline, deliverableContractForPhase, splitModelVariant, validateStepFilters } from "./pipeline"
 import { pickPrdHistory, prdHistoryFile, readPrdHistoryIndex, writePrdHistory } from "./prd-history"
 import { installWriteReportTool, startReportBridge, type ReportBridge } from "./report-bridge"
@@ -1688,6 +1688,10 @@ type PreparedPhaseRun = {
   permissions?: PermissionAdditions
   /** The run's live auto-accept reference; read when each attempt starts. */
   autoAccept?: AutoAccept
+  /** The configured Claude authentication; absent means subscription. */
+  claudeAuth?: AuthenticationSelection
+  /** The smart auto-accept judge, for a runner whose asks the engine decides. */
+  judgeModel?: { providerID: string; modelID: string }
 }
 
 export async function preparePhaseRun(
@@ -1725,6 +1729,8 @@ export async function preparePhaseRun(
     loopGuard: resolveLoopGuard(options.loopGuard),
     permissions: options.permissions,
     autoAccept: options.autoAccept ?? options.progress?.autoAccept ?? { mode: options.yolo ? "all" : options.smart ? "smart" : "off" },
+    ...(options.claudeAuth ? { claudeAuth: options.claudeAuth } : {}),
+    ...(options.smartJudgeModel ? { judgeModel: parseModel(splitModelVariant(options.smartJudgeModel).model) } : {}),
   }
 }
 
@@ -2274,6 +2280,15 @@ async function runPhaseAttempt(
   const services = composition.servicesFor(
     runnerId,
     {
+      approvals: createOperatorApprovalService({
+        client,
+        progress,
+        directory: targetDir,
+        ...(prepared.autoAccept ? { autoAccept: prepared.autoAccept } : {}),
+        ...(prepared.judgeModel ? { judgeModel: prepared.judgeModel } : {}),
+        signal: shutdown.signal,
+        session: () => activeSessionID,
+      }),
       ...(reports ? { reports } : {}),
       ...(advisors ? { advisors } : {}),
       loopGuard: loopGuard ?? new LoopGuard(prepared.loopGuard),
@@ -2312,6 +2327,13 @@ async function runPhaseAttempt(
     runDir: workspace.dir,
     privateDir: runPrivateDir(workspace.dir),
     commands: bashPolicy(targetDir, prepared.permissions ?? noAdditions),
+    attachments: prepared.attachments.flatMap((file) => {
+      try {
+        return [fileURLToPath(file.url)]
+      } catch {
+        return []
+      }
+    }),
   })
 
   // Validate the phase's required services against this runner's own
@@ -2348,6 +2370,7 @@ async function runPhaseAttempt(
     attempt,
     services,
     policy,
+    ...(prepared.claudeAuth ? { auth: prepared.claudeAuth } : {}),
     env: process.env,
     client,
   }

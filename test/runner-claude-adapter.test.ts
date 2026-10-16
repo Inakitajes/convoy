@@ -36,6 +36,9 @@ function readOnly(): ExecutionRequest {
   })
 }
 
+/** The effective-auth probe of an operator logged in with a subscription. */
+const subscriptionLogin = { probeAuth: async () => ({ authMethod: "claude.ai" }) }
+
 /** A reviewed plan that installs the hook and the permission host. */
 function enforcementPlan(): EnforcementPlan {
   return {
@@ -102,9 +105,10 @@ describe("claude adapter (unit)", () => {
     const text = signalsToEvents({ type: "message", message: { channel: "response", text: "hi" } }, 2)
     expect(text.events[0]?.type).toBe("text")
 
+    // The result reports its usage; the terminal event is the adapter's, once the outcome is final.
     const result = signalsToEvents({ type: "result", subtype: "success", text: "done", cost: 0.1, tokens: undefined, isError: false }, 2)
     expect(result.outcome?.status).toBe("completed")
-    expect(result.events[0]?.type).toBe("terminal")
+    expect(result.events.map((event) => event.type)).toEqual(["usage"])
   })
 
   test("maps tokens and cost to usage", () => {
@@ -121,7 +125,7 @@ describe("claude adapter (unit)", () => {
 
 describe("claude adapter (fixture execution)", () => {
   test("streams a fixture turn into events and a completed outcome", async () => {
-    const runner = createClaudeRunner({ cwd: "/tmp", env: {}, deps: { spawn: () => fakeProcess(fixture) }, enforcement: enforcementPlan() })
+    const runner = createClaudeRunner({ cwd: "/tmp", env: {}, deps: { ...subscriptionLogin, spawn: () => fakeProcess(fixture) }, enforcement: enforcementPlan() })
     const events: RunnerEvent[] = []
     const outcome = await runner.executeAttempt(request(), (event) => events.push(event))
 
@@ -130,7 +134,7 @@ describe("claude adapter (fixture execution)", () => {
     expect(outcome.session?.sessionId).toBe("ses_claude_1")
     expect(events.some((event) => event.type === "session")).toBe(true)
     expect(events.filter((event) => event.type === "text").map((event) => (event as { text: string }).text)).toEqual(["Hello ", "world"])
-    expect(events.some((event) => event.type === "tool")).toBe(true)
+    expect(events.some((event) => event.type === "activity" && event.kind === "tool")).toBe(true)
     expect(events.at(-1)?.type).toBe("terminal")
   })
 
@@ -141,6 +145,7 @@ describe("claude adapter (fixture execution)", () => {
       env: { ANTHROPIC_API_KEY: "sk-ambient-leak", PATH: "/bin" },
       enforcement: enforcementPlan(),
       deps: {
+        ...subscriptionLogin,
         spawn: (_command, options) => {
           seenEnv = options.env
           return fakeProcess(fixture)
@@ -158,7 +163,7 @@ describe("claude adapter (fixture execution)", () => {
       cwd: "/tmp",
       env: {},
       enforcement: enforcementPlan(),
-      deps: { spawn: () => fakeProcess([], () => { killed = true }) },
+      deps: { ...subscriptionLogin, spawn: () => fakeProcess([], () => { killed = true }) },
     })
     const controller = new AbortController()
     controller.abort()
@@ -172,7 +177,7 @@ describe("claude adapter (fixture execution)", () => {
     const runner = createClaudeRunner({
       cwd: "/tmp",
       env: {},
-      deps: { spawn: () => { spawned = true; return fakeProcess(fixture) } },
+      deps: { ...subscriptionLogin, spawn: () => { spawned = true; return fakeProcess(fixture) } },
     })
     const events: RunnerEvent[] = []
     const outcome = await runner.executeAttempt(request({ mode: "write", approvals: "auto" }), (event) => events.push(event))
@@ -187,7 +192,7 @@ describe("claude adapter (fixture execution)", () => {
     const runner = createClaudeRunner({
       cwd: "/tmp",
       env: {},
-      deps: { spawn: () => { spawned = true; return fakeProcess(fixture) } },
+      deps: { ...subscriptionLogin, spawn: () => { spawned = true; return fakeProcess(fixture) } },
     })
     const outcome = await runner.executeAttempt(
       request({
@@ -202,7 +207,7 @@ describe("claude adapter (fixture execution)", () => {
   })
 
   test("delivers the final report to a contract that expects it", async () => {
-    const runner = createClaudeRunner({ cwd: "/tmp", env: {}, deps: { spawn: () => fakeProcess(fixture) } })
+    const runner = createClaudeRunner({ cwd: "/tmp", env: {}, deps: { ...subscriptionLogin, spawn: () => fakeProcess(fixture) } })
     const observed: string[] = []
     let submitted: { kind: string; body: string } | undefined
     const outcome = await runner.executeAttempt(readOnly(), () => {}, {
@@ -227,7 +232,7 @@ describe("claude adapter (fixture execution)", () => {
   })
 
   test("a contract that expects a report fails when the attempt produced none", async () => {
-    const runner = createClaudeRunner({ cwd: "/tmp", env: {}, deps: { spawn: () => fakeProcess(emptyResult) } })
+    const runner = createClaudeRunner({ cwd: "/tmp", env: {}, deps: { ...subscriptionLogin, spawn: () => fakeProcess(emptyResult) } })
     let submitted = false
     const outcome = await runner.executeAttempt(readOnly(), () => {}, {
       deliverables: {
@@ -244,7 +249,7 @@ describe("claude adapter (fixture execution)", () => {
   })
 
   test("a rejected deliverable fails the attempt", async () => {
-    const runner = createClaudeRunner({ cwd: "/tmp", env: {}, deps: { spawn: () => fakeProcess(fixture) } })
+    const runner = createClaudeRunner({ cwd: "/tmp", env: {}, deps: { ...subscriptionLogin, spawn: () => fakeProcess(fixture) } })
     const outcome = await runner.executeAttempt(readOnly(), () => {}, {
       deliverables: {
         expected: ["report"],
@@ -262,7 +267,7 @@ describe("claude adapter (robustness)", () => {
       cwd: "/tmp",
       env: {},
       enforcement: enforcementPlan(),
-      deps: { spawn: () => fakeProcess(lines) },
+      deps: { ...subscriptionLogin, spawn: () => fakeProcess(lines) },
     })
     const events: RunnerEvent[] = []
     const outcome = await runner.executeAttempt(request(), (event) => events.push(event))
@@ -300,12 +305,12 @@ describe("claude adapter (robustness)", () => {
     expect(outcome.status).toBe("failed")
   })
 
-  test("a nested subagent assistant message maps to a tool event, not completion", async () => {
+  test("a nested subagent assistant message maps to tool activity, not completion", async () => {
     const { outcome, events } = await run([
       `{"type":"assistant","parent_tool_use_id":"toolu_1","message":{"content":[{"type":"tool_use","name":"Grep","input":{}}]}}`,
       `{"type":"result","subtype":"success","result":"ok"}`,
     ])
-    expect(events.some((event) => event.type === "tool")).toBe(true)
+    expect(events.some((event) => event.type === "activity" && event.kind === "tool")).toBe(true)
     expect(outcome.status).toBe("completed")
   })
 })

@@ -682,6 +682,18 @@ function warnIgnoredMaxAttempts() {
   log.warn("maxAttempts is no longer used; a failed step now waits for your decision")
 }
 
+const warnedUnwiredDefaults = new Set<string>()
+
+/**
+ * Route keys that parse and round-trip but that no execution path reads yet.
+ * A config setting one is told so, instead of believing it took effect.
+ */
+function warnUnwiredDefault(key: "runner" | "helperRoutes" | "advisorRoute" | "authoring") {
+  if (warnedUnwiredDefaults.has(key)) return
+  warnedUnwiredDefaults.add(key)
+  log.warn(`defaults.${key} is not applied yet and has no effect on runs`)
+}
+
 function validateDefaults(v: Validator, raw: unknown): ConvoyDefaults {
   const record = v.record(raw, "defaults")
   v.knownKeys(record, "defaults", [
@@ -728,11 +740,23 @@ function validateDefaults(v: Validator, raw: unknown): ConvoyDefaults {
     if (policy !== "summary" && policy !== "redacted" && policy !== "full") v.fail("defaults.advisorAuditPolicy", "must be summary, redacted, or full")
     defaults.advisorAuditPolicy = policy as AdvisorAuditPolicy
   }
-  if (record.runner !== undefined) defaults.runner = validateRunnerId(v, record.runner, "defaults.runner")
+  if (record.runner !== undefined) {
+    warnUnwiredDefault("runner")
+    defaults.runner = validateRunnerId(v, record.runner, "defaults.runner")
+  }
   if (record.claudeAuth !== undefined) defaults.claudeAuth = validateClaudeAuth(v, record.claudeAuth, "defaults.claudeAuth")
-  if (record.helperRoutes !== undefined) defaults.helperRoutes = validateHelperRoutes(v, record.helperRoutes)
-  if (record.advisorRoute !== undefined) defaults.advisorRoute = validateAdvisorRoute(v, record.advisorRoute)
-  if (record.authoring !== undefined) defaults.authoring = validateAuthoringRoute(v, record.authoring)
+  if (record.helperRoutes !== undefined) {
+    warnUnwiredDefault("helperRoutes")
+    defaults.helperRoutes = validateHelperRoutes(v, record.helperRoutes)
+  }
+  if (record.advisorRoute !== undefined) {
+    warnUnwiredDefault("advisorRoute")
+    defaults.advisorRoute = validateAdvisorRoute(v, record.advisorRoute)
+  }
+  if (record.authoring !== undefined) {
+    warnUnwiredDefault("authoring")
+    defaults.authoring = validateAuthoringRoute(v, record.authoring)
+  }
   return defaults
 }
 

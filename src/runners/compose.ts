@@ -13,6 +13,7 @@ import { createOpencodeRunner } from "./opencode/adapter"
 import { executeClaudeAttempt } from "./claude/attempt"
 import { executeOpencodeAttempt } from "./opencode/attempt"
 import { bindOpencodeServices } from "./opencode/services"
+import { supportsService } from "./capabilities"
 import { RunnerRegistry, type ExecutionServices, type RunnerCapabilities, type RunnerId } from "./contracts"
 import type { ServiceRuntimes } from "./service-runtimes"
 
@@ -59,6 +60,10 @@ type AttemptRegistration = {
   serverSession: boolean
 }
 
+function bindClaudeServices(runtimes: ServiceRuntimes, capabilities: RunnerCapabilities): ExecutionServices {
+  return runtimes.approvals && supportsService(capabilities, "approvals") ? { approvals: runtimes.approvals } : {}
+}
+
 /** Registers the built-in adapters with the assembled options. */
 export function composeRunners(options: ComposeOptions): Composition {
   const registry = new RunnerRegistry()
@@ -78,10 +83,11 @@ export function composeRunners(options: ComposeOptions): Composition {
   registry.register({ id: "claude-code", execution: claude })
   const attempts: Partial<Record<RunnerId, AttemptRegistration>> = {
     "opencode": { run: executeOpencodeAttempt, bindServices: bindOpencodeServices, serverSession: true },
-    // Claude binds no engine runtime: its report is the final assistant text or
-    // the report file, which core resolves and validates after exit, and it
-    // honors neither the advisor bridge nor the loop guard.
-    "claude-code": { run: (context) => executeClaudeAttempt(context, claude), serverSession: false },
+    // Claude binds only the operator's approval gate, which its permission host
+    // reaches through the adapter's bridge: its report is the final assistant
+    // text or the report file, which core resolves and validates after exit,
+    // and it honors neither the advisor bridge nor the loop guard.
+    "claude-code": { run: (context) => executeClaudeAttempt(context, claude), bindServices: bindClaudeServices, serverSession: false },
   }
   return {
     registry,

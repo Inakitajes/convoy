@@ -81,7 +81,7 @@ export const claudeDeclaration: CapabilityDeclaration = {
     "live-observation": "streamed to the coordinator; not a native attach",
     "usage-reporting": "subscription values are estimates",
     approvals:
-      "Convoy's policy is enforced by a PreToolUse hook and an MCP permission host; with no operator bridge in print mode, an ask-level action is denied unless auto-accept is on",
+      "Convoy's policy is enforced by a PreToolUse hook and an MCP permission host; an ask-level action reaches the run's operator gate (auto-accept, smart judge, prompt) through a per-attempt loopback bridge",
     "structured-deliverables": "the report is the final assistant text or the report file, validated by Convoy after the attempt exits",
   },
   unavailable: [

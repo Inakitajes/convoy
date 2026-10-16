@@ -153,7 +153,12 @@ export function parseModelOverride(raw: string | undefined): ModelOverride {
   if (!value) return { model: "" }
   for (const runner of stepRunnerIds) {
     if (value === runner) return { scope: runner, model: "" }
-    if (value.startsWith(`${runner}/`)) return { scope: runner, model: value.slice(runner.length + 1) }
+    if (!value.startsWith(`${runner}/`)) continue
+    const model = value.slice(runner.length + 1)
+    // `opencode` is also a provider: `opencode/<id>` is an OpenCode Zen model,
+    // and only `opencode/<provider>/<model>` names the runner scope.
+    if (runner === "opencode" && !model.includes("/")) return { model: value }
+    return { scope: runner, model }
   }
   return { model: value }
 }

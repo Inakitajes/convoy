@@ -18,7 +18,7 @@ import type { AdvisorUsage, ModelSelection } from "../advisor"
 import type { AdvisorEvent } from "../advisor-events"
 import type { FilePartInput, OpencodeClient } from "../opencode-client"
 import type { AgentStep, DeliverableContract } from "../types"
-import type { AttemptIdentity, ExecutionServices, RunnerCapabilities, RunnerId, ServiceId } from "./contracts"
+import type { AttemptIdentity, AuthenticationSelection, ExecutionServices, RunnerCapabilities, RunnerId, ServiceId } from "./contracts"
 import { assertServicesSupported } from "./capabilities"
 import type { AttemptSink } from "./attempt-sink"
 import type { PolicyConfig } from "./policy"
@@ -43,6 +43,8 @@ export type AttemptContext = {
   services: ExecutionServices
   /** Convoy's reviewed action policy for the attempt, for adapters that enforce it themselves. */
   policy?: PolicyConfig
+  /** The reviewed authentication for a harness that selects one (Claude); absent means subscription. */
+  auth?: AuthenticationSelection
   /** Process environment for a CLI harness (Claude). */
   env?: NodeJS.ProcessEnv
   /** The run's OpenCode client, when the runner is OpenCode. */

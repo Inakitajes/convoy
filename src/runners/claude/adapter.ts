@@ -14,18 +14,23 @@
  * permission host.
  */
 
+import { randomUUID } from "node:crypto"
 import { isAbsolute, relative } from "node:path"
 
-import { describeClaudeEvent, ndjsonLines, newClaudeStreamState, type ClaudeSignal } from "../../claude-code"
+import { claudeModelLabel, describeClaudeEvent, ndjsonLines, newClaudeStreamState, type ClaudeSignal } from "../../claude-code"
 import { externalAttachmentDirectories, withAttachmentSection } from "../agent-source"
-import { resolveClaudeAuth } from "./auth"
+import { resolveClaudeAuth, type ClaudeAuthResolution } from "./auth"
+import { startClaudeApprovalBridge, type ClaudeApprovalBridge } from "./approval-bridge"
+import { validateEffectiveAuth, type EffectiveAuthProbe } from "./effective-auth"
 import { assertEnforcementReady, EnforcementNotReadyError, type EnforcementPlan } from "./enforcement"
+import { toolToIntent } from "./hook"
 import { encodeClaudeMcpConfig, encodeClaudeSettings, permissionPromptArgs } from "./settings"
 
 import type { AttemptOutcome, ExecutionAdapter, ExecutionRequest, ExecutionServices, RunnerEvent, Usage } from "../contracts"
 import { resolveEffectiveCapabilities } from "../capabilities"
 import { claudeDeclaration } from "../declarations"
 import { runnerPolicyEnv } from "../policy"
+import { redactSecrets } from "../redaction"
 import type { ProgressTokens } from "../../progress"
 
 export type ClaudeProcess = {
@@ -38,6 +43,8 @@ export type ClaudeProcess = {
 
 export type ClaudeRunnerDeps = {
   spawn(command: string[], options: { cwd: string; env: NodeJS.ProcessEnv; stdin: Blob; stdout: "pipe"; stderr: "pipe" }): ClaudeProcess
+  /** The effective-auth probe; defaults to `claude auth status --json` through `spawn`. */
+  probeAuth?: EffectiveAuthProbe
 }
 
 const defaultDeps: ClaudeRunnerDeps = {
@@ -60,6 +67,36 @@ export type ClaudeRunnerOptions = {
 export type ClaudeRunner = ExecutionAdapter
 
 const defaultBinary = "claude"
+
+/** The permission category an operator recognizes from OpenCode's prompts. */
+function approvalAction(tool: string): string {
+  const intent = toolToIntent(tool)
+  if (intent === "execute") return "bash"
+  if (intent === "write") return "edit"
+  return intent
+}
+
+/** How many trailing stderr lines explain a child that exited without a result. */
+const stderrTailLines = 3
+
+/**
+ * The supported auth-status interface, asked under the attempt's exact child
+ * environment: `claude auth status --json` reports the method Claude will use.
+ */
+export function cliAuthProbe(spawn: ClaudeRunnerDeps["spawn"], binary: string, cwd: string): EffectiveAuthProbe {
+  return async (env) => {
+    const proc = spawn([binary, "auth", "status", "--json"], { cwd, env, stdin: new Blob([]), stdout: "pipe", stderr: "pipe" })
+    const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited])
+    let status: { loggedIn?: unknown; authMethod?: unknown }
+    try {
+      status = JSON.parse(stdout) as typeof status
+    } catch {
+      throw new Error(`claude auth status returned no status${stderr.trim() ? `: ${stderr.trim().split("\n").at(-1)}` : ""}`)
+    }
+    if (status.loggedIn === false) throw new Error("the Claude CLI is not logged in")
+    return { authMethod: typeof status.authMethod === "string" ? status.authMethod : "" }
+  }
+}
 
 /** True when `path` is inside `root` (or is `root` itself). */
 function isWithin(path: string, root: string): boolean {
@@ -94,6 +131,8 @@ export function buildClaudeArgs(request: ExecutionRequest): string[] {
 export type ClaudeInvocation = {
   args: string[]
   env: NodeJS.ProcessEnv
+  /** The reviewed auth overlay `env` was built from, for effective-auth validation. */
+  auth: ClaudeAuthResolution
 }
 
 /**
@@ -147,7 +186,7 @@ export function buildClaudeInvocation(
     args.push(...permissionPromptArgs(enforcement.permissionPromptTool))
   }
 
-  return { args, env }
+  return { args, env, auth: resolution }
 }
 
 /** ProgressTokens -> neutral Usage. */
@@ -159,35 +198,42 @@ export function usageFromTokens(tokens: ProgressTokens | undefined, cost?: numbe
   }
 }
 
-/** Maps a `ClaudeSignal` to zero or more neutral events (session/text/tool). */
+/**
+ * Maps a `ClaudeSignal` to zero or more neutral events, rendering exactly what
+ * the dashboard showed before the adapter: transcript messages keep their
+ * channel and block id, activity keeps its kind, and the result reports its
+ * usage. The terminal event is the caller's, sent once the outcome is final.
+ */
 export function signalsToEvents(
   signal: ClaudeSignal,
   attempt: number,
+  /** The model label and session the dashboard attributes the usage to. */
+  usageLabels: Pick<Usage, "model" | "sessionID"> = {},
 ): { events: RunnerEvent[]; outcome?: AttemptOutcome } {
   if (signal.type === "session") {
     return { events: [{ type: "session", runner: "claude-code", attempt, session: { runner: "claude-code", sessionId: signal.sessionID } }] }
   }
   if (signal.type === "message") {
-    if (signal.message.channel === "reasoning") {
-      return { events: [{ type: "reasoning", runner: "claude-code", attempt, text: signal.message.text }] }
-    }
-    if (signal.message.channel === "response") {
-      return { events: [{ type: "text", runner: "claude-code", attempt, text: signal.message.text }] }
-    }
-    return { events: [{ type: "tool", runner: "claude-code", attempt, name: signal.message.channel, detail: signal.message.text }] }
+    const { channel, text, partID } = signal.message
+    const part = partID ? { partId: partID } : {}
+    if (channel === "reasoning") return { events: [{ type: "reasoning", runner: "claude-code", attempt, text, ...part }] }
+    if (channel === "response") return { events: [{ type: "text", runner: "claude-code", attempt, text, ...part }] }
+    return { events: [{ type: "message", runner: "claude-code", attempt, channel, text, ...part }] }
   }
   if (signal.type === "activity") {
-    return signal.kind === "tool" ? { events: [{ type: "tool", runner: "claude-code", attempt, name: signal.message }] } : { events: [] }
+    return { events: [{ type: "activity", runner: "claude-code", attempt, message: signal.message, kind: signal.kind, ...(signal.pulse ? { pulse: true } : {}) }] }
   }
   // result
+  const usage = usageFromTokens(signal.tokens, signal.cost)
   const outcome: AttemptOutcome = {
     status: signal.isError ? "failed" : "completed",
     ...(signal.text ? { assistantText: signal.text } : {}),
     ...(signal.subtype ? { finish: signal.subtype } : {}),
-    ...(usageFromTokens(signal.tokens, signal.cost) ? { usage: usageFromTokens(signal.tokens, signal.cost) } : {}),
+    ...(usage ? { usage } : {}),
     ...(signal.isError ? { error: signal.text ? signal.text.slice(0, 300) : `claude finished with ${signal.subtype}` } : {}),
   }
-  return { events: [{ type: "terminal", runner: "claude-code", attempt, outcome }], outcome }
+  const events: RunnerEvent[] = usage ? [{ type: "usage", runner: "claude-code", attempt, usage: { ...usage, ...usageLabels } }] : []
+  return { events, outcome }
 }
 
 export function createClaudeRunner(options: ClaudeRunnerOptions): ClaudeRunner {
@@ -195,6 +241,88 @@ export function createClaudeRunner(options: ClaudeRunnerOptions): ClaudeRunner {
   const binary = options.binary ?? defaultBinary
   const baseEnv = options.env ?? process.env
   const enforcement = options.enforcement
+
+  /** Runs the CLI for one prepared invocation; the caller reports the terminal event. */
+  async function runInvocation(
+    request: ExecutionRequest,
+    invocation: ClaudeInvocation,
+    sink: (event: RunnerEvent) => void,
+    services?: ExecutionServices,
+  ): Promise<AttemptOutcome> {
+    const attachments = request.attachments ?? []
+    const prompt = withAttachmentSection(request.prompt, attachments)
+    const extraDirs = externalAttachmentDirectories(attachments, (path) => isWithin(path, request.checkout))
+    const modelId = request.agent.model.modelId
+    const model = claudeModelLabel(modelId === "default" ? "" : modelId)
+
+    const proc = spawn([binary, ...invocation.args, ...extraDirs.flatMap((dir) => ["--add-dir", dir])], {
+      cwd: request.checkout,
+      env: invocation.env,
+      stdin: new Blob([prompt]),
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+
+    const kill = () => proc.kill()
+    request.signal.addEventListener("abort", kill, { once: true })
+    if (request.signal.aborted) kill()
+
+    // Drained immediately so a noisy hook cannot fill the pipe and deadlock the child.
+    const stderrPromise = new Response(proc.stderr).text()
+    const state = newClaudeStreamState()
+    let sessionId: string | undefined
+    let outcome: AttemptOutcome | undefined
+    const session = () => (sessionId ? { session: { runner: "claude-code" as const, sessionId } } : {})
+
+    try {
+      for await (const line of ndjsonLines(proc.stdout)) {
+        let parsed: unknown
+        try {
+          parsed = JSON.parse(line)
+        } catch {
+          continue
+        }
+        for (const signal of describeClaudeEvent(parsed, state)) {
+          if (signal.type === "session") sessionId = signal.sessionID
+          const mapped = signalsToEvents(signal, request.identity.attempt, { model, ...(sessionId ? { sessionID: sessionId } : {}) })
+          // Claude does not advertise loop control, so no loop observation is
+          // forwarded: a decision could not be applied (task 3.5).
+          for (const event of mapped.events) sink(event)
+          if (mapped.outcome) outcome = mapped.outcome
+        }
+      }
+      const [exitCode, stderr] = await Promise.all([proc.exited, stderrPromise])
+      if (!outcome) {
+        if (request.signal.aborted) return { status: "interrupted", ...session() }
+        const detail = redactSecrets(stderr.trim().split("\n").slice(-stderrTailLines).join(" ").trim())
+        return { status: "failed", ...session(), error: `claude exited with status ${exitCode} before reporting a result${detail ? `: ${detail}` : ""}` }
+      }
+      const final: AttemptOutcome = { ...outcome, ...session() }
+      // Deliverable service: the final assistant text is the only report this
+      // transport can carry, so it is submitted only for a contract that
+      // expects a report — and a missing required report fails the attempt.
+      if (services?.deliverables && final.status === "completed" && services.deliverables.expected.includes("report")) {
+        const body = (final.assistantText ?? "").trim()
+        if (body.length === 0) {
+          return { ...final, status: "failed", error: "the deliverable contract expects a report but the attempt produced none" }
+        }
+        const submitted = await services.deliverables.submit({ kind: "report", body: final.assistantText! })
+        if (!submitted.ok) {
+          return { ...final, status: "failed", error: submitted.error }
+        }
+      }
+      return final
+    } catch (error) {
+      return {
+        status: request.signal.aborted ? "interrupted" : "failed",
+        ...session(),
+        error: error instanceof Error ? error.message : String(error),
+      }
+    } finally {
+      request.signal.removeEventListener("abort", kill)
+      if (proc.exitCode === null) proc.kill()
+    }
+  }
 
   return {
     id: "claude-code",
@@ -213,90 +341,50 @@ export function createClaudeRunner(options: ClaudeRunnerOptions): ClaudeRunner {
       if (request.runner !== "claude-code") {
         return { status: "failed", error: `claude adapter received a ${request.runner} request` }
       }
+      // Exactly one terminal event per attempt, carrying the final outcome.
+      const finish = (outcome: AttemptOutcome): AttemptOutcome => {
+        sink({ type: "terminal", runner: "claude-code", attempt: request.identity.attempt, outcome })
+        return outcome
+      }
 
       let invocation: ClaudeInvocation
       try {
         invocation = buildClaudeInvocation(request, enforcement, { env: baseEnv })
       } catch (error) {
-        const outcome: AttemptOutcome = { status: "failed", error: error instanceof Error ? error.message : String(error) }
-        sink({ type: "terminal", runner: "claude-code", attempt: request.identity.attempt, outcome })
-        return outcome
+        return finish({ status: "failed", error: error instanceof Error ? error.message : String(error) })
       }
 
-      const attachments = request.attachments ?? []
-      const prompt = withAttachmentSection(request.prompt, attachments)
-      const extraDirs = externalAttachmentDirectories(attachments, (path) => isWithin(path, request.checkout))
+      // The overlay is only an intent: the billing source is whatever Claude
+      // resolves under this exact environment, so a key helper or third-party
+      // provider that would silently change billing refuses the attempt
+      // before the agent runs (spec runner-authentication).
+      const probe = options.deps?.probeAuth ?? cliAuthProbe(spawn, binary, request.checkout)
+      const effective = await validateEffectiveAuth({ resolution: invocation.auth, probe, env: baseEnv })
+      if (!effective.ok) {
+        return finish({ status: "failed", error: `${effective.error} Set defaults.claudeAuth to choose Claude's billing source explicitly.` })
+      }
 
-      const proc = spawn([binary, ...invocation.args, ...extraDirs.flatMap((dir) => ["--add-dir", dir])], {
-        cwd: request.checkout,
-        env: invocation.env,
-        stdin: new Blob([prompt]),
-        stdout: "pipe",
-        stderr: "pipe",
-      })
-
-      const kill = () => proc.kill()
-      request.signal.addEventListener("abort", kill, { once: true })
-      if (request.signal.aborted) kill()
-
-      const stderrPromise = new Response(proc.stderr).text()
-      const state = newClaudeStreamState()
-      let sessionId: string | undefined
-      let outcome: AttemptOutcome | undefined
+      // An ask-level action reaches the attempt's approval service through a
+      // per-attempt loopback bridge the permission host is pointed at.
+      let bridge: ClaudeApprovalBridge | undefined
+      const approvals = services?.approvals
+      if (approvals) {
+        bridge = await startClaudeApprovalBridge(async (ask) => {
+          const decision = await approvals.decide({
+            requestId: randomUUID(),
+            tool: ask.tool,
+            action: approvalAction(ask.tool),
+            ...(ask.resource ? { resources: [ask.resource] } : {}),
+          })
+          return decision === "allow"
+        })
+        Object.assign(invocation.env, bridge.env)
+      }
 
       try {
-        for await (const line of ndjsonLines(proc.stdout)) {
-          let parsed: unknown
-          try {
-            parsed = JSON.parse(line)
-          } catch {
-            continue
-          }
-          for (const signal of describeClaudeEvent(parsed, state)) {
-            if (signal.type === "session") sessionId = signal.sessionID
-            const mapped = signalsToEvents(signal, request.identity.attempt)
-            // Claude does not advertise loop control, so no loop observation is
-            // forwarded: a decision could not be applied (task 3.5).
-            for (const event of mapped.events) sink(event)
-            if (mapped.outcome) outcome = mapped.outcome
-          }
-        }
-        const [exitCode] = await Promise.all([proc.exited, stderrPromise])
-        if (!outcome) {
-          const result: AttemptOutcome = {
-            status: request.signal.aborted ? "interrupted" : "failed",
-            ...(sessionId ? { session: { runner: "claude-code", sessionId } } : {}),
-            ...(request.signal.aborted ? {} : { error: `claude exited with status ${exitCode} before reporting a result` }),
-          }
-          sink({ type: "terminal", runner: "claude-code", attempt: request.identity.attempt, outcome: result })
-          return result
-        }
-        const final: AttemptOutcome = { ...outcome, ...(sessionId ? { session: { runner: "claude-code", sessionId } } : {}) }
-        // Deliverable service: the final assistant text is the only report this
-        // transport can carry, so it is submitted only for a contract that
-        // expects a report — and a missing required report fails the attempt.
-        if (services?.deliverables && final.status === "completed" && services.deliverables.expected.includes("report")) {
-          const body = (final.assistantText ?? "").trim()
-          if (body.length === 0) {
-            return { ...final, status: "failed", error: "the deliverable contract expects a report but the attempt produced none" }
-          }
-          const submitted = await services.deliverables.submit({ kind: "report", body: final.assistantText! })
-          if (!submitted.ok) {
-            return { ...final, status: "failed", error: submitted.error }
-          }
-        }
-        return final
-      } catch (error) {
-        const result: AttemptOutcome = {
-          status: request.signal.aborted ? "interrupted" : "failed",
-          ...(sessionId ? { session: { runner: "claude-code", sessionId } } : {}),
-          error: error instanceof Error ? error.message : String(error),
-        }
-        sink({ type: "terminal", runner: "claude-code", attempt: request.identity.attempt, outcome: result })
-        return result
+        return finish(await runInvocation(request, invocation, sink, services))
       } finally {
-        request.signal.removeEventListener("abort", kill)
-        if (proc.exitCode === null) proc.kill()
+        await bridge?.close()
       }
     },
 
