@@ -348,7 +348,7 @@ export type AgentStepSpec = {
   model?: string
   /** Fans this step out into one concurrent, forced-read-only invocation per model. Mutually exclusive with `model`. */
   models?: string[]
-  /** Execution engine. Default is OpenCode; "claude-code" spawns the local `claude` CLI (read-only audit steps only). */
+  /** Execution engine. Default is OpenCode; "claude-code" spawns the local `claude` CLI under Convoy's hook-enforced policy. */
   runner?: "opencode" | StepRunner
   /**
    * Advising model consulted at this step's decision points, or `false` to run
@@ -541,10 +541,12 @@ export const builtInPipelines: Record<string, PipelineSpec> = {
       { agent: "quality-score-report", name: "score-report", model: glm53HighModel, reports: "all", verify: true, prdHistory: true },
     ],
   },
-  // Claude-only preset: no OpenCode session, catalog, or credentials. Every
-  // step runs the local `claude` CLI on subscription auth by default, and the
+  // Claude-only preset: every step runs the local `claude` CLI on subscription
+  // auth by default, so no OpenCode model or provider credential is needed
+  // (the run still starts its OpenCode server for Convoy's own helpers). The
   // audits fan out across Claude aliases through the same scheduler as any
-  // other pipeline. Report-only, so it never writes. Copy it into
+  // other pipeline. Report-only, so it never writes; the verifying scope step
+  // runs its checks under Convoy's hook-enforced command policy. Copy it into
   // `.convoy/config.yaml` and adjust the model aliases (or set an explicit
   // `authMode: api-key` route) to match the installation.
   "claude-review": {

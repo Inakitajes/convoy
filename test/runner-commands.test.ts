@@ -3,10 +3,10 @@ import { describe, expect, test } from "bun:test"
 import { evaluateHookInput, policyFromEnv } from "../src/runners/commands"
 
 describe("enforcement commands", () => {
-  test("policyFromEnv defaults safely and accepts a reviewed policy", () => {
-    expect(policyFromEnv({})).toEqual({ mode: "write", approvals: "auto" })
-    expect(policyFromEnv({ CONVOY_RUNNER_POLICY: '{"mode":"read-only","approvals":"auto"}' })).toEqual({ mode: "read-only", approvals: "auto" })
-    expect(policyFromEnv({ CONVOY_RUNNER_POLICY: "not json" })).toEqual({ mode: "write", approvals: "auto" })
+  test("policyFromEnv fails closed and accepts a reviewed policy", () => {
+    expect(policyFromEnv({})).toEqual({ mode: "read-only", approvals: "interactive" })
+    expect(policyFromEnv({ CONVOY_RUNNER_POLICY: '{"mode":"write","approvals":"auto"}' })).toEqual({ mode: "write", approvals: "auto" })
+    expect(policyFromEnv({ CONVOY_RUNNER_POLICY: "not json" })).toEqual({ mode: "read-only", approvals: "interactive" })
   })
 
   test("evaluateHookInput denies a write under read-only and allows a read", () => {

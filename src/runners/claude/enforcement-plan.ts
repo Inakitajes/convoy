@@ -4,8 +4,13 @@
  * Moved out of the composition root so the Claude attempt can build its own
  * plan without importing the composition (which imports the attempt modules for
  * registration), keeping the dependency graph acyclic.
+ *
+ * By default the plan points at this Convoy's own `hook` and `mcp` subcommands,
+ * so Claude write and verify steps are enforced out of the box; the
+ * `CONVOY_CLAUDE_*` variables only override the commands.
  */
 
+import { isOfficialStandaloneExecutable } from "../../update"
 import { buildPermissionPromptTool } from "./permission-broker"
 import { buildClaudeSettings, buildPermissionMcpConfig } from "./settings"
 import type { EnforcementPlan } from "./enforcement"
@@ -37,4 +42,34 @@ export function claudeEnforcementFromEnv(env: NodeJS.ProcessEnv = process.env): 
   const permissionCommand = env.CONVOY_CLAUDE_MCP_COMMAND
   if (!hookCommand || !permissionCommand) return undefined
   return buildEnforcementPlan({ hookCommand, permissionCommand })
+}
+
+/**
+ * The argv that re-invokes this Convoy with an internal subcommand: a release
+ * executable runs `execPath <sub>`, a source checkout re-runs its entry script
+ * with the same runtime flags.
+ */
+export function convoySubcommandArgv(sub: string, standalone = isOfficialStandaloneExecutable()): string[] {
+  if (standalone) return [process.execPath, sub]
+  return [process.execPath, ...process.execArgv, process.argv[1] ?? "", sub]
+}
+
+/** POSIX-quotes an argv into one shell command line (Claude runs hooks through a shell). */
+export function shellCommandLine(argv: readonly string[]): string {
+  return argv.map((arg) => (/^[\w@%+=:,./-]+$/.test(arg) ? arg : `'${arg.replace(/'/g, `'\\''`)}'`)).join(" ")
+}
+
+/** The enforcement plan that routes Claude's hook and permission host to this Convoy. */
+export function convoyEnforcementPlan(argvFor: (sub: string) => string[] = convoySubcommandArgv): EnforcementPlan {
+  const mcp = argvFor("mcp")
+  return buildEnforcementPlan({
+    hookCommand: shellCommandLine(argvFor("hook")),
+    permissionCommand: mcp[0]!,
+    permissionArgs: mcp.slice(1),
+  })
+}
+
+/** The plan a run uses: an explicit environment override, else this Convoy's own commands. */
+export function resolveClaudeEnforcement(env: NodeJS.ProcessEnv = process.env): EnforcementPlan {
+  return claudeEnforcementFromEnv(env) ?? convoyEnforcementPlan()
 }

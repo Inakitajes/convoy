@@ -7,27 +7,21 @@
  * checkpoints, permissions); core keeps scheduling, budgets, git boundaries,
  * retries and finalization (design D3).
  *
- * The context carries the Convoy policy objects the engine owns during the
- * migration (report/advisor runtimes, the shutdown handle, the progress
- * target). `prepareAttemptRequest` derives the neutral `ExecutionRequest` from
- * it, and `requiredServicesFor` expresses what a phase genuinely requires so
- * support is validated by capability before the attempt starts.
+ * The context carries phase data, the neutral sink, the cancellation signal,
+ * the services the runner's composition bound, and the reviewed action policy
+ * — never an engine-owned runtime. `requiredServicesFor` expresses what a
+ * phase genuinely requires so support is validated by capability before the
+ * attempt starts.
  */
 
 import type { AdvisorUsage, ModelSelection } from "../advisor"
 import type { AdvisorEvent } from "../advisor-events"
-import type { AdvisorRuntime } from "../advisor-runtime"
-import type { LoopGuard, LoopGuardConfig } from "../loop-guard"
 import type { FilePartInput, OpencodeClient } from "../opencode-client"
-import type { ProgressUI } from "../progress"
-import type { QualityDimension } from "../quality-score"
-import type { ReportRuntime } from "../report-runtime"
 import type { AgentStep, DeliverableContract } from "../types"
-import type { Workspace } from "../workspace"
-import type { AttemptIdentity, ExecutionRequest, ExecutionServices, RunnerCapabilities, RunnerId, ServiceId } from "./contracts"
+import type { AttemptIdentity, ExecutionServices, RunnerCapabilities, RunnerId, ServiceId } from "./contracts"
 import { assertServicesSupported } from "./capabilities"
 import type { AttemptSink } from "./attempt-sink"
-import type { SessionRef } from "./opencode/session"
+import type { PolicyConfig } from "./policy"
 
 /** Everything one attempt needs; prepared once by the engine, consumed by the adapter. */
 export type AttemptContext = {
@@ -47,6 +41,8 @@ export type AttemptContext = {
   attempt: number
   /** The services this runner honors; the engine owns their implementations. */
   services: ExecutionServices
+  /** Convoy's reviewed action policy for the attempt, for adapters that enforce it themselves. */
+  policy?: PolicyConfig
   /** Process environment for a CLI harness (Claude). */
   env?: NodeJS.ProcessEnv
   /** The run's OpenCode client, when the runner is OpenCode. */
@@ -89,30 +85,6 @@ export async function resolveAttempt(input: AttemptResolution): Promise<PhaseAtt
   assertServicesSupported(capabilities, requiredServicesFor(input.contract))
   if (!input.attempt) throw new Error(`no phase attempt registered for runner: ${input.runner}`)
   return input.attempt
-}
-
-/** The neutral request derived from an attempt context. */
-export function prepareAttemptRequest(context: AttemptContext): ExecutionRequest {
-  const { phase } = context
-  return {
-    identity: context.identity,
-    runner: context.runner,
-    checkout: context.targetDir,
-    agent: {
-      name: phase.agentName,
-      mode: phase.readOnly ? (phase.verify ? "verify" : "read-only") : "write",
-      model: {
-        runner: context.runner,
-        modelId: context.model.modelID,
-        ...(context.model.variant ? { variant: context.model.variant } : {}),
-      },
-    },
-    prompt: context.prompt,
-    auth: { mode: "subscription" },
-    mode: phase.readOnly ? (phase.verify ? "verify" : "read-only") : "write",
-    approvals: "auto",
-    signal: context.signal,
-  }
 }
 
 /**

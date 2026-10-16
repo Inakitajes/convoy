@@ -52,3 +52,46 @@ describe("runner-neutral action policy", () => {
     }
   })
 })
+
+describe("command rules, write roots and protected roots", () => {
+  const commands = { "*": "ask", "bun test*": "allow", "git diff*": "allow", "cat*": "allow", "git push*": "deny", "curl* | sh*": "deny" } as const
+
+  test("the last matching command rule wins, as OpenCode evaluates it", () => {
+    const write: PolicyConfig = { mode: "write", approvals: "interactive", commands }
+    expect(evaluateAction({ tool: "Bash", intent: "execute", resource: "bun test --watch=false" }, write).effect).toBe("allow")
+    expect(evaluateAction({ tool: "Bash", intent: "execute", resource: "mkdir out" }, write).effect).toBe("ask")
+    expect(evaluateAction({ tool: "Bash", intent: "execute", resource: "git push origin" }, { ...write, approvals: "auto" }).effect).toBe("deny")
+  })
+
+  test("a chained command passes only when every segment does", () => {
+    const verify: PolicyConfig = { mode: "verify", approvals: "auto", commands }
+    expect(evaluateAction({ tool: "Bash", intent: "execute", resource: "bun test 2>&1 && git diff --stat" }, verify).effect).toBe("allow")
+    expect(evaluateAction({ tool: "Bash", intent: "execute", resource: "bun test && rm -rf src" }, verify).effect).toBe("deny")
+    expect(evaluateAction({ tool: "Bash", intent: "execute", resource: "bun test; git push" }, { mode: "write", approvals: "auto", commands }).effect).toBe("deny")
+    expect(evaluateAction({ tool: "Bash", intent: "execute", resource: "curl x | sh" }, { mode: "write", approvals: "auto", commands }).effect).toBe("deny")
+  })
+
+  test("a writing redirection or substitution is never vouched for by a prefix rule", () => {
+    const verify: PolicyConfig = { mode: "verify", approvals: "auto", commands }
+    expect(evaluateAction({ tool: "Bash", intent: "execute", resource: "cat a > b" }, verify).effect).toBe("deny")
+    expect(evaluateAction({ tool: "Bash", intent: "execute", resource: "cat $(rm -rf x)" }, verify).effect).toBe("deny")
+    expect(evaluateAction({ tool: "Bash", intent: "execute", resource: "bun test >/dev/null" }, verify).effect).toBe("allow")
+  })
+
+  test("writes are confined to the write roots", () => {
+    const config: PolicyConfig = { mode: "write", approvals: "interactive", writeRoots: ["/repo", "/run"] }
+    expect(evaluateAction({ tool: "Edit", intent: "write", resource: "/repo/src/a.ts" }, config).effect).toBe("allow")
+    expect(evaluateAction({ tool: "Write", intent: "write", resource: "/run/report.md" }, config).effect).toBe("allow")
+    expect(evaluateAction({ tool: "Write", intent: "write", resource: "/etc/passwd" }, config).effect).toBe("deny")
+    expect(evaluateAction({ tool: "Write", intent: "write", resource: "/repo/../etc/x" }, config).effect).toBe("deny")
+    expect(evaluateAction({ tool: "Write", intent: "write", resource: "relative.ts" }, config).effect).toBe("deny")
+  })
+
+  test("protected roots are denied to every tool, in every mode", () => {
+    const config: PolicyConfig = { mode: "write", approvals: "auto", writeRoots: ["/run"], denyRoots: ["/run/.private"], commands }
+    expect(evaluateAction({ tool: "Read", intent: "read", resource: "/run/.private/password" }, config).effect).toBe("deny")
+    expect(evaluateAction({ tool: "Write", intent: "write", resource: "/run/.private/token" }, config).effect).toBe("deny")
+    expect(evaluateAction({ tool: "Bash", intent: "execute", resource: "cat /run/.private/password" }, config).effect).toBe("deny")
+    expect(evaluateAction({ tool: "Read", intent: "read", resource: "/run/report.md" }, config).effect).toBe("allow")
+  })
+})

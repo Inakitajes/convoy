@@ -80,10 +80,18 @@ export const claudeDeclaration: CapabilityDeclaration = {
   semantics: {
     "live-observation": "streamed to the coordinator; not a native attach",
     "usage-reporting": "subscription values are estimates",
+    approvals:
+      "Convoy's policy is enforced by a PreToolUse hook and an MCP permission host; with no operator bridge in print mode, an ask-level action is denied unless auto-accept is on",
+    "structured-deliverables": "the report is the final assistant text or the report file, validated by Convoy after the attempt exits",
   },
   unavailable: [
     { id: "native-live-attach", reason: "print mode has no attachable live session" },
     { id: "session-history", reason: "print mode does not expose a recorded transcript to reconstruct" },
+    {
+      id: "loop-guard",
+      reason: "print mode cannot take a nudge mid-turn, so Convoy's repeated-call and cost guard does not apply to Claude steps",
+      remediation: "bound the step with Claude's own limits or run it on OpenCode",
+    },
   ],
   restricted: [
     {

@@ -25,6 +25,7 @@ import { encodeClaudeMcpConfig, encodeClaudeSettings, permissionPromptArgs } fro
 import type { AttemptOutcome, ExecutionAdapter, ExecutionRequest, ExecutionServices, RunnerEvent, Usage } from "../contracts"
 import { resolveEffectiveCapabilities } from "../capabilities"
 import { claudeDeclaration } from "../declarations"
+import { runnerPolicyEnv } from "../policy"
 import type { ProgressTokens } from "../../progress"
 
 export type ClaudeProcess = {
@@ -132,6 +133,12 @@ export function buildClaudeInvocation(
   const env: NodeJS.ProcessEnv = { ...baseEnv }
   for (const key of resolution.unset) delete env[key]
   Object.assign(env, resolution.set)
+
+  // The hook and the permission host are Claude's children, so they read the
+  // attempt's reviewed policy from the environment Claude passes down. Without
+  // a reviewed policy they still enforce the attempt's own mode and approvals,
+  // never a more permissive default.
+  env[runnerPolicyEnv] = JSON.stringify(request.policy ?? { mode: request.mode, approvals: request.approvals })
 
   const args = buildClaudeArgs(request)
   if (enforcement) {

@@ -19,13 +19,8 @@ import { Caffeinate } from "./caffeinate"
 import { ensureClaudeAvailable, openClaudeSessionWindow, promptClaudePhase } from "./claude-code"
 import { baseAgentName } from "./runners/agent-source"
 import { attemptCompositionFor } from "./runners/attempt-composition"
-import { claudeEnforcementFromEnv } from "./runners/claude/enforcement-plan"
 import { resolveAttempt, type AttemptContext } from "./runners/attempt"
-import { supportsService } from "./runners/capabilities"
-import type { ExecutionServices } from "./runners/contracts"
-import { createOpencodeLoopGuardService } from "./runners/opencode/loop-guard"
-import { createOpencodeAdvisorService } from "./runners/opencode/advisor"
-import { createOpencodeDeliverableService } from "./runners/opencode/deliverables"
+import { phasePolicy } from "./runners/phase-policy"
 import { releaseSessionHandles } from "./runners/session-handles"
 import { progressSink } from "./runners/attempt-sink"
 import type { AttemptResult } from "./runners/attempt"
@@ -95,7 +90,8 @@ import {
 import { discoverProjectContextFiles } from "./project-context"
 import { createStepRunnerImpl, stepRunnerFor, stepRunnerModel, type StepRunnerId, type StepRunnerImpl } from "./step-runners"
 import { createTerminalInput, type TerminalInput } from "./terminal-input"
-import type { AgentSpec, AgentStep, DeliverableContract, HookSet, HookSpec, Pipeline, ResolvedGoalPlan, RunOptions, Step } from "./types"
+import type { AgentSpec, AgentStep, DeliverableContract, HookSet, HookSpec, PermissionAdditions, Pipeline, ResolvedGoalPlan, RunOptions, Step } from "./types"
+import { bashPolicy, noAdditions } from "./bash-policy"
 import { consensusStep, loadQualityRubricWeights, parseQualityScoreReport, qualityDimensionWeights, type QualityDimension, type QualityScore } from "./quality-score"
 import { addTokens, emptyTokens, tokensFromValue } from "./usage"
 import { cleanupWorkspace, createWorkspace, resumeWorkspace, runPrivateDir, type Workspace, writeSummary } from "./workspace"
@@ -1688,6 +1684,10 @@ type PreparedPhaseRun = {
   model: ModelSelection
   /** Resolved exactly once, here, and threaded through unchanged: re-resolving would re-arm defaults over `maxPhaseCost: false`. */
   loopGuard: LoopGuardConfig
+  /** Project additions to the bash policy, for runners that enforce it themselves. */
+  permissions?: PermissionAdditions
+  /** The run's live auto-accept reference; read when each attempt starts. */
+  autoAccept?: AutoAccept
 }
 
 export async function preparePhaseRun(
@@ -1718,7 +1718,14 @@ export async function preparePhaseRun(
   const prompt = buildPhasePrompt(workspace, phase)
   const model = selectedModel(phase, options.modelOverride)
 
-  return { attachments, prompt, model, loopGuard: resolveLoopGuard(options.loopGuard) }
+  return {
+    attachments,
+    prompt,
+    model,
+    loopGuard: resolveLoopGuard(options.loopGuard),
+    permissions: options.permissions,
+    autoAccept: options.autoAccept ?? options.progress?.autoAccept ?? { mode: options.yolo ? "all" : options.smart ? "smart" : "off" },
+  }
 }
 
 /** Best-effort dynamic attachment: history stays out of frozen pipeline metadata. */
@@ -2253,29 +2260,38 @@ async function runPhaseAttempt(
 ) {
   const runnerId = stepRunnerFor(phase.runner).id
   const contract = deliverableContract ?? deliverableContractForPhase(phase)
-  const enforcement = claudeEnforcementFromEnv(process.env)
-  // One composition per run directory, reused across the run's attempts.
-  const composition = attemptCompositionFor({
-    cwd: targetDir,
-    env: process.env,
-    ...(enforcement ? { enforcement } : {}),
-  })
+  // One composition per run directory, reused across the run's attempts. It
+  // carries the Claude enforcement plan (this Convoy's hook and permission host
+  // unless the environment overrides them).
+  const composition = attemptCompositionFor({ cwd: targetDir, env: process.env })
 
   const registration = composition.registry.require(runnerId)
   const capabilities = await registration.execution.capabilities()
-  // The guard is Convoy policy owned by the engine; the attempt gets only the
-  // services this runner actually honors (task 6.2).
-  const guard = loopGuard ?? new LoopGuard(prepared.loopGuard)
-  // The engine owns the runtimes; the attempt gets services bound to the session
-  // it creates itself, and only those this runner honors (task 6.2).
+  // The engine owns the runtimes; the runner's composition binds the ones it
+  // honors to the session the attempt creates itself (task 6.2).
   let activeSessionID: string | undefined
-  const session = () => activeSessionID
-  const services: ExecutionServices = {}
-  if (supportsService(capabilities, "loop-guard")) services.loopGuard = createOpencodeLoopGuardService(guard)
-  if (advisors && supportsService(capabilities, "advisor")) services.advisor = createOpencodeAdvisorService({ runtime: advisors, session })
-  if (reports && supportsService(capabilities, "deliverables")) {
-    services.deliverables = createOpencodeDeliverableService({ runtime: reports, session, expected: contract.kind === "none" ? [] : ["report"] })
-  }
+  const services = composition.servicesFor(
+    runnerId,
+    {
+      ...(reports ? { reports } : {}),
+      ...(advisors ? { advisors } : {}),
+      loopGuard: loopGuard ?? new LoopGuard(prepared.loopGuard),
+      expected: contract.kind === "none" ? [] : ["report"],
+      session: () => activeSessionID,
+    },
+    capabilities,
+  )
+  const serverSession = composition.abortsSessionOnShutdown(runnerId)
+  // The same rules the OpenCode run config encodes, for a runner that enforces
+  // them out of process; the auto-accept mode is read when the attempt starts.
+  const policy = phasePolicy({
+    mode: phase.readOnly ? (phase.verify ? "verify" : "read-only") : "write",
+    autoAccept: prepared.autoAccept?.mode ?? "off",
+    checkout: targetDir,
+    runDir: workspace.dir,
+    privateDir: runPrivateDir(workspace.dir),
+    commands: bashPolicy(targetDir, prepared.permissions ?? noAdditions),
+  })
 
   // Validate the phase's required services against this runner's own
   // capabilities and resolve its registered attempt, before anything runs.
@@ -2302,13 +2318,14 @@ async function runPhaseAttempt(
     sink: (event) => {
       if (event.type === "session") {
         activeSessionID = event.session.sessionId
-        shutdown.setActiveSession({ client, sessionID: activeSessionID, directory: targetDir, phaseName: phase.name })
+        if (serverSession) shutdown.setActiveSession({ client, sessionID: activeSessionID, directory: targetDir, phaseName: phase.name })
       }
       render(event)
     },
     signal: shutdown.signal,
     attempt,
     services,
+    policy,
     env: process.env,
     client,
   }
@@ -2317,7 +2334,7 @@ async function runPhaseAttempt(
   try {
     result = await attemptRunner(context)
   } finally {
-    if (activeSessionID) shutdown.clearActiveSession(phase.name, activeSessionID)
+    if (activeSessionID && serverSession) shutdown.clearActiveSession(phase.name, activeSessionID)
   }
 
   await writeAttemptLog(workspace, phase, attempt, {

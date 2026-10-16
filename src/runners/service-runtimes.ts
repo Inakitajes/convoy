@@ -1,0 +1,22 @@
+/**
+ * The engine-owned runtimes a runner may bind into attempt services.
+ *
+ * The engine owns these Convoy policy objects for the whole run; each adapter
+ * decides which of them it can honor and binds them to its attempt's session.
+ * The attempt itself only ever receives the bound services.
+ */
+
+import type { AdvisorRuntime } from "../advisor-runtime"
+import type { LoopGuard } from "../loop-guard"
+import type { ReportRuntime } from "../report-runtime"
+import type { DeliverableKind } from "./contracts"
+
+export type ServiceRuntimes = {
+  reports?: ReportRuntime
+  advisors?: AdvisorRuntime
+  loopGuard: LoopGuard
+  /** Artifacts the phase's deliverable contract expects. */
+  expected: readonly DeliverableKind[]
+  /** The attempt's session, known once the attempt reports it. */
+  session: () => string | undefined
+}

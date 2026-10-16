@@ -8,19 +8,24 @@
  *   - `convoy mcp` — the stdio MCP permission host that answers Claude's
  *     `--permission-prompt-tool` calls.
  *
- * Both read a reviewed policy from `CONVOY_RUNNER_POLICY` (JSON). A missing or
- * malformed policy falls back to write+auto; an `ask` with no operator denies.
+ * Both read a reviewed policy from `CONVOY_RUNNER_POLICY` (JSON), which the
+ * Claude adapter sets for every attempt. A missing or malformed policy fails
+ * closed to read-only with interactive approvals; an `ask` with no operator
+ * denies.
  */
 
 import { decideToolCall, preToolUseOutput, type PreToolUseInput } from "./claude/hook"
 import { serveMcpPermissionStdio } from "./claude/mcp-stdio"
 import { resolvePermission } from "./claude/permission-broker"
 
-import type { PolicyConfig } from "./policy"
+import { runnerPolicyEnv, type PolicyConfig } from "./policy"
 
-/** The reviewed policy from the environment, or a safe default. */
+/** The policy enforced when none was reviewed for the attempt: nothing but reads. */
+const failClosedPolicy: PolicyConfig = { mode: "read-only", approvals: "interactive" }
+
+/** The reviewed policy from the environment, or the fail-closed default. */
 export function policyFromEnv(env: NodeJS.ProcessEnv = process.env): PolicyConfig {
-  const raw = env.CONVOY_RUNNER_POLICY
+  const raw = env[runnerPolicyEnv]
   if (raw) {
     try {
       const parsed = JSON.parse(raw) as PolicyConfig
@@ -31,7 +36,7 @@ export function policyFromEnv(env: NodeJS.ProcessEnv = process.env): PolicyConfi
       // fall through to the safe default
     }
   }
-  return { mode: "write", approvals: "auto" }
+  return { ...failClosedPolicy }
 }
 
 /** Evaluates one `PreToolUse` payload and returns the hook's stdout JSON. */

@@ -8,6 +8,7 @@
  * drops the cache and closes what it holds.
  */
 
+import { resolveClaudeEnforcement } from "./claude/enforcement-plan"
 import { composeRunners, type ComposeOptions, type Composition } from "./compose"
 
 const cache = new Map<string, Composition>()
@@ -15,11 +16,12 @@ const cache = new Map<string, Composition>()
 export type AttemptCompositionOptions = {
   cwd: string
   env?: NodeJS.ProcessEnv
+  /** Defaults to the environment override, else this Convoy's own hook and permission host. */
   enforcement?: ComposeOptions["enforcement"]
 }
 
 function cacheKey(options: AttemptCompositionOptions): string {
-  return `${options.cwd}\u0000${options.enforcement ? "enforced" : "plain"}`
+  return `${options.cwd}\u0000${options.enforcement ? JSON.stringify(options.enforcement) : "default"}`
 }
 
 /** The run-lifetime composition for a run directory, reused across its attempts. */
@@ -31,7 +33,7 @@ export function attemptCompositionFor(options: AttemptCompositionOptions): Compo
   const composition = composeRunners({
     cwd: options.cwd,
     ...(options.env ? { env: options.env } : {}),
-    ...(options.enforcement ? { enforcement: options.enforcement } : {}),
+    enforcement: options.enforcement ?? resolveClaudeEnforcement(options.env ?? process.env),
   })
   cache.set(key, composition)
   return composition

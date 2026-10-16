@@ -12,8 +12,8 @@ import { fileURLToPath } from "node:url"
 import { loadAgentPrompt } from "../../agents"
 import { baseAgentName } from "../agent-source"
 import { stepRunnerFor } from "../../step-runners"
-import { createClaudeRunner } from "./adapter"
-import { claudeEnforcementFromEnv } from "./enforcement-plan"
+import { createClaudeRunner, type ClaudeRunner } from "./adapter"
+import { resolveClaudeEnforcement } from "./enforcement-plan"
 import type { AttemptContext, AttemptResult } from "../attempt"
 import type { AttachmentDescriptor, ExecutionMode, ExecutionRequest } from "../contracts"
 import type { FilePartInput } from "../../opencode-client"
@@ -36,17 +36,17 @@ export function claudeAttachmentDescriptors(files: readonly FilePartInput[]): At
   return descriptors
 }
 
-export async function executeClaudeAttempt(context: AttemptContext): Promise<AttemptResult> {
+/**
+ * Runs one Claude phase attempt on the composed adapter (which carries the
+ * run's enforcement plan); a standalone call builds its own with the default
+ * enforcement.
+ */
+export async function executeClaudeAttempt(context: AttemptContext, adapter?: ClaudeRunner): Promise<AttemptResult> {
   const phase = context.phase
   const base = baseAgentName(phase.agentName)
   const mode: ExecutionMode = phase.readOnly ? (phase.verify ? "verify" : "read-only") : "write"
   const env = context.env ?? process.env
-  const enforcement = claudeEnforcementFromEnv(env)
-  const runner = createClaudeRunner({
-    cwd: context.targetDir,
-    env,
-    ...(enforcement ? { enforcement } : {}),
-  })
+  const runner = adapter ?? createClaudeRunner({ cwd: context.targetDir, env, enforcement: resolveClaudeEnforcement(env) })
 
   const request: ExecutionRequest = {
     identity: context.identity,
@@ -61,13 +61,15 @@ export async function executeClaudeAttempt(context: AttemptContext): Promise<Att
     prompt: context.prompt,
     auth: { mode: "subscription" },
     mode,
-    approvals: "auto",
+    approvals: context.policy?.approvals ?? "auto",
+    ...(context.policy ? { policy: context.policy } : {}),
     attachments: claudeAttachmentDescriptors(context.attachments),
     signal: context.signal,
   }
 
-  // The adapter emits neutral events; the engine's sink renders them.
-  const outcome = await runner.executeAttempt(request, (event) => context.sink(event))
+  // The adapter emits neutral events; the engine's sink renders them. The
+  // services are the ones the composition bound for Claude.
+  const outcome = await runner.executeAttempt(request, (event) => context.sink(event), context.services)
 
   return {
     assistantText: outcome.assistantText ?? "",

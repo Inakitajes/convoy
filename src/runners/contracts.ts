@@ -13,6 +13,7 @@
 
 import type { StepRunnerId } from "../step-runners"
 import type { ActivityKind, ProgressDiffSummary, ProgressMessageChannel, ProgressStepUsage, ProgressTodo } from "../progress"
+import type { PolicyConfig } from "./policy"
 
 /** Re-exported so core code can name a runner without reaching into a vendor. */
 export type RunnerId = StepRunnerId
@@ -229,6 +230,12 @@ export type ExecutionRequest = {
   deliverableContract?: string
   /** Continue this exact recorded session instead of creating a new one (D11). */
   continueSession?: RunnerSessionRef
+  /**
+   * Convoy's reviewed action policy for this attempt (command rules, write and
+   * protected roots). An adapter that intercepts actions enforces exactly this;
+   * without it, enforcement falls back to `mode`/`approvals` alone.
+   */
+  policy?: PolicyConfig
   signal: AbortSignal
 }
 

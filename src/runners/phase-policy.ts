@@ -1,0 +1,62 @@
+/**
+ * The reviewed action policy for one phase attempt.
+ *
+ * Core decides the policy, adapters enforce it (see `policy.ts`). This builds
+ * the same rules the OpenCode run config encodes — the bash allow/deny/ask
+ * ruleset, writes confined to the checkout and the run directory, the run's
+ * private directory off limits — so a harness that enforces through an
+ * out-of-process hook (Claude) applies exactly what OpenCode applies natively.
+ */
+
+import { realpathSync } from "node:fs"
+
+import type { ApprovalMode, ExecutionMode } from "./contracts"
+import type { CommandEffect, PolicyConfig } from "./policy"
+
+/** The run's live auto-accept mode, as the dashboard toggles it. */
+export type AutoAcceptMode = "off" | "all" | "smart"
+
+export type PhasePolicyInput = {
+  mode: ExecutionMode
+  autoAccept: AutoAcceptMode
+  /** The step's checkout. */
+  checkout: string
+  /** The run directory (reports, attachments). */
+  runDir: string
+  /** The run's private directory (server password, bridge tokens). */
+  privateDir: string
+  /** The assembled bash ruleset (`bashPolicy`), in evaluation order. */
+  commands: Readonly<Record<string, CommandEffect>>
+}
+
+/** Maps the auto-accept mode onto the approval mode an `ask` follows. */
+export function approvalsFor(autoAccept: AutoAcceptMode): ApprovalMode {
+  if (autoAccept === "all") return "auto"
+  if (autoAccept === "smart") return "smart"
+  return "interactive"
+}
+
+/**
+ * A root as given and as the filesystem resolves it. A harness reports the
+ * paths it touches in either form (macOS `/var` is `/private/var`), so a root
+ * must match both or a legitimate write is refused — and a protected path
+ * reached through its real form slips through.
+ */
+export function rootForms(path: string): string[] {
+  try {
+    const real = realpathSync(path)
+    return real === path ? [path] : [path, real]
+  } catch {
+    return [path]
+  }
+}
+
+export function phasePolicy(input: PhasePolicyInput): PolicyConfig {
+  return {
+    mode: input.mode,
+    approvals: approvalsFor(input.autoAccept),
+    commands: input.commands,
+    writeRoots: [...rootForms(input.checkout), ...rootForms(input.runDir)],
+    denyRoots: rootForms(input.privateDir),
+  }
+}
