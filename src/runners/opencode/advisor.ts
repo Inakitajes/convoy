@@ -74,7 +74,10 @@ export function createOpencodeAdvisorService(options: OpencodeAdvisorOptions): O
       const before = live.usage.length
       const advice = await live.consult(consultation.trigger, consultation.question)
       const usage = usageOf(live.usage.slice(before))
-      return { text: advice.text, ok: advice.ok, ...(usage ? { usage } : {}) }
+      return { text: advice.text, ok: advice.ok, ...(usage ? { usage } : {}), ...(advice.callId ? { callId: advice.callId } : {}) }
+    },
+    async delivered(callId, delivery) {
+      await handle()?.delivered(callId, delivery)
     },
     release() {
       released = true

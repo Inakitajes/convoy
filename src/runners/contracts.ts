@@ -366,6 +366,12 @@ export type DeliverableService = {
   readonly expected: readonly DeliverableKind[]
   /** The last accepted artifact for the attempt, when one exists. */
   candidate?(): string | undefined
+  /**
+   * Whether the attempt already produced a deliverable its contract accepts
+   * (the accepted candidate, else the phase's report file). Core owns the
+   * contract validation; a runner only asks.
+   */
+  accepted?(): Promise<boolean>
   /** Validates and records one artifact; a rejection never replaces the last accepted one. */
   submit(submission: DeliverableSubmission): Promise<DeliverableResult>
 }
@@ -414,6 +420,8 @@ export type AdvisorAdvice = {
   ok: boolean
   /** Advisor usage, attributed separately from the executor's own usage. */
   usage?: Usage
+  /** The consultation's call id, echoed to `delivered` once the advice reaches the executor. */
+  callId?: string
 }
 
 /**
@@ -432,6 +440,8 @@ export type AdvisorService = {
   satisfied(): boolean
   /** Runs one consultation; the runner applies its own limit and degradation policy. */
   consult(consultation: AdvisorConsultation): Promise<AdvisorAdvice>
+  /** Journals how a consultation's advice reached the executor. */
+  delivered?(callId: string | undefined, delivery: "permission" | "tool" | "follow-up"): Promise<void>
 }
 
 // --- Loop guard / budget --------------------------------------------------

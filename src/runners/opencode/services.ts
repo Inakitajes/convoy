@@ -21,7 +21,12 @@ export function bindOpencodeServices(runtimes: ServiceRuntimes, capabilities: Ru
     services.advisor = createOpencodeAdvisorService({ runtime: runtimes.advisors, session: runtimes.session })
   }
   if (runtimes.reports && supportsService(capabilities, "deliverables")) {
-    services.deliverables = createOpencodeDeliverableService({ runtime: runtimes.reports, session: runtimes.session, expected: runtimes.expected })
+    services.deliverables = createOpencodeDeliverableService({
+      runtime: runtimes.reports,
+      session: runtimes.session,
+      expected: runtimes.expected,
+      ...(runtimes.accepts ? { accepts: runtimes.accepts } : {}),
+    })
   }
   return services
 }

@@ -17,6 +17,8 @@ export type ServiceRuntimes = {
   loopGuard: LoopGuard
   /** Artifacts the phase's deliverable contract expects. */
   expected: readonly DeliverableKind[]
+  /** Core's contract check for the attempt's deliverable so far (candidate, else the report file). */
+  accepts?: (candidate: string | undefined) => Promise<boolean>
   /** The attempt's session, known once the attempt reports it. */
   session: () => string | undefined
 }

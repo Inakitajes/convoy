@@ -393,9 +393,12 @@ Release ownership stays with the adapter. Releasing a runner's runtime reports a
 observed outcome — `released` only when the exit was observed, `not-owned` when
 it never started one, and `unresolved` (with a reason and retained evidence) when
 termination could not be confirmed — so a submitted stop is never reported as
-termination. Session-bound service handles (deliverables, advisor) are released
-at the phase decision through one common operation; a late submission or
-consultation from a released session is refused.
+termination. Session-bound service handles (deliverables, advisor) begin when the
+attempt reports its session — before the first prompt, so the `write_report` and
+advisor bridges can resolve it — and only for the services the runner bound
+(`beginSessionHandles`). They are released at the phase decision through one
+common operation (`releaseSessionHandles`); a late submission or consultation
+from a released session is refused.
 
 The Claude capability matrix is explicit, so an unsupported requirement is
 refused before execution rather than assumed: **available** — read-only, write,

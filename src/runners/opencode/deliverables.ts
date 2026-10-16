@@ -24,6 +24,8 @@ export type OpencodeDeliverableOptions = {
   session?: () => string | undefined
   /** Artifacts this attempt's contract expects; defaults to a report. */
   expected?: readonly DeliverableKind[]
+  /** Core's contract check for the candidate so far (falls back to the report file). */
+  accepts?: (candidate: string | undefined) => Promise<boolean>
 }
 
 type Mapped = { ok: true; payload: unknown } | { ok: false; error: string }
@@ -76,6 +78,14 @@ export function createOpencodeDeliverableService(options: OpencodeDeliverableOpt
       const id = sessionOf()
       return id ? runtime.handleFor(id)?.candidate : undefined
     },
+    ...(options.accepts
+      ? {
+          accepted: async () => {
+            const id = sessionOf()
+            return await options.accepts!(id ? runtime.handleFor(id)?.candidate : undefined)
+          },
+        }
+      : {}),
     async submit(submission: DeliverableSubmission): Promise<DeliverableResult> {
       if (released) {
         return { ok: false, error: "the attempt's report session was released", retryable: false, preserved: false }

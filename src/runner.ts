@@ -21,7 +21,7 @@ import { baseAgentName } from "./runners/agent-source"
 import { attemptCompositionFor } from "./runners/attempt-composition"
 import { resolveAttempt, type AttemptContext } from "./runners/attempt"
 import { phasePolicy } from "./runners/phase-policy"
-import { releaseSessionHandles } from "./runners/session-handles"
+import { beginSessionHandles, releaseSessionHandles } from "./runners/session-handles"
 import { progressSink } from "./runners/attempt-sink"
 import type { AttemptResult } from "./runners/attempt"
 import { createClaudeRunner } from "./runners/claude/adapter"
@@ -2267,6 +2267,7 @@ async function runPhaseAttempt(
 
   const registration = composition.registry.require(runnerId)
   const capabilities = await registration.execution.capabilities()
+  const weights = rubricWeights ?? qualityDimensionWeights
   // The engine owns the runtimes; the runner's composition binds the ones it
   // honors to the session the attempt creates itself (task 6.2).
   let activeSessionID: string | undefined
@@ -2277,10 +2278,30 @@ async function runPhaseAttempt(
       ...(advisors ? { advisors } : {}),
       loopGuard: loopGuard ?? new LoopGuard(prepared.loopGuard),
       expected: contract.kind === "none" ? [] : ["report"],
+      accepts: async (candidate) => {
+        const text = candidate ?? (await readFile(join(workspace.dir, phase.reportPath), "utf8").catch(() => undefined))
+        return text !== undefined && validateDeliverableContract(contract, text, weights).valid
+      },
       session: () => activeSessionID,
     },
     capabilities,
   )
+  // A bound service is only reachable once its session is registered with the
+  // runtime behind it: the write_report and advisor bridges look the session up
+  // there. The handles live until the phase's decision releases them.
+  const beginSession = (sessionID: string) => {
+    // The phase's gate reopens, and its decision releases, this exact session.
+    if (sessionRef) sessionRef.id = sessionID
+    beginSessionHandles(sessionID, {
+      services,
+      ...(reports ? { reports } : {}),
+      ...(advisors ? { advisors } : {}),
+      phase,
+      contract,
+      weights,
+      attempt,
+    })
+  }
   const serverSession = composition.abortsSessionOnShutdown(runnerId)
   // The same rules the OpenCode run config encodes, for a runner that enforces
   // them out of process; the auto-accept mode is read when the attempt starts.
@@ -2316,8 +2337,9 @@ async function runPhaseAttempt(
     model: prepared.model,
     attachments: prepared.attachments,
     sink: (event) => {
-      if (event.type === "session") {
+      if (event.type === "session" && event.session.sessionId !== activeSessionID) {
         activeSessionID = event.session.sessionId
+        beginSession(activeSessionID)
         if (serverSession) shutdown.setActiveSession({ client, sessionID: activeSessionID, directory: targetDir, phaseName: phase.name })
       }
       render(event)
@@ -2337,6 +2359,12 @@ async function runPhaseAttempt(
     if (activeSessionID && serverSession) shutdown.clearActiveSession(phase.name, activeSessionID)
   }
 
+  // Advisor usage and events stay on the runtime's handle, not the attempt
+  // result; the attempt log reads them from there before the phase releases it.
+  const advisorHandle = activeSessionID ? advisors?.handleFor(activeSessionID) : undefined
+  const advisorUsage = result.advisorUsage ?? (advisorHandle && advisorHandle.usage.length > 0 ? [...advisorHandle.usage] : undefined)
+  const advisorEvents = result.advisorEvents ?? (advisorHandle && advisorHandle.events.length > 0 ? [...advisorHandle.events] : undefined)
+
   await writeAttemptLog(workspace, phase, attempt, {
     session: result.sessionID,
     agent: phase.agentName,
@@ -2348,10 +2376,10 @@ async function runPhaseAttempt(
     error: result.error,
     // Logged as its own line, never folded into the executor's totals: the whole
     // economic claim of the pattern is that this stays a small fraction.
-    ...(result.advisorUsage ? { advisor: totalAdvisorUsage(result.advisorUsage) } : {}),
+    ...(advisorUsage ? { advisor: totalAdvisorUsage(advisorUsage) } : {}),
     // Fallback copy for writeAttemptLog's journal merge; it is replaced by the
     // merged event list before the log is written.
-    ...(result.advisorEvents && result.advisorEvents.length > 0 ? { advisorEvents: result.advisorEvents } : {}),
+    ...(advisorEvents && advisorEvents.length > 0 ? { advisorEvents } : {}),
     text: result.assistantText,
   })
 

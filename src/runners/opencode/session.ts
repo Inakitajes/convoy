@@ -115,7 +115,7 @@ export async function applyCompletionCheckpoint(
       parts: [{ type: "text", text: completionFollowUp(input.phase, advice.text) }],
     }, { signal: input.signal })
     if (accepted.error) throw new Error(formatSdkError(accepted.error))
-
+    await advisor.delivered?.(advice.callId, "follow-up")
 
     const second = await watcher.result
     // The watcher resolves on a terminal error as readily as on a completion, so
@@ -175,7 +175,7 @@ export async function applyReportCheckpoint(
 ): Promise<SessionResult> {
   // A contract expecting nothing owns no deliverable; there is nothing to remind about.
   if (deliverables.expected.length === 0) return first
-  if (deliverables.candidate?.() !== undefined) return first
+  if (await hasAcceptedDeliverable(deliverables)) return first
 
   let latest = first
   for (let reminder = 0; reminder < 2; reminder++) {
@@ -209,7 +209,7 @@ export async function applyReportCheckpoint(
         assistantInfos: [...latest.assistantInfos, ...next.assistantInfos],
         lastAssistantParts: next.lastAssistantParts,
       }
-      if (deliverables.candidate?.() !== undefined) return latest
+      if (await hasAcceptedDeliverable(deliverables)) return latest
     } catch (error) {
       if (input.signal.aborted || isUserAbortError(error) || error instanceof LoopGuardError) throw error
       return keepCompletedPhase(input.phase.name, latest, error instanceof Error ? error.message : String(error), "report reminder turn")
@@ -218,6 +218,12 @@ export async function applyReportCheckpoint(
     }
   }
   return latest
+}
+
+/** Whether the attempt already holds a deliverable its contract accepts; the engine owns that validation. */
+async function hasAcceptedDeliverable(deliverables: DeliverableService): Promise<boolean> {
+  if (deliverables.accepted) return await deliverables.accepted()
+  return deliverables.candidate?.() !== undefined
 }
 
 /** The phase already produced a durable deliverable; a failed follow-up turn must not discard it. */
