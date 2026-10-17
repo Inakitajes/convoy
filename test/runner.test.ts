@@ -42,6 +42,7 @@ import {
   shouldSkip,
   validateDeliverable,
   watchSession,
+  withAttachmentsByPath,
   withReadOnlyRepositoryBoundary,
   softBudgetNudgeText,
   type ActiveSession,
@@ -54,6 +55,7 @@ import { createReportRuntime, type ReportPhaseHandle } from "../src/report-runti
 import { startReportBridge } from "../src/report-bridge"
 import { writeCommitSidecar } from "../src/step-commit"
 import { qualityDimensionWeights } from "../src/quality-score"
+import { ContextOverflowError } from "../src/runners/errors"
 
 const recoveryDirs: string[] = []
 
@@ -638,6 +640,104 @@ describe("run phase gate", () => {
     expect(restores).toBe(0)
     expect(prompts[0]?.kind).toBe("failure")
     expect(prompts[0]?.canRetry).toBe(true)
+  })
+
+  test("a context overflow retries once with the attachments by path, without a gate", async () => {
+    const seen: { attempt: number; byPath?: boolean }[] = []
+    const prompts: HumanReviewPromptInfo[] = []
+    const workspace = await retryWorkspace()
+    const reports = createReportRuntime(workspace.dir)
+    const phase = { ...agentStep("score"), deliverableContract: { kind: "markdown-report" } as const }
+    const progress: ProgressUI = {
+      ...noopProgress,
+      askHumanReview: (info) => {
+        prompts.push(info)
+        return Promise.resolve("abort")
+      },
+    }
+    const withDiff = { ...prepared, attachments: [{ type: "file" as const, mime: "text/plain", filename: "score.pre.diff", url: "file:///run/diffs/score.pre.diff" }] }
+
+    const result = await runPhaseUntilResolved(
+      {} as never,
+      workspace,
+      phase,
+      "/repo",
+      withDiff,
+      { head: "baseline" },
+      progress,
+      trackedShutdown(),
+      createGitLock(),
+      { serverUrl: "http://127.0.0.1:1" },
+      {
+        runPhaseAttempt: async (_client, _workspace, _phase, _targetDir, attemptPrepared, attempt) => {
+          seen.push({ attempt, byPath: attemptPrepared.attachmentsByPath })
+          // The live failure: the inlined diff overflowed Grok's 500k window.
+          if (!attemptPrepared.attachmentsByPath) throw new ContextOverflowError("The compaction request cannot be reduced further")
+          return "# Scored from the diff on disk"
+        },
+        restorePhaseBaseline: async () => {},
+      },
+      undefined,
+      reports,
+    )
+
+    expect(result).toContain("Scored from the diff on disk")
+    expect(seen).toEqual([{ attempt: 1, byPath: undefined }, { attempt: 2, byPath: true }])
+    expect(prompts).toEqual([])
+  })
+
+  test("a context overflow that persists by path reaches the failure gate", async () => {
+    const attempts: number[] = []
+    const prompts: HumanReviewPromptInfo[] = []
+    const workspace = await retryWorkspace()
+    const reports = createReportRuntime(workspace.dir)
+    const phase = { ...agentStep("score"), deliverableContract: { kind: "markdown-report" } as const }
+    const progress: ProgressUI = {
+      ...noopProgress,
+      askHumanReview: (info) => {
+        prompts.push(info)
+        return Promise.resolve("abort")
+      },
+    }
+    const withDiff = { ...prepared, attachments: [{ type: "file" as const, mime: "text/plain", filename: "score.pre.diff", url: "file:///run/diffs/score.pre.diff" }] }
+
+    await expect(
+      runPhaseUntilResolved(
+        {} as never,
+        workspace,
+        phase,
+        "/repo",
+        withDiff,
+        { head: "baseline" },
+        progress,
+        trackedShutdown(),
+        createGitLock(),
+        { serverUrl: "http://127.0.0.1:1" },
+        {
+          runPhaseAttempt: async (_client, _workspace, _phase, _targetDir, _prepared, attempt) => {
+            attempts.push(attempt)
+            throw new ContextOverflowError("The compaction request cannot be reduced further")
+          },
+          restorePhaseBaseline: async () => {},
+        },
+        undefined,
+        reports,
+      ),
+    ).rejects.toThrow()
+
+    expect(attempts).toEqual([1, 2])
+    expect(prompts.map((prompt) => prompt.kind)).toEqual(["failure"])
+  })
+
+  test("withAttachmentsByPath lists each attachment's path for the agent to read", () => {
+    const prompt = withAttachmentsByPath("base prompt", [
+      { type: "file", mime: "text/plain", filename: "score.pre.diff", url: "file:///run/diffs/score.pre.diff" },
+      { type: "file", mime: "text/plain", filename: "spec.md", url: "file:///repo/openspec/specs/a/spec.md" },
+    ])
+    expect(prompt.startsWith("base prompt\n")).toBe(true)
+    expect(prompt).toContain("## Attachments by path")
+    expect(prompt).toContain("- /run/diffs/score.pre.diff (score.pre.diff)")
+    expect(prompt).toContain("- /repo/openspec/specs/a/spec.md (spec.md)")
   })
 
   test("a loop-guard trip reaches the decision gate instead of being swallowed", async () => {
@@ -2628,6 +2728,33 @@ describe("watchSession turn scoping", () => {
     })
 
     await expect(watcher.result).rejects.toThrow("compaction request cannot be reduced further")
+    await watcher.stop()
+  })
+
+  test("a V2 compaction failure settles as a context overflow", async () => {
+    async function* stream() {
+      yield {
+        type: "session.execution.failed",
+        data: { sessionID: "ses_1", error: { type: "compaction.failed", message: "The compaction request cannot be reduced further" } },
+      }
+      await new Promise<void>(() => {})
+    }
+    const client = {
+      event: { subscribe: async () => ({ stream: stream() }) },
+      session: {
+        messages: async () => ({ data: [] }),
+        status: async () => ({ data: { ses_1: { type: "busy" } } }),
+      },
+    } as never
+    const watcher = watchSession(client, {
+      directory: "/repo",
+      phaseName: "score",
+      sessionID: "ses_1",
+      progress: noopProgress,
+      signal: new AbortController().signal,
+    })
+
+    await expect(watcher.result).rejects.toBeInstanceOf(ContextOverflowError)
     await watcher.stop()
   })
 

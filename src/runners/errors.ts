@@ -12,3 +12,20 @@ export function formatSdkError(error: unknown): string {
   if (typeof error === "object" && error && "name" in error) return String((error as { name?: unknown }).name)
   return String(error)
 }
+
+/**
+ * The turn cannot fit the model's context window: OpenCode's automatic
+ * compaction ran out of earlier history to summarize. Retrying the same prompt
+ * fails the same way, so the engine retries once with attachments by path.
+ */
+export class ContextOverflowError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "ContextOverflowError"
+  }
+}
+
+/** Matches the overflow directly or as the cause of an engine wrapper error. */
+export function isContextOverflowError(error: unknown): boolean {
+  return error instanceof ContextOverflowError || (error instanceof Error && error.cause instanceof ContextOverflowError)
+}

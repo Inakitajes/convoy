@@ -37,7 +37,7 @@ import type {
   ProgressUsage,
 } from "../../progress"
 import { UserAbortError, isUserAbortError } from "../abort"
-import { formatSdkError } from "../errors"
+import { ContextOverflowError, formatSdkError } from "../errors"
 import type { DeliverableService, LoopGuardService } from "../contracts"
 import { validateDeliverableContract } from "../quality-contract"
 
@@ -300,8 +300,11 @@ type SessionSignal =
   | { type: "todos"; todos: ProgressTodo[]; message: string }
   | { type: "diff"; summary: ProgressDiffSummary }
   | { type: "idle" }
-  /** `terminal`: the turn is over (V2 `session.execution.failed`); no `idle` follows. */
-  | { type: "error"; error: string; terminal?: boolean }
+  /**
+   * `terminal`: the turn is over (V2 `session.execution.failed`); no `idle` follows.
+   * `overflow`: it failed because the turn could not be compacted to fit the context.
+   */
+  | { type: "error"; error: string; terminal?: boolean; overflow?: boolean }
 
 const sessionPollMs = 30_000
 const maxConsecutivePollFailures = 10
@@ -472,7 +475,9 @@ export function watchSession(
         input.progress.phaseActivity(input.phaseName, `session error: ${signal.error}`, "error")
         // A V2 execution failure ends the turn without an idle: settle it now
         // rather than waiting on a status poll that may keep reporting it active.
-        if (!(await verifyCompletion()) && signal.terminal) finish({ error: new Error(signal.error) })
+        if (!(await verifyCompletion()) && signal.terminal) {
+          finish({ error: signal.overflow ? new ContextOverflowError(signal.error) : new Error(signal.error) })
+        }
         return
       case "idle":
         input.progress.phaseActivity(input.phaseName, "session idle; collecting results", "info")
@@ -769,6 +774,7 @@ export function describeSessionActivity(payload: unknown, state: ActivityState):
         type: "error",
         error: formatEventError(properties.error),
         ...(payloadType(payload) === "session.execution.failed" ? { terminal: true } : {}),
+        ...(isCompactionFailure(properties.error) ? { overflow: true } : {}),
       }
     default:
       if (type.startsWith("session.next.")) return activity("info", type.replace(/^session\.next\./, ""))
@@ -1253,6 +1259,11 @@ function describeToolContent(value: unknown) {
   if (typeof file?.name === "string") return file.name
   if (typeof file?.uri === "string") return file.uri
   return "done"
+}
+
+/** V2 reports an unshrinkable turn as `{ type: "compaction.failed" }`. */
+function isCompactionFailure(value: unknown) {
+  return Boolean(value && typeof value === "object" && (value as { type?: unknown }).type === "compaction.failed")
 }
 
 function formatEventError(value: unknown) {

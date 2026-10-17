@@ -89,6 +89,14 @@ describe("V2 event stream → settlement and usage", () => {
     expect(signal).toMatchObject({ type: "error", terminal: true })
   })
 
+  test("a V2 compaction failure is flagged as a context overflow", () => {
+    const signal = activity({
+      type: "session.execution.failed",
+      data: { sessionID: "ses_1", error: { type: "compaction.failed", message: "The compaction request cannot be reduced further" } },
+    })
+    expect(signal).toMatchObject({ type: "error", terminal: true, overflow: true })
+  })
+
   test("a V1 session.error is not terminal; its idle settles the turn", () => {
     const signal = activity({ type: "session.error", properties: { sessionID: "ses_1", error: { message: "retrying" } } })
     expect(signal).toMatchObject({ type: "error" })

@@ -33,7 +33,7 @@ export { promptPhase }
 // (change `unify-runner-system`, task 2.1). The engine imports them back and
 // re-exports for its existing consumers; no adapter imports this module.
 import { UserAbortError, isUserAbortError } from "./runners/abort"
-import { formatSdkError } from "./runners/errors"
+import { formatSdkError, isContextOverflowError } from "./runners/errors"
 import { validateDeliverableContract } from "./runners/quality-contract"
 import { combinedAssistantUsage, extractAssistantText, type SessionRef } from "./runners/opencode/session"
 
@@ -1693,6 +1693,8 @@ async function runPhase(
 
 type PreparedPhaseRun = {
   attachments: FilePartInput[]
+  /** The overflow fallback: the prompt lists the attachments by path instead of inlining them. */
+  attachmentsByPath?: boolean
   prompt: string
   model: ModelSelection
   /** Resolved exactly once, here, and threaded through unchanged: re-resolving would re-arm defaults over `maxPhaseCost: false`. */
@@ -1856,6 +1858,8 @@ export async function runPhaseUntilResolved(
     rubricWeights ??
     (deliverableContract.kind === "quality-score-report" ? ((await loadQualityRubricWeights(targetDir)) ?? qualityDimensionWeights) : qualityDimensionWeights)
   let automaticDeliverableRetries = 0
+  // Swapped once, for the by-path fallback, when the inlined attachments overflow the model's context.
+  let run = prepared
   // A budget-gate reset starts a new prompt but keeps the renewable guard's
   // other fuses (especially accumulated cost) intact. Ordinary retries still
   // receive a fresh guard because they begin a clean phase attempt.
@@ -1876,7 +1880,7 @@ export async function runPhaseUntilResolved(
           workspace,
           phase,
           targetDir,
-          prepared,
+          run,
           attempt,
           progress,
           shutdown,
@@ -1993,6 +1997,19 @@ export async function runPhaseUntilResolved(
           budgetGuard = loopGuard
           // The reset starts a new prompt with a new session: end the pre-reset
           // attempt's handles so its write_report window cannot leak into the reset.
+          releasePhaseSession(sessionRef, reports, advisors)
+          continue
+        }
+        // The inlined attachments did not fit the model's context and compaction
+        // had nothing earlier to shrink, so the same prompt can only fail again.
+        // Retry once listing the files by path: the agent reads what it needs.
+        if (isContextOverflowError(error) && !run.attachmentsByPath && run.attachments.length > 0) {
+          if (!(error instanceof LoggedAttemptError)) await writeAttemptLog(workspace, phase, attempt, { error: formatSdkError(error) })
+          log.warn(`[${phase.name}] attempt ${attempt} overflowed the model's context: ${formatSdkError(error)}; retrying with attachments by path`)
+          progress.phaseActivity(phase.name, "context overflow; retrying with attachments by path", "retry")
+          run = { ...run, attachmentsByPath: true }
+          await gitLock(() => deps.restorePhaseBaseline(phase, baseline, targetDir, error))
+          await removePhaseReport(workspace, phase)
           releasePhaseSession(sessionRef, reports, advisors)
           continue
         }
@@ -2368,9 +2385,9 @@ async function runPhaseAttempt(
     runner: runnerId,
     phase,
     targetDir,
-    prompt: prepared.prompt,
+    prompt: prepared.attachmentsByPath ? withAttachmentsByPath(prepared.prompt, prepared.attachments) : prepared.prompt,
     model: prepared.model,
-    attachments: prepared.attachments,
+    attachments: prepared.attachmentsByPath ? [] : prepared.attachments,
     sink: (event) => {
       if (event.type === "session" && event.session.sessionId !== activeSessionID) {
         activeSessionID = event.session.sessionId
@@ -2406,6 +2423,7 @@ async function runPhaseAttempt(
     agent: phase.agentName,
     model: result.model,
     attachments: prepared.attachments.map((file) => ({ filename: file.filename, mime: file.mime, url: file.url })),
+    ...(prepared.attachmentsByPath ? { attachmentsByPath: true } : {}),
     finish: result.finish,
     cost: result.cost,
     tokens: result.tokens,
@@ -2610,6 +2628,25 @@ export async function assertPendingReadOnlyResumeBaselines(metadata: RunMetadata
 }
 
 
+
+/** Names each attachment instead of inlining it, for a turn whose attachments overflow the model's context. */
+export function withAttachmentsByPath(prompt: string, attachments: readonly FilePartInput[]): string {
+  const lines = attachments.flatMap((file) => {
+    try {
+      return [`- ${fileURLToPath(file.url)}${file.filename ? ` (${file.filename})` : ""}`]
+    } catch {
+      return []
+    }
+  })
+  if (lines.length === 0) return prompt
+  return [
+    prompt,
+    "",
+    "## Attachments by path",
+    "The attachments did not fit in this model's context window, so they are listed by path instead of attached. Decide which ones you need and read them with the read tool; read large files, such as the diff, in sections rather than whole.",
+    ...lines,
+  ].join("\n")
+}
 
 function buildPhasePrompt(workspace: Workspace, phase: AgentStep) {
   const usesWriteReport = phase.runner !== "claude-code"
