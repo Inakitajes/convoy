@@ -424,7 +424,7 @@ describe("built-in review pipeline", () => {
       "bugs__openrouter-z-ai-glm-5-3-flash-high",
       "report",
       "score__openrouter-z-ai-glm-5-3-high",
-      "score__openrouter-x-ai-grok-4-6-high",
+      "score__openrouter-moonshotai-kimi-k3",
       "score-report",
     ])
   })
@@ -457,7 +457,7 @@ describe("built-in review pipeline", () => {
       "reports/bugs__openrouter-z-ai-glm-5-3-flash-high.md",
       "reports/report.md",
       "reports/score__openrouter-z-ai-glm-5-3-high.md",
-      "reports/score__openrouter-x-ai-grok-4-6-high.md",
+      "reports/score__openrouter-moonshotai-kimi-k3.md",
     ])
   })
 })
@@ -526,7 +526,7 @@ describe("review model choices", () => {
     expect(scope).toMatchObject({ agentName: "review-scope", readOnly: true, verify: true })
   })
 
-  test("runs entirely on low-cost models: DeepSeek V4.1 Flash scopes, audits, and reports, and the scoring stays on GLM 5.3 + Grok 4.6", () => {
+  test("runs entirely on low-cost models: DeepSeek V4.1 Flash scopes, audits, and reports, and the scoring stays on GLM 5.3 + Kimi K3", () => {
     const pipeline = review()
     expect(stepNames(pipeline)).toEqual([
       "scope",
@@ -538,7 +538,7 @@ describe("review model choices", () => {
       "bugs__openrouter-z-ai-glm-5-3-flash-high",
       "report",
       "score__openrouter-z-ai-glm-5-3-high",
-      "score__openrouter-x-ai-grok-4-6-high",
+      "score__openrouter-moonshotai-kimi-k3",
       "score-report",
     ])
 

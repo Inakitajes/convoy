@@ -12,7 +12,7 @@ const fallbackModel = `${defaultGptModel}#${defaultGptVariant}`
 const glm53HighModel = "openrouter/z-ai/glm-5.3#high"
 /** Opus reached through OpenRouter for shared agent defaults and hunter audits. */
 const opusViaOpenRouter = "openrouter/anthropic/claude-opus-5"
-/** Grok 4.6 high: the review and ship scoring, plus one hunter audit track. */
+/** Grok 4.6 high: the ship scoring, plus one hunter audit track. */
 const grokModel = "openrouter/x-ai/grok-4.6#high"
 const kimiModel = "openrouter/moonshotai/kimi-k3"
 /** DeepSeek V4.1 Flash on OpenRouter: the writer for `implement`, review's report, and the goal fixers. */
@@ -520,7 +520,7 @@ export const builtInPipelines: Record<string, PipelineSpec> = {
   // Report-only audits on two flash models, followed by independent scoring.
   review: {
     description:
-      "Report-only PR review on ultra-cheap models: scope, parallel audits (DeepSeek V4.1 Flash + GLM 5.3 Flash) and report on flash models; the scoring uses GLM 5.3 high + Grok 4.6 high and the score consensus stays on GLM 5.3 high. Makes no changes.",
+      "Report-only PR review on ultra-cheap models: scope, parallel audits (DeepSeek V4.1 Flash + GLM 5.3 Flash) and report on flash models; the scoring uses GLM 5.3 high + Kimi K3 and the score consensus stays on GLM 5.3 high. Makes no changes.",
     defaultPrompt: "Review the current branch against its base and report prioritized findings with a verified quality score.",
     suggestedPrompts: ["Review the open PR for this branch", "Review only the last commit's diff"],
     steps: [
@@ -535,7 +535,7 @@ export const builtInPipelines: Record<string, PipelineSpec> = {
       { agent: "review-report", name: "report", model: deepseekHighModel, reports: "all" },
       {
         parallel: [
-          { agent: "quality-scorer", name: "score", models: [glm53HighModel, grokModel], reports: "all", prdHistory: true },
+          { agent: "quality-scorer", name: "score", models: [glm53HighModel, kimiModel], reports: "all", prdHistory: true },
         ],
       },
       { agent: "quality-score-report", name: "score-report", model: glm53HighModel, reports: "all", verify: true, prdHistory: true },
