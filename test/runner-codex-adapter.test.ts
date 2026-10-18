@@ -74,14 +74,34 @@ describe("codex invocation", () => {
 
   test("the thread config disables every operator MCP server and declares only Convoy's host", () => {
     expect(configuredMcpServers({ config: { mcp_servers: { a: {}, b: {} } } })).toEqual(["a", "b"])
-    expect(configuredMcpServers(undefined)).toEqual([])
-    expect(codexThreadConfig(["a", "convoy"], { command: "convoy", args: ["mcp", "--bridge-file", "/p"] })).toEqual({
+    expect(configuredMcpServers({ config: {} })).toEqual([])
+    expect(configuredMcpServers(undefined)).toBeUndefined()
+    // Without Convoy's host, an operator server under its name is disabled like any other.
+    expect(codexThreadConfig(["a", "convoy"])).toEqual({ "mcp_servers.a.enabled": false, "mcp_servers.convoy.enabled": false })
+    expect(codexThreadConfig(["a"], { command: "convoy", args: ["mcp", "--bridge-file", "/p"] })).toEqual({
       "mcp_servers.a.enabled": false,
       "mcp_servers.convoy.command": "convoy",
       "mcp_servers.convoy.args": ["mcp", "--bridge-file", "/p"],
       "mcp_servers.convoy.enabled": true,
       "mcp_servers.convoy.tool_timeout_sec": 3600,
     })
+  })
+
+  test("an attempt does not start when the operator's MCP servers cannot be read or one takes Convoy's name", async () => {
+    const dir = await checkout()
+    for (const [configRead, reason] of [
+      [async () => { throw new Error("config unavailable") }, "could not read the operator's Codex MCP servers"],
+      [() => ({}), "could not read the operator's Codex MCP servers"],
+      [() => ({ config: { mcp_servers: { convoy: { command: "operator-convoy" } } } }), "an MCP server named `convoy`"],
+    ] as const) {
+      const codex = fakeCodex(defaultCodexHandlers({ "config/read": configRead }))
+      const outcome = await createCodexRunner({ cwd: dir, mcpHost: ["convoy", "mcp"], deps: { spawn: codex.spawn } }).executeAttempt(request(dir), () => {}, {
+        deliverables: { expected: ["report"], candidate: () => "accepted", submit: async () => ({ ok: true }) },
+      })
+      expect(outcome).toMatchObject({ status: "failed" })
+      expect((outcome as { error: string }).error).toContain(reason)
+      expect(codex.requests("thread/start")).toHaveLength(0)
+    }
   })
 
   test("token usage splits cached input and reasoning out of OpenAI's totals", () => {

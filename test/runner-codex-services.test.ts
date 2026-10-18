@@ -181,6 +181,12 @@ describe("Codex helper inference", () => {
     expect(silent.requests("turn/interrupt")).toHaveLength(1)
   })
 
+  test("helper inference does not start a thread when the operator's MCP servers cannot be read", async () => {
+    const codex = fakeCodex(defaultCodexHandlers({ "config/read": async () => { throw new Error("config unavailable") } }))
+    await expect(codexInference({ prompt: "p", system: "s", auth: { mode: "subscription" }, cwd: "/tmp", tools: "none", timeoutMs: 500 }, { spawn: codex.spawn })).rejects.toThrow("could not read the operator's Codex MCP servers")
+    expect(codex.requests("thread/start")).toHaveLength(0)
+  })
+
   test("only plain inspection commands count as read-only", () => {
     for (const command of ["ls -la", "cat a.ts | head -5", "git diff --stat", "rg foo src", "/bin/zsh -lc 'git status'", "find . -name '*.ts'"]) expect(isReadOnlyHelperCommand(command)).toBe(true)
     for (const command of ["git push", "rm a", "cat a > b", "echo $(id)", "find . -delete", "npm test", "ls; curl x"]) expect(isReadOnlyHelperCommand(command)).toBe(false)

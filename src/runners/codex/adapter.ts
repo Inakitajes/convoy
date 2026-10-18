@@ -65,7 +65,7 @@ export function codexSandbox(mode: ExecutionRequest["mode"]): CodexSandboxMode {
  */
 export function codexThreadConfig(operatorServers: readonly string[], host?: { command: string; args: readonly string[] }): Record<string, unknown> {
   const config: Record<string, unknown> = {}
-  for (const name of operatorServers) if (name !== convoyMcpServer) config[`mcp_servers.${name}.enabled`] = false
+  for (const name of operatorServers) if (name !== convoyMcpServer || !host) config[`mcp_servers.${name}.enabled`] = false
   if (host) {
     config[`mcp_servers.${convoyMcpServer}.command`] = host.command
     config[`mcp_servers.${convoyMcpServer}.args`] = [...host.args]
@@ -75,10 +75,29 @@ export function codexThreadConfig(operatorServers: readonly string[], host?: { c
   return config
 }
 
-/** The MCP servers the operator's Codex config declares, from `config/read`. */
-export function configuredMcpServers(configResult: unknown): string[] {
-  const servers = asRecord(asRecord(asRecord(configResult)?.config)?.mcp_servers)
+/**
+ * The MCP servers the operator's Codex config declares, from `config/read`;
+ * undefined when the result carries no config, since a run that cannot see
+ * the operator's servers cannot disable them.
+ */
+export function configuredMcpServers(configResult: unknown): string[] | undefined {
+  const config = asRecord(asRecord(configResult)?.config)
+  if (!config) return undefined
+  const servers = asRecord(config.mcp_servers)
   return servers ? Object.keys(servers) : []
+}
+
+export const unreadableMcpServers = "Convoy could not read the operator's Codex MCP servers (config/read), so it cannot keep them out of the run"
+
+/**
+ * Why the operator's MCP servers cannot be isolated for a thread, if they
+ * cannot: their list is unreadable, or one of them is named like Convoy's
+ * host, whose settings it would merge into.
+ */
+export function mcpIsolationProblem(operatorServers: readonly string[] | undefined, declaresHost: boolean): string | undefined {
+  if (!operatorServers) return unreadableMcpServers
+  if (declaresHost && operatorServers.includes(convoyMcpServer)) return `the operator's Codex config declares an MCP server named \`${convoyMcpServer}\`, which Convoy's tool host needs; rename it`
+  return undefined
 }
 
 /** Codex reasoning effort for a model variant, when it is one. */
@@ -472,6 +491,8 @@ export function createCodexRunner(options: CodexRunnerOptions): CodexRunner {
       if (mismatch) return { status: "failed", error: `${mismatch} Set runners.codex.auth to choose Codex's billing source explicitly.` }
 
       const operatorServers = configuredMcpServers(await server.request("config/read", {}).catch(() => undefined))
+      const isolation = mcpIsolationProblem(operatorServers, host !== undefined)
+      if (isolation || !operatorServers) return { status: "failed", error: isolation ?? unreadableMcpServers }
       const threadParams = {
         cwd: request.checkout,
         approvalPolicy: "untrusted",

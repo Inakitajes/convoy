@@ -18,7 +18,7 @@ import { convoySecretsDir } from "../../workspace"
 import { evaluateAction, type PolicyConfig } from "../policy"
 import { inspectionReads } from "./inspection"
 import { redactSecrets } from "../redaction"
-import { codexAppServerArgs, codexEffort, codexThreadConfig, configuredMcpServers, usageFromCodexTokens } from "./adapter"
+import { codexAppServerArgs, codexEffort, codexThreadConfig, configuredMcpServers, unreadableMcpServers, usageFromCodexTokens } from "./adapter"
 import { startCodexAppServer, type CodexAppServer, type CodexSpawn } from "./app-server"
 import { codexAccountMismatch, prepareCodexAuth, type CodexLogin } from "./auth"
 import { asRecord, stringField, type TokenUsageBreakdown } from "./protocol"
@@ -148,6 +148,7 @@ export async function codexInference(input: CodexInferenceInput, deps: CodexInfe
     const mismatch = codexAccountMismatch(auth.mode, await server.request("account/read", {}))
     if (mismatch) throw new CodexInferenceError(mismatch)
     const operatorServers = configuredMcpServers(await server.request("config/read", {}).catch(() => undefined))
+    if (!operatorServers) throw new CodexInferenceError(unreadableMcpServers)
     const started = asRecord(
       await server.request("thread/start", {
         cwd: input.cwd,
