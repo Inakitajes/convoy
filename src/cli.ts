@@ -2789,7 +2789,7 @@ export function retiredFeatureDiagnostic(args: string[]): string {
 function help() {
   return `convoy [prompt]
 
-Sequential agent pipeline for implementing features, on OpenCode or Claude Code.
+Sequential agent pipeline for implementing features, on OpenCode, Claude Code, or Codex.
 
 Usage:
   convoy
@@ -2866,7 +2866,7 @@ Flags:
   --smart                  Smart auto-accept: an AI judge auto-allows safe ask-level requests and escalates risky ones (shift+tab cycles)
   --smart-model <provider/model[#variant]> Model for the smart auto-accept judge (default: defaults.autoAcceptJudgeModel, else the run's model)
   --include-dirty          Include existing changes in the first commit
-  --model <provider/model[#variant]> Force a model for OpenCode steps (Claude Code steps keep their CLI model)
+  --model <provider/model[#variant]> Force a model for OpenCode steps; <runner>/<model> (codex/gpt-5.5, claude-code/opus) forces one runner's steps
   --advisor <provider/model[#variant]> Force an advising model on every OpenCode step: a stronger model
                            consulted at decision points (before the first write, before declaring done,
                            and on demand) that reads the step's transcript but never runs tools
@@ -2922,8 +2922,9 @@ Config files:
 Config keys:
   defaults:                model, baseRef, pipeline, worktree, worktreeLocation, prdHistory,
                            autoAcceptJudgeModel, branchNameModel, commitMessageModel,
-                           runner, claudeAuth, advisorRoute, helperRoutes, authoring
-  modelRouting:            gateway and explicit per-logical-model overrides
+                           runner, advisorRoute, helperRoutes, authoring (claudeAuth: legacy)
+  runners:                 per-runner settings: runners.<claude-code|codex>.auth
+  modelRouting:            gateway and explicit per-logical-model overrides (OpenCode)
   agents:                  project agents or built-in overrides; prompts live at agents/<name>.md
   pipelines:               named step lists mixing agents and human gates
   permissions:             allow/deny additions to the bash policy (deny always wins)

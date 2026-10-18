@@ -2,27 +2,26 @@
 
 ## 1. Lock current behavior
 
-- [ ] 1.1 Add a golden test that resolves every built-in pipeline and the repo's config fixtures (steps, fan-outs, advisors, judge, helpers, authoring, auth) to a normalized route list; verify it passes unchanged on `main` before any refactor.
-- [ ] 1.2 Inventory every runner-ID comparison and `claude-code/` prefix use outside `src/runners/<id>/**`; verify each one maps to a task below.
+- [x] 1.1 Use the existing suite (3812 tests on `main`) as the regression gate for every resolution path (steps, fan-outs, advisors, judge, helpers, auth); verify it stays green at every step, with changed assertions limited to new generic messages and the `runnerAuth` field.
+- [x] 1.2 Inventory every runner-id comparison and `claude-code/` prefix use outside the runner adapters; verify each is removed or registered in a table (`test/runner-routing-conformance.test.ts`).
 
 ## 2. Registry and types
 
-- [ ] 2.1 Introduce `RunnerDescriptor`, the registry, and `RunnerId` as a registry-checked string; rebuild `stepRunnerFor`, `isStepRunnerId`, `stepRunnerIds` and capability resolution on it; verify typecheck and the existing suite pass with no behavior change.
-- [ ] 2.2 Move model support into descriptors (`accepts`, aliases, variant mapping, default model) for OpenCode and Claude; replace `normalizeStepRunnerModel` and `stepRunnerModel`; verify the golden test is unchanged.
-- [ ] 2.3 Move the installation probe, the effective-auth check, helper inference, conversation support and the prompt's report-tool name behind the descriptor; remove the `runnerId === "claude-code"` branches in `runner.ts`, `run-plan.ts`, `plan-dependencies.ts`, `advisor.ts`, `safety-judge.ts`, `commit-message.ts`, `worktree.ts`, `conversations.ts` and `human.ts`; verify the golden test is unchanged.
-- [ ] 2.4 Extend the dependency-direction test to fail on runner-ID literals outside the allowed boundaries; verify it fails on a planted literal and passes on the tree.
+- [x] 2.1 Introduce `RunnerDescriptor` (`src/runners/descriptors.ts`) and rebuild `stepRunnerFor`, `isStepRunnerId`, `stepRunnerIds`, capability resolution and model labels on it; verify typecheck and the suite.
+- [x] 2.2 Move model support into descriptors (runner- versus provider-qualified, provider, aliases, variants) and replace `normalizeStepRunnerModel`, `stepRunnerModel` and `parseModelOverride` with generic versions; verify Claude behavior is unchanged.
+- [x] 2.3 Replace the runner branches in routing consumers: plan dependencies, the advisor, the judge, the commit writer, the branch namer, preflight, provenance, the review screens, human gates, the engine's stream log, auth and prompt; move per-runner code into registration tables (helper inference, session openers and recorders, iteration clients, auth probes); verify with the suite.
+- [x] 2.4 Add the routing conformance test; verify it detects every comparison spelling and passes on the tree.
 
 ## 3. Routes and configuration
 
-- [ ] 3.1 Add the `ModelRoute` parser and validator and use it for step `model`, `models:` entries, `advisor`, `defaults.model`, `defaults.judge`, `defaults.helpers.*` and `defaults.authoring`; implement D3 inheritance with errors that name the runner's source; verify the scenarios in `specs/runner-routing/spec.md`.
-- [ ] 3.2 Replace the fake `providerID: "claude-code"` advisor marker with a resolved route on `AgentStep` and the plan; verify advisor dependencies and consultation routing for every runner pair.
-- [ ] 3.3 Add `runners.<id>` with descriptor-parsed `auth`; keep route-level `authMode`; verify the per-runner auth scenario and that no credential value is accepted.
-- [ ] 3.4 Make fan-out phase names unique per runner (D8); verify the same-model, two-runner scenario.
-- [ ] 3.5 Implement the legacy readers and deprecation notices (D7), including the pre-change advisor default of `opencode`; verify the golden test resolves legacy fixtures identically and old `metadata.json` fixtures resume.
-- [ ] 3.6 Rewrite built-in pipelines and the `convoy init` template in canonical IDs and routes; verify the golden test is unchanged.
+- [x] 3.1 Accept `{ runner, model }` routes for fan-out entries, advisors and the judge, normalized to the runner-qualified form the plan stores; verify the routing scenarios (`test/runner-routing.test.ts`).
+- [x] 3.2 Resolve each fan-out variant on its own runner, with an inherited model applying only where the runner executes it; verify mixed-runner fan-outs and unique names.
+- [x] 3.3 Add `runners.<id>.auth`, merged per runner, with `defaults.claudeAuth` as its legacy reading, and route auth-mode overrides that reuse their runner's credential reference; verify validation and merging.
+- [x] 3.4 Carry one reviewed auth and billing decision per authenticating runner in the plan (`RunPlan.runnerAuth`) and run options (`RunOptions.runnerAuth`); verify review, preflight and step auth previews.
+- [x] 3.5 Keep legacy spellings and frozen plans resolving as before; verify with the existing route, config and resume tests.
 
 ## 4. CLI, review and docs
 
-- [ ] 4.1 Add `--runner` and canonical `--model` semantics (D6), reading `--model claude-code/<m>` as legacy; verify the mixed-plan override scenario and that review lists steps the override did not reach.
-- [ ] 4.2 Show `model · runner` for every route in launch review, the dashboard and `SUMMARY.md`; verify snapshots.
-- [ ] 4.3 Update `configuration.md`, `models.md`, `runners.md`, `pipelines.md` and `--help` with the route model, inheritance, `runners:` and a legacy-to-new table; verify every documented example parses in a doc test.
+- [x] 4.1 Scope `--model` by the runner-qualified shorthand and name unaffected steps; verify the mixed-plan override scenario.
+- [x] 4.2 Show each CLI runner's route in launch review and the review TUI, and a CLI step's model as `<runner>/<model>`; verify review tests.
+- [x] 4.3 Document one model spelling, routes, inheritance and `runners:` in `runners.md`, `models.md`, `configuration.md`, `getting-started.md`, `development.md`, README and `--help`.

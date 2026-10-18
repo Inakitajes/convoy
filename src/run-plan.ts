@@ -1,5 +1,4 @@
 import { resolveModel, type ModelGateway, type ModelRoutingOverrides, type ResolvedModel } from "./model-routing"
-import { splitModelVariant } from "./pipeline"
 import type { OpenSpecBundle } from "./openspec"
 import type { PrdHistoryPreview } from "./prd-history"
 import { resolveBilling } from "./runners/billing"

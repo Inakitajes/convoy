@@ -28,7 +28,9 @@ Method: a throwaway Bun driver spoke JSON-RPC to `codex app-server` over stdio (
 - `dynamicTools` on `thread/start` and `item/tool/call`: in-band Convoy tools with no MCP process or bridge. **Experimental only** (`experimentalApi`).
 - `codex --remote ws://…`: TUI attach to a running app-server, a candidate for native live attach.
 
-## Open, to verify during implementation
+## Open questions during implementation
+
+All five are resolved; see `acceptance.md`.
 
 - API-key mode without touching the operator's `~/.codex/auth.json` (`codex login --with-api-key` persists to `CODEX_HOME`). The candidate is an owner-only per-run `CODEX_HOME` under `~/.convoy/private/`.
 - Whether operator `mcp_servers` from `config.toml` load in a Convoy run and how to exclude them, for example with `-c mcp_servers={}` before adding Convoy's.
