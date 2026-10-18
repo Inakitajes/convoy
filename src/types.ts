@@ -31,6 +31,8 @@ import type { ModelGateway, ModelRoutingOverrides, ResolvedModel } from "./model
 
 /** The configured authentication per CLI runner. */
 export type RunnerAuthSelections = Partial<Record<StepRunnerId, AuthenticationSelection>>
+/** `advisorRoute.authMode`'s selection, which applies only to advisors on its runner. */
+export type AdvisorAuthOverride = { runner: StepRunnerId; selection: AuthenticationSelection }
 
 /** One CLI runner's reviewed authentication and the billing decision it implies. */
 export type ReviewedRunnerAuth = { auth: AuthenticationSelection; billing: BillingResolution }
@@ -50,8 +52,8 @@ export type RunOptions = {
    * non-secret credential reference is carried, never a key.
    */
   runnerAuth?: RunnerAuthSelections
-  /** The reviewed authentication a CLI-routed advisor (`claude-code/<model>`, `codex/<model>`) consults under; defaults to its runner's. */
-  advisorAuth?: AuthenticationSelection
+  /** The reviewed authentication a CLI-routed advisor (`claude-code/<model>`, `codex/<model>`) on the advisor route's runner consults under; other advisors use their runner's. */
+  advisorAuth?: AdvisorAuthOverride
   /** The commit writer's route for automatic run compaction (`helperRoutes.commitMessage`), runner-qualified for a CLI runner. */
   commitMessageModel?: string
   files: string[]

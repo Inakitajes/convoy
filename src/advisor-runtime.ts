@@ -152,10 +152,11 @@ export function createAdvisorRuntime(options: AdvisorRuntimeOptions): AdvisorRun
     const startedAt = performance.now()
     let transcript: string | undefined
     const recorded = recordings.get(sessionID)?.render() ?? options.transcriptFor?.(sessionID)
+    const auth = options.advisorAuth?.(runnerOfModelReference(model))
     const result = await consultFn({
       ...(options.client ? { client: options.client } : {}),
       ...(recorded !== undefined ? { transcript: recorded } : {}),
-      ...(options.advisorAuth?.(runnerOfModelReference(model)) ? { auth: options.advisorAuth(runnerOfModelReference(model))! } : {}),
+      ...(auth ? { auth } : {}),
       sessionID,
       directory: options.directory,
       model,

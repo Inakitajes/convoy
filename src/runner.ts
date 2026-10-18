@@ -16,6 +16,7 @@ import { aggregateAdvisorEvents, createAdvisorEventJournal, readAdvisorEvents, t
 import { opencodeConfig, loadAgentPrompt } from "./agents"
 import { fileParts } from "./attachments"
 import { Caffeinate } from "./caffeinate"
+import { advisorAuthFor } from "./config"
 import { claudeReadableDirectories, openClaudeSessionWindow, writeClaudeSessionDirectories } from "./claude-code"
 import { ensureRunnersAvailable } from "./runner-installation"
 import { baseAgentName } from "./runners/agent-source"
@@ -950,7 +951,7 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
       ...(opencode ? { client: opencode.client } : {}),
       // A CLI-routed advising model consults under its reviewed route's auth:
       // the advisor route's override, else its runner's configured auth.
-      advisorAuth: (runner) => options.advisorAuth ?? options.runnerAuth?.[runner],
+      advisorAuth: (runner) => advisorAuthFor(runner, options),
       directory: options.targetDir,
       signal: shutdown.signal,
       auditPolicy: options.advisorAuditPolicy ?? "summary",

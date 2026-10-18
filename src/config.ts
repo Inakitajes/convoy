@@ -31,7 +31,7 @@ import { qualifiedRunnerOf, runnerDescriptor } from "./runners/descriptors"
 import type { AuthenticationMode, AuthenticationSelection, BillingPolicy } from "./runners/contracts"
 import type { NotificationSettings } from "./notifications"
 import type { AdvisorAuditPolicy } from "./advisor-events"
-import type { AgentSpec, HookSet, HookSpec, HooksConfig, HookWhen, PermissionAdditions } from "./types"
+import type { AgentSpec, HookSet, HookSpec, HooksConfig, HookWhen, PermissionAdditions, AdvisorAuthOverride, RunnerAuthSelections } from "./types"
 import { isModelGateway, logicalModel, modelGatewayChoices, modelGateways, type ModelRoutingConfig, type ModelRoutingOverrides } from "./model-routing"
 import { convoyHome, convoyRoot, globalConfigPath } from "./workspace"
 
@@ -874,13 +874,25 @@ export function qualifyRoute(runner: StepRunnerId, model: string): string {
   return `${runner}/${normalizeStepRunnerModel(runner, model)}`
 }
 
-/** The authentication a CLI-routed advisor consults under when `advisorRoute.authMode` selects one. */
-export function advisorAuthOf(config: Pick<ConvoyConfig, "defaults" | "runners"> | undefined): AuthenticationSelection | undefined {
+/**
+ * The authentication `advisorRoute.authMode` selects, and the runner it is
+ * for: the advisor route's runner, which is the only runner it applies to.
+ */
+export function advisorAuthOf(config: Pick<ConvoyConfig, "defaults" | "runners"> | undefined): AdvisorAuthOverride | undefined {
   const mode = config?.defaults?.advisorRoute?.authMode
   if (!mode) return undefined
   const runner = config?.defaults?.advisorRoute?.runner ?? config?.defaults?.runner ?? "claude-code"
   const credentialRef = runnerAuthOf(config)[runner]?.credentialRef
-  return mode === "api-key" ? { mode, ...(credentialRef ? { credentialRef } : {}) } : { mode }
+  return { runner, selection: mode === "api-key" ? { mode, ...(credentialRef ? { credentialRef } : {}) } : { mode } }
+}
+
+/**
+ * The authentication an advisor on `runner` consults under: the advisor
+ * route's override when it is for that runner, else the runner's own. A
+ * step's advisor on another runner never borrows the route's credential.
+ */
+export function advisorAuthFor(runner: StepRunnerId, options: { advisorAuth?: AdvisorAuthOverride; runnerAuth?: RunnerAuthSelections }): AuthenticationSelection | undefined {
+  return (options.advisorAuth?.runner === runner ? options.advisorAuth.selection : undefined) ?? options.runnerAuth?.[runner]
 }
 
 const envVarNamePattern = /^[A-Za-z_][A-Za-z0-9_]*$/

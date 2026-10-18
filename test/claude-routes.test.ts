@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { proposeCommitMessage } from "../src/commit-message"
-import { advisorAuthOf, parseConvoyConfig, pipelineDefaultsOf } from "../src/config"
+import { advisorAuthFor, advisorAuthOf, parseConvoyConfig, pipelineDefaultsOf, runnerAuthOf } from "../src/config"
 import {
   authoringClientArgv,
   claudeClientEnv,
@@ -79,11 +79,32 @@ defaults:
     runner: claude-code
 `, "config.yaml", "/tmp")
     expect(pipelineDefaultsOf(config.defaults)).toMatchObject({ defaultRunner: "claude-code", defaultAdvisor: "claude-code/opus" })
-    expect(advisorAuthOf(config)).toEqual({ mode: "subscription" })
+    expect(advisorAuthOf(config)).toEqual({ runner: "claude-code", selection: { mode: "subscription" } })
     const pipeline = resolvePipeline({ name: "p", spec: { steps: [{ agent: "implementer", model: "sonnet" }] }, agents: builtInAgents, ...pipelineDefaultsOf(config.defaults) })
     const step = pipeline.steps[0] as AgentStep
     expect(step.runner).toBe("claude-code")
     expect(step.advisor).toBe("claude-code/opus")
+  })
+
+  test("advisorRoute.authMode applies only to advisors on its own runner", () => {
+    const config = parseConvoyConfig(`version: 1
+runners:
+  codex:
+    auth:
+      authMode: api-key
+      credentialRef: CONVOY_OPENAI_KEY
+defaults:
+  claudeAuth:
+    authMode: subscription
+  advisorRoute:
+    runner: codex
+    model: openai/gpt-5.5
+    authMode: api-key
+`, "config.yaml", "/tmp")
+    const options = { advisorAuth: advisorAuthOf(config), runnerAuth: runnerAuthOf(config) }
+    expect(advisorAuthFor("codex", options)).toEqual({ mode: "api-key", credentialRef: "CONVOY_OPENAI_KEY" })
+    // A step's own Claude advisor never consults under the Codex route's OpenAI key.
+    expect(advisorAuthFor("claude-code", options)).toEqual({ mode: "subscription" })
   })
 
   test("an inherited Claude runner refuses an OpenCode model instead of guessing", () => {
