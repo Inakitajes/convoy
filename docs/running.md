@@ -71,8 +71,9 @@ convoy --resume 20260519-103045-x7q2
 convoy runs
 convoy runs 20260519-103045-x7q2
 
-# list the global (~/.convoy) and project config files, see whether each one
-# loads, and open one in $EDITOR (a missing config is created from the template)
+# toggle the worktrees and specs features for this project, list the global
+# (~/.convoy) and project config files, see whether each one loads, and open
+# one in $EDITOR (a missing config is created from the template)
 convoy config
 
 # create project-local config and prompt files you can customize

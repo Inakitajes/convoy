@@ -5,6 +5,7 @@
 - [x] 1.1 Add `src/config-files.ts`: list each scope's config file and agent prompt overrides with their load state (never writing), create a missing config from the init template, and resolve the editor command; verify `test/config-files.test.ts`.
 - [x] 1.2 Rewrite `src/config-tui.ts` as the file list that opens the editor in the foreground and reports the file's state when it closes; verify the screen test in `test/config-files.test.ts` and `test/tui-session.test.ts`.
 - [x] 1.3 Remove the form editor's tests and smoke script, the model catalog, `defaultConfigTemplate`, `materializePipelineSpec`, and `checkPipelineResolves`; verify typecheck and the full suite.
+- [x] 1.4 Show the feature switches as toggles at the top of the config screen, saving a flip to the project config by editing only that key's line; verify `test/config-files.test.ts`.
 
 ## 2. Feature toggles
 

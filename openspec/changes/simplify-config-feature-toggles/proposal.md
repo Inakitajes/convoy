@@ -6,7 +6,7 @@ The config screen edits every YAML key through forms. Its 2.2k lines cost more t
 
 ## What Changes
 
-- Replace the form editor with a config screen that lists the files that shape the project (global and project config, and agent prompt overrides in both scopes), says whether each one loads, and opens the selected one in `$VISUAL`, `$EDITOR`, or `nano`/`vim`/`vi`. Missing config files are created from the `convoy init` template, and a file that stops loading is reported when the editor closes.
+- Replace the form editor with a config screen that shows the feature switches as toggles (saved to the project config without touching its other lines) and lists the files that shape the project (global and project config, and agent prompt overrides in both scopes), says whether each one loads, and opens the selected one in `$VISUAL`, `$EDITOR`, or `nano`/`vim`/`vi`. Missing config files are created from the `convoy init` template, and a file that stops loading is reported when the editor closes.
 - Add `features: { worktrees, specs }` to the config (each on unless set to `false`, the project winning per switch).
 - `worktrees: false` opens the TUI on the run launcher as its first screen, with Runs, Config, and Specs reachable from it, and stops isolating runs by default. An explicit `--worktree` or `defaults.worktree` still isolates.
 - `specs: false` removes OpenSpec from the TUI (the Specs destination, OpenSpec actions, linked specs, and the launcher's change picker) and from run plans (nothing attached, no selection required). `--change`, `convoy specs`, and `convoy spin` refuse with a message naming the switch.

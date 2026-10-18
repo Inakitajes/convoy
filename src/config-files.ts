@@ -5,12 +5,12 @@
  * than a form for every key.
  */
 
-import { readdir, readFile } from "node:fs/promises"
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 
 import { whichOnPath } from "./claude-code"
-import { parseConvoyConfig, projectConfigPath, writeDefaultGlobalConfig, writeDefaultProjectConfig } from "./config"
+import { defaultConvoyConfig, parseConvoyConfig, projectConfigPath, writeDefaultGlobalConfig, writeDefaultProjectConfig, type ConvoyConfig, type FeatureToggles } from "./config"
 import { convoyRoot, globalAgentsDir, globalConfigPath } from "./workspace"
 
 export type ConfigFileScope = "global" | "project"
@@ -97,4 +97,83 @@ export function editorArgv(path: string, env: NodeJS.ProcessEnv = process.env, w
 export function displayPath(path: string): string {
   const home = homedir()
   return path === home || path.startsWith(`${home}/`) ? `~${path.slice(home.length)}` : path
+}
+
+export type FeatureKey = keyof FeatureToggles
+
+export type FeatureState = {
+  key: FeatureKey
+  enabled: boolean
+  /** Which file decided it: the project wins over the global config, else the built-in default. */
+  source: "default" | "global" | "project"
+}
+
+const featureKeys: readonly FeatureKey[] = ["worktrees", "specs"]
+
+async function loadedScope(scope: ConfigFileScope, targetDir: string): Promise<ConvoyConfig | undefined> {
+  const file = await configFileFor(scope, targetDir)
+  if (file.body === undefined) return undefined
+  try {
+    return parseConvoyConfig(file.body, displayPath(file.path), scope === "global" ? convoyRoot() : targetDir)
+  } catch {
+    return undefined
+  }
+}
+
+/** Each switch's effective value and where it comes from. A config that doesn't load contributes nothing. */
+export async function featureStates(targetDir: string): Promise<FeatureState[]> {
+  const [global, project] = await Promise.all([loadedScope("global", targetDir), loadedScope("project", targetDir)])
+  return featureKeys.map((key) => {
+    const fromProject = project?.features?.[key]
+    if (fromProject !== undefined) return { key, enabled: fromProject, source: "project" }
+    const fromGlobal = global?.features?.[key]
+    if (fromGlobal !== undefined) return { key, enabled: fromGlobal, source: "global" }
+    return { key, enabled: true, source: "default" }
+  })
+}
+
+/**
+ * Sets one switch in the project config, which wins over the global one. The
+ * file is edited in place, so its comments and layout survive: the key's line
+ * inside a top-level `features:` block is replaced or added, or the block is
+ * appended. A missing file starts from the init template. The result must
+ * load before anything is written.
+ */
+export async function setProjectFeature(targetDir: string, key: FeatureKey, enabled: boolean): Promise<string> {
+  const file = await configFileFor("project", targetDir)
+  const before = file.body ?? defaultConvoyConfig
+  if (file.body !== undefined) {
+    try {
+      parseConvoyConfig(before, displayPath(file.path), targetDir)
+    } catch (error) {
+      throw new Error(`fix ${displayPath(file.path)} first: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  const after = withFeature(before, key, enabled)
+  parseConvoyConfig(after, displayPath(file.path), targetDir)
+  await mkdir(dirname(file.path), { recursive: true })
+  await writeFile(file.path, after)
+  return file.path
+}
+
+/** The YAML text with `features.<key>` set, touching only that line or appending the block. */
+export function withFeature(body: string, key: FeatureKey, enabled: boolean): string {
+  const lines = body.split("\n")
+  const value = `  ${key}: ${enabled}`
+  const start = lines.findIndex((line) => /^features:\s*(#.*)?$/.test(line))
+  if (start === -1) {
+    if (lines.some((line) => /^features:/.test(line))) {
+      throw new Error("features is written inline in this config; set it in your editor")
+    }
+    const trimmed = body.replace(/\n*$/, "")
+    return `${trimmed}${trimmed ? "\n\n" : ""}features:\n${value}\n`
+  }
+  let end = start + 1
+  while (end < lines.length && (lines[end]!.trim() === "" || /^\s/.test(lines[end]!) || lines[end]!.startsWith("#"))) end++
+  // Trailing blank or comment lines belong to whatever follows the block.
+  while (end > start + 1 && !/^\s+\S/.test(lines[end - 1]!)) end--
+  const existing = lines.slice(start + 1, end).findIndex((line) => new RegExp(`^\\s+${key}:`).test(line))
+  if (existing !== -1) lines[start + 1 + existing] = value
+  else lines.splice(end, 0, value)
+  return lines.join("\n")
 }

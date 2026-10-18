@@ -155,7 +155,9 @@ Both files are merged before a run, with the project winning: `defaults`, `agent
 
 ## Config files (`convoy config`)
 
-`convoy config` (or **Config** in the TUI) lists the files that shape the current project and opens them in your own editor. Convoy doesn't edit YAML through forms; your editor is better at it.
+`convoy config` (or **Config** in the TUI) shows the [feature switches](#turning-off-worktrees-or-specs-features) as toggles, then lists the files that shape the current project and opens them in your own editor. Apart from the switches, Convoy doesn't edit YAML through forms; your editor is better at it.
+
+The **Features** rows show each switch's value and where it comes from (default, the global config, or this project). `space` flips one and saves it in the project's `.convoy/config.yaml`, which wins over the global config. Only that line changes, so the file keeps its comments; a missing project config is created from the `convoy init` template first, and one that doesn't load is left alone until you fix it.
 
 - **Global:** `~/.convoy/config.yaml` and any agent prompt overrides in `~/.convoy/agents/`.
 - **Project:** `.convoy/config.yaml` (or `config.yml`) and any agent prompt overrides in `.convoy/agents/`.
@@ -164,7 +166,7 @@ Each row says whether the file loads, and a file that doesn't load shows the par
 
 ## Turning off worktrees or specs (`features`)
 
-Both areas are on by default. Turn off the ones you don't use, globally or per project (the project wins, per switch):
+Both areas are on by default. Turn off the ones you don't use from the Features toggles in `convoy config`, or in YAML, globally or per project (the project wins, per switch):
 
 ```yaml
 features:

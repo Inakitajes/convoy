@@ -2844,8 +2844,8 @@ Commands:
   opencode install          Install the global /convoy-spin OpenCode command — a thin wrapper at
                              ~/.config/opencode/commands/convoy-spin.md that runs convoy spin
                              from a session (opt-in, idempotent; touches no other command file)
-  config                   List the global (~/.convoy) and project config files, show whether each
-                           loads, and open one in $EDITOR
+  config                   Toggle the worktrees and specs features, list the global (~/.convoy) and
+                           project config files, show whether each loads, and open one in $EDITOR
   auth openrouter          Store an OpenRouter management key in the macOS Keychain for the
                            header credits meter (--remove deletes it; "auth status" lists sources)
 

@@ -1,13 +1,14 @@
 /**
- * The config screen: the configuration files that shape this project, whether
- * each one loads, and a key to open it in the operator's own editor. Convoy
- * does not edit YAML through forms; the editor is better at that, and a file
- * that stops parsing is reported here the moment the editor closes.
+ * The config screen: the feature switches as toggles, then the configuration
+ * files that shape this project, whether each one loads, and a key to open it
+ * in the operator's own editor. Beyond the switches, Convoy does not edit YAML
+ * through forms; the editor is better at that, and a file that stops parsing
+ * is reported here the moment the editor closes.
  */
 
 import { BoxRenderable, StyledText, TextRenderable, bold, createCliRenderer, fg } from "@opentui/core"
 
-import { createConfigFile, displayPath, editorArgv, listConfigFiles, type ConfigFileEntry } from "./config-files"
+import { createConfigFile, displayPath, editorArgv, featureStates, listConfigFiles, setProjectFeature, type ConfigFileEntry, type FeatureState } from "./config-files"
 import { runForegroundChild } from "./terminal-host"
 import { hintsRow, joinLines, paletteForTerminal, setTheme, terminalBackgroundHex, theme, truncate, type Hint } from "./tui-theme"
 import { sceneForRoute, type TuiRoute, type TuiScene } from "./tui-session"
@@ -32,6 +33,16 @@ export async function editConfigTui(options: { targetDir: string; route?: TuiRou
 
 type Notice = { tone: "ok" | "error" | "info"; text: string }
 
+type Item = { kind: "feature"; state: FeatureState } | { kind: "file"; entry: ConfigFileEntry }
+
+const featureLabels: Record<FeatureState["key"], string> = { worktrees: "Worktrees", specs: "Specs" }
+
+const featureSources: Record<FeatureState["source"], string> = {
+  default: "default",
+  global: "from the global config",
+  project: "set in this project",
+}
+
 /** Test seam: how the editor takes the terminal. */
 export type ConfigScreenDeps = { runEditor: typeof runForegroundChild }
 
@@ -42,6 +53,9 @@ export class ConfigScreen {
   private busy = false
   private selected = 0
   private notice?: Notice
+  private features: FeatureState[] = []
+  /** False until the switches first load: that load puts the selection on the first row. */
+  private loaded = false
   private readonly bodyText: TextRenderable
   private readonly footerText: TextRenderable
 
@@ -59,7 +73,7 @@ export class ConfigScreen {
     if (key.name === "q" || key.name === "escape") return this.finish("back")
     if (key.name === "up" || key.name === "k") this.move(-1)
     else if (key.name === "down" || key.name === "j") this.move(1)
-    else if (key.name === "return" || key.name === "linefeed" || key.name === "e") void this.open()
+    else if (key.name === "space" || key.name === "return" || key.name === "linefeed" || key.name === "e") void this.activate(key.name)
     else if (key.name === "r") void this.reload()
   }
 
@@ -98,26 +112,54 @@ export class ConfigScreen {
     renderer.keyInput.on("keypress", this.handleKeyPress)
     renderer.on("theme_mode", this.handleThemeMode)
     this.render()
+    // The switches load after the first paint, landing the selection on the first of them.
+    void this.reload()
+  }
+
+  /** The selectable rows in order: the feature switches, then the files. */
+  private items(): Item[] {
+    return [...this.features.map((state) => ({ kind: "feature" as const, state })), ...this.entries.map((entry) => ({ kind: "file" as const, entry }))]
   }
 
   private move(delta: number) {
-    this.selected = Math.max(0, Math.min(this.entries.length - 1, this.selected + delta))
+    this.selected = Math.max(0, Math.min(this.items().length - 1, this.selected + delta))
     this.render()
   }
 
   private async reload(notice?: Notice) {
-    const path = this.entries[this.selected]?.path
-    this.entries = await listConfigFiles(this.targetDir)
-    const index = this.entries.findIndex((entry) => entry.path === path)
-    this.selected = index >= 0 ? index : Math.min(this.selected, this.entries.length - 1)
+    const identity = (item: Item | undefined) => (item?.kind === "feature" ? `feature:${item.state.key}` : item ? `file:${item.entry.path}` : undefined)
+    const current = identity(this.items()[this.selected])
+    ;[this.features, this.entries] = await Promise.all([featureStates(this.targetDir), listConfigFiles(this.targetDir)])
+    const index = this.items().findIndex((item) => identity(item) === current)
+    this.selected = !this.loaded ? 0 : index >= 0 ? index : Math.min(this.selected, this.items().length - 1)
+    this.loaded = true
     this.notice = notice
     this.render()
   }
 
-  /** Opens the selected file in the editor, creating a missing config from the template first. */
-  private async open() {
-    const entry = this.entries[this.selected]
-    if (!entry) return
+  private async activate(key: string) {
+    const item = this.items()[this.selected]
+    if (item?.kind === "feature") await this.toggle(item.state)
+    else if (item && key !== "space") await this.open(item.entry)
+  }
+
+  /** Flips a switch in the project config, which wins over the global one. */
+  private async toggle(state: FeatureState) {
+    this.busy = true
+    try {
+      const path = await setProjectFeature(this.targetDir, state.key, !state.enabled)
+      const shown = path.startsWith(`${this.targetDir}/`) ? path.slice(this.targetDir.length + 1) : displayPath(path)
+      await this.reload({ tone: "ok", text: `${featureLabels[state.key]} ${state.enabled ? "off" : "on"} · saved in ${shown}` })
+    } catch (error) {
+      this.notice = { tone: "error", text: error instanceof Error ? error.message : String(error) }
+      this.render()
+    } finally {
+      this.busy = false
+    }
+  }
+
+  /** Opens a file in the editor, creating a missing config from the template first. */
+  private async open(entry: ConfigFileEntry) {
     this.busy = true
     try {
       if (!entry.exists) await createConfigFile(entry, this.targetDir)
@@ -144,9 +186,15 @@ export class ConfigScreen {
     if (this.finished || this.renderer.isDestroyed || this.scene?.isClosed) return
     const width = Math.max(20, this.renderer.width - 8)
     const lines: StyledText[] = []
-    const nameWidth = Math.max(...this.entries.map((entry) => entryName(entry).length), 6) + 2
+    const nameWidth = Math.max(...this.entries.map((entry) => entryName(entry).length), 9) + 2
+    if (this.features.length > 0) {
+      lines.push(new StyledText([bold(fg(theme.dim)("FEATURES")), fg(theme.faint)(" · saved in this project's config")]))
+      for (const [index, state] of this.features.entries()) lines.push(this.featureRow(state, index === this.selected, nameWidth))
+    }
+    const offset = this.features.length
     let scope: string | undefined
-    for (const [index, entry] of this.entries.entries()) {
+    for (const [position, entry] of this.entries.entries()) {
+      const index = offset + position
       if (entry.scope !== scope) {
         scope = entry.scope
         if (lines.length > 0) lines.push(new StyledText([]))
@@ -154,7 +202,8 @@ export class ConfigScreen {
       }
       lines.push(this.row(entry, index === this.selected, width, nameWidth))
     }
-    const current = this.entries[this.selected]
+    const selectedItem = this.items()[this.selected]
+    const current = selectedItem?.kind === "file" ? selectedItem.entry : undefined
     lines.push(new StyledText([]))
     if (current?.error) lines.push(new StyledText([fg(theme.red)(truncate(current.error, width * 3))]))
     if (this.notice) {
@@ -164,12 +213,22 @@ export class ConfigScreen {
     this.bodyText.content = joinLines(lines)
     const hints: Hint[] = [
       { keys: "↑/↓", label: "move", priority: 3, tone: "dim" },
-      { keys: "enter", label: current?.exists === false ? "create and edit" : "open in editor", priority: 1 },
+      selectedItem?.kind === "feature"
+        ? { keys: "space", label: "toggle", priority: 1 }
+        : { keys: "enter", label: current?.exists === false ? "create and edit" : "open in editor", priority: 1 },
       { keys: "r", label: "efresh", priority: 4, style: "glued" },
       { keys: "q", label: this.scene ? "back" : "uit", priority: 2, style: this.scene ? undefined : "glued" },
     ]
     this.footerText.content = hintsRow(hints, [], Math.max(1, this.renderer.width - 6), { style: "spaced" })
     this.renderer.requestRender()
+  }
+
+  private featureRow(state: FeatureState, selected: boolean, nameWidth: number): StyledText {
+    const marker: TextChunk = selected ? fg(theme.accent)("▸ ") : fg(theme.faint)("  ")
+    const label = featureLabels[state.key]
+    const name = (selected ? bold : (chunk: TextChunk) => chunk)(fg(selected ? theme.text : theme.dim)(label.padEnd(nameWidth)))
+    const value = state.enabled ? fg(theme.green)("● on ") : fg(theme.faint)("○ off")
+    return new StyledText([marker, name, value, fg(theme.faint)(`   ${featureSources[state.source]}`)])
   }
 
   private row(entry: ConfigFileEntry, selected: boolean, width: number, nameWidth: number): StyledText {
