@@ -35,3 +35,11 @@ Depends on `generalize-runner-routes`.
 
 - [x] 5.1 Document Codex in `runners.md`, `models.md`, `configuration.md`, `getting-started.md`, `development.md` and README.
 - [x] 5.2 Run a consented live run on a disposable repo (an advised implementation, then a read-only audit) and record it in `evidence/acceptance.md`.
+
+## 6. Review fixes
+
+- [x] 6.1 Judge shell inspection fail-closed (per-program option values, expansions, globs, changed environments) and limit git to reads inside the checkout; verify every bypass spelling the review found as a regression test.
+- [x] 6.2 Start no thread when the operator's MCP servers cannot be read, or one is named `convoy`; verify for attempts and helpers.
+- [x] 6.3 Gate preflight on the minimum Codex release read from `initialize`; verify an old and a current release.
+- [x] 6.4 Refuse to reopen a thread Codex no longer holds (API-key threads); verify against a scripted Codex home.
+- [x] 6.5 Run the shared runner conformance suite against the Codex adapter.

@@ -27,7 +27,7 @@ See `proposal.md` and `evidence/`. This builds on `generalize-runner-routes`: Co
 
 - **Process.** Convoy starts `codex app-server --disable hooks --disable apps --disable browser_use --disable browser_use_external --disable computer_use` per attempt as its own child. It never attaches to the operator's shared daemon.
 - **Protocol types.** The protocol is labeled experimental, so the adapter speaks a small hand-typed subset (`protocol.ts`) and reads every field defensively. Generated bindings for the whole surface were rejected, because they would churn with every Codex release.
-- **Version gate.** Releases older than 0.160 restrict every capability with an update hint.
+- **Version gate.** Preflight reads the release from `initialize`'s user agent (`<originator>/<version>`) and refuses one older than 0.160 with an update hint; the declaration restricts every capability on the same check.
 
 `dynamicTools` would remove the MCP process and the bridge, but it is experimental. MCP is used instead (D4).
 
@@ -45,6 +45,7 @@ See `proposal.md` and `evidence/`. This builds on `generalize-runner-routes`: Co
 
 - **`item/commandExecution/requestApproval`.** Unwrap the login-shell wrapper (`/bin/zsh -lc '…'`), then:
   - A command that only inspects (`inspection.ts`: `cat`, `sed -n …p`, `head`, `tail`, `ls`, `rg`, `grep`, `find` without `-exec`/`-delete`, `wc`, `git diff/log/show/status`, with no redirection, substitution or writer option) is judged as the reads it performs. Each path passes the read policy, with a recursive search treated as a tree read.
+  - The reading fails closed. Each program declares only the options it knows take a non-path value (a numeric one only when the next word is a number), so every other word, including an option the classifier does not know, is judged as a path. A word the shell would still change (a variable other than a leading `$HOME`, a brace, `~user`) or a command run after assignments or wrappers is an execution. A glob is judged as the tree below its fixed prefix, and the parent too when a segment could match `..`. Git is limited to reads inside the checkout: every path or revision word is judged as a path, `--no-index`, `--ext-diff`, `--output`, `grep -O` and global options other than `-C`/`--no-pager` are executions, and `git branch` only lists.
   - Anything else is an execution, judged by the existing bash policy (hard denials, protected paths, verify allowlist) and then the operator gate.
 - **Why inspection is a read.** Codex has no file-read tool. The first live run showed a read-only Codex auditor could read nothing (`evidence/acceptance.md`), and every `cat` in an interactive run would otherwise prompt the operator.
 - **`item/fileChange/requestApproval`.** Take the paths from the `fileChange` item with the same `itemId` (seen in `item/started`), then judge each path as a write. A request whose item was never seen is declined.
@@ -58,7 +59,7 @@ See `proposal.md` and `evidence/`. This builds on `generalize-runner-routes`: Co
 
 `thread/start` takes per-thread config overrides (verified, `evidence/acceptance.md`). Each attempt's config:
 
-- disables every MCP server the operator's config declares (read with `config/read`);
+- disables every MCP server the operator's config declares (read with `config/read`). When that list cannot be read, the attempt or helper starts no thread, and an operator server named `convoy` refuses an attempt that declares Convoy's host, since its settings would merge into the host's;
 - declares Convoy's host as `convoy mcp --bridge-file <path>`, with a long tool timeout for advisor consultations.
 
 `mcp_servers={}` cannot clear the operator's table, because overrides deep-merge, so each server is disabled by name.

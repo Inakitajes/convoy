@@ -24,7 +24,7 @@ Every model-bearing setting SHALL accept a model by its provider-owned identity,
 
 ### Requirement: Every model-bearing setting accepts a route
 
-A step's `model`, each `models:` entry, every `advisor`, and `defaults.autoAcceptJudgeModel` SHALL accept either a model or a route `{ runner, model }`. A step's runner SHALL be its own `runner`, else `defaults.runner`, else OpenCode. Its model and plain fan-out entries SHALL be read in that runner's namespace. A model the step only inherits (agent `model`, `defaults.model`) SHALL apply only where the runner executes it. A plain advisor or judge model SHALL keep consulting through OpenCode. Convoy SHALL NOT infer a runner from a model's provider. The resolved runner and model SHALL be frozen in the plan and shown in review.
+A step's `model`, each `models:` entry, every `advisor`, and `defaults.autoAcceptJudgeModel` SHALL accept either a model or a route `{ runner, model }`. A step's runner SHALL be its own `runner`, else the runner its `model` route names, else `defaults.runner`, else OpenCode. A `model` route that names a different runner than the step's own `runner` SHALL be refused. Its model and plain fan-out entries SHALL be read in that runner's namespace. A model the step only inherits (agent `model`, `defaults.model`) SHALL apply only where the runner executes it. A plain advisor or judge model SHALL keep consulting through OpenCode. Convoy SHALL NOT infer a runner from a model's provider. The resolved runner and model SHALL be frozen in the plan and shown in review.
 
 #### Scenario: An advisor on a different runner
 - **WHEN** a Codex step sets `advisor: { runner: claude-code, model: anthropic/opus }`
@@ -56,11 +56,15 @@ Each runner SHALL be described by one descriptor: its identity, its capability d
 
 ### Requirement: Runner settings live under the runner
 
-Settings for a runner that authenticates SHALL be configured under `runners.<id>.auth`. Global and project settings SHALL merge per runner. A route MAY override its runner's authentication mode. It SHALL reuse that runner's credential reference and SHALL NOT embed a credential value. Each plan SHALL carry one reviewed authentication and billing decision for every authenticating runner it uses: a step, an advisor, the judge, or the commit writer.
+Settings for a runner that authenticates SHALL be configured under `runners.<id>.auth`. Global and project settings SHALL merge per runner. A route MAY override its runner's authentication mode. The override SHALL apply only to that runner: an advisor on another runner SHALL keep its own runner's authentication. It SHALL reuse that runner's credential reference and SHALL NOT embed a credential value. Each plan SHALL carry one reviewed authentication and billing decision for every authenticating runner it uses: a step, an advisor, the judge, or the commit writer.
 
 #### Scenario: Two runners with different authentication
 - **WHEN** `runners.claude-code.auth` selects a subscription and `runners.codex.auth` selects an API key
 - **THEN** review shows both routes, and each attempt, advisor and helper runs under its own runner's authentication
+
+#### Scenario: An advisor route's authentication on a mixed plan
+- **WHEN** `advisorRoute` selects Codex with an API key and a step's own advisor runs on Claude
+- **THEN** the Claude advisor consults under Claude's authentication, never the Codex route's key
 
 #### Scenario: A runner that authenticates through its own configuration
 - **WHEN** a config sets `runners.opencode.auth`

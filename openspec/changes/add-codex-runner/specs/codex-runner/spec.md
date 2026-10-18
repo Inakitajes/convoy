@@ -10,7 +10,7 @@ Run pipeline steps, advisors, helpers and human iterations on Codex under Convoy
 
 Convoy SHALL register a `codex` runner that executes `openai/*` models and maps a model's `#variant` to Codex reasoning effort. Preflight SHALL verify the following before any checkout change:
 
-- the `codex` CLI is installed;
+- the `codex` CLI is installed, at the minimum supported release or later;
 - every Codex model and effort the plan names is offered to the effective account.
 
 A plan in which nothing runs on another runner SHALL NOT require OpenCode or Claude.
@@ -49,6 +49,10 @@ Each Codex attempt SHALL run under `approvalPolicy: untrusted`. Its sandbox SHAL
 - **WHEN** a Codex agent runs `cat ~/.convoy/private/<file>` or `rg secret ~` through any spelling
 - **THEN** Convoy declines it, even with `--yolo`
 
+#### Scenario: An option or expansion hides the path
+- **WHEN** a Codex agent runs `cat -n <protected file>`, `cat $SOME_VAR/file`, `git diff --no-index <file> /dev/null` or `git branch -D <branch>`
+- **THEN** none of them is accepted as inspection; each is judged as an execution or declined as a read of a protected or outside path
+
 #### Scenario: A declined action is explained
 - **WHEN** Convoy declines a Codex command
 - **THEN** the policy's reason is steered into the running turn, and Codex's generic "rejected by user" is not the only signal the agent gets
@@ -64,6 +68,10 @@ Pipeline attempts and helpers SHALL start Codex with the operator's hooks, apps,
 #### Scenario: The operator has Codex hooks and MCP servers
 - **WHEN** `~/.codex` defines hooks and MCP servers and a Codex step runs
 - **THEN** none of those hooks run, none of those servers start for the thread, and the operator's files are unchanged
+
+#### Scenario: The operator's MCP servers cannot be read
+- **WHEN** `config/read` fails, or the operator declares an MCP server named `convoy`
+- **THEN** no thread starts, and the attempt fails with the reason
 
 #### Scenario: The agent inspects its process
 - **WHEN** a Codex agent lists processes or prints its environment
@@ -115,7 +123,7 @@ Cancellation SHALL interrupt the turn and stop the owned child within the bounde
 
 ### Requirement: Authoring conversations are refused on Codex with a reason
 
-Convoy SHALL refuse `defaults.authoring.runner: codex`, stating that Codex assigns a conversation's thread id itself. When the run-wide `defaults.runner` is Codex, authoring SHALL fall back to OpenCode. Human-gate iterations in a run without OpenCode SHALL open the operator's interactive Codex under the reviewed authentication.
+Convoy SHALL refuse `defaults.authoring.runner: codex`, stating that Codex assigns a conversation's thread id itself. When the run-wide `defaults.runner` is Codex, authoring SHALL fall back to OpenCode. Human-gate iterations in a run without OpenCode SHALL open the operator's interactive Codex under the reviewed authentication. Reopening a Codex thread SHALL be refused, with the reason, when Codex no longer holds it, as for a thread that ran under API-key mode in a discarded private home.
 
 #### Scenario: Codex chosen for authoring
 - **WHEN** a config sets `defaults.authoring.runner: codex`
