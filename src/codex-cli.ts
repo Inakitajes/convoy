@@ -1,3 +1,6 @@
+import { homedir } from "node:os"
+import { join } from "node:path"
+
 import { withoutHerdrEnv } from "./herdr"
 import { openSessionCommand, shellQuote, type SessionWindowBackend } from "./opencode"
 import { codexBinaryName } from "./runners/codex/adapter"
@@ -43,11 +46,34 @@ export function codexAuthShellCommand(command: string, auth: AuthenticationSelec
 }
 
 /**
+ * Why `codex resume` cannot bring a thread back, if it cannot. Codex keeps a
+ * thread as a rollout file in the Codex home it ran under. An API-key thread
+ * ran in a private per-use home that Convoy discards, so it is gone; any
+ * other thread must be in the operator's Codex home.
+ */
+export async function codexResumeProblem(sessionID: string, auth: AuthenticationSelection = { mode: "subscription" }, env: NodeJS.ProcessEnv = process.env): Promise<string | undefined> {
+  const discarded = `Codex thread ${sessionID} ran under API-key mode, in a private Codex home Convoy discards after use, so it cannot be reopened`
+  if (auth.mode === "api-key") return discarded
+  const home = env.CODEX_HOME || join(homedir(), ".codex")
+  if (/^[A-Za-z0-9-]+$/.test(sessionID)) {
+    try {
+      for await (const _ of new Bun.Glob(`sessions/**/rollout-*-${sessionID}.jsonl`).scan({ cwd: home, onlyFiles: true })) return undefined
+    } catch {
+      // No Codex home: the thread is not there either.
+    }
+  }
+  return `Codex thread ${sessionID} is not in your Codex home (${home}); a thread run under API-key mode lived in a private Codex home Convoy discards after use, so it cannot be reopened`
+}
+
+/**
  * Reopens a finished Codex session for the operator (`[o]`): Codex keeps the
  * thread on disk, so `codex resume` brings it back with its full context, in a
- * read-only sandbox that asks before anything runs.
+ * read-only sandbox that asks before anything runs. A thread Codex no longer
+ * has is refused with its reason instead of opening an empty client.
  */
-export async function openCodexSessionWindow(input: { targetDir: string; sessionID: string; auth?: AuthenticationSelection }): Promise<SessionWindowBackend> {
+export async function openCodexSessionWindow(input: { targetDir: string; sessionID: string; auth?: AuthenticationSelection; env?: NodeJS.ProcessEnv }): Promise<SessionWindowBackend> {
+  const problem = await codexResumeProblem(input.sessionID, input.auth, input.env)
+  if (problem) throw new Error(problem)
   const command = [codexBinaryName, "resume", input.sessionID, "--sandbox", "read-only", "--ask-for-approval", "on-request"].map(shellQuote).join(" ")
   return openSessionCommand(codexAuthShellCommand(command, input.auth), input.targetDir, "codex session")
 }
@@ -59,12 +85,16 @@ export async function openCodexSessionWindow(input: { targetDir: string; session
  * reopens that exact thread; without it a fresh conversation starts.
  */
 export async function openCodexInteractiveWindow(input: { targetDir: string; auth?: AuthenticationSelection; resume?: string; label?: string; prompt?: string }): Promise<SessionWindowBackend> {
+  const problem = input.resume ? await codexResumeProblem(input.resume, input.auth) : undefined
+  if (problem) throw new Error(problem)
   const args = [codexBinaryName, ...(input.resume ? ["resume", input.resume] : []), ...(input.prompt ? [input.prompt] : [])].map(shellQuote).join(" ")
   return openSessionCommand(codexAuthShellCommand(args, input.auth), input.targetDir, input.label ?? "codex session")
 }
 
 /** Runs an interactive Codex client in this terminal until it exits, under the reviewed authentication. */
 export async function runInteractiveCodex(input: { targetDir: string; auth?: AuthenticationSelection; resume?: string }): Promise<number> {
+  const problem = input.resume ? await codexResumeProblem(input.resume, input.auth) : undefined
+  if (problem) throw new Error(problem)
   const auth = await prepareCodexAuth({ selection: input.auth ?? { mode: "subscription" }, env: process.env, cwd: input.targetDir })
   try {
     const proc = Bun.spawn([codexBinaryName, ...(input.resume ? ["resume", input.resume] : [])], {

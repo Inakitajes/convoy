@@ -5,7 +5,7 @@ import { join } from "node:path"
 
 import { afterEach, describe, expect, test } from "bun:test"
 
-import { codexAuthShellCommand } from "../src/codex-cli"
+import { codexAuthShellCommand, codexResumeProblem, openCodexSessionWindow } from "../src/codex-cli"
 import { bridgeFileEnvironment, convoyToolHost } from "../src/runners/commands"
 import { handleMcpPermissionRequest } from "../src/runners/claude/mcp-permission-server"
 import { bridgeFileFlag, createCodexRunner } from "../src/runners/codex/adapter"
@@ -85,6 +85,20 @@ describe("Convoy's tools reach a Codex attempt through a private bridge file", (
     expect((listed as { result: { tools: { name: string }[] } }).result.tools.map((tool) => tool.name)).toEqual(["write_report", "advisor", "advisor_feedback"])
     const permission = await handleMcpPermissionRequest({ id: 2, method: "tools/call", params: { name: "permission", arguments: {} } }, { permissionTool: false, tools, resolve: async () => ({ decision: "allow" }) })
     expect(permission).toMatchObject({ error: { code: -32602 } })
+  })
+})
+
+describe("reopening a Codex thread", () => {
+  test("only a thread the operator's Codex home holds is reopened; an API-key thread is refused with its reason", async () => {
+    const home = await tempDir()
+    const thread = "01a15065-0fe6-7cd1-a60a-0db398a995b2"
+    const env = { CODEX_HOME: home }
+    expect(await codexResumeProblem(thread, { mode: "subscription" }, env)).toContain("is not in your Codex home")
+    await expect(openCodexSessionWindow({ targetDir: home, sessionID: thread, env })).rejects.toThrow("cannot be reopened")
+    await Bun.write(join(home, "sessions", "2026", "10", "18", `rollout-2026-10-18T20-02-42-${thread}.jsonl`), "{}\n")
+    expect(await codexResumeProblem(thread, { mode: "subscription" }, env)).toBeUndefined()
+    expect(await codexResumeProblem(thread, { mode: "api-key", credentialRef: "CONVOY_OPENAI_KEY" }, env)).toContain("ran under API-key mode")
+    expect(await codexResumeProblem("../../x", { mode: "subscription" }, env)).toContain("is not in your Codex home")
   })
 })
 

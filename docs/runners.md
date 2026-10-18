@@ -246,6 +246,8 @@ conversations stay on OpenCode or Claude: Codex assigns a conversation's
 thread id itself, so Convoy cannot link one to a worktree. Human gates
 iterate with Codex when the run has no OpenCode server, and `[o]` reopens a
 finished Codex step with `codex resume <thread>` in a read-only sandbox.
+A thread that ran under API-key mode lived in a private Codex home that
+Convoy discards after the attempt, so `[o]` refuses it and says why.
 
 ## Reports and advisors
 
