@@ -47,6 +47,8 @@ export type AttemptContext = {
   auth?: AuthenticationSelection
   /** Process environment for a CLI harness (Claude). */
   env?: NodeJS.ProcessEnv
+  /** Where a CLI harness tees its raw event stream (`logs/<step>.<attempt>.claude.jsonl`); absent writes none. */
+  streamLogPath?: string
   /** The run's OpenCode client, when the runner is OpenCode. */
   client?: OpencodeClient
 }

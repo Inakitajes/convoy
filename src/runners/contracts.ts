@@ -238,6 +238,8 @@ export type ExecutionRequest = {
   policy?: PolicyConfig
   /** True when the phase consults an advisor: its tools and first-write checkpoint are installed. */
   advised?: boolean
+  /** Where a CLI harness tees its raw event stream for inspection; absent writes none. */
+  streamLogPath?: string
   signal: AbortSignal
 }
 

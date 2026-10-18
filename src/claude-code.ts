@@ -498,7 +498,8 @@ function claudeRawStreamLog(workspace: Workspace, phase: AgentStep, attempt: num
   return new ClaudeRawStreamLog(path, phase.name)
 }
 
-class ClaudeRawStreamLog {
+/** Tees a Claude attempt's raw stream-json lines to an owner-only file; a write failure warns once and never fails the attempt. */
+export class ClaudeRawStreamLog {
   private file: Awaited<ReturnType<typeof open>> | undefined
   private failed = false
 

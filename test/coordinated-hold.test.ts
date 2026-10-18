@@ -181,3 +181,29 @@ describe("coordinated finish hold over a real server, adapter, client, and polle
     }
   })
 })
+
+describe("unattended holds", () => {
+  test("a hold with no controller says what waits and how to release it, and still holds", async () => {
+    const server = await startControlServer()
+    const progress = new ControlProgress({ server })
+    progress.start("20260101-000000-cd34", await scratch())
+    const lines: string[] = []
+    const original = console.error
+    console.error = (...args: unknown[]) => void lines.push(args.join(" "))
+    try {
+      const reply = progress.askPermission({ id: "per-1", permission: "bash", patterns: ["rm -rf build"], command: "rm -rf build" })
+      void progress.askHumanReview({ stepName: "review", iterations: 0 })
+      const text = lines.join("\n")
+      expect(text).toContain("[permission] waiting for an answer: bash: rm -rf build")
+      expect(text).toContain("[human] review is waiting for a decision")
+      expect(text).toContain("convoy runs 20260101-000000-cd34")
+      expect(text).toContain("--smart or --yolo")
+      // Waiting is the design: nobody being attached never auto-rejects.
+      expect(server.pending.resolvePermission("per-1", "once")).toBe(true)
+      expect(await reply).toBe("once")
+    } finally {
+      console.error = original
+      server.close()
+    }
+  })
+})

@@ -2,6 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 
 import type { ControlReset, ControlServer } from "./control-server"
+import { log } from "./log"
 import type {
   AutoAccept,
   GoalLoopView,
@@ -168,11 +169,25 @@ export class ControlProgress implements ProgressUI {
   phaseRestored(): void {}
 
   askPermission(info: PermissionPromptInfo): Promise<PermissionReply> {
+    if (!this.server.hasController()) {
+      const what = info.command ?? info.target ?? info.patterns.join(", ")
+      this.warnUnattended(`[permission] waiting for an answer: ${info.permission}${what ? `: ${what}` : ""}`)
+    }
     return this.server.pending.holdPermission(info)
   }
 
   askHumanReview(info: HumanReviewPromptInfo): Promise<HumanReviewAction> {
+    if (!this.server.hasController()) this.warnUnattended(`[human] ${info.stepName} is waiting for a decision${info.error ? ` after: ${info.error}` : ""}`)
     return this.server.pending.holdHuman(info)
+  }
+
+  /**
+   * A hold without a controller waits by design (a dashboard may attach later),
+   * but its log reader, often an agent following a --no-tui launch, would
+   * otherwise see only silence. Say what is held and how to release it.
+   */
+  private warnUnattended(what: string): void {
+    log.warn(`${what} — no controller is attached; answer it from \`convoy runs ${this.runID}\`, or launch unattended runs with --smart or --yolo`)
   }
 
   isInteractiveTakeover(name: string): boolean {

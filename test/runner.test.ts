@@ -2265,6 +2265,17 @@ describe("waitForPhaseGate", () => {
     return { events, permissions, pauseCalls, resumeCalls }
   }
 
+  test("an unattended run fails its failure and budget gates instead of holding, but an armed takeover still asks", async () => {
+    // A coordinated run always has a hold to wait on; without this a headless
+    // failure waited forever for an answer nobody would give.
+    const { calls, progress } = gateProgress(["continue"])
+    expect(await waitForPhaseGate("implementer", "/repo", "ses_1", undefined, progress, { kind: "failure", canRetry: true, unattended: true })).toBe("unavailable")
+    expect(await waitForPhaseGate("implementer", "/repo", "ses_1", undefined, progress, { kind: "budget-gate", canRetry: false, unattended: true })).toBe("unavailable")
+    expect(calls.prompts).toEqual([])
+    expect(await waitForPhaseGate("implementer", "/repo", "ses_1", undefined, progress, { kind: "interactive", canRetry: false, unattended: true })).toBe("continue")
+    expect(calls.prompts).toHaveLength(1)
+  })
+
   test("continue resolves the interactive gate and pauses permissions only while waiting", async () => {
     const { calls, progress } = gateProgress(["continue"])
     const { events, permissions } = trackedPermissions()

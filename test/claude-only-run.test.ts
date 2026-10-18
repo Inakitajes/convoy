@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -101,7 +101,16 @@ describe("Claude-only run", () => {
     await git(["add", "-A"], repo)
     await git(["commit", "-qm", "base"], repo)
 
-    const result = await run({ ...options(repo), plan: buildRunPlan(options(repo)) }, { startOpencode: noOpencode })
+    const logged: string[] = []
+    const originalError = console.error
+    console.error = (...args: unknown[]) => void logged.push(args.join(" "))
+    const result = await run({ ...options(repo), plan: buildRunPlan(options(repo)) }, { startOpencode: noOpencode }).finally(() => {
+      console.error = originalError
+    })
+    // Someone following the log (a CLI agent) sees the same session and usage
+    // lines an OpenCode step prints.
+    expect(logged.join("\n")).toContain("[review] session: ses-claude-1")
+    expect(logged.join("\n")).toContain("[review] usage: $0.0000")
     expect(await readFile(join(result.dir, "reports", "review.md"), "utf8")).toContain("The change is sound.")
     const metadata = await readRunMetadata(join(result.dir, "metadata.json"))
     expect(metadata?.server).toBeUndefined()
@@ -115,6 +124,10 @@ describe("Claude-only run", () => {
       session: { sessionId: "ses-claude-1" },
       attempt: { phase: "review", attempt: 1 },
     })
+    // The raw stream-json is kept for inspection, owner-only.
+    const streamLog = join(result.dir, "logs", "review.1.claude.jsonl")
+    expect(await readFile(streamLog, "utf8")).toContain('"session_id":"ses-claude-1"')
+    expect((await stat(streamLog)).mode & 0o777).toBe(0o600)
     // The run's attempt composition ended with it.
     expect(cachedCompositionCount()).toBe(0)
     // The Claude CLI ran the step under a verified subscription login.

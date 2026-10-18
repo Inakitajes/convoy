@@ -16,13 +16,13 @@ import { aggregateAdvisorEvents, createAdvisorEventJournal, readAdvisorEvents, t
 import { opencodeConfig, loadAgentPrompt } from "./agents"
 import { fileParts } from "./attachments"
 import { Caffeinate } from "./caffeinate"
-import { ensureClaudeAvailable, openClaudeSessionWindow, promptClaudePhase } from "./claude-code"
+import { ensureClaudeAvailable, openClaudeSessionWindow } from "./claude-code"
 import { baseAgentName } from "./runners/agent-source"
 import { attemptCompositionFor, releaseAttemptCompositions } from "./runners/attempt-composition"
 import { resolveAttempt, type AttemptContext } from "./runners/attempt"
 import { phasePolicy } from "./runners/phase-policy"
 import { beginSessionHandles, releaseSessionHandles } from "./runners/session-handles"
-import { progressSink } from "./runners/attempt-sink"
+import { progressSink, toProgressUsage } from "./runners/attempt-sink"
 import type { AttemptResult } from "./runners/attempt"
 import { createClaudeRunner } from "./runners/claude/adapter"
 import { promptPhase } from "./runners/opencode/phase"
@@ -35,7 +35,7 @@ export { promptPhase }
 import { UserAbortError, isUserAbortError } from "./runners/abort"
 import { formatSdkError, isContextOverflowError } from "./runners/errors"
 import { validateDeliverableContract } from "./runners/quality-contract"
-import { combinedAssistantUsage, extractAssistantText, type SessionRef } from "./runners/opencode/session"
+import { combinedAssistantUsage, extractAssistantText, formatUsageForLog, type SessionRef } from "./runners/opencode/session"
 
 export { UserAbortError, isUserAbortError } from "./runners/abort"
 export { formatSdkError } from "./runners/errors"
@@ -1750,6 +1750,8 @@ type PreparedPhaseRun = {
   claudeAuth?: AuthenticationSelection
   /** The smart auto-accept judge, for a runner whose asks the engine decides. */
   judgeModel?: { providerID: string; modelID: string }
+  /** No human decides this run (human steps off): failure and budget gates fail the step instead of holding. */
+  unattended?: boolean
 }
 
 export async function preparePhaseRun(
@@ -1789,6 +1791,7 @@ export async function preparePhaseRun(
     autoAccept: options.autoAccept ?? options.progress?.autoAccept ?? { mode: options.yolo ? "all" : options.smart ? "smart" : "off" },
     ...(options.claudeAuth ? { claudeAuth: options.claudeAuth } : {}),
     ...(options.smartJudgeModel ? { judgeModel: parseModel(splitModelVariant(options.smartJudgeModel).model) } : {}),
+    ...(options.humanReview ? {} : { unattended: true }),
   }
 }
 
@@ -2023,6 +2026,7 @@ export async function runPhaseUntilResolved(
             kind: "budget-gate",
             error: formatSdkError(error),
             canRetry: false,
+            ...(run.unattended ? { unattended: true } : {}),
             signal: shutdown.signal,
             onAbort: () => {
               if (!shutdown.aborted) shutdown.request("budget gate abort")
@@ -2075,6 +2079,7 @@ export async function runPhaseUntilResolved(
             kind: armed() ? "interactive" : "failure",
             error: gateError,
             canRetry: Boolean(baseline),
+            ...(run.unattended ? { unattended: true } : {}),
             signal: shutdown.signal,
             onAbort: () => {
               if (!shutdown.aborted) shutdown.request("phase gate abort")
@@ -2138,6 +2143,13 @@ type PhaseGateOptions = {
   /** Which runner's session the gate reopens; resolved through the opener table. */
   runner?: StepRunnerId
   runDir?: string
+  /**
+   * The run has no human decisions (human steps off, the default off a TTY):
+   * a failure or budget gate is "unavailable" so the step fails and the run
+   * exits non-zero. A coordinated run always has a hold to wait on, so without
+   * this a headless failure waited forever for an answer nobody would give.
+   */
+  unattended?: boolean
 }
 
 type SessionWindowInput = { targetDir: string; sessionID: string; runDir: string; url?: string; password?: string }
@@ -2204,6 +2216,8 @@ export async function waitForPhaseGate(
   options: PhaseGateOptions,
   deps: PhaseGateDeps = defaultPhaseGateDeps,
 ): Promise<PhaseGateOutcome> {
+  // An armed takeover is a human's explicit request, so it holds regardless.
+  if (options.unattended && options.kind !== "interactive") return "unavailable"
   const askInTui = progress.askHumanReview?.bind(progress)
   const usingTui = Boolean(askInTui)
   if (!usingTui && !(stdin.isTTY && stdout.isTTY)) return "unavailable"
@@ -2434,6 +2448,11 @@ async function runPhaseAttempt(
     model: prepared.model,
     attachments: prepared.attachmentsByPath ? [] : prepared.attachments,
     sink: (event) => {
+      // OpenCode's phase logs its session and usage itself; a process-owned
+      // session (Claude) reports them only as events, so log the same lines
+      // here for whoever follows the coordinator's log, such as a CLI agent.
+      if (!serverSession && event.type === "session" && event.session.sessionId !== activeSessionID) log.info(`[${phase.name}] session: ${event.session.sessionId}`)
+      if (!serverSession && event.type === "usage") log.info(`[${phase.name}] usage: ${formatUsageForLog(toProgressUsage(event.usage))}`)
       if (event.type === "session" && event.session.sessionId !== activeSessionID) {
         activeSessionID = event.session.sessionId
         beginSession(activeSessionID)
@@ -2451,6 +2470,7 @@ async function runPhaseAttempt(
     services,
     policy,
     ...(prepared.claudeAuth ? { auth: prepared.claudeAuth } : {}),
+    ...(runnerId === "claude-code" ? { streamLogPath: join(workspace.dir, "logs", `${phase.name}.${attempt}.claude.jsonl`) } : {}),
     env: process.env,
     client,
   }

@@ -65,6 +65,7 @@ export async function executeClaudeAttempt(context: AttemptContext, adapter?: Cl
     ...(context.policy ? { policy: context.policy } : {}),
     ...(phase.resolvedAdvisor ? { advised: true } : {}),
     attachments: claudeAttachmentDescriptors(context.attachments),
+    ...(context.streamLogPath ? { streamLogPath: context.streamLogPath } : {}),
     signal: context.signal,
   }
 

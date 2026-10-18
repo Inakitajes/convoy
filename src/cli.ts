@@ -266,6 +266,12 @@ export async function parseAndRun(argv: string[]) {
   } else {
     process.stdout.write(renderRunPlan(plan, true))
   }
+  // Without an auto-attached dashboard nobody answers a permission request:
+  // it holds until someone opens the run. Say so before an agent or script
+  // starts a run that would otherwise go quiet at its first ask.
+  if (plan.permissions === "interactive" && !(command.options.tui && process.stdout.isTTY)) {
+    log.warn("permissions: interactive — requests wait for a controller (`convoy runs`); pass --smart or --yolo for an unattended run")
+  }
   await preflightRunPlan(plan, undefined, { reviewed: interactive && !command.options.noConfirm })
   // Nothing has touched the repo yet; the worktree is the first effect, and only
   // once the plan has been accepted.
@@ -1048,7 +1054,7 @@ async function spawnAndAttachRun(options: RunOptions, plan: RunPlan, route?: Tui
     }
     // --no-tui / CI: don't attach; stream the coordinator's log to the
     // terminal, wait for its exit, and forward the exit code.
-    process.stdout.write(`coordinator ${child.pid} running; logs: ${pending.logPath}\n`)
+    process.stdout.write(`coordinator ${child.pid} running run ${ready.runID}; logs: ${pending.logPath}\n`)
     const forwarder = await forwardCoordinatorLogs(pending.logPath, (chunk) => process.stdout.write(chunk))
     const code = await child.exited
     await forwarder.stop()
@@ -2735,7 +2741,7 @@ export function retiredFeatureDiagnostic(args: string[]): string {
 function help() {
   return `convoy [prompt]
 
-Sequential OpenCode agent pipeline for implementing features.
+Sequential agent pipeline for implementing features, on OpenCode or Claude Code.
 
 Usage:
   convoy
@@ -2765,7 +2771,9 @@ Commands:
   update [--check]         Check GitHub Releases for a newer official binary, or install it
                            (source checkouts are never modified)
   runs [run-id]            Browse run history: resume a run, read its summary/reports,
-                           or open a subshell in its run dir (under ~/.convoy/runs)
+                           or open a subshell in its run dir (under ~/.convoy/runs).
+                           Off a terminal it prints plain text: the history, or for a
+                           run id its "run <id>: <status>" line, phases, and summary
   worktrees                The worktree control center: every registered checkout with
                            its independent Git/OpenSpec facts, plus guarded fetch, sync,
                            push, archive, remove, delete-branch, and recover actions
@@ -2822,7 +2830,8 @@ Flags:
   --notify                 Enable desktop notifications for this run, overriding notifications.enabled in config
   --no-notify              Disable desktop notifications for this run (the terminal title still updates)
   --human-step             Enable human steps (alias: --human-review; default in interactive terminals)
-  --no-human-step          Drop all human steps (alias: --no-human-review)
+  --no-human-step          Drop all human steps and failure decisions: a failed step fails the run
+                           (alias: --no-human-review; default off a terminal)
   --max-concurrent <n>     Max agents running at once within a parallel group (default: ${defaultMaxConcurrentAgents}); smaller groups are unaffected
   --base <ref>             Branch/base for calculating diffs (default: auto-detected — origin's default branch, else main/master/develop/trunk, else the current branch)
   --worktree               Run on a fresh branch in its own worktree
@@ -2842,6 +2851,13 @@ Flags:
                            --change or --manual.
   --dir <path>             Target repo (default: cwd)
 
+Headless (scripts, CI, agents):
+  Off a terminal, a launch prints the plan, then "coordinator <pid> running run <id>",
+  streams the run's log, and exits with the run's own code (0 only on success).
+  Pass --change or --manual, plus --smart or --yolo: with interactive permissions
+  a request waits (logged as "[permission] waiting for an answer") until someone
+  answers it from "convoy runs". "convoy runs <id>" prints that run's status.
+
 Goal mode:
   Pipelines enter goal execution exclusively by declaring one terminal goal
   step (the pipeline's last step). There are no goal CLI flags; retired flags
@@ -2855,7 +2871,8 @@ Config files:
 
 Config keys:
   defaults:                model, baseRef, pipeline, worktree, worktreeLocation, prdHistory,
-                           autoAcceptJudgeModel, branchNameModel, commitMessageModel
+                           autoAcceptJudgeModel, branchNameModel, commitMessageModel,
+                           runner, claudeAuth, advisorRoute, helperRoutes, authoring
   modelRouting:            gateway and explicit per-logical-model overrides
   agents:                  project agents or built-in overrides; prompts live at agents/<name>.md
   pipelines:               named step lists mixing agents and human gates

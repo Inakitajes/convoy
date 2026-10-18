@@ -17,7 +17,7 @@
 import { randomUUID } from "node:crypto"
 import { isAbsolute, relative } from "node:path"
 
-import { claudeModelLabel, describeClaudeEvent, ndjsonLines, newClaudeStreamState, type ClaudeSignal } from "../../claude-code"
+import { ClaudeRawStreamLog, claudeModelLabel, describeClaudeEvent, ndjsonLines, newClaudeStreamState, type ClaudeSignal } from "../../claude-code"
 import { withoutHerdrEnv } from "../../herdr"
 import { externalAttachmentDirectories, withAttachmentSection } from "../agent-source"
 import { resolveClaudeAuth, type ClaudeAuthResolution } from "./auth"
@@ -353,9 +353,11 @@ export function createClaudeRunner(options: ClaudeRunnerOptions): ClaudeRunner {
     let sessionId: string | undefined
     let outcome: AttemptOutcome | undefined
     const session = () => (sessionId ? { session: { runner: "claude-code" as const, sessionId } } : {})
+    const rawLog = request.streamLogPath ? new ClaudeRawStreamLog(request.streamLogPath, request.identity.phaseName) : undefined
 
     try {
       for await (const line of ndjsonLines(proc.stdout)) {
+        await rawLog?.append(line)
         let parsed: unknown
         try {
           parsed = JSON.parse(line)
@@ -403,6 +405,7 @@ export function createClaudeRunner(options: ClaudeRunnerOptions): ClaudeRunner {
       request.signal.removeEventListener("abort", kill)
       if (escalation) clearTimeout(escalation)
       if (proc.exitCode === null) proc.kill()
+      await rawLog?.close()
     }
   }
 
