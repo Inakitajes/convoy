@@ -266,7 +266,7 @@ export async function parseAndRun(argv: string[]) {
   } else {
     process.stdout.write(renderRunPlan(plan, true))
   }
-  await preflightRunPlan(plan)
+  await preflightRunPlan(plan, undefined, { reviewed: interactive && !command.options.noConfirm })
   // Nothing has touched the repo yet; the worktree is the first effect, and only
   // once the plan has been accepted.
   let options = command.options
@@ -1190,7 +1190,8 @@ async function launchInteractiveRun(
   let options = selection.options
   const plan = selection.plan
   const runSelection = selection.selection
-  await preflightRunPlan(plan)
+  // The launcher's review screen is where the operator accepted this plan.
+  await preflightRunPlan(plan, undefined, { reviewed: true })
   if (runSelection.initializeGit) {
     const { initializeRepoWithInitialCommit } = await import("./git")
     await initializeRepoWithInitialCommit(targetDir, { baseRef: options.baseRef === "HEAD" ? undefined : options.baseRef })
@@ -1303,7 +1304,7 @@ async function openRunsBrowser(initialRunID?: string, route?: TuiRoute): Promise
       const options = await retryOptions(resolution.runID, resolution.targetDir)
       const plan = options.plan ?? (await buildReviewedPlan({ ...options, promptSource: "retry" }))
       if (!(await confirmRunPlan(plan))) return false
-      await preflightRunPlan(plan)
+      await preflightRunPlan(plan, undefined, { reviewed: true })
       // A resumed/retried run is also a coordinator: same spawn + auto-attach path.
       await executeRun(options, plan, route)
       return true
@@ -1312,7 +1313,7 @@ async function openRunsBrowser(initialRunID?: string, route?: TuiRoute): Promise
       const options = await resumeOptions(resolution.runID, resolution.targetDir)
       const plan = options.plan ?? (await buildReviewedPlan({ ...options, promptSource: "resume" }))
       if (!(await confirmRunPlan(plan))) return false
-      await preflightRunPlan(plan)
+      await preflightRunPlan(plan, undefined, { reviewed: true })
       await executeRun(options, plan, route)
       return true
     }
@@ -2431,7 +2432,13 @@ export async function resolveRunOptions(parsed: ParsedArgs): Promise<Omit<RunOpt
     commitMessageModel: helperModel("commitMessage", defaults, defaultCommitMessageModel, isClaudeOnlyPipeline(pipeline) ? "claude-code" : undefined),
     ...(advisorAuthOf(defaults) ? { advisorAuth: advisorAuthOf(defaults)! } : {}),
     ...(defaults.claudeAuth
-      ? { claudeAuth: { mode: defaults.claudeAuth.authMode, ...(defaults.claudeAuth.credentialRef ? { credentialRef: defaults.claudeAuth.credentialRef } : {}) } }
+      ? {
+          claudeAuth: {
+            mode: defaults.claudeAuth.authMode,
+            ...(defaults.claudeAuth.credentialRef ? { credentialRef: defaults.claudeAuth.credentialRef } : {}),
+            ...(defaults.claudeAuth.billingPolicy ? { billingPolicy: defaults.claudeAuth.billingPolicy } : {}),
+          },
+        }
       : {}),
     gateway: parsed.gateway ?? config?.modelRouting?.gateway ?? "configured",
     gatewayExplicit: parsed.gateway !== undefined,

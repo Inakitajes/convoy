@@ -33,9 +33,10 @@ function runnerOf(step: AgentStep): RunnerId {
 function collectFromSteps(steps: readonly AgentStep[], dependencies: PlanDependency[]): void {
   for (const step of steps) {
     dependencies.push({ kind: "step", runner: runnerOf(step), label: step.name })
-    if (step.advisor) {
-      // The advisor runs on the executor's runner unless a route qualifies it.
-      dependencies.push({ kind: "advisor", runner: runnerOf(step), label: `${step.name} advisor` })
+    if (step.resolvedAdvisor) {
+      // A `claude-code/<model>` advisor runs on Claude; any other on OpenCode,
+      // whatever runner the executor uses (a cross-runner consultation).
+      dependencies.push({ kind: "advisor", runner: step.resolvedAdvisor.providerID === "claude-code" ? "claude-code" : "opencode", label: `${step.name} advisor` })
     }
   }
 }
@@ -84,4 +85,12 @@ export function assertPlanDependenciesAvailable(
 ): void {
   const missing = missingDependencies(collectPlanDependencies(pipeline, options), available)
   if (missing.length > 0) throw new PlanDependencyError(missing)
+}
+
+/** The plan's judge and helper dependencies, from its frozen routes. */
+export function planDependencyOptions(plan: { smartJudge?: { runner?: "claude-code" }; commitMessageModel?: string }): PlanDependencyOptions {
+  return {
+    ...(plan.smartJudge ? { judge: plan.smartJudge.runner ?? ("opencode" as const) } : {}),
+    ...(plan.commitMessageModel ? { helpers: [{ role: "commit-message", runner: plan.commitMessageModel.startsWith("claude-code/") ? ("claude-code" as const) : ("opencode" as const) }] } : {}),
+  }
 }

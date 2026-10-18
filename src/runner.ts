@@ -18,7 +18,7 @@ import { fileParts } from "./attachments"
 import { Caffeinate } from "./caffeinate"
 import { ensureClaudeAvailable, openClaudeSessionWindow, promptClaudePhase } from "./claude-code"
 import { baseAgentName } from "./runners/agent-source"
-import { attemptCompositionFor } from "./runners/attempt-composition"
+import { attemptCompositionFor, releaseAttemptCompositions } from "./runners/attempt-composition"
 import { resolveAttempt, type AttemptContext } from "./runners/attempt"
 import { phasePolicy } from "./runners/phase-policy"
 import { beginSessionHandles, releaseSessionHandles } from "./runners/session-handles"
@@ -66,6 +66,7 @@ import { installWriteReportTool, startReportBridge, type ReportBridge } from "./
 import { createReportRuntime, type ReportPhaseHandle, type ReportRuntime } from "./report-runtime"
 import { stepCommitMessageFactory } from "./step-commit"
 import { pipelineRunners, throughputRoutedModels } from "./run-plan"
+import { runnerExecutionRecord } from "./runners/provenance"
 import { isClaudeJudge } from "./safety-judge"
 import { promoteScoreReport, runGoalCycle, type GoalCycleOutcome } from "./goal-scheduler"
 import { formatTerminalTitle, projectName, RunStatusTracker, trackRunStatus } from "./run-status"
@@ -1261,6 +1262,8 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
   } finally {
     removeSignalHandlers()
     if (shutdown.aborted) await shutdown.abortActiveSessions(progress)
+    // The run's attempt compositions end with it.
+    await releaseAttemptCompositions(workspace.runID)
     await caffeinate?.stop()
     await notifier?.stop()
     await permissions?.stop()
@@ -2339,7 +2342,7 @@ async function runPhaseAttempt(
   // One composition per run directory, reused across the run's attempts. It
   // carries the Claude enforcement plan (this Convoy's hook and permission host
   // unless the environment overrides them).
-  const composition = attemptCompositionFor({ cwd: targetDir, env: process.env })
+  const composition = attemptCompositionFor({ runId: workspace.runID, cwd: targetDir, env: process.env })
 
   const registration = composition.registry.require(runnerId)
   const capabilities = await registration.execution.capabilities()
@@ -2457,6 +2460,21 @@ async function runPhaseAttempt(
     result = await attemptRunner(context)
   } finally {
     if (activeSessionID && serverSession) shutdown.clearActiveSession(phase.name, activeSessionID)
+    // Versioned provenance for the attempt (design D11): which runner ran it,
+    // under which non-secret authentication, model, and exact native session,
+    // so recovery and history never have to guess. Recorded even on failure.
+    progress.phaseExecution?.(
+      phase.name,
+      runnerExecutionRecord({
+        runner: runnerId,
+        // Only Claude selects an authentication; OpenCode uses its provider credentials.
+        ...(runnerId === "claude-code" ? { auth: { mode: context.auth?.mode ?? "subscription", ...(context.auth?.credentialRef ? { credentialRef: context.auth.credentialRef } : {}) } } : {}),
+        checkout: targetDir,
+        model: { modelId: prepared.model.modelID, ...(prepared.model.variant ? { variant: prepared.model.variant } : {}) },
+        ...(activeSessionID ? { sessionId: activeSessionID } : {}),
+        attempt: { runId: workspace.runID, phase: phase.name, attempt },
+      }),
+    )
   }
 
   // Advisor usage and events stay on the runtime's handle, not the attempt

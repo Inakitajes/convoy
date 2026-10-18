@@ -25,6 +25,7 @@ export type FeaturePlanLink = {
 import type { AutoAccept, ProgressUI } from "./progress"
 import type { RunShutdown } from "./runner"
 import type { StepRunnerId } from "./step-runners"
+import type { BillingResolution } from "./runners/billing"
 import type { AuthenticationSelection } from "./runners/contracts"
 import type { ModelGateway, ModelRoutingOverrides, ResolvedModel } from "./model-routing"
 
@@ -352,6 +353,15 @@ export type RunPlan = {
    * authentication, so a Claude-only plan needs no OpenCode to judge.
    */
   smartJudge?: { model: ResolvedModel; runner?: "claude-code" }
+  /**
+   * The reviewed Claude route when anything in the plan runs on Claude (a
+   * step, an advisor, the judge, or the commit writer): its non-secret
+   * authentication and the billing decision it implies, shown in review and
+   * enforced at preflight before any work starts.
+   */
+  claude?: { auth: AuthenticationSelection; billing: BillingResolution }
+  /** The commit writer's frozen route for automatic compaction, when configured. */
+  commitMessageModel?: string
   hooks: HookSet
   attachments: string[]
   /**

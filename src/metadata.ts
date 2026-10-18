@@ -547,6 +547,10 @@ export function recordProgress(progress: ProgressUI, store: RunMetadataStore): P
       store.phaseSession(name, sessionID)
       progress.phaseSession(name, sessionID)
     },
+    phaseExecution(name, execution) {
+      store.phaseExecution(name, execution)
+      progress.phaseExecution?.(name, execution)
+    },
     phaseActivity: (name, detail, kind, pulse) => progress.phaseActivity(name, detail, kind, pulse),
     phaseOutput(name, lines) {
       // Best-effort: a storage failure must not change the hook's exit-status

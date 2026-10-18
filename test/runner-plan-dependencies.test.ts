@@ -21,7 +21,10 @@ function step(name: string, extra: Partial<AgentStep> = {}): AgentStep {
 
 const pipeline: Pipeline = {
   name: "p",
-  steps: [step("implement"), step("review", { runner: "claude-code", advisor: "opus" })],
+  steps: [
+    step("implement"),
+    step("review", { runner: "claude-code", advisor: "claude-code/opus", resolvedAdvisor: { configured: "claude-code/opus", logical: "opus", gateway: "configured", providerID: "claude-code", modelID: "opus", target: "claude-code/opus" } }),
+  ],
   goalPlan: {
     target: 90,
     maxIterations: 3,
@@ -52,6 +55,11 @@ describe("plan dependency traversal", () => {
     const missing = missingDependencies(deps, (runner) => runner === "opencode")
     expect(missing.map((dependency) => dependency.label).sort()).toEqual(["fix", "review", "review advisor"])
     expect(() => assertPlanDependenciesAvailable(pipeline, {}, (runner) => runner === "opencode")).toThrow(PlanDependencyError)
+  })
+
+  test("an advisor depends on its own runner, not the executor's", () => {
+    const crossRunner = { ...pipeline, steps: [step("review", { runner: "claude-code", resolvedAdvisor: { configured: "openai/gpt-5.5", logical: "openai/gpt-5.5", gateway: "configured", providerID: "openai", modelID: "gpt-5.5", target: "openai/gpt-5.5" } })] }
+    expect(collectPlanDependencies({ ...crossRunner, goalPlan: undefined }).find((dependency) => dependency.kind === "advisor")?.runner).toBe("opencode")
   })
 
   test("passes when every runner is available", () => {

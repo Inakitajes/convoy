@@ -57,5 +57,7 @@ export function helperModel(
 /** The Claude authentication a helper runs under: the configured Claude auth, else subscription. */
 export function helperClaudeAuth(defaults: Pick<ConvoyDefaults, "claudeAuth"> | undefined): AuthenticationSelection {
   const auth = defaults?.claudeAuth
-  return auth ? { mode: auth.authMode, ...(auth.credentialRef ? { credentialRef: auth.credentialRef } : {}) } : { mode: "subscription" }
+  return auth
+    ? { mode: auth.authMode, ...(auth.credentialRef ? { credentialRef: auth.credentialRef } : {}), ...(auth.billingPolicy ? { billingPolicy: auth.billingPolicy } : {}) }
+    : { mode: "subscription" }
 }

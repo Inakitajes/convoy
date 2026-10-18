@@ -2,7 +2,8 @@ import { resolveModel, type ModelGateway, type ModelRoutingOverrides, type Resol
 import { splitModelVariant } from "./pipeline"
 import type { OpenSpecBundle } from "./openspec"
 import type { PrdHistoryPreview } from "./prd-history"
-import type { AuthenticationMode } from "./runners/contracts"
+import { resolveBilling } from "./runners/billing"
+import type { AuthenticationMode, AuthenticationSelection } from "./runners/contracts"
 import { modelOverrideTargetsRunner, normalizeStepRunnerModel, parseModelOverride, stepRunnerFor, type ModelOverride } from "./step-runners"
 import type { AgentStep, FeaturePlanLink, Pipeline, ResolvedGoalPlan, RunOptions, RunPlan, Step } from "./types"
 
@@ -62,6 +63,15 @@ export function buildRunPlan(input: BuildRunPlanInput): RunPlan {
   if (claudeAuthMode) registerClaudeAuth(pipeline, claudeAuthMode)
   const judge = input.smart ? resolveJudge(input.smartJudgeModel, gateway, overrides) : undefined
   const hooks = hooksForPlan(input, pipeline.name)
+  const usesClaude =
+    pipelineRunners(pipeline).has("claude-code") ||
+    judge?.runner === "claude-code" ||
+    planAgentSteps(pipeline).some((step) => step.resolvedAdvisor?.providerID === "claude-code") ||
+    (input.commitMessageModel?.startsWith("claude-code/") ?? false)
+  // Only non-secret selection fields are frozen; the key stays in its variable.
+  const claudeAuth: AuthenticationSelection = input.claudeAuth
+    ? { mode: input.claudeAuth.mode, ...(input.claudeAuth.credentialRef ? { credentialRef: input.claudeAuth.credentialRef } : {}), ...(input.claudeAuth.billingPolicy ? { billingPolicy: input.claudeAuth.billingPolicy } : {}) }
+    : { mode: claudeAuthMode ?? "subscription" }
   return deepFreeze({
     prompt: { source: input.promptSource ?? (input.resumeRunID ? "resume" : "inline"), text: input.prompt },
     target: {
@@ -75,6 +85,10 @@ export function buildRunPlan(input: BuildRunPlanInput): RunPlan {
     pipeline,
     modelRouting: { gateway },
     ...(judge ? { smartJudge: judge } : {}),
+    // The Claude CLI exposes no control that enforces included-only usage,
+    // so the billing decision is never claimed verified (design D3).
+    ...(usesClaude ? { claude: { auth: claudeAuth, billing: resolveBilling(claudeAuth, { canVerifyIncludedOnly: false }) } } : {}),
+    ...(input.commitMessageModel ? { commitMessageModel: input.commitMessageModel } : {}),
     hooks,
     attachments: [...input.files],
     ...(input.openspec ? { openspec: input.openspec } : {}),
@@ -105,10 +119,15 @@ function resolveJudge(configured: string, gateway: ModelGateway, overrides: Mode
   return model.providerID === "claude-code" ? { runner: "claude-code", model } : { model }
 }
 
+/** Every agent step of the pipeline, goal fragments included. */
+export function planAgentSteps(pipeline: Pipeline): AgentStep[] {
+  const steps: Step[] = [...pipeline.steps, ...(pipeline.goalPlan ? [...pipeline.goalPlan.improve.steps, ...pipeline.goalPlan.measure.steps] : [])]
+  return steps.filter((step): step is AgentStep => step.type === "agent")
+}
+
 /** Every runner an agent step of the pipeline (goal fragments included) executes on. */
 export function pipelineRunners(pipeline: Pipeline): Set<"opencode" | "claude-code"> {
-  const steps: Step[] = [...pipeline.steps, ...(pipeline.goalPlan ? [...pipeline.goalPlan.improve.steps, ...pipeline.goalPlan.measure.steps] : [])]
-  return new Set(steps.flatMap((step) => (step.type === "agent" ? [stepRunnerFor(step.runner).id] : [])))
+  return new Set(planAgentSteps(pipeline).map((step) => stepRunnerFor(step.runner).id))
 }
 
 /** True when every agent step runs on Claude: such a plan never needs OpenCode by default. */

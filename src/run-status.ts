@@ -470,6 +470,7 @@ export function trackRunStatus(progress: ProgressUI, tracker: RunStatusTracker):
       progress.phaseAttempt(name, info)
     },
     phaseSession: (name, sessionID) => progress.phaseSession(name, sessionID),
+    phaseExecution: (name, execution) => progress.phaseExecution?.(name, execution),
     phaseActivity: (name, detail, kind, pulse) => progress.phaseActivity(name, detail, kind, pulse),
     phaseOutput: (name, lines) => progress.phaseOutput?.(name, lines),
     phaseMessage: (name, message) => progress.phaseMessage(name, message),

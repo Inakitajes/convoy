@@ -14,7 +14,10 @@ export const runnerExecutionVersion = 1
 export type RunnerExecutionRecord = {
   version: typeof runnerExecutionVersion
   runner: RunnerId
-  auth: { mode: AuthenticationMode; credentialRef?: string }
+  /** Claude's reviewed authentication; OpenCode authenticates with its own provider credentials. */
+  auth?: { mode: AuthenticationMode; credentialRef?: string }
+  /** The verified checkout the attempt ran in. */
+  checkout?: string
   model?: { modelId: string; variant?: string }
   session?: { sessionId: string }
   attempt?: { runId: string; phase: string; attempt: number }
@@ -24,7 +27,8 @@ export type RunnerExecutionRecord = {
 
 export function runnerExecutionRecord(input: {
   runner: RunnerId
-  auth: { mode: AuthenticationMode; credentialRef?: string }
+  auth?: { mode: AuthenticationMode; credentialRef?: string }
+  checkout?: string
   model?: { modelId: string; variant?: string }
   sessionId?: string
   attempt?: { runId: string; phase: string; attempt: number }
@@ -33,7 +37,8 @@ export function runnerExecutionRecord(input: {
   return {
     version: runnerExecutionVersion,
     runner: input.runner,
-    auth: { mode: input.auth.mode, ...(input.auth.credentialRef ? { credentialRef: input.auth.credentialRef } : {}) },
+    ...(input.auth ? { auth: { mode: input.auth.mode, ...(input.auth.credentialRef ? { credentialRef: input.auth.credentialRef } : {}) } } : {}),
+    ...(input.checkout ? { checkout: input.checkout } : {}),
     ...(input.model ? { model: input.model } : {}),
     ...(input.sessionId ? { session: { sessionId: input.sessionId } } : {}),
     ...(input.attempt ? { attempt: input.attempt } : {}),
@@ -53,7 +58,7 @@ function isAuthMode(value: unknown): value is AuthenticationMode {
 export function isRunnerExecutionRecord(value: unknown): value is RunnerExecutionRecord {
   if (typeof value !== "object" || value === null) return false
   const record = value as Record<string, unknown>
-  return record.version === runnerExecutionVersion && isRunnerId(record.runner) && isAuthObject(record.auth)
+  return record.version === runnerExecutionVersion && isRunnerId(record.runner) && (record.auth === undefined || isAuthObject(record.auth))
 }
 
 function isAuthObject(value: unknown): boolean {

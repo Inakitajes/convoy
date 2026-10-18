@@ -33,7 +33,7 @@ import {
   type StepSpec,
 } from "./pipeline"
 import { isStepRunnerId, normalizeStepRunnerModel, stepRunnerCapabilityReason, stepRunnerFor, type StepRunnerId } from "./step-runners"
-import type { AuthenticationMode, AuthenticationSelection } from "./runners/contracts"
+import type { AuthenticationMode, AuthenticationSelection, BillingPolicy } from "./runners/contracts"
 import type { NotificationSettings } from "./notifications"
 import type { AdvisorAuditPolicy } from "./advisor-events"
 import type { AgentSpec, HookSet, HookSpec, HooksConfig, HookWhen, PermissionAdditions } from "./types"
@@ -110,7 +110,7 @@ export type ConvoyDefaults = {
   /** Default runner for steps that do not set their own. */
   runner?: StepRunnerId
   /** Default Claude authentication mode; api-key requires the env var holding the key. */
-  claudeAuth?: { authMode: AuthenticationMode; credentialRef?: string }
+  claudeAuth?: { authMode: AuthenticationMode; credentialRef?: string; billingPolicy?: BillingPolicy }
   /** Explicit helper-inference routes; unspecified roles inherit the run's route. */
   helperRoutes?: {
     branchName?: { runner?: StepRunnerId; model?: string }
@@ -796,15 +796,21 @@ function validateCredentialRef(v: Validator, value: unknown, path: string): stri
   return ref
 }
 
-function validateClaudeAuth(v: Validator, raw: unknown, path: string): { authMode: AuthenticationMode; credentialRef?: string } {
+function validateClaudeAuth(v: Validator, raw: unknown, path: string): NonNullable<ConvoyDefaults["claudeAuth"]> {
   const record = v.record(raw, path)
-  v.knownKeys(record, path, ["authMode", "credentialRef"])
+  v.knownKeys(record, path, ["authMode", "credentialRef", "billingPolicy"])
   if (record.authMode === undefined) v.fail(`${path}.authMode`, "is required")
   const authMode = validateAuthMode(v, record.authMode, `${path}.authMode`)
   const credentialRef = record.credentialRef !== undefined ? validateCredentialRef(v, record.credentialRef, `${path}.credentialRef`) : undefined
   if (authMode === "api-key" && credentialRef === undefined) v.fail(path, "api-key mode requires credentialRef")
   if (authMode === "subscription" && credentialRef !== undefined) v.fail(path, "subscription mode must not set credentialRef")
-  return { authMode, ...(credentialRef ? { credentialRef } : {}) }
+  let billingPolicy: BillingPolicy | undefined
+  if (record.billingPolicy !== undefined) {
+    if (record.billingPolicy !== "included-only" && record.billingPolicy !== "account-policy") v.fail(`${path}.billingPolicy`, 'must be "included-only" or "account-policy"')
+    if (authMode === "api-key") v.fail(`${path}.billingPolicy`, "applies to subscription mode; api-key mode always bills the account")
+    billingPolicy = record.billingPolicy as BillingPolicy
+  }
+  return { authMode, ...(credentialRef ? { credentialRef } : {}), ...(billingPolicy ? { billingPolicy } : {}) }
 }
 
 function validateHelperRoutes(v: Validator, raw: unknown): NonNullable<ConvoyDefaults["helperRoutes"]> {

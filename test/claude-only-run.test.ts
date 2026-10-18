@@ -7,6 +7,7 @@ import { builtInAgents } from "../src/pipeline"
 import { readRunMetadata } from "../src/metadata"
 import { buildRunPlan, isClaudeOnlyPipeline } from "../src/run-plan"
 import { run, runNeedsOpencodeServer, type RunDeps } from "../src/runner"
+import { cachedCompositionCount } from "../src/runners/attempt-composition"
 import type { AgentStep, Pipeline, RunOptions } from "../src/types"
 
 // Spec runner-execution, "Claude-only workstation": a Claude-only plan runs
@@ -105,6 +106,17 @@ describe("Claude-only run", () => {
     const metadata = await readRunMetadata(join(result.dir, "metadata.json"))
     expect(metadata?.server).toBeUndefined()
     expect(metadata?.phases.review?.status).toBe("completed")
+    // Versioned provenance names the runner, auth, model, and exact session.
+    expect(metadata?.phases.review?.execution).toMatchObject({
+      version: 1,
+      runner: "claude-code",
+      auth: { mode: "subscription" },
+      model: { modelId: "sonnet" },
+      session: { sessionId: "ses-claude-1" },
+      attempt: { phase: "review", attempt: 1 },
+    })
+    // The run's attempt composition ended with it.
+    expect(cachedCompositionCount()).toBe(0)
     // The Claude CLI ran the step under a verified subscription login.
     const calls = await readFile(claudeCalls, "utf8")
     expect(calls).toContain("auth status --json")
