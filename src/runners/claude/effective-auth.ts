@@ -186,3 +186,29 @@ export async function validateEffectiveAuth(input: EffectiveAuthInput): Promise<
     error: `Unsupported Claude authentication mode "${String((resolution as { mode?: unknown }).mode)}".`,
   }
 }
+
+/** The slice of a process spawner the auth-status probe needs. */
+export type AuthStatusSpawn = (
+  command: string[],
+  options: { cwd: string; env: NodeJS.ProcessEnv; stdin: Blob; stdout: "pipe"; stderr: "pipe" },
+) => { stdout: ReadableStream<Uint8Array>; stderr: ReadableStream<Uint8Array>; exited: Promise<number> }
+
+/**
+ * The supported auth-status interface, asked under the attempt's exact child
+ * environment: `claude auth status --json` reports the method Claude will use.
+ */
+export function cliAuthProbe(spawn: AuthStatusSpawn, binary: string, cwd: string): EffectiveAuthProbe {
+  return async (env) => {
+    const proc = spawn([binary, "auth", "status", "--json"], { cwd, env, stdin: new Blob([]), stdout: "pipe", stderr: "pipe" })
+    const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited])
+    let status: { loggedIn?: unknown; authMethod?: unknown }
+    try {
+      status = JSON.parse(stdout) as typeof status
+    } catch {
+      throw new Error(`claude auth status returned no status${stderr.trim() ? `: ${stderr.trim().split("\n").at(-1)}` : ""}`)
+    }
+    if (status.loggedIn === false) throw new Error("the Claude CLI is not logged in")
+    return { authMethod: typeof status.authMethod === "string" ? status.authMethod : "" }
+  }
+}
+

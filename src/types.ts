@@ -42,6 +42,8 @@ export type RunOptions = {
    * non-secret credential reference is carried, never a key.
    */
   claudeAuth?: AuthenticationSelection
+  /** The reviewed authentication a Claude advisor (`claude-code/<model>`) consults under; defaults to `claudeAuth`. */
+  advisorAuth?: AuthenticationSelection
   files: string[]
   onlySteps: string[]
   skipSteps: string[]

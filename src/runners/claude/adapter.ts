@@ -21,13 +21,16 @@ import { claudeModelLabel, describeClaudeEvent, ndjsonLines, newClaudeStreamStat
 import { withoutHerdrEnv } from "../../herdr"
 import { externalAttachmentDirectories, withAttachmentSection } from "../agent-source"
 import { resolveClaudeAuth, type ClaudeAuthResolution } from "./auth"
-import { stagePrivateMcpConfig, startClaudeApprovalBridge, type ClaudeApprovalBridge } from "./approval-bridge"
-import { validateEffectiveAuth, type EffectiveAuthProbe } from "./effective-auth"
+import { bridgeFileEnv, stagePrivateFile, stagePrivateMcpConfig, startClaudeAttemptBridge, type ClaudeAttemptBridge, type ClaudeAttemptHandlers, type ConvoyToolName } from "./approval-bridge"
+import { cliAuthProbe, validateEffectiveAuth, type EffectiveAuthProbe } from "./effective-auth"
+
+export { cliAuthProbe }
 import { assertEnforcementReady, EnforcementNotReadyError, type EnforcementPlan } from "./enforcement"
 import { toolToIntent } from "./hook"
-import { encodeClaudeMcpConfig, encodeClaudeSettings, permissionPromptArgs, withServerEnv } from "./settings"
+import { encodeClaudeMcpConfig, encodeClaudeSettings, permissionPromptArgs, withHookEnv, withServerEnv } from "./settings"
 
-import type { AttemptOutcome, ExecutionAdapter, ExecutionRequest, ExecutionServices, RunnerEvent, Usage } from "../contracts"
+import { firstWriteMessage } from "../../advisor-runtime"
+import type { AttemptOutcome, DeliverableSubmission, ExecutionAdapter, ExecutionRequest, ExecutionServices, RunnerEvent, Usage } from "../contracts"
 import { resolveEffectiveCapabilities } from "../capabilities"
 import { claudeDeclaration } from "../declarations"
 import { runnerPolicyEnv } from "../policy"
@@ -77,27 +80,85 @@ function approvalAction(tool: string): string {
   return intent
 }
 
-/** How many trailing stderr lines explain a child that exited without a result. */
-const stderrTailLines = 3
+/** The MCP tool names Convoy serves an attempt (`mcp__<server>__<tool>`), pre-allowed so no prompt intervenes. */
+export const convoyMcpTools: Record<ConvoyToolName, readonly string[]> = { report: ["write_report"], advisor: ["advisor", "advisor_feedback"] }
+
+function convoyToolNames(permissionPromptTool: string, tools: readonly ConvoyToolName[]): string[] {
+  const prefix = permissionPromptTool.slice(0, permissionPromptTool.lastIndexOf("__") + 2)
+  return tools.flatMap((tool) => convoyMcpTools[tool].map((name) => `${prefix}${name}`))
+}
+
+const scoreFields = ["dimensions", "mustFix", "gaps", "confidence"]
 
 /**
- * The supported auth-status interface, asked under the attempt's exact child
- * environment: `claude auth status --json` reports the method Claude will use.
+ * Maps a `write_report` call onto the attempt's deliverable service with the
+ * same payload OpenCode's tool sends, so both runners validate identically: a
+ * scoring call carries its dimensions, a report carries its optional commit.
  */
-export function cliAuthProbe(spawn: ClaudeRunnerDeps["spawn"], binary: string, cwd: string): EffectiveAuthProbe {
-  return async (env) => {
-    const proc = spawn([binary, "auth", "status", "--json"], { cwd, env, stdin: new Blob([]), stdout: "pipe", stderr: "pipe" })
-    const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited])
-    let status: { loggedIn?: unknown; authMethod?: unknown }
-    try {
-      status = JSON.parse(stdout) as typeof status
-    } catch {
-      throw new Error(`claude auth status returned no status${stderr.trim() ? `: ${stderr.trim().split("\n").at(-1)}` : ""}`)
-    }
-    if (status.loggedIn === false) throw new Error("the Claude CLI is not logged in")
-    return { authMethod: typeof status.authMethod === "string" ? status.authMethod : "" }
+export function toolReportSubmission(payload: unknown): DeliverableSubmission {
+  const record = typeof payload === "object" && payload !== null ? (payload as Record<string, unknown>) : {}
+  if (scoreFields.some((field) => field in record)) return { kind: "score", body: JSON.stringify(record) }
+  const commit = record.commit as { subject?: unknown; details?: unknown } | undefined
+  return {
+    kind: "report",
+    body: typeof record.markdown === "string" ? record.markdown : "",
+    ...(commit && typeof commit.subject === "string"
+      ? { commit: { subject: commit.subject, ...(Array.isArray(commit.details) ? { details: commit.details.filter((detail): detail is string => typeof detail === "string") } : {}) } }
+      : {}),
   }
 }
+
+/** The bridge handlers one attempt's services provide. */
+function attemptHandlers(request: ExecutionRequest, services: ExecutionServices | undefined): ClaudeAttemptHandlers {
+  const handlers: ClaudeAttemptHandlers = {}
+  const approvals = services?.approvals
+  if (approvals) {
+    handlers.approve = async (ask) => {
+      const decision = await approvals.decide({
+        requestId: randomUUID(),
+        tool: ask.tool,
+        action: approvalAction(ask.tool),
+        ...(ask.resource ? { resources: [ask.resource] } : {}),
+      })
+      return decision === "allow"
+    }
+  }
+  const deliverables = services?.deliverables
+  if (deliverables) {
+    handlers.report = async (payload) => {
+      const result = await deliverables.submit(toolReportSubmission(payload))
+      return result.ok ? { ok: true, text: "Report saved." } : { ok: false, error: result.error }
+    }
+  }
+  const advisor = services?.advisor
+  if (advisor && request.advised) {
+    handlers.advisor = {
+      async consult(question) {
+        const advice = await advisor.consult({ trigger: "on-demand", question: question ?? "" })
+        if (advice.ok) await advisor.delivered?.(advice.callId, "tool")
+        return { ok: true, text: advice.text, ...(advice.callId ? { callId: advice.callId } : {}) }
+      },
+      async feedback(callId, outcome, note) {
+        if (outcome !== "adopted" && outcome !== "partially-adopted" && outcome !== "rejected") return { ok: false, error: "outcome must be adopted, partially-adopted, or rejected" }
+        const recorded = (await advisor.feedback?.(callId, outcome, note)) ?? false
+        return { ok: true, text: recorded ? "Advisor feedback recorded." : "No matching completed advisor call." }
+      },
+      // The OpenCode gate's semantics: the first write is held once for a
+      // consultation, and later writes (or a failed consultation) proceed.
+      async checkpoint() {
+        if (advisor.satisfied()) return { decision: "allow" }
+        const advice = await advisor.consult({ trigger: "first-write", question: "" })
+        if (!advice.ok) return { decision: "allow" }
+        await advisor.delivered?.(advice.callId, "permission")
+        return { decision: "advise", message: firstWriteMessage(advice.text) }
+      },
+    }
+  }
+  return handlers
+}
+
+/** How many trailing stderr lines explain a child that exited without a result. */
+const stderrTailLines = 3
 
 /** True when `path` is inside `root` (or is `root` itself). */
 function isWithin(path: string, root: string): boolean {
@@ -305,7 +366,8 @@ export function createClaudeRunner(options: ClaudeRunnerOptions): ClaudeRunner {
       // Deliverable service: the final assistant text is the only report this
       // transport can carry, so it is submitted only for a contract that
       // expects a report — and a missing required report fails the attempt.
-      if (services?.deliverables && final.status === "completed" && services.deliverables.expected.includes("report")) {
+      // A `write_report` submission already accepted wins over the final text.
+      if (services?.deliverables && final.status === "completed" && services.deliverables.expected.includes("report") && services.deliverables.candidate?.() === undefined) {
         const body = (final.assistantText ?? "").trim()
         if (body.length === 0) {
           return { ...final, status: "failed", error: "the deliverable contract expects a report but the attempt produced none" }
@@ -368,31 +430,32 @@ export function createClaudeRunner(options: ClaudeRunnerOptions): ClaudeRunner {
         return finish({ status: "failed", error: `${effective.error} Set defaults.claudeAuth to choose Claude's billing source explicitly.` })
       }
 
-      // An ask-level action reaches the attempt's approval service through a
-      // per-attempt loopback bridge the permission host is pointed at. Its
-      // address and token go to that host's own env in a private config file,
-      // so the agent's tools (which inherit Claude's env) never see the token.
-      let bridge: ClaudeApprovalBridge | undefined
-      let staged: { path: string; discard(): Promise<void> } | undefined
-      const approvals = services?.approvals
+      // The attempt's bridge serves its approvals and Convoy's own tools
+      // (write_report, the advisor) to the permission host, and the
+      // first-write checkpoint to the hook. Its address and token reach only
+      // those two: the host through its own MCP `env` in a private staged
+      // config, the hook through a private file it is pointed at — never
+      // Claude's environment or argv, which the agent's tools can read.
+      let bridge: ClaudeAttemptBridge | undefined
+      const staged: { discard(): Promise<void> }[] = []
       try {
-        if (approvals && enforcement) {
-          bridge = await startClaudeApprovalBridge(async (ask) => {
-            const decision = await approvals.decide({
-              requestId: randomUUID(),
-              tool: ask.tool,
-              action: approvalAction(ask.tool),
-              ...(ask.resource ? { resources: [ask.resource] } : {}),
-            })
-            return decision === "allow"
-          })
-          staged = await stagePrivateMcpConfig(withServerEnv(enforcement.mcpConfig, bridge.env))
-          invocation.args[invocation.args.indexOf("--mcp-config") + 1] = staged.path
+        const handlers = enforcement ? attemptHandlers(request, services) : {}
+        if (enforcement && (handlers.approve || handlers.report || handlers.advisor)) {
+          bridge = await startClaudeAttemptBridge(handlers)
+          const mcp = await stagePrivateMcpConfig(withServerEnv(enforcement.mcpConfig, bridge.env))
+          staged.push(mcp)
+          invocation.args[invocation.args.indexOf("--mcp-config") + 1] = mcp.path
+          if (handlers.advisor) {
+            const file = await stagePrivateFile("bridge.json", JSON.stringify({ url: bridge.url, token: bridge.token }))
+            staged.push(file)
+            invocation.args[invocation.args.indexOf("--settings") + 1] = encodeClaudeSettings(withHookEnv(enforcement.settings, { [bridgeFileEnv]: file.path }))
+          }
+          invocation.args.push("--allowedTools", ...convoyToolNames(enforcement.permissionPromptTool, bridge.tools))
         }
         return finish(await runInvocation(request, invocation, sink, services))
       } finally {
         await bridge?.close()
-        await staged?.discard()
+        for (const file of staged) await file.discard()
       }
     },
 

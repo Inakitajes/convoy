@@ -13,6 +13,8 @@ import { createOpencodeRunner } from "./opencode/adapter"
 import { executeClaudeAttempt } from "./claude/attempt"
 import { executeOpencodeAttempt } from "./opencode/attempt"
 import { bindOpencodeServices } from "./opencode/services"
+import { createSessionAdvisorService } from "./session-advisor"
+import { createSessionDeliverableService } from "./session-deliverables"
 import { supportsService } from "./capabilities"
 import { RunnerRegistry, type ExecutionServices, type RunnerCapabilities, type RunnerId } from "./contracts"
 import type { ServiceRuntimes } from "./service-runtimes"
@@ -60,8 +62,28 @@ type AttemptRegistration = {
   serverSession: boolean
 }
 
+/**
+ * Claude binds the operator's approval gate (its permission host reaches it
+ * through the attempt's bridge), the session-scoped deliverable service its
+ * `write_report` MCP tool submits through, and the advisor its hook
+ * checkpoint and `advisor` tool consult — all keyed by the Claude session the
+ * attempt reports, so a call can never land in a sibling attempt.
+ */
 function bindClaudeServices(runtimes: ServiceRuntimes, capabilities: RunnerCapabilities): ExecutionServices {
-  return runtimes.approvals && supportsService(capabilities, "approvals") ? { approvals: runtimes.approvals } : {}
+  const services: ExecutionServices = {}
+  if (runtimes.approvals && supportsService(capabilities, "approvals")) services.approvals = runtimes.approvals
+  if (runtimes.reports && supportsService(capabilities, "deliverables")) {
+    services.deliverables = createSessionDeliverableService({
+      runtime: runtimes.reports,
+      session: runtimes.session,
+      expected: runtimes.expected,
+      ...(runtimes.accepts ? { accepts: runtimes.accepts } : {}),
+    })
+  }
+  if (runtimes.advisors && supportsService(capabilities, "advisor")) {
+    services.advisor = createSessionAdvisorService({ runtime: runtimes.advisors, session: runtimes.session })
+  }
+  return services
 }
 
 /** Registers the built-in adapters with the assembled options. */
@@ -83,10 +105,9 @@ export function composeRunners(options: ComposeOptions): Composition {
   registry.register({ id: "claude-code", execution: claude })
   const attempts: Partial<Record<RunnerId, AttemptRegistration>> = {
     "opencode": { run: executeOpencodeAttempt, bindServices: bindOpencodeServices, serverSession: true },
-    // Claude binds only the operator's approval gate, which its permission host
-    // reaches through the adapter's bridge: its report is the final assistant
-    // text or the report file, which core resolves and validates after exit,
-    // and it honors neither the advisor bridge nor the loop guard.
+    // Claude binds approvals, deliverables, and the advisor (see
+    // bindClaudeServices); print mode cannot take a mid-turn nudge, so it
+    // does not honor the loop guard.
     "claude-code": { run: (context) => executeClaudeAttempt(context, claude), bindServices: bindClaudeServices, serverSession: false },
   }
   return {

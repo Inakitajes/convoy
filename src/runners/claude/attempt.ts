@@ -63,6 +63,7 @@ export async function executeClaudeAttempt(context: AttemptContext, adapter?: Cl
     mode,
     approvals: context.policy?.approvals ?? "auto",
     ...(context.policy ? { policy: context.policy } : {}),
+    ...(phase.resolvedAdvisor ? { advised: true } : {}),
     attachments: claudeAttachmentDescriptors(context.attachments),
     signal: context.signal,
   }

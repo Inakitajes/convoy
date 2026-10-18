@@ -1,24 +1,26 @@
 /**
- * OpenCode advisor service (change `unify-runner-system`, task 2.3).
+ * Session-scoped advisor service (change `unify-runner-system`, task 2.3;
+ * shared by both runners since `runner-parity-opencode-v2`).
  *
- * Adapts the OpenCode advisor runtime to the neutral advisor service. The
- * OpenCode gate is a **hold**, not a block: the first protected write is held
+ * Adapts Convoy's advisor runtime to the neutral advisor service, for
+ * OpenCode's permission gate and plugin tools and Claude's hook checkpoint
+ * and MCP tools alike. The gate is a **hold**, not a block: the first protected write is held
  * once, the advisor is consulted, and the write is then permitted — including
  * after a failed consultation, so the executor never loses a turn. Consultations
  * share the attempt's session (the advisor reads its transcript), and advisor
  * usage is attributed separately from the executor's.
  */
 
-import type { AdvisorUsage as AdvisorCallUsage } from "../../advisor"
-import type { AdvisorRuntime } from "../../advisor-runtime"
-import type { AdvisorAdvice, AdvisorConsultation, AdvisorService, Usage } from "../contracts"
+import type { AdvisorUsage as AdvisorCallUsage } from "../advisor"
+import type { AdvisorRuntime } from "../advisor-runtime"
+import type { AdvisorAdvice, AdvisorConsultation, AdvisorService, Usage } from "./contracts"
 
-export type OpencodeAdvisorService = AdvisorService & {
+export type SessionAdvisorService = AdvisorService & {
   /** Release the attempt's session; later consultations find no live advisor. */
   release(): void
 }
 
-export type OpencodeAdvisorOptions = {
+export type SessionAdvisorOptions = {
   runtime: AdvisorRuntime
   /** A fixed session id, or a getter when the session is known only after creation. */
   sessionID?: string
@@ -45,7 +47,7 @@ function usageOf(entries: readonly AdvisorCallUsage[]): Usage | undefined {
   return { input, output, reasoning, cacheRead, cacheWrite, costEstimate: cost }
 }
 
-export function createOpencodeAdvisorService(options: OpencodeAdvisorOptions): OpencodeAdvisorService {
+export function createSessionAdvisorService(options: SessionAdvisorOptions): SessionAdvisorService {
   const { runtime } = options
   const sessionID = () => (options.session ? options.session() : options.sessionID)
   let released = false
@@ -78,6 +80,9 @@ export function createOpencodeAdvisorService(options: OpencodeAdvisorOptions): O
     },
     async delivered(callId, delivery) {
       await handle()?.delivered(callId, delivery)
+    },
+    async feedback(callId, outcome, note) {
+      return (await handle()?.feedback(callId, outcome, note)) ?? false
     },
     release() {
       released = true

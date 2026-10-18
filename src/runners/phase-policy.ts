@@ -29,6 +29,8 @@ export type PhasePolicyInput = {
   commands: Readonly<Record<string, CommandEffect>>
   /** Absolute paths of the attempt's attachments (files or directories), readable wherever they live. */
   attachments?: readonly string[]
+  /** The phase consults an advisor: its first write waits for the first-write checkpoint. */
+  advised?: boolean
 }
 
 /** Maps the auto-accept mode onto the approval mode an `ask` follows. */
@@ -63,5 +65,6 @@ export function phasePolicy(input: PhasePolicyInput): PolicyConfig {
     // Reads elsewhere are denied, as OpenCode's external_directory rule does.
     readRoots: (input.attachments ?? []).flatMap(rootForms),
     cwd: input.checkout,
+    ...(input.advised ? { requireAdvisorBeforeWrite: true } : {}),
   }
 }

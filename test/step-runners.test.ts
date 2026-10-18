@@ -32,14 +32,14 @@ describe("stepRunnerFor", () => {
     const runner = stepRunnerFor("claude-code")
     expect(runner.id).toBe("claude-code")
     expect(runner.displayName).toBe("Claude Code")
-    // Claude supports the full execution surface; only native attach, quiesced
-    // takeover, the plan-layer advisor route, and the unqualified override are off.
+    // Claude supports the full execution surface, advisors included; only
+    // native attach, quiesced takeover, and the unqualified override are off.
     expect(runner.capabilities.writeSteps).toBe(true)
     expect(runner.capabilities.verifySteps).toBe(true)
     expect(runner.capabilities.modelFanout).toBe(true)
     expect(runner.capabilities.liveAttach).toBe(false)
     expect(runner.capabilities.takeover).toBe(false)
-    expect(runner.capabilities.advisor).toBe(false)
+    expect(runner.capabilities.advisor).toBe(true)
     expect(runner.capabilities.globalModelOverride).toBe(false)
   })
 

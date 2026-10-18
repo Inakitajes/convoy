@@ -472,10 +472,11 @@ describe("advisor routing", () => {
     expect(plannedStepAdvisor(route(step()))).toBeUndefined()
   })
 
-  test("claude-code steps are never given an advisor by the global override", () => {
-    const routed = route(step({ runner: "claude-code", model: "opus", readOnly: true }), "configured", { advisorOverride: "anthropic/claude-opus-5" })
-
-    expect(routed.advisor).toBeUndefined()
+  test("claude-code steps route their advisor like any step, a Claude one without the gateway", () => {
+    const opencodeAdvisor = route(step({ runner: "claude-code", model: "opus", readOnly: true }), "configured", { advisorOverride: "anthropic/claude-opus-5" })
+    expect(opencodeAdvisor.advisor).toBe("anthropic/claude-opus-5")
+    const claudeAdvisor = route(step({ runner: "claude-code", model: "sonnet", readOnly: true }), "openrouter", { advisorOverride: "claude-code/opus" })
+    expect(claudeAdvisor.resolvedAdvisor).toMatchObject({ providerID: "claude-code", modelID: "opus", target: "claude-code/opus" })
   })
 })
 

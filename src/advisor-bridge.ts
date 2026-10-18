@@ -170,7 +170,9 @@ export async function installAdvisorTool(
   return [path, feedbackPath]
 }
 
-const advisorToolDescription = [
+export const advisorFeedbackToolDescription = "Record whether you adopted the latest advisor guidance. outcome must be adopted, partially-adopted, or rejected; note is optional and brief."
+
+export const advisorToolDescription = [
   "Get guidance from a stronger reviewing model that has read your entire transcript.",
   "Takes no parameters. The advisor has no tools and never touches the repository;",
   "it returns a short plan, a correction, or a stop signal.",

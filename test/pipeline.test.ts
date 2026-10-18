@@ -1278,14 +1278,14 @@ describe("advisor resolution", () => {
     expect(() => agentSteps({ steps: [{ agent: "implementer", advisorMaxCalls: 2 }] })).toThrow("advisorMaxCalls without an advisor")
   })
 
-  test("an advisor named on a claude-code step is an error; an inherited one is dropped", () => {
-    expect(() =>
-      agentSteps({ steps: [{ agent: "bug-auditor", runner: "claude-code", advisor: "anthropic/claude-opus-5", reports: "none" }] }),
-    ).toThrow(/runner: claude-code does not support/)
+  test("a claude-code step takes an advisor, named on the step or inherited", () => {
+    const named = agentSteps({ steps: [{ agent: "bug-auditor", runner: "claude-code", advisor: "claude-code/opus", reports: "none" }] })
+    expect(named[0]?.advisor).toBe("claude-code/opus")
 
+    // An inherited OpenCode advisor is a cross-runner consultation, not dropped.
     const steps = withAdvisor({ steps: [{ agent: "bug-auditor", runner: "claude-code", reports: "none" }] }, "anthropic/claude-opus-5")
     expect(steps[0]?.runner).toBe("claude-code")
-    expect(steps[0]?.advisor).toBeUndefined()
+    expect(steps[0]?.advisor).toBe("anthropic/claude-opus-5")
   })
 
   test("every variant of a models: fan-out inherits the same advisor", () => {

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 
 import type { AdvisorUsage as AdvisorCallUsage } from "../src/advisor"
 import type { AdvisorPhaseHandle, AdvisorRuntime } from "../src/advisor-runtime"
-import { createOpencodeAdvisorService } from "../src/runners/opencode/advisor"
+import { createSessionAdvisorService } from "../src/runners/session-advisor"
 
 const attemptTokens = { input: 10, output: 5, reasoning: 2, cacheRead: 3, cacheWrite: 1 }
 
@@ -50,7 +50,7 @@ function fakeRuntime(handle: AdvisorPhaseHandle | undefined, seen: string[] = []
 describe("OpenCode advisor service", () => {
   test("the first write is held once, then permitted (hold, not block)", async () => {
     const handle = fakeHandle()
-    const service = createOpencodeAdvisorService({ runtime: fakeRuntime(handle), sessionID: "ses_1" })
+    const service = createSessionAdvisorService({ runtime: fakeRuntime(handle), sessionID: "ses_1" })
     expect(service.firstWriteGate).toBe("hold")
     expect(service.satisfied()).toBe(false)
 
@@ -63,14 +63,14 @@ describe("OpenCode advisor service", () => {
 
   test("advisor usage is attributed separately from the executor", async () => {
     const handle = fakeHandle()
-    const service = createOpencodeAdvisorService({ runtime: fakeRuntime(handle), sessionID: "ses_1" })
+    const service = createSessionAdvisorService({ runtime: fakeRuntime(handle), sessionID: "ses_1" })
     const advice = await service.consult({ trigger: "on-demand", question: "Check this" })
     expect(advice.usage).toEqual({ input: 10, output: 5, reasoning: 2, cacheRead: 3, cacheWrite: 1, costEstimate: 0.01 })
   })
 
   test("a consultation is bounded and a failed consult still releases the hold", async () => {
     const handle = fakeHandle(1)
-    const service = createOpencodeAdvisorService({ runtime: fakeRuntime(handle), sessionID: "ses_1" })
+    const service = createSessionAdvisorService({ runtime: fakeRuntime(handle), sessionID: "ses_1" })
     expect((await service.consult({ trigger: "first-write", question: "one" })).ok).toBe(true)
 
     const exhausted = await service.consult({ trigger: "on-demand", question: "two" })
@@ -83,14 +83,14 @@ describe("OpenCode advisor service", () => {
   test("a completion consultation uses the same session and trigger", async () => {
     const handle = fakeHandle()
     const seen: string[] = []
-    const service = createOpencodeAdvisorService({ runtime: fakeRuntime(handle, seen), sessionID: "ses_live" })
+    const service = createSessionAdvisorService({ runtime: fakeRuntime(handle, seen), sessionID: "ses_live" })
     const advice = await service.consult({ trigger: "completion", question: "Anything wrong?" })
     expect(advice.text).toContain("completion")
     expect(seen).toContain("ses_live")
   })
 
   test("a phase with no advisor has no gate and no consultation", async () => {
-    const service = createOpencodeAdvisorService({ runtime: fakeRuntime(undefined), sessionID: "ses_none" })
+    const service = createSessionAdvisorService({ runtime: fakeRuntime(undefined), sessionID: "ses_none" })
     expect(service.firstWriteGate).toBe("none")
     expect(service.satisfied()).toBe(true)
     const advice = await service.consult({ trigger: "first-write", question: "?" })
@@ -99,7 +99,7 @@ describe("OpenCode advisor service", () => {
   })
 
   test("a released session finds no live advisor", async () => {
-    const service = createOpencodeAdvisorService({ runtime: fakeRuntime(fakeHandle()), sessionID: "ses_1" })
+    const service = createSessionAdvisorService({ runtime: fakeRuntime(fakeHandle()), sessionID: "ses_1" })
     service.release()
     expect(service.firstWriteGate).toBe("none")
     expect(service.satisfied()).toBe(true)

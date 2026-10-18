@@ -47,7 +47,7 @@ describe("Claude capability matrix (task 3.5)", () => {
     } catch (error) {
       expect(error).toBeInstanceOf(UnsupportedServiceError)
     }
-    expect(() => assertServicesSupported(claude, ["advisor"])).toThrow(UnsupportedServiceError)
+    expect(() => assertServicesSupported(claude, ["advisor"])).not.toThrow()
     expect(() => assertServicesSupported(claude, ["approvals"])).not.toThrow()
   })
 

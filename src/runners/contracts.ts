@@ -236,6 +236,8 @@ export type ExecutionRequest = {
    * without it, enforcement falls back to `mode`/`approvals` alone.
    */
   policy?: PolicyConfig
+  /** True when the phase consults an advisor: its tools and first-write checkpoint are installed. */
+  advised?: boolean
   signal: AbortSignal
 }
 
@@ -442,6 +444,8 @@ export type AdvisorService = {
   consult(consultation: AdvisorConsultation): Promise<AdvisorAdvice>
   /** Journals how a consultation's advice reached the executor. */
   delivered?(callId: string | undefined, delivery: "permission" | "tool" | "follow-up"): Promise<void>
+  /** Records what the executor did with a consultation's advice; false when no completed call matches. */
+  feedback?(callId: string | undefined, outcome: "adopted" | "partially-adopted" | "rejected", note?: string): Promise<boolean>
 }
 
 // --- Loop guard / budget --------------------------------------------------

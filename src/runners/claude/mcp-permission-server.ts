@@ -14,11 +14,19 @@ import type { PreToolUseInput } from "./hook"
 
 export type PermissionResolution = { decision: "allow" | "deny"; reason?: string }
 
+/** Convoy's own agent-facing tools (write_report, advisor), served beside the permission tool. */
+export type McpToolHost = {
+  definitions: readonly { name: string; description: string; inputSchema: Record<string, unknown> }[]
+  call(name: string, args: Record<string, unknown>): Promise<{ text: string; isError: boolean }>
+}
+
 export type McpPermissionDeps = {
   /** Resolve the tool call to a decision (Convoy's arbiter). */
   resolve(call: PreToolUseInput): Promise<PermissionResolution>
   /** Reject an unauthenticated caller before doing any work. */
   authorize?(request: McpRequest): boolean
+  /** The attempt's Convoy tools, when its bridge serves any. */
+  tools?: McpToolHost
 }
 
 export type McpRequest = {
@@ -93,11 +101,15 @@ export async function handleMcpPermissionRequest(
     case "ping":
       return ok(id, {})
     case "tools/list":
-      return ok(id, { tools: [permissionTool] })
+      return ok(id, { tools: [permissionTool, ...(deps.tools?.definitions ?? [])] })
     case "tools/call": {
       const params = asRecord(request.params)
       const name = params && typeof params.name === "string" ? params.name : ""
-      if (name !== permissionToolName) return fail(id, -32602, `unknown tool: ${name}`)
+      if (name !== permissionToolName) {
+        if (!deps.tools?.definitions.some((tool) => tool.name === name)) return fail(id, -32602, `unknown tool: ${name}`)
+        const result = await deps.tools.call(name, params ? asRecord(params.arguments) ?? {} : {})
+        return ok(id, { content: [{ type: "text", text: result.text }], isError: result.isError })
+      }
       const args = params ? asRecord(params.arguments) ?? {} : {}
       const resolution = await deps.resolve(callFromArguments(args))
       const payload = { behavior: resolution.decision, ...(resolution.reason ? { message: resolution.reason } : {}) }

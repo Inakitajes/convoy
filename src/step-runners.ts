@@ -25,11 +25,11 @@ export type StepRunnerCapabilities = {
   modelFanout: boolean
   globalModelOverride: boolean
   /**
-   * Whether the engine can host an advisor at the step's decision points.
-   * Convoy's advisor is consulted through OpenCode's session and permission
-   * APIs, so the plan-layer route is OpenCode-only until Claude's advisor
-   * bridge is wired end to end (tasks 8.2/8.4). Declaring it here for a runner
-   * whose route does not exist would silently drop the configured advisor.
+   * Whether the engine can host an advisor at the step's decision points:
+   * OpenCode through its permission gate and plugin tools, Claude through
+   * Convoy's hook checkpoint and MCP tools. Derived from the runner's
+   * `advisor-bridge` capability, so a runner whose bridge is unavailable
+   * rejects an advisor instead of silently dropping it.
    */
   advisor: boolean
 }
@@ -79,8 +79,7 @@ export function resolveStepRunnerCapabilities(id: StepRunnerId, input: Capabilit
     // An unqualified --model override keeps OpenCode-only interpretation; a
     // Claude override is runner-qualified (task 8.5, handled in run-plan.ts).
     globalModelOverride: id === "opencode",
-    // The advisor route is OpenCode's bridge at the plan layer (see the type).
-    advisor: id === "opencode",
+    advisor: capabilityAvailable(caps, "advisor-bridge"),
   }
 }
 

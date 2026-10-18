@@ -7,8 +7,8 @@ import { afterAll, describe, expect, test } from "bun:test"
 import { createReportRuntime } from "../src/report-runtime"
 import { isConfirmedRelease } from "../src/runners/contracts"
 import { createOpencodeRunner, releaseOutcomeOf } from "../src/runners/opencode/adapter"
-import { createOpencodeDeliverableService } from "../src/runners/opencode/deliverables"
-import { createOpencodeAdvisorService } from "../src/runners/opencode/advisor"
+import { createSessionDeliverableService } from "../src/runners/session-deliverables"
+import { createSessionAdvisorService } from "../src/runners/session-advisor"
 import type { AdvisorRuntime } from "../src/advisor-runtime"
 
 const dirs: string[] = []
@@ -66,8 +66,8 @@ describe("session-bound service-handle lifetime", () => {
       checkpoint: async () => ({ action: "allow" }),
     }
     calls += 1
-    const deliverables = createOpencodeDeliverableService({ runtime, sessionID: "ses_1" })
-    const advisor = createOpencodeAdvisorService({ runtime: advisorRuntime, sessionID: "ses_1" })
+    const deliverables = createSessionDeliverableService({ runtime, sessionID: "ses_1" })
+    const advisor = createSessionAdvisorService({ runtime: advisorRuntime, sessionID: "ses_1" })
 
     // Before the phase decision, the services are live.
     expect((await deliverables.submit({ kind: "report", body: "# ok" })).ok).toBe(true)

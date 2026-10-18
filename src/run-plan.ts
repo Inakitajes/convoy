@@ -1,4 +1,5 @@
-import { resolveModel, type ModelGateway, type ModelRoutingOverrides } from "./model-routing"
+import { resolveModel, type ModelGateway, type ModelRoutingOverrides, type ResolvedModel } from "./model-routing"
+import { splitModelVariant } from "./pipeline"
 import type { OpenSpecBundle } from "./openspec"
 import type { PrdHistoryPreview } from "./prd-history"
 import type { AuthenticationMode } from "./runners/contracts"
@@ -100,15 +101,8 @@ export function buildRunPlan(input: BuildRunPlanInput): RunPlan {
  * anything else is an OpenCode model routed like a step's.
  */
 function resolveJudge(configured: string, gateway: ModelGateway, overrides: ModelRoutingOverrides): NonNullable<RunPlan["smartJudge"]> {
-  const scoped = parseModelOverride(configured)
-  if (scoped.scope === "claude-code") {
-    const modelID = normalizeStepRunnerModel("claude-code", scoped.model || "haiku")
-    return {
-      runner: "claude-code",
-      model: { configured, logical: modelID, gateway: "configured", providerID: "claude-code", modelID, target: `claude-code/${modelID}` },
-    }
-  }
-  return { model: resolveModel(configured, gateway, overrides) }
+  const model = resolveRunnerQualifiedModel(configured, gateway, overrides, "haiku")
+  return model.providerID === "claude-code" ? { runner: "claude-code", model } : { model }
 }
 
 /** Every runner an agent step of the pipeline (goal fragments included) executes on. */
@@ -166,9 +160,11 @@ function routeStep(
   if (stepRunnerFor(step.runner).id !== "opencode") {
     // Claude's CLI identifier is opaque to the gateway router; only a
     // Claude-scoped override replaces it. An unqualified override is
-    // OpenCode-only and leaves Claude steps untouched (design D5).
-    if (!modelOverrideTargetsRunner(override, "claude-code")) return structuredClone(step)
-    return { ...structuredClone(step), model: normalizeStepRunnerModel("claude-code", override.model), variant: undefined }
+    // OpenCode-only and leaves Claude steps untouched (design D5). Its
+    // advisor routes like any other step's.
+    const routed = { ...structuredClone(step), ...routeAdvisor(step, gateway, overrides, advisor) }
+    if (!modelOverrideTargetsRunner(override, "claude-code")) return routed
+    return { ...routed, model: normalizeStepRunnerModel("claude-code", override.model), variant: undefined }
   }
   // A runner-scoped override that names another runner does not replace the
   // OpenCode model; the step still routes its own configured model normally.
@@ -202,12 +198,24 @@ function routeAdvisor(
   const configured = advisorOverride || (step.advisor ? `${step.advisor}${step.advisorVariant ? `#${step.advisorVariant}` : ""}` : "")
   if (!configured) return off
 
-  const resolvedAdvisor = resolveModel(configured, gateway, overrides)
+  const resolvedAdvisor = resolveRunnerQualifiedModel(configured, gateway, overrides)
   return {
     advisor: `${resolvedAdvisor.providerID}/${resolvedAdvisor.modelID}`,
     advisorVariant: resolvedAdvisor.variant,
     resolvedAdvisor,
   }
+}
+
+/**
+ * A helper model reference (advisor, judge): `claude-code/<model>` runs on the
+ * Claude CLI and is never gateway-routed, since Claude's model id is opaque to
+ * OpenCode's catalog; anything else is an OpenCode model routed like a step's.
+ */
+export function resolveRunnerQualifiedModel(configured: string, gateway: ModelGateway, overrides: ModelRoutingOverrides, claudeDefault = "sonnet"): ResolvedModel {
+  const scoped = parseModelOverride(splitModelVariant(configured).model)
+  if (scoped.scope !== "claude-code") return resolveModel(configured, gateway, overrides)
+  const modelID = normalizeStepRunnerModel("claude-code", scoped.model || claudeDefault)
+  return { configured, logical: modelID, gateway: "configured", providerID: "claude-code", modelID, target: `claude-code/${modelID}` }
 }
 
 function filterPipeline(pipeline: Pipeline, only: string[], skip: string[]): Pipeline {

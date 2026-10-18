@@ -13,7 +13,7 @@ describe("runner service capabilities", () => {
 
     const claude = resolveRunnerCapabilities("claude-code", { enforcementReady: true })
     expect(supportsService(claude, "deliverables")).toBe(true)
-    expect(supportsService(claude, "advisor")).toBe(false)
+    expect(supportsService(claude, "advisor")).toBe(true)
     expect(supportsService(claude, "loop-guard")).toBe(false)
   })
 

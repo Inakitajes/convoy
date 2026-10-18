@@ -73,16 +73,20 @@ export const claudeDeclaration: CapabilityDeclaration = {
     "parallel",
     "approvals",
     "structured-deliverables",
+    "advisor-bridge",
     "live-observation",
     "post-exit-resume",
     "usage-reporting",
   ],
   semantics: {
-    "live-observation": "streamed to the coordinator; not a native attach",
+    "live-observation": "streamed to the coordinator's journal; not a native attach",
     "usage-reporting": "subscription values are estimates",
     approvals:
       "Convoy's policy is enforced by a PreToolUse hook and an MCP permission host; an ask-level action reaches the run's operator gate (auto-accept, smart judge, prompt) through a per-attempt loopback bridge",
-    "structured-deliverables": "the report is the final assistant text or the report file, validated by Convoy after the attempt exits",
+    "structured-deliverables":
+      "reports, scores, and commit descriptions are submitted through Convoy's write_report MCP tool and validated like OpenCode's; the final assistant text remains the fallback report",
+    "advisor-bridge":
+      "Convoy's advisor MCP tools and a PreToolUse first-write checkpoint, consulting the step's advisor (Claude or OpenCode) over the transcript Convoy recorded",
   },
   unavailable: [
     { id: "native-live-attach", reason: "print mode has no attachable live session" },
@@ -99,15 +103,10 @@ export const claudeDeclaration: CapabilityDeclaration = {
       reason: "requires a verified quiesced handoff",
       remediation: "use post-exit resume or observe",
     },
-    {
-      id: "advisor-bridge",
-      reason: "the Claude adapter has no advisor bridge yet",
-      remediation: "use an OpenCode advisor or omit the advisor for this step",
-    },
   ],
   restrictions: [
     {
-      ids: ["approvals"],
+      ids: ["approvals", "advisor-bridge"],
       when: (evidence) => evidence.enforcementReady === false,
       reason: "mandatory enforcement (hook + permission host) is not installed",
     },

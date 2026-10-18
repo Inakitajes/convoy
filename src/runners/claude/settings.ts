@@ -76,6 +76,25 @@ export function withServerEnv(mcpConfig: Record<string, unknown>, env: Record<st
   return { ...mcpConfig, mcpServers: withEnv }
 }
 
+/**
+ * The settings with an environment prefix on every hook command. Claude runs
+ * hooks through a shell, so the variables reach the hook process only — not
+ * Claude, and so not the agent's tools.
+ */
+export function withHookEnv(settings: Record<string, unknown>, env: Record<string, string>): Record<string, unknown> {
+  const prefix = Object.entries(env)
+    .map(([key, value]) => {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new Error(`invalid hook environment variable: ${key}`)
+      return `${key}='${value.replace(/'/g, `'\\''`)}'`
+    })
+    .join(" ")
+  const clone = structuredClone(settings) as { hooks?: Record<string, { hooks?: { command?: string }[] }[]> }
+  for (const entries of Object.values(clone.hooks ?? {})) {
+    for (const entry of entries) for (const hook of entry.hooks ?? []) if (typeof hook.command === "string") hook.command = `${prefix} ${hook.command}`
+  }
+  return clone
+}
+
 /** The `--permission-prompt-tool` argument pair for a hosted permission tool. */
 export function permissionPromptArgs(tool: string): string[] {
   return ["--permission-prompt-tool", tool]

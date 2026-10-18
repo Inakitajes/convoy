@@ -930,6 +930,8 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
 
     advisors = createAdvisorRuntime({
       ...(opencode ? { client: opencode.client } : {}),
+      // A Claude advising model consults under its reviewed route's auth.
+      ...((options.advisorAuth ?? options.claudeAuth) ? { claudeAuth: (options.advisorAuth ?? options.claudeAuth)! } : {}),
       directory: options.targetDir,
       signal: shutdown.signal,
       auditPolicy: options.advisorAuditPolicy ?? "summary",
@@ -2392,6 +2394,7 @@ async function runPhaseAttempt(
     runDir: workspace.dir,
     privateDirs: agentDeniedDirs(workspace.dir),
     commands: bashPolicy(targetDir, prepared.permissions ?? noAdditions, agentDeniedDirs(workspace.dir)),
+    advised: Boolean(phase.resolvedAdvisor),
     attachments: prepared.attachments.flatMap((file) => {
       try {
         return [fileURLToPath(file.url)]
@@ -2428,6 +2431,11 @@ async function runPhaseAttempt(
         activeSessionID = event.session.sessionId
         beginSession(activeSessionID)
         if (serverSession && client) shutdown.setActiveSession({ client, sessionID: activeSessionID, directory: targetDir, phaseName: phase.name })
+        // A process-owned session (Claude) has no server holding its
+        // transcript: record it, prompt first, for the phase's advisor.
+        if (!serverSession && phase.resolvedAdvisor) advisors?.record?.(activeSessionID, { prompt: context.prompt })
+      } else if (!serverSession && phase.resolvedAdvisor && activeSessionID) {
+        advisors?.record?.(activeSessionID, { event })
       }
       render(event)
     },
@@ -2684,7 +2692,9 @@ export function withAttachmentsByPath(prompt: string, attachments: readonly File
 }
 
 function buildPhasePrompt(workspace: Workspace, phase: AgentStep) {
-  const usesWriteReport = phase.runner !== "claude-code"
+  // Both runners submit through Convoy's write_report tool: OpenCode's plugin,
+  // Claude's MCP tool (which Claude lists under its server-qualified name).
+  const tool = phase.runner === "claude-code" ? "`write_report` (`mcp__convoy__write_report`)" : "`write_report`"
   return [
     `# Pipeline phase: ${phase.name}`,
     "",
@@ -2692,31 +2702,23 @@ function buildPhasePrompt(workspace: Workspace, phase: AgentStep) {
     "",
     "## Run context",
     `- Run dir: ${workspace.dir}`,
-    usesWriteReport
-      ? "- Report: call `write_report` with the complete Markdown report before finishing. Convoy fixes the path; do not use write or edit for the report. In read-only phases this is the only permitted report write."
-      : phase.readOnly
-        ? `- Report: Convoy saves your report itself as ${phase.reportPath}; you do not (and cannot) write it.`
-        : `- Write your final report to: ${join(workspace.dir, phase.reportPath)}`,
+    `- Report: call ${tool} with the complete Markdown report before finishing. Convoy fixes the path; do not use write or edit for the report. In read-only phases this is the only permitted report write.`,
     // Structured commit metadata (capability step-commit-messages): Convoy
     // renders the phase's step commit from it, so ask for an outcome-oriented
     // subject instead of leaving the subject to first-heading inference.
-    ...(usesWriteReport && !phase.readOnly
+    ...(!phase.readOnly
       ? [
-          "- Commit: Convoy commits this phase's repository changes as `convoy(<step>): <subject>` with a `Convoy-Run` trailer. In the same `write_report` call, include an optional `commit` object: { \"subject\": \"...\", \"details\": [\"...\"] }. The `subject` is an imperative English line describing the repository outcome — never the report, the phase, the agent, or the process. `details` holds at most three concrete statements about what changed. Convoy falls back to your report or the staged changes when you omit it.",
+          `- Commit: Convoy commits this phase's repository changes as \`convoy(<step>): <subject>\` with a \`Convoy-Run\` trailer. In the same ${tool} call, include an optional \`commit\` object: { "subject": "...", "details": ["..."] }. The \`subject\` is an imperative English line describing the repository outcome — never the report, the phase, the agent, or the process. \`details\` holds at most three concrete statements about what changed. Convoy falls back to your report or the staged changes when you omit it.`,
         ]
       : []),
     "- Working directory: the directory where `convoy` was invoked (root of the target repo).",
     "",
     "## Access mode",
     phase.readOnly && phase.verify
-      ? usesWriteReport
-        ? "This phase verifies without editing: you have bash, so run the tests, typecheck, lint, and other checks your instructions call for, and quote the exact command and its real result as evidence — never claim a check you did not run. Do not run commands that modify the repository either — no snapshot updates (`-u`, `--update-snapshots`), no formatters that rewrite files, no dependency installs; Convoy fails this phase if the repository changes. You have no write or edit tools. Use `write_report`, not write or edit, to persist the final report."
-        : "This phase verifies without editing: you have bash, so run the tests, typecheck, lint, and other checks your instructions call for, and quote the exact command and its real result as evidence — never claim a check you did not run. You have no write or edit tools, and that is expected: do not try to write any file. Do not run commands that modify the repository either — no snapshot updates (`-u`, `--update-snapshots`), no formatters that rewrite files, no dependency installs; Convoy fails this phase if the repository changes. Convoy saves your visible Markdown report as the fallback deliverable."
+      ? `This phase verifies without editing: you have bash, so run the tests, typecheck, lint, and other checks your instructions call for, and quote the exact command and its real result as evidence — never claim a check you did not run. Do not run commands that modify the repository either — no snapshot updates (\`-u\`, \`--update-snapshots\`), no formatters that rewrite files, no dependency installs; Convoy fails this phase if the repository changes. You have no write or edit tools. Use ${tool}, not write or edit, to persist the final report.`
       : phase.readOnly
-        ? usesWriteReport
-          ? "This phase is read-only: do not modify the target repository or try to use write, edit, or bash. Call `write_report` to persist the complete final report; this tool is the only permitted write."
-          : "This phase is read-only: Convoy gives you no write, edit, or bash tools. Do not modify the target repository. Convoy saves your visible Markdown report as the fallback deliverable."
-        : "This phase may edit the target repository when the phase-specific instructions call for it. Call `write_report` to persist the final report rather than writing a report file directly.",
+        ? `This phase is read-only: do not modify the target repository or try to use write, edit, or bash. Call ${tool} to persist the complete final report; this tool is the only permitted write.`
+        : `This phase may edit the target repository when the phase-specific instructions call for it. Call ${tool} to persist the final report rather than writing a report file directly.`,
     "",
     "## Attachments",
     "You will receive as file attachments: project context files when present, the original PRD, the OpenSpec spec bundle (proposal, design, tasks, and delta specs) when an active change is attached, the project's historical PRD for this branch when present, previous phase reports, the cumulative diff against the base branch, and any `--file` passed by the user. Read them before acting. When an OpenSpec change is attached, those spec files are the contract — implement and grade against them, not a reconstructed brief.",
@@ -2732,11 +2734,7 @@ function buildPhasePrompt(workspace: Workspace, phase: AgentStep) {
       : phase.readOnly
         ? "1. Have not modified the target repository."
         : "1. Have applied necessary changes to the repo code.",
-    usesWriteReport
-      ? "2. Have called `write_report` with the complete report (markdown, max ~80 lines)."
-      : phase.readOnly
-        ? "2. Make the report (markdown, max ~80 lines) your entire visible output — Convoy persists it for you. Nothing before or after it."
-        : "2. Have written the report (markdown, max ~80 lines) at the absolute path indicated above. If you can't write it, respond with the exact report content and Convoy will save it.",
+    `2. Have called ${tool} with the complete report (markdown, max ~80 lines). If the tool is unavailable, make the report your entire final message and Convoy will save it.`,
     "3. Leave the tree in a compilable state.",
     "",
     // The goal brief is untrusted, agent-authored text. It is appended AFTER the

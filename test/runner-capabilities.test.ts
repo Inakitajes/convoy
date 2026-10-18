@@ -70,9 +70,10 @@ describe("native versus bridged semantics", () => {
 
   test("a capability the runner cannot honor is advertised as restricted, never dropped", () => {
     const caps = resolveRunnerCapabilities("claude-code", { enforcementReady: true })
-    expect(capability(caps, "advisor-bridge")?.availability).toBe("restricted")
-    if (capability(caps, "advisor-bridge")?.availability === "restricted") {
-      expect((capability(caps, "advisor-bridge") as { remediation?: string }).remediation).toBeTruthy()
-    }
+    expect(capability(caps, "explicit-handoff")?.availability).toBe("restricted")
+    expect((capability(caps, "explicit-handoff") as { remediation?: string }).remediation).toBeTruthy()
+    // The advisor bridge is Claude's once its hook and permission host are installed.
+    expect(capability(caps, "advisor-bridge")?.availability).toBe("available")
+    expect(capability(resolveRunnerCapabilities("claude-code", { enforcementReady: false }), "advisor-bridge")?.availability).toBe("restricted")
   })
 })

@@ -130,8 +130,8 @@ describe("write_report tool file", () => {
     const source = await readFile(path, "utf8")
     expect(source).toContain('import { Plugin } from "@opencode/plugin"')
     expect(source).toContain("ctx.tool.transform")
-    expect(source).toContain("commit: { type: \"object\"")
-    expect(source).toContain("subject: { type: \"string\" }")
+    expect(source).toContain('"commit":{"type":"object"')
+    expect(source).toContain('"subject":{"type":"string"}')
     expect(source).toContain("imperative English subject")
   })
 

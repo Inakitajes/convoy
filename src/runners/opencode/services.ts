@@ -10,18 +10,18 @@
 import { supportsService } from "../capabilities"
 import type { ExecutionServices, RunnerCapabilities } from "../contracts"
 import type { ServiceRuntimes } from "../service-runtimes"
-import { createOpencodeAdvisorService } from "./advisor"
-import { createOpencodeDeliverableService } from "./deliverables"
+import { createSessionAdvisorService } from "../session-advisor"
+import { createSessionDeliverableService } from "../session-deliverables"
 import { createOpencodeLoopGuardService } from "./loop-guard"
 
 export function bindOpencodeServices(runtimes: ServiceRuntimes, capabilities: RunnerCapabilities): ExecutionServices {
   const services: ExecutionServices = {}
   if (supportsService(capabilities, "loop-guard")) services.loopGuard = createOpencodeLoopGuardService(runtimes.loopGuard)
   if (runtimes.advisors && supportsService(capabilities, "advisor")) {
-    services.advisor = createOpencodeAdvisorService({ runtime: runtimes.advisors, session: runtimes.session })
+    services.advisor = createSessionAdvisorService({ runtime: runtimes.advisors, session: runtimes.session })
   }
   if (runtimes.reports && supportsService(capabilities, "deliverables")) {
-    services.deliverables = createOpencodeDeliverableService({
+    services.deliverables = createSessionDeliverableService({
       runtime: runtimes.reports,
       session: runtimes.session,
       expected: runtimes.expected,

@@ -1,23 +1,25 @@
 /**
- * OpenCode deliverable service (change `unify-runner-system`, task 2.2).
+ * Session-scoped deliverable service (change `unify-runner-system`, task 2.2;
+ * shared by both runners since `runner-parity-opencode-v2`).
  *
- * Adapts the OpenCode `write_report` transport (`ReportRuntime`) to the neutral
- * deliverable service, reusing its existing payload validation, its atomic
+ * Adapts Convoy's `write_report` runtime (`ReportRuntime`) to the neutral
+ * deliverable service — reached by OpenCode's plugin tool and Claude's MCP
+ * tool alike — reusing its existing payload validation, its atomic
  * report + commit-sidecar persistence, and its candidate precedence. A
  * submission is addressed to one exact session: once that session's handle is
  * released (retry, abort or the phase decision), a late submission is refused
  * rather than accepted into a later attempt.
  */
 
-import type { ReportRuntime } from "../../report-runtime"
-import type { DeliverableKind, DeliverableResult, DeliverableService, DeliverableSubmission } from "../contracts"
+import type { ReportRuntime } from "../report-runtime"
+import type { DeliverableKind, DeliverableResult, DeliverableService, DeliverableSubmission } from "./contracts"
 
-export type OpencodeDeliverableService = DeliverableService & {
+export type SessionDeliverableService = DeliverableService & {
   /** Release the attempt's session; every later submission is refused as stale. */
   release(): void
 }
 
-export type OpencodeDeliverableOptions = {
+export type SessionDeliverableOptions = {
   runtime: ReportRuntime
   /** A fixed session id, or a getter when the session is known only after creation. */
   sessionID?: string
@@ -64,7 +66,7 @@ export function toWriteReportPayload(submission: DeliverableSubmission): Mapped 
   return { ok: true, payload: parsed }
 }
 
-export function createOpencodeDeliverableService(options: OpencodeDeliverableOptions): OpencodeDeliverableService {
+export function createSessionDeliverableService(options: SessionDeliverableOptions): SessionDeliverableService {
   const { runtime } = options
   const sessionOf = () => (options.session ? options.session() : options.sessionID)
   let released = false

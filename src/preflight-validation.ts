@@ -5,8 +5,16 @@ type DiscoveredModel = { variants?: unknown }
 type DiscoveredProvider = { id?: unknown; models?: unknown }
 export type ProviderCatalog = { all: readonly DiscoveredProvider[]; connected: readonly string[] }
 
-/** The exact OpenCode targets that must be available before a run can begin. */
+/**
+ * The exact OpenCode targets that must be available before a run can begin.
+ * Claude-routed models (`claude-code/<model>` advisors and judges) are not
+ * OpenCode catalog entries: the Claude CLI's own auth probe checks them.
+ */
 export function preflightTargets(plan: RunPlan): ResolvedModel[] {
+  return opencodeTargets(plan).filter((target) => target.providerID !== "claude-code")
+}
+
+function opencodeTargets(plan: RunPlan): ResolvedModel[] {
   const targets = plan.pipeline.steps.flatMap((step) =>
     step.type === "agent" && step.runner !== "claude-code" && step.resolvedModel ? [step.resolvedModel] : [],
   )

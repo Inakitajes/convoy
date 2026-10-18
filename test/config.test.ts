@@ -1518,17 +1518,16 @@ pipelines:
     expect(() => parseAdvisor(`version: 1\ndefaults:\n  advisor: nope\n`)).toThrow(/defaults.advisor/)
   })
 
-  test("rejects an advisor on a claude-code step", () => {
-    expect(() =>
-      parseAdvisor(`version: 1
+  test("accepts an advisor on a claude-code step", () => {
+    const config = parseAdvisor(`version: 1
 pipelines:
   p:
     steps:
       - agent: bug-auditor
         runner: claude-code
-        advisor: anthropic/claude-opus-5
-`),
-    ).toThrow(/does not support an advisor/)
+        advisor: claude-code/opus
+`)
+    expect(config.pipelines.p?.steps[0]).toMatchObject({ runner: "claude-code", advisor: "claude-code/opus" })
   })
 
   test("buildAgentRegistry carries the advisor onto built-in and project agents", () => {

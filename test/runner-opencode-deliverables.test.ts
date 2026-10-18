@@ -5,7 +5,7 @@ import { join } from "node:path"
 import { afterAll, describe, expect, test } from "bun:test"
 
 import { createReportRuntime } from "../src/report-runtime"
-import { createOpencodeDeliverableService } from "../src/runners/opencode/deliverables"
+import { createSessionDeliverableService } from "../src/runners/session-deliverables"
 import { loadCommitSidecar, sidecarPathFor } from "../src/step-commit"
 import { qualityDimensionWeights } from "../src/quality-score"
 import type { AgentStep, DeliverableContract } from "../src/types"
@@ -43,7 +43,7 @@ const dimensions = { prd: 92, tests: 70, security: 95, maintainability: 88, oper
 function service(dir: string, sessionID: string, phaseOverride: Partial<AgentStep> = {}) {
   const runtime = createReportRuntime(dir)
   const handle = runtime.begin(sessionID, phase(phaseOverride), markdownContract, qualityDimensionWeights)
-  return { runtime, handle, service: createOpencodeDeliverableService({ runtime, sessionID }) }
+  return { runtime, handle, service: createSessionDeliverableService({ runtime, sessionID }) }
 }
 
 describe("OpenCode deliverable service", () => {
@@ -101,7 +101,7 @@ describe("OpenCode deliverable service", () => {
     const stale = await deliverables.submit({ kind: "report", body: "# late" })
     expect(stale).toEqual({ ok: false, error: "no live report session for this attempt", retryable: false, preserved: false })
 
-    const other = createOpencodeDeliverableService({ runtime: createReportRuntime(dir), sessionID: "ses_2" })
+    const other = createSessionDeliverableService({ runtime: createReportRuntime(dir), sessionID: "ses_2" })
     other.release()
     const released = await other.submit({ kind: "report", body: "# late" })
     expect(released.ok).toBe(false)

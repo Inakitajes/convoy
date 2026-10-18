@@ -79,6 +79,13 @@ export function resourceOf(toolName: string, input?: Record<string, unknown>): s
   return undefined
 }
 
+/** Convoy's own MCP tools (`mcp__convoy__write_report`, …): mediated and scoped by the attempt's bridge. */
+const convoyMcpToolPattern = /^mcp__convoy__(write_report|advisor|advisor_feedback)$/
+
+export function isConvoyMcpTool(toolName: string | undefined): boolean {
+  return typeof toolName === "string" && convoyMcpToolPattern.test(toolName)
+}
+
 /** The neutral action request for a hook input. */
 export function toActionRequest(input: PreToolUseInput): ActionRequest {
   const tool = typeof input.tool_name === "string" && input.tool_name.length > 0 ? input.tool_name : "unknown"
@@ -93,6 +100,10 @@ export function toActionRequest(input: PreToolUseInput): ActionRequest {
 
 /** Convoy's decision for one tool call (used by the hook and by OpenCode). */
 export function decideToolCall(input: PreToolUseInput, config: PolicyConfig, state?: PolicyState): PolicyDecision {
+  // Submitting a report or consulting the advisor never touches the checkout
+  // directly; the attempt's bridge decides what each call may do. Any other
+  // MCP tool stays unclassifiable, and so denied.
+  if (isConvoyMcpTool(input.tool_name)) return { effect: "allow", reason: "Convoy tool" }
   return evaluateAction(toActionRequest(input), config, state ?? {})
 }
 

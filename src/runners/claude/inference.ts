@@ -15,9 +15,9 @@
 import { withoutHerdrEnv } from "../../herdr"
 import type { AuthenticationSelection, Usage } from "../contracts"
 import { redactSecrets } from "../redaction"
-import { cliAuthProbe, type ClaudeProcess, type ClaudeRunnerDeps } from "./adapter"
+import type { ClaudeProcess, ClaudeRunnerDeps } from "./adapter"
 import { resolveClaudeAuth } from "./auth"
-import { applyAuthOverlay, validateEffectiveAuth, type EffectiveAuthProbe } from "./effective-auth"
+import { applyAuthOverlay, cliAuthProbe, validateEffectiveAuth, type EffectiveAuthProbe } from "./effective-auth"
 
 export type ClaudeInferenceInput = {
   prompt: string

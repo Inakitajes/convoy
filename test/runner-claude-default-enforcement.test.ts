@@ -158,11 +158,14 @@ describe("service binding by the composition", () => {
     await composition.close()
   })
 
-  test("Claude binds no engine runtime and owns its session through cancellation", async () => {
+  test("Claude binds the session's deliverables and advisor, and owns its session through cancellation", async () => {
     const dir = await mkdtemp(join(tmpdir(), "convoy-bind-"))
     dirs.push(dir)
     const composition = composeRunners({ cwd: dir })
-    expect(composition.servicesFor("claude-code", runtimes(), resolveRunnerCapabilities("claude-code"))).toEqual({})
+    // No runtimes, no services; the loop guard is never bound (print mode cannot be nudged).
+    const bound = composition.servicesFor("claude-code", runtimes(), resolveRunnerCapabilities("claude-code"))
+    expect(bound.loopGuard).toBeUndefined()
+    expect(bound.approvals).toBeUndefined()
     expect(composition.abortsSessionOnShutdown("claude-code")).toBe(false)
     await composition.close()
   })
