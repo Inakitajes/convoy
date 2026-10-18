@@ -89,6 +89,12 @@ defaults:
     ).toThrow(/runs on claude-code through defaults.runner but names the OpenCode model "openai\/gpt-5.5"/)
   })
 
+  test("claudeAuth defaults to subscription, so a billing policy alone is valid", () => {
+    const config = parseConvoyConfig(`version: 1\ndefaults:\n  claudeAuth:\n    billingPolicy: account-policy\n`, "config.yaml", "/tmp")
+    expect(config.defaults.claudeAuth).toEqual({ authMode: "subscription", billingPolicy: "account-policy" })
+    expect(() => parseConvoyConfig(`version: 1\ndefaults:\n  claudeAuth:\n    credentialRef: KEY\n`, "config.yaml", "/tmp")).toThrow(/subscription mode must not set credentialRef/)
+  })
+
   test("an api-key advisor or authoring route needs the Claude credential reference", () => {
     expect(() => parseConvoyConfig(`version: 1\ndefaults:\n  advisorRoute:\n    authMode: api-key\n`, "config.yaml", "/tmp")).toThrow(/credentialRef/)
     expect(() => parseConvoyConfig(`version: 1\ndefaults:\n  authoring:\n    authMode: api-key\n`, "config.yaml", "/tmp")).toThrow(/credentialRef/)

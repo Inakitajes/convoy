@@ -799,8 +799,8 @@ function validateCredentialRef(v: Validator, value: unknown, path: string): stri
 function validateClaudeAuth(v: Validator, raw: unknown, path: string): NonNullable<ConvoyDefaults["claudeAuth"]> {
   const record = v.record(raw, path)
   v.knownKeys(record, path, ["authMode", "credentialRef", "billingPolicy"])
-  if (record.authMode === undefined) v.fail(`${path}.authMode`, "is required")
-  const authMode = validateAuthMode(v, record.authMode, `${path}.authMode`)
+  // Subscription is the documented default, so `billingPolicy` alone is valid.
+  const authMode = record.authMode === undefined ? "subscription" : validateAuthMode(v, record.authMode, `${path}.authMode`)
   const credentialRef = record.credentialRef !== undefined ? validateCredentialRef(v, record.credentialRef, `${path}.credentialRef`) : undefined
   if (authMode === "api-key" && credentialRef === undefined) v.fail(path, "api-key mode requires credentialRef")
   if (authMode === "subscription" && credentialRef !== undefined) v.fail(path, "subscription mode must not set credentialRef")
