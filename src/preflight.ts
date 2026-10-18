@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs"
 
-import { claudeBinaryName } from "./claude-code"
+import { claudeBinaryName, whichOnPath } from "./claude-code"
 import { startOpencode, type OpencodeHandle } from "./opencode"
 import { resolveOpencodeBin } from "./opencode-runtime"
 import type { RunPlan } from "./types"
@@ -24,9 +24,9 @@ export type PreflightOptions = {
 }
 
 function installedRunner(runner: RunnerId): boolean {
-  if (runner === "claude-code") return Bun.which(claudeBinaryName) !== null
+  if (runner === "claude-code") return whichOnPath(claudeBinaryName) !== null
   const bin = resolveOpencodeBin()
-  return bin.includes("/") ? existsSync(bin) : Bun.which(bin) !== null
+  return bin.includes("/") ? existsSync(bin) : whichOnPath(bin) !== null
 }
 
 /**

@@ -17,6 +17,7 @@ import {
   newClaudeStreamState,
   pipelineUsesClaudeCode,
   promptClaudePhase,
+  whichOnPath,
   stageClaudeAttachments,
   type ClaudeShutdown,
 } from "../src/claude-code"
@@ -97,6 +98,22 @@ describe("optional Claude Code dependency", () => {
     expect(pipelineUsesClaudeCode(claudePipeline)).toBe(true)
     expect(() => ensureClaudeAvailable(claudePipeline, () => null)).toThrow(/external-security/)
     expect(() => ensureClaudeAvailable(claudePipeline, () => null)).toThrow(/claude.*not found in PATH/)
+  })
+
+  test("the availability check resolves against the live PATH, as the launch does", async () => {
+    const bin = await mkdtemp(join(tmpdir(), "convoy-which-"))
+    const original = process.env.PATH
+    try {
+      const name = `convoy-fake-cli-${process.pid}`
+      await writeFile(join(bin, name), "#!/bin/sh\n", { mode: 0o755 })
+      expect(whichOnPath(name)).toBeNull()
+      process.env.PATH = `${bin}:${original ?? ""}`
+      // Bun.which alone would still read the startup PATH here.
+      expect(whichOnPath(name)).toBe(join(bin, name))
+    } finally {
+      process.env.PATH = original
+      await rm(bin, { recursive: true, force: true })
+    }
   })
 })
 

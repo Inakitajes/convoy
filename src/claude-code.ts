@@ -50,7 +50,16 @@ export function pipelineUsesClaudeCode(pipeline: Pipeline): boolean {
  * actually contains a claude-code step requires the CLI, and it must fail at
  * launch, never minutes into a run.
  */
-export function ensureClaudeAvailable(pipeline: Pipeline, which: (bin: string) => string | null = Bun.which) {
+/**
+ * Resolves a binary against the current `PATH`. `Bun.which` alone reads the
+ * PATH the process started with, while spawning resolves against the live
+ * environment, so a check without this can disagree with the launch it guards.
+ */
+export function whichOnPath(bin: string): string | null {
+  return Bun.which(bin, { PATH: process.env.PATH ?? "" })
+}
+
+export function ensureClaudeAvailable(pipeline: Pipeline, which: (bin: string) => string | null = whichOnPath) {
   if (!pipelineUsesClaudeCode(pipeline)) return
   if (which(claudeBinaryName)) return
   const steps = pipeline.steps
