@@ -9,7 +9,7 @@
  */
 
 import { createClaudeRunner, type ClaudeRunnerOptions } from "./claude/adapter"
-import { createOpencodeRunner } from "./opencode/adapter"
+import { createOpencodeRegistration } from "./opencode/registration"
 import { executeClaudeAttempt } from "./claude/attempt"
 import { executeOpencodeAttempt } from "./opencode/attempt"
 import { bindOpencodeServices } from "./opencode/services"
@@ -29,12 +29,9 @@ export type { EnforcementCommands }
 export type ComposeOptions = {
   cwd: string
   env?: NodeJS.ProcessEnv
-  /** Rendered OpenCode run config (`OPENCODE_CONFIG_CONTENT`). */
-  opencodeConfigContent?: string
   /** Claude enforcement plan; without it, Claude write/verify attempts fail closed. */
   enforcement?: EnforcementPlan
   claude?: Omit<ClaudeRunnerOptions, "cwd" | "env" | "enforcement">
-  opencode?: Omit<Parameters<typeof createOpencodeRunner>[0], "cwd" | "env" | "configContent">
 }
 
 export type Composition = {
@@ -89,12 +86,7 @@ function bindClaudeServices(runtimes: ServiceRuntimes, capabilities: RunnerCapab
 /** Registers the built-in adapters with the assembled options. */
 export function composeRunners(options: ComposeOptions): Composition {
   const registry = new RunnerRegistry()
-  const opencode = createOpencodeRunner({
-    cwd: options.cwd,
-    ...(options.env ? { env: options.env } : {}),
-    ...(options.opencodeConfigContent ? { configContent: options.opencodeConfigContent } : {}),
-    ...(options.opencode ?? {}),
-  })
+  const opencode = createOpencodeRegistration()
   const claude = createClaudeRunner({
     cwd: options.cwd,
     ...(options.env ? { env: options.env } : {}),
@@ -115,8 +107,8 @@ export function composeRunners(options: ComposeOptions): Composition {
     attemptFor: (id) => attempts[id]?.run,
     servicesFor: (id, runtimes, capabilities) => attempts[id]?.bindServices?.(runtimes, capabilities) ?? {},
     abortsSessionOnShutdown: (id) => attempts[id]?.serverSession ?? false,
-    async close() {
-      await opencode.close().catch(() => undefined)
-    },
+    // Neither registration owns a process: OpenCode's server is the run's,
+    // and each Claude attempt owns and ends its own child.
+    async close() {},
   }
 }

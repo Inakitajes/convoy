@@ -390,3 +390,45 @@ describe("Claude approval bridge token", () => {
     expect(existsSync(mcpConfigPath!)).toBe(false)
   })
 })
+
+// Spec runner-execution, "Claude child stalls during abort": cancellation
+// must settle within a bounded deadline, escalating to a forced stop of the
+// owned child instead of waiting forever on one that ignores SIGTERM.
+describe("Claude abort escalation", () => {
+  test("a child that ignores SIGTERM is force-stopped within the grace period", async () => {
+    const signals: string[] = []
+    let closeStdout: (() => void) | undefined
+    let resolveExit!: (code: number) => void
+    const proc: ClaudeProcess = {
+      stdout: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(`${JSON.stringify({ type: "system", subtype: "init", session_id: "ses_stall" })}\n`))
+          closeStdout = () => controller.close()
+        },
+      }),
+      stderr: new ReadableStream<Uint8Array>({ start: (controller) => controller.close() }),
+      exited: new Promise<number>((resolve) => (resolveExit = resolve)),
+      exitCode: null,
+      kill: (signal?: NodeJS.Signals | number) => {
+        signals.push(String(signal ?? "SIGTERM"))
+        // Only a forced stop ends this child.
+        if (signal === "SIGKILL") {
+          proc.exitCode = 137
+          closeStdout?.()
+          resolveExit(137)
+        }
+      },
+    }
+    const controller = new AbortController()
+    const runner = createClaudeRunner({ cwd: "/tmp", env: {}, deps: { ...subscriptionLogin, spawn: () => proc, stopGraceMs: 20 } })
+    const outcome = runner.executeAttempt(readOnlyWith(controller.signal), () => {})
+    await Bun.sleep(10)
+    controller.abort()
+    expect(await outcome).toMatchObject({ status: "interrupted", session: { sessionId: "ses_stall" } })
+    expect(signals).toEqual(["SIGTERM", "SIGKILL"])
+  }, 2_000)
+})
+
+function readOnlyWith(signal: AbortSignal): ExecutionRequest {
+  return { ...readOnly(), signal }
+}

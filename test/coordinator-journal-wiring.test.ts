@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { appendFile, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
+import { appendFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -141,6 +141,19 @@ describe("coordinator journal wiring", () => {
     } finally {
       await attach.stop()
     }
+  })
+
+  test("a stopped run's journal with a hole is replayed with an explicit gap marker", async () => {
+    const runDir = await scratch()
+    const path = coordinatorJournalPath(runDir)
+    const line = (seq: number, text: string) => `${JSON.stringify({ seq, runner: "claude-code", attempt: { runId: "r", phase: "implement", attempt: 1 }, at: 0, event: { type: "text", runner: "claude-code", attempt: 1, text } })}\n`
+    await mkdir(join(runDir, "events"), { recursive: true })
+    await writeFile(path, line(1, "before") + line(4, "after"))
+    const notices: string[] = []
+    const { messages, tui } = recordingTui()
+    await replayJournal({ ...tui, message: (text) => void notices.push(text) }, runDir, new Set(["implement"]))
+    expect(messages.implement?.map((message) => message.text)).toEqual(["before", "after"])
+    expect(notices).toEqual(["transcript incomplete: events 2–3 were not captured"])
   })
 
   test("a phase with native live attach keeps its own stream, so the journal never doubles it", async () => {

@@ -1,31 +1,39 @@
-import { runExecutionConformance, makeRequest } from "./helpers/runner-conformance"
+import { runExecutionConformance } from "./helpers/runner-conformance"
 
-import type { ExecutionAdapter, ExecutionRequest, RunnerEvent, RunnerId } from "../src/runners/contracts"
+import { createClaudeRunner, type ClaudeProcess } from "../src/runners/claude/adapter"
+import { buildEnforcementPlan } from "../src/runners/compose"
 
 /**
- * A vendor-free double used to exercise the shared conformance suite today.
- * When the real OpenCode v2 and Claude adapters land (groups 4 and 5) they call
- * `runExecutionConformance` from their own tests, so the contract is asserted in
- * exactly one place.
+ * The shared conformance suite against the real Claude execution adapter —
+ * the production `ExecutionAdapter` — driving a scripted CLI stream instead of
+ * a model. (OpenCode attempts run on the run-owned server through the engine's
+ * `executeOpencodeAttempt`; their contract is covered by the engine tests.)
  */
-function doubleAdapter(id: RunnerId): ExecutionAdapter {
+function scriptedClaude(): ClaudeProcess {
+  const lines = [
+    { type: "system", subtype: "init", session_id: "ses_conformance" },
+    { type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: "ok" } } },
+    { type: "result", subtype: "success", is_error: false, result: "ok", session_id: "ses_conformance" },
+  ]
   return {
-    id,
-    async capabilities() {
-      return { runner: id, version: "double", capabilities: [{ id: "write", availability: "available" }] }
-    },
-    async executeAttempt(request: ExecutionRequest, sink: (event: RunnerEvent) => void) {
-      sink({ type: "session", runner: id, attempt: request.identity.attempt, session: { runner: id, sessionId: "ses_double" } })
-      sink({ type: "text", runner: id, attempt: request.identity.attempt, text: "ok" })
-      sink({ type: "terminal", runner: id, attempt: request.identity.attempt, outcome: { status: "completed", finish: "stop" } })
-      return { status: "completed", finish: "stop" }
-    },
-    async cancelAttempt() {},
+    stdout: new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(lines.map((line) => JSON.stringify(line)).join("\n") + "\n"))
+        controller.close()
+      },
+    }),
+    stderr: new ReadableStream<Uint8Array>({ start: (controller) => controller.close() }),
+    exited: Promise.resolve(0),
+    exitCode: 0,
+    kill: () => {},
   }
 }
 
-runExecutionConformance("opencode", () => doubleAdapter("opencode"))
-runExecutionConformance("claude-code", () => doubleAdapter("claude-code"))
-
-// Keep the helper's request factory exercised so it stays in step with the contract.
-void makeRequest()
+runExecutionConformance("claude-code", () =>
+  createClaudeRunner({
+    cwd: "/tmp",
+    env: { PATH: "/bin" },
+    enforcement: buildEnforcementPlan({ hookCommand: "convoy hook", permissionCommand: "convoy-mcp" }),
+    deps: { spawn: () => scriptedClaude(), probeAuth: async () => ({ authMethod: "claude.ai" }) },
+  }),
+)

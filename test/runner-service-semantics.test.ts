@@ -3,19 +3,24 @@
  * `unify-runner-system`, task 1.5).
  *
  * These tests do more than assert that a callback was invoked: they wire the
- * real Convoy domain logic (deliverable ledger, advisor checkpoint, loop guard)
+ * real Convoy domain logic (report runtime, advisor runtime, loop guard)
  * behind the neutral service vocabulary and assert the semantics an adapter
  * relies on — a rejection preserves the last accepted artifact, a protected
  * write stays blocked until the checkpoint is satisfied, and a repeated call
  * yields a stop decision rather than a silent observation.
  */
 
-import { describe, expect, test } from "bun:test"
+import { afterAll, describe, expect, test } from "bun:test"
+import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 
 import { LoopGuard, resolveLoopGuard, type LoopGuardObservation } from "../src/loop-guard"
-import { AdvisorCheckpoint } from "../src/runners/advisor-consult"
+import { createAdvisorRuntime } from "../src/advisor-runtime"
+import { createReportRuntime } from "../src/report-runtime"
 import { assertServicesSupported, resolveRunnerCapabilities, UnsupportedServiceError } from "../src/runners/capabilities"
-import { DeliverableLedger } from "../src/runners/deliverables"
+import { createSessionAdvisorService } from "../src/runners/session-advisor"
+import { createSessionDeliverableService } from "../src/runners/session-deliverables"
 import type {
   AdvisorService,
   AttemptIdentity,
@@ -23,82 +28,72 @@ import type {
   LoopGuardService,
   LoopObservation,
 } from "../src/runners/contracts"
+import type { AgentStep } from "../src/types"
 
 const identity: AttemptIdentity = { runId: "run-1", phaseName: "implement", attempt: 1 }
-const attempt = { runId: identity.runId, phase: identity.phaseName, attempt: identity.attempt }
+const dirs: string[] = []
+afterAll(async () => {
+  await Promise.all(dirs.map((dir) => rm(dir, { recursive: true, force: true })))
+})
 
 describe("deliverable service semantics", () => {
-  function service(maxCorrections = 2): DeliverableService {
-    const ledger = new DeliverableLedger({ maxCorrections })
-    return {
-      expected: ["report"],
-      async submit(submission) {
-        const result = ledger.submit({
-          kind: submission.kind,
-          attempt,
-          body: submission.body,
-        })
-        if (result.ok) return { ok: true }
-        return {
-          ok: false,
-          error: result.error,
-          retryable: result.correctionsRemaining > 0,
-          preserved: result.candidate !== undefined,
-        }
-      },
-    }
+  async function service(): Promise<DeliverableService> {
+    const dir = await mkdtemp(join(tmpdir(), "convoy-service-semantics-"))
+    dirs.push(dir)
+    const runtime = createReportRuntime(dir)
+    const phase = { type: "agent" as const, name: "review", stepName: "review", groupId: "g", agentName: "bug-auditor", description: "Review", model: "m", inputFiles: [], inputDiff: false, reportPath: "reports/review.md" }
+    runtime.begin("ses_1", phase, { kind: "markdown-report" }, { prd: 1, tests: 1, security: 1, maintainability: 1, operational: 1, scope: 1 })
+    return createSessionDeliverableService({ runtime, sessionID: "ses_1" })
   }
 
   test("an invalid submission is rejected without replacing the last accepted artifact", async () => {
-    const deliverables = service()
+    const deliverables = await service()
     expect(await deliverables.submit({ kind: "report", body: "# report" })).toEqual({ ok: true })
 
     const rejected = await deliverables.submit({ kind: "report", body: "   " })
     expect(rejected.ok).toBe(false)
     if (!rejected.ok) {
-      expect(rejected.error).toContain("non-empty")
       // The good artifact is preserved and the attempt may still correct it.
       expect(rejected.preserved).toBe(true)
       expect(rejected.retryable).toBe(true)
     }
+    expect(deliverables.candidate?.()).toContain("# report")
 
     // A correction is accepted.
     expect(await deliverables.submit({ kind: "report", body: "# fixed" })).toEqual({ ok: true })
+    expect(deliverables.candidate?.()).toContain("# fixed")
   })
 })
 
 describe("advisor service semantics", () => {
-  function service(): AdvisorService {
-    const checkpoint = new AdvisorCheckpoint({ executor: "opencode", requireBeforeWrite: true })
-    return {
-      firstWriteGate: "block",
-      satisfied: () => checkpoint.satisfied(attempt),
-      async consult(consultation) {
-        const result = await checkpoint.consult(attempt, async () => ({ runner: "claude-code", text: consultation.question }))
-        return { text: result.text, ok: true }
+  function service(consult: () => Promise<{ text: string; ok: boolean; callId?: string }>): AdvisorService {
+    const step = { type: "agent", name: "implement", resolvedAdvisor: { providerID: "claude-code", modelID: "opus" } } as unknown as AgentStep
+    const runtime = createAdvisorRuntime({
+      directory: "/tmp",
+      consult: async () => {
+        const advice = await consult()
+        return advice.ok ? { kind: "advice", text: advice.text } : { kind: "error", code: "unavailable", message: advice.text }
       },
-    }
+    })
+    runtime.begin("ses_1", step)
+    return createSessionAdvisorService({ runtime, sessionID: "ses_1" })
   }
 
-  /** The protected-work gate an adapter applies before a mutation. */
-  function mayWrite(advisor: AdvisorService): boolean {
-    return advisor.firstWriteGate !== "block" || advisor.satisfied()
-  }
-
-  test("a blocking gate holds a protected write until the checkpoint is satisfied", async () => {
-    const advisor = service()
-    expect(advisor.firstWriteGate).toBe("block")
-    expect(mayWrite(advisor)).toBe(false)
-
-    const advice = await advisor.consult({ trigger: "first-write", question: "Proceed?" })
-    expect(advice.ok).toBe(true)
-    expect(mayWrite(advisor)).toBe(true)
+  test("the first protected write is held for one consultation, then permitted", async () => {
+    const advisor = service(async () => ({ text: "check the edge case", ok: true }))
+    expect(advisor.firstWriteGate).toBe("hold")
+    expect(advisor.satisfied()).toBe(false)
+    const advice = await advisor.consult({ trigger: "first-write", question: "" })
+    expect(advice).toMatchObject({ ok: true, text: "check the edge case" })
+    expect(advisor.satisfied()).toBe(true)
   })
 
-  test("a failed consultation leaves the checkpoint blocked", async () => {
-    const checkpoint = new AdvisorCheckpoint({ executor: "opencode", requireBeforeWrite: true })
-    await expect(checkpoint.consult(attempt, async () => ({ runner: "claude-code", text: "  " }))).rejects.toThrow()
-    expect(checkpoint.satisfied(attempt)).toBe(false)
+  test("a failed consultation degrades to guidance and still releases the hold", async () => {
+    const advisor = service(async () => ({ text: "provider down", ok: false }))
+    const advice = await advisor.consult({ trigger: "first-write", question: "" })
+    expect(advice.ok).toBe(false)
+    expect(advice.text).toContain("No advice this time")
+    expect(advisor.satisfied()).toBe(true)
   })
 })
 

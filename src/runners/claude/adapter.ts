@@ -42,14 +42,19 @@ export type ClaudeProcess = {
   stderr: ReadableStream<Uint8Array>
   exited: Promise<number>
   exitCode: number | null
-  kill(): void
+  kill(signal?: NodeJS.Signals | number): void
 }
 
 export type ClaudeRunnerDeps = {
   spawn(command: string[], options: { cwd: string; env: NodeJS.ProcessEnv; stdin: Blob; stdout: "pipe"; stderr: "pipe" }): ClaudeProcess
   /** The effective-auth probe; defaults to `claude auth status --json` through `spawn`. */
   probeAuth?: EffectiveAuthProbe
+  /** How long a cancelled child gets to exit on SIGTERM before it is killed. */
+  stopGraceMs?: number
 }
+
+/** The bounded grace a cancelled Claude child gets before its forced stop (design D11). */
+export const defaultStopGraceMs = 5_000
 
 const defaultDeps: ClaudeRunnerDeps = {
   spawn: (command, options) => Bun.spawn(command, options) as unknown as ClaudeProcess,
@@ -328,7 +333,17 @@ export function createClaudeRunner(options: ClaudeRunnerOptions): ClaudeRunner {
       stderr: "pipe",
     })
 
-    const kill = () => proc.kill()
+    // Cancellation is bounded: SIGTERM, then a forced stop of this owned child
+    // if it has not exited within the grace, so an attempt never hangs on a
+    // child that ignores the request (design D11).
+    let escalation: ReturnType<typeof setTimeout> | undefined
+    const kill = () => {
+      proc.kill("SIGTERM")
+      escalation ??= setTimeout(() => {
+        if (proc.exitCode === null) proc.kill("SIGKILL")
+      }, options.deps?.stopGraceMs ?? defaultStopGraceMs)
+      escalation.unref?.()
+    }
     request.signal.addEventListener("abort", kill, { once: true })
     if (request.signal.aborted) kill()
 
@@ -386,6 +401,7 @@ export function createClaudeRunner(options: ClaudeRunnerOptions): ClaudeRunner {
       }
     } finally {
       request.signal.removeEventListener("abort", kill)
+      if (escalation) clearTimeout(escalation)
       if (proc.exitCode === null) proc.kill()
     }
   }

@@ -1,10 +1,9 @@
 /**
  * Shared runner conformance suite (change `runner-parity-opencode-v2`, task 2.5).
  *
- * Any execution adapter -- the OpenCode v2 adapter, the Claude adapter, or a
- * test double -- must satisfy the same neutral contract. Real adapters call
- * {@link runExecutionConformance} from their own test file so parity is asserted
- * once, in one place, rather than re-described per adapter.
+ * Any neutral execution adapter must satisfy the same contract; the real
+ * Claude adapter is run through {@link runExecutionConformance} in
+ * `test/runner-conformance.test.ts`, so parity is asserted once, in one place.
  */
 
 import { describe, expect, test } from "bun:test"

@@ -5,8 +5,6 @@ import { join } from "node:path"
 import { afterAll, describe, expect, test } from "bun:test"
 
 import { createReportRuntime } from "../src/report-runtime"
-import { isConfirmedRelease } from "../src/runners/contracts"
-import { createOpencodeRunner, releaseOutcomeOf } from "../src/runners/opencode/adapter"
 import { createSessionDeliverableService } from "../src/runners/session-deliverables"
 import { createSessionAdvisorService } from "../src/runners/session-advisor"
 import type { AdvisorRuntime } from "../src/advisor-runtime"
@@ -14,29 +12,6 @@ import type { AdvisorRuntime } from "../src/advisor-runtime"
 const dirs: string[] = []
 afterAll(async () => {
   await Promise.all(dirs.map((dir) => rm(dir, { recursive: true, force: true })))
-})
-
-describe("release outcome mapping", () => {
-  test("an observed stop is a confirmed release; an unresolved stop is not", () => {
-    expect(releaseOutcomeOf({ status: "stopped", via: "graceful" })).toEqual({ status: "released" })
-    expect(releaseOutcomeOf({ status: "stopped", via: "already-gone" })).toEqual({ status: "released" })
-    const unresolved = releaseOutcomeOf({ status: "unresolved", reason: "child exit not observed" })
-    expect(unresolved).toEqual({ status: "unresolved", reason: "child exit not observed" })
-
-    expect(isConfirmedRelease({ status: "released" })).toBe(true)
-    expect(isConfirmedRelease({ status: "not-owned" })).toBe(true)
-    expect(isConfirmedRelease(unresolved)).toBe(false)
-  })
-})
-
-describe("adapter runtime release", () => {
-  test("releasing an adapter that never booted is not-owned, not a false stop", async () => {
-    const runner = createOpencodeRunner({ cwd: "/tmp" })
-    expect(await runner.release()).toEqual({ status: "not-owned" })
-    // Close stays idempotent.
-    await runner.close()
-    await runner.close()
-  })
 })
 
 describe("session-bound service-handle lifetime", () => {

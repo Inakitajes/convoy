@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
-import { attemptKey, RunnerRegistry, type AttemptIdentity } from "../src/runners/contracts"
+import { attemptKey, type AttemptIdentity, type ExecutionAdapter } from "../src/runners/contracts"
 import { makeRequest } from "./helpers/runner-conformance"
 
 describe("attempt identity", () => {
@@ -19,27 +19,22 @@ describe("attempt identity", () => {
 
   test("parallel phases with the same local attempt number are distinguished on cancellation", async () => {
     const cancelled: AttemptIdentity[] = []
-    const registry = new RunnerRegistry()
-    registry.register({
-      id: "opencode",
-      execution: {
-        id: "opencode",
-        async capabilities() {
-          return { runner: "opencode", capabilities: [] }
-        },
-        async executeAttempt(request, sink) {
-          sink({ type: "terminal", runner: "opencode", attempt: request.identity.attempt, outcome: { status: "completed" } })
-          return { status: "completed" }
-        },
-        async cancelAttempt(attempt) {
-          cancelled.push(attempt)
-        },
+    const execution: ExecutionAdapter = {
+      id: "claude-code",
+      async capabilities() {
+        return { runner: "claude-code", capabilities: [] }
       },
-    })
+      async executeAttempt(request, sink) {
+        sink({ type: "terminal", runner: "claude-code", attempt: request.identity.attempt, outcome: { status: "completed" } })
+        return { status: "completed" }
+      },
+      async cancelAttempt(attempt) {
+        cancelled.push(attempt)
+      },
+    }
 
     const build = makeRequest({ identity: { runId: "run-par", phaseName: "build", attempt: 1 } })
     const testPhase = makeRequest({ identity: { runId: "run-par", phaseName: "test", attempt: 1 } })
-    const execution = registry.require("opencode").execution
     await execution.executeAttempt(build, () => {})
     await execution.executeAttempt(testPhase, () => {})
     await execution.cancelAttempt(testPhase.identity)

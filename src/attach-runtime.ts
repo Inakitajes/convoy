@@ -5,7 +5,7 @@ import { goalProgressPhases } from "./goal-phases"
 import { readRunMetadata, type PhaseMetadata, type RunMetadata } from "./metadata"
 import { progressPhases, watchSession, backfillSessionTranscript, withGoalPhases, type SessionWatcher } from "./runner"
 import { coordinatorJournalPath, progressMessageFromRunnerEvent, type CoordinatorEventItem, type CoordinatorEventSource } from "./runners/coordinator-events"
-import { RunnerJournal } from "./runners/journal"
+import { readRunTranscript } from "./runners/transcript"
 
 import type { OpencodeClient } from "./opencode-client"
 import type { RunnerEvent } from "./runners/contracts"
@@ -74,7 +74,11 @@ export class LiveAttach {
   }
 
   private applyNeutral(item: CoordinatorEventItem) {
-    if (this.stopped || item.kind === "gap") return
+    if (this.stopped) return
+    if (item.kind === "gap") {
+      this.tui.message(transcriptGapMessage(item))
+      return
+    }
     if (!this.phasesWithoutLiveAttach.has(item.record.attempt.phase)) return
     applyJournalRecord(this.tui, item.record)
   }
@@ -235,8 +239,15 @@ function applyJournalRecord(tui: ProgressUI, record: { attempt: { phase: string 
  * the dashboard's honest placeholder.
  */
 export async function replayJournal(tui: ProgressUI, runDir: string, phases: ReadonlySet<string>): Promise<void> {
-  const records = await new RunnerJournal({ path: coordinatorJournalPath(runDir) }).readPersisted().catch(() => [])
-  for (const record of records) if (phases.has(record.attempt.phase)) applyJournalRecord(tui, record)
+  const transcript = await readRunTranscript(coordinatorJournalPath(runDir))
+  for (const record of transcript.records) if (phases.has(record.attempt.phase)) applyJournalRecord(tui, record)
+  // Captured history with holes is shown as such, never as complete.
+  for (const gap of transcript.gaps) tui.message(transcriptGapMessage(gap))
+}
+
+/** The dashboard line for an unrecoverable interval of the run's transcript. */
+export function transcriptGapMessage(gap: { from: number; to: number }): string {
+  return `transcript incomplete: event${gap.from === gap.to ? ` ${gap.from} was` : `s ${gap.from}–${gap.to} were`} not captured`
 }
 
 /** Merge the authoritative append-only journal over metadata's convenience projection. */

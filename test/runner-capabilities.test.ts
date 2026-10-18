@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 
 import { buildEnforcementPlan } from "../src/runners/compose"
 import { createClaudeRunner } from "../src/runners/claude/adapter"
-import { opencodeCapabilities } from "../src/runners/opencode/adapter"
+import { opencodeCapabilities } from "../src/runners/opencode/registration"
 import { capabilityAvailable, resolveRunnerCapabilities } from "../src/runners/capabilities"
 import { capability } from "../src/runners/contracts"
 

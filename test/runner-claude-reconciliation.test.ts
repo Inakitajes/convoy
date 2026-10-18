@@ -11,9 +11,8 @@ import { describe, expect, test } from "bun:test"
 
 import { buildEnforcementPlan, composeRunners } from "../src/runners/compose"
 import { assertServicesSupported, assertSessionOperationSupported, resolveRunnerCapabilities, supportsSessionOperation, UnsupportedServiceError, UnsupportedSessionOperationError } from "../src/runners/capabilities"
-import { capability } from "../src/runners/contracts"
+import { capability, type ExecutionAdapter } from "../src/runners/contracts"
 import { buildClaudeArgs, type ClaudeProcess } from "../src/runners/claude/adapter"
-import { createClaudeSessionControls } from "../src/runners/claude/session-controls"
 import { makeRequest } from "./helpers/runner-conformance"
 
 const fixture = [
@@ -58,22 +57,6 @@ describe("Claude capability matrix (task 3.5)", () => {
     expect(() => assertSessionOperationSupported(claude, "history")).toThrow(UnsupportedSessionOperationError)
     expect(capability(claude, "live-observation")?.availability).toBe("available")
   })
-
-  test("history is not reconstructed and attach/resume are gated by the composition", async () => {
-    const bare = createClaudeSessionControls()
-    const refused = await bare.history({ session: { runner: "claude-code", sessionId: "ses_1" }, identity: { runId: "r", phaseName: "p", attempt: 1 } })
-    expect(refused.ok).toBe(false)
-    expect(bare.resume).toBeUndefined()
-    expect(bare.attach).toBeUndefined()
-
-    const wired = createClaudeSessionControls({
-      continueSession: async (request) => ({ ok: true, outcome: { status: "completed", session: request.session } }),
-      openWindow: async (sessionId) => ({ backend: `tui:${sessionId}` }),
-    })
-    const resumed = await wired.resume!({ session: { runner: "claude-code", sessionId: "ses_1" }, prompt: "go", identity: { runId: "r", phaseName: "p", attempt: 1 }, signal: new AbortController().signal })
-    expect(resumed.ok).toBe(true)
-    expect(await wired.attach!({ session: { runner: "claude-code", sessionId: "ses_1" }, identity: { runId: "r", phaseName: "p", attempt: 1 } })).toEqual({ ok: true, detail: "tui:ses_1" })
-  })
 })
 
 describe("Claude through registered composition (task 3.6)", () => {
@@ -84,7 +67,7 @@ describe("Claude through registered composition (task 3.6)", () => {
       enforcement,
     })
     try {
-      const adapter = composition.registry.require("claude-code").execution
+      const adapter = composition.registry.require("claude-code").execution as ExecutionAdapter
       const caps = await adapter.capabilities()
       expect(caps.runner).toBe("claude-code")
       const request = makeRequest({ runner: "claude-code", mode: "read-only", agent: { name: "reviewer", mode: "read-only", model: { runner: "claude-code", modelId: "haiku" } } })
@@ -99,7 +82,7 @@ describe("Claude through registered composition (task 3.6)", () => {
   test("a write attempt without enforcement fails closed", async () => {
     const composition = composeRunners({ cwd: "/tmp", claude: { deps: { spawn: () => fakeProcess() } } })
     try {
-      const adapter = composition.registry.require("claude-code").execution
+      const adapter = composition.registry.require("claude-code").execution as ExecutionAdapter
       const capabilities = await adapter.capabilities()
       expect(capability(capabilities, "approvals")?.availability).toBe("restricted")
       const request = makeRequest({ runner: "claude-code", mode: "write", approvals: "auto" })

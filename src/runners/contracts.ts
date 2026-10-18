@@ -551,10 +551,14 @@ export type SessionControls = {
  * leaks vendor clients into the core (design D1). Optional services are passed
  * only when the runner advertises support for them.
  */
-export interface ExecutionAdapter {
+/** What the registry needs of every runner: its resolved capabilities. */
+export interface CapabilitySource {
   readonly id: RunnerId
   /** Resolve effective capabilities for the current install/auth (design D4). */
   capabilities(auth?: AuthenticationSelection): Promise<RunnerCapabilities>
+}
+
+export interface ExecutionAdapter extends CapabilitySource {
   /** Run one attempt, emitting normalized events and resolving to its outcome. */
   executeAttempt(
     request: ExecutionRequest,
@@ -582,7 +586,8 @@ export interface ConversationAdapter {
 
 export type RunnerRegistration = {
   id: RunnerId
-  execution: ExecutionAdapter
+  /** The runner's capability source; a runner whose attempt the engine binds to its own runtime (OpenCode) registers only this. */
+  execution: CapabilitySource
   /** Capability-gated session operations (history/resume/attach). */
   session?: SessionControls
   conversation?: ConversationAdapter
