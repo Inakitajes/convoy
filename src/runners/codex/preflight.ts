@@ -9,6 +9,7 @@ import { planAgentSteps } from "../../run-plan"
 import { qualifiedModelRoute, stepRunnerFor } from "../../step-runners"
 import type { RunPlan } from "../../types"
 import type { AuthenticationSelection } from "../contracts"
+import { codexVersionProblem } from "../declarations"
 import { codexAppServerArgs } from "./adapter"
 import { startCodexAppServer, type CodexSpawn } from "./app-server"
 import { codexAccountMismatch, prepareCodexAuth, type CodexLogin } from "./auth"
@@ -58,13 +59,25 @@ export function missingCodexModel(requirements: readonly CodexModelRequirement[]
   return undefined
 }
 
-/** Verifies the effective account and the plan's models; resolves to an error message, or undefined when ready. */
+/**
+ * The Codex release an app-server reports at `initialize`: its user agent
+ * leads with `<originator>/<version>`.
+ */
+export function codexVersionOf(info: Record<string, unknown>): string | undefined {
+  const agent = typeof info.userAgent === "string" ? info.userAgent : ""
+  return /^[^/\s]+\/(\d+\.\d+\.\d+)/.exec(agent)?.[1]
+}
+
+/** Verifies the Codex release, the effective account and the plan's models; resolves to an error message, or undefined when ready. */
 export async function preflightCodex(input: CodexPreflightInput): Promise<string | undefined> {
   const binary = input.binary ?? "codex"
   const auth = await prepareCodexAuth({ selection: input.selection, env: input.env ?? process.env, binary, cwd: input.cwd, ...(input.login ? { login: input.login } : {}) })
   try {
     const server = await startCodexAppServer({ binary, args: codexAppServerArgs(), cwd: input.cwd, env: auth.env, ...(input.spawn ? { spawn: input.spawn } : {}) })
     try {
+      const version = codexVersionOf(server.info)
+      const outdated = version ? codexVersionProblem(version) : undefined
+      if (outdated) return `${outdated}; update Codex with \`codex update\``
       const mismatch = codexAccountMismatch(auth.mode, await server.request("account/read", {}))
       if (mismatch) return mismatch
       if (input.models.some((requirement) => requirement.model && requirement.model !== "default")) {

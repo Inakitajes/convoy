@@ -116,6 +116,11 @@ export const claudeDeclaration: CapabilityDeclaration = {
 /** The oldest Codex release whose app-server protocol the Codex adapter is tested against. */
 export const minimumCodexVersion = "0.160.0"
 
+/** Why a Codex release cannot run Convoy's attempts, or undefined when it can. */
+export function codexVersionProblem(version: string): string | undefined {
+  return olderThan(version, minimumCodexVersion) ? `Codex ${version} predates the supported app-server protocol (${minimumCodexVersion} or later)` : undefined
+}
+
 function olderThan(version: string, minimum: string): boolean {
   const parse = (value: string) => value.split(/[.-]/).slice(0, 3).map(Number)
   const [a, b] = [parse(version), parse(minimum)]
@@ -167,8 +172,8 @@ export const codexDeclaration: CapabilityDeclaration = {
   restrictions: [
     {
       ids: codexCapabilities,
-      when: (evidence) => evidence.version !== undefined && olderThan(evidence.version, minimumCodexVersion),
-      reason: (evidence) => `Codex ${evidence.version} predates the supported app-server protocol (${minimumCodexVersion} or later)`,
+      when: (evidence) => evidence.version !== undefined && codexVersionProblem(evidence.version) !== undefined,
+      reason: (evidence) => codexVersionProblem(evidence.version!)!,
       remediation: "update Codex with `codex update`",
     },
     {

@@ -232,4 +232,11 @@ describe("Codex preflight", () => {
     const keyed = fakeCodex(defaultCodexHandlers({ "account/read": () => ({ account: { type: "apiKey" } }) }))
     expect(await preflightCodex({ selection: { mode: "subscription" }, models: [], cwd: "/tmp", spawn: keyed.spawn })).toContain("reviewed as a subscription")
   })
+
+  test("refuses a Codex older than the supported app-server protocol, read from initialize's user agent", async () => {
+    const old = fakeCodex(defaultCodexHandlers({ initialize: () => ({ userAgent: "convoy/0.150.2 (Mac OS 27.0.1; arm64)", codexHome: "/home/.codex" }) }))
+    expect(await preflightCodex({ selection: { mode: "subscription" }, models: [], cwd: "/tmp", spawn: old.spawn })).toContain("Codex 0.150.2 predates the supported app-server protocol (0.160.0 or later)")
+    const current = fakeCodex(defaultCodexHandlers({ initialize: () => ({ userAgent: "convoy/0.163.0 (Mac OS 27.0.1; arm64) herdr/0.9.5 (convoy; 0.0.0)", codexHome: "/home/.codex" }) }))
+    expect(await preflightCodex({ selection: { mode: "subscription" }, models: [], cwd: "/tmp", spawn: current.spawn })).toBeUndefined()
+  })
 })
