@@ -1233,9 +1233,8 @@ describe("new worktree form (auto by default, manual on tab)", () => {
       session.press("n")
       await session.renderOnce()
       // The model resolves off the keypress path (config load + import);
-      // give it a beat and re-render before asserting.
-      await Bun.sleep(50)
-      await session.renderOnce()
+      // wait for it to land before asserting.
+      await awaitFrame(session, (frame) => frame.includes("using"))
       const frame = frameOf(session)
       expect(frame).toContain("↵ create")
       expect(frame).toContain("using")
@@ -1512,8 +1511,8 @@ describe("new worktree form (auto by default, manual on tab)", () => {
       session.press("return")
       await session.renderOnce()
       session.press("return") // confirm the branch field: the conventional prefix is prefilled
-      await Bun.sleep(50)
-      await session.renderOnce()
+      // Confirming awaits a free-name check against git; a fixed sleep raced it on slow runners.
+      await awaitFrame(session, (frame) => frame.includes("feat/improve-review-navigation"))
       // The branch is prefilled from the name, editable.
       expect(frameOf(session)).toContain("feat/improve-review-navigation")
       session.press("escape")
