@@ -1224,7 +1224,14 @@ function validateStep(v: Validator, raw: unknown, path: string, context: StepCon
   if (context.insideParallel && agent === humanReviewStep) v.fail(path, `"${humanReviewStep}" can't run inside a parallel block`)
   if (record.model !== undefined && record.models !== undefined) v.fail(path, `set either "model" or "models", not both`)
 
-  const runner = record.runner !== undefined ? validateRunner(v, record.runner, `${path}.runner`) : undefined
+  // A `model: { runner, model }` route names the step's runner: the same as
+  // setting `runner:` beside a plain model, and refused when the two disagree.
+  const modelRoute = record.model !== null && typeof record.model === "object" ? v.record(record.model, `${path}.model`) : undefined
+  if (modelRoute) v.knownKeys(modelRoute, `${path}.model`, ["runner", "model"])
+  const routeRunner = modelRoute ? validateRunnerId(v, modelRoute.runner, `${path}.model.runner`) : undefined
+  const ownRunner = record.runner !== undefined ? validateRunner(v, record.runner, `${path}.runner`) : undefined
+  if (ownRunner !== undefined && routeRunner !== undefined && ownRunner !== routeRunner) v.fail(`${path}.model.runner`, `is ${routeRunner}, but the step sets runner: ${ownRunner}; set the runner in one place`)
+  const runner = ownRunner ?? routeRunner
   if (!stepRunnerFor(runner).capabilities.modelFanout && record.models !== undefined) {
     v.fail(path, `can't combine runner: ${runner} with "models" (${stepRunnerCapabilityReason(runner ?? "opencode", "model-fanout")}); give the step a single model (or none for the CLI default)`)
   }
@@ -1261,7 +1268,7 @@ function validateStep(v: Validator, raw: unknown, path: string, context: StepCon
   const model =
     record.model === undefined
       ? undefined
-      : validateStepRunnerModel(v, runner ?? "opencode", record.model, `${path}.model`)
+      : validateStepRunnerModel(v, runner ?? "opencode", modelRoute ? modelRoute.model : record.model, modelRoute ? `${path}.model.model` : `${path}.model`)
 
   if (record.maxAttempts !== undefined) warnIgnoredMaxAttempts()
 

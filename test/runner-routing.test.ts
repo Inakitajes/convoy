@@ -148,6 +148,25 @@ pipelines:
     expect(steps[1]!.models).toEqual(["openai/gpt-5.5", "codex/gpt-5.5", "claude-code/sonnet", "opencode/openai/gpt-5.5"])
   })
 
+  test("a step's model: { runner, model } route is the step's runner and model", () => {
+    const config = parse(`pipelines:
+  p:
+    steps:
+      - agent: implementer
+        model: { runner: codex, model: openai/gpt-5.5#high }
+      - agent: bug-auditor
+        runner: claude-code
+        model: { runner: claude-code, model: anthropic/sonnet }
+`)
+    const steps = config.pipelines.p!.steps as { runner?: string; model?: string }[]
+    expect(steps[0]).toMatchObject({ runner: "codex", model: "gpt-5.5#high" })
+    expect(steps[1]).toMatchObject({ runner: "claude-code", model: "sonnet" })
+    const pipeline = resolvePipeline({ name: "p", spec: config.pipelines.p!, agents: builtInAgents })
+    expect(pipeline.steps[0]).toMatchObject({ runner: "codex", model: "gpt-5.5", variant: "high" })
+    // A route that disagrees with the step's own runner is refused, not guessed.
+    expect(() => parse(`pipelines:\n  p:\n    steps:\n      - agent: implementer\n        runner: opencode\n        model: { runner: codex, model: openai/gpt-5.5 }\n`)).toThrow("runner: opencode")
+  })
+
   test("a route's model must be one its runner executes", () => {
     expect(() => parse(`defaults:\n  advisor: { runner: codex, model: anthropic/opus }\n`)).toThrow("defaults.advisor.model runner codex executes OpenAI models")
     expect(() => parse(`pipelines:\n  p:\n    steps:\n      - agent: implementer\n        runner: codex\n        model: anthropic/opus\n`)).toThrow("runner codex executes OpenAI models")
