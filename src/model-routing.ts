@@ -65,13 +65,12 @@ const gatewayLabels: Record<ModelGateway, string> = {
   vercel: "Vercel AI Gateway",
 }
 
-/** Single display label shared by the launcher, config editor, review, and errors. */
+/** Single display label shared by the launcher, review, and errors. */
 export function gatewayLabel(gateway: ModelGateway): string {
   return gatewayLabels[gateway]
 }
 
-// One-line reason shown beside each gateway wherever a picker lists them, so
-// the launcher dropdown and the config editor can never drift apart.
+// One-line reason shown beside each gateway wherever a picker lists them.
 const gatewayHints: Record<ModelGateway, string> = {
   configured: "preserve pipeline model IDs literally",
   direct: "use the model owner's provider",

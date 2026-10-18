@@ -1,9 +1,9 @@
 import { readFile, stat } from "node:fs/promises"
 import { dirname, join, resolve } from "node:path"
 
-import { advisorAuthOf, buildAgentRegistry, ejectAgentPrompt, emptyHooksConfig, globalConfigPath, loadMergedConvoyConfig, pipelineDefaultsOf, selectPipelineSpec, writeDefaultGlobalConfig, writeDefaultProjectConfig, type ConvoyDefaults } from "./config"
+import { advisorAuthOf, buildAgentRegistry, ejectAgentPrompt, emptyHooksConfig, featuresOf, globalConfigPath, loadMergedConvoyConfig, pipelineDefaultsOf, selectPipelineSpec, writeDefaultGlobalConfig, writeDefaultProjectConfig, type ConvoyDefaults } from "./config"
 import { readControlFile } from "./control-client"
-import { detectBaseRef, currentBranch, listChangedFiles, resolveWorktreeDefault } from "./git"
+import { detectBaseRef, currentBranch, listChangedFiles, worktreeDefaultFor } from "./git"
 import { openRouterKeySources } from "./limits"
 import { log } from "./log"
 import { builtInAgents, defaultGptModel, defaultGptVariant, defaultPipeline, defaultPipelineName, hasWritableStep, resolvePipeline, splitModelVariant, validateStepFilters } from "./pipeline"
@@ -146,10 +146,12 @@ export async function parseAndRun(argv: string[]) {
     return
   }
   if (command.type === "specs") {
+    await assertSpecsEnabled(command.targetDir, "convoy specs")
     await openSpecsBrowser(command.targetDir)
     return
   }
   if (command.type === "spin") {
+    await assertSpecsEnabled(command.options.targetDir, "convoy spin")
     const { runSpin, printSpinHandoff } = await import("./spin")
     const result = await runSpin(command.options)
     printSpinHandoff(result)
@@ -331,6 +333,22 @@ const mutatingHomeActions: ReadonlySet<HomeWorkAction> = new Set<HomeWorkAction>
 ])
 
 /** One alternate-screen owner routes every destination until Home itself quits. */
+/**
+ * The session loop when the launcher is the first screen: every return from a
+ * destination or a run reopens it, and leaving the launcher itself ends it.
+ */
+export async function runRootLauncherLoop(launch: () => Promise<"quit" | "continue">, interrupted: () => boolean): Promise<void> {
+  while (!interrupted()) {
+    if ((await launch()) === "quit") return
+  }
+}
+
+/** Refuses an OpenSpec-only command in a project that turned specs off. */
+async function assertSpecsEnabled(targetDir: string, command: string): Promise<void> {
+  if (featuresOf(await loadMergedConvoyConfig(targetDir).catch(() => undefined)).specs) return
+  throw new Error(`${command} needs OpenSpec, which this project turned off (features.specs: false)`)
+}
+
 async function runHomeSession(targetDir: string): Promise<void> {
   // Probe the Kitty graphics protocol before the session renderer takes
   // stdin; over SSH the client's environment doesn't travel, so the terminal
@@ -356,8 +374,16 @@ async function runHomeSession(targetDir: string): Promise<void> {
   // was viewing, by verified identity; the first open passes none and selects
   // New worktree. Persisted hints stay non-authoritative and never drive this.
   let lastSelection: { path: string; branch?: string } | undefined
+  const features = featuresOf(await loadMergedConvoyConfig(targetDir).catch(() => undefined))
 
   try {
+    // Without worktree management the session opens on Pipelines: the
+    // launcher is the root screen, reaching Runs, Config, and (when on) Specs,
+    // and its q ends the session.
+    if (!features.worktrees) {
+      await runRootLauncherLoop(() => launchInteractiveRun(targetDir, undefined, undefined, route, { root: true, specsDestination: features.specs }), () => interrupted)
+      return
+    }
     await runHomeNavigationLoop({
       interrupted: () => interrupted,
       route,
@@ -376,6 +402,7 @@ async function runHomeSession(targetDir: string): Promise<void> {
           onWorktreeSelected: (selection) => {
             lastSelection = selection
           },
+          specs: features.specs,
         }),
       openWork: async (worktree, action) => {
         await dispatchWorkAction(targetDir, route, worktree, action)
@@ -957,13 +984,21 @@ async function buildReviewedPlan(input: BuildRunPlanInput): Promise<RunPlan> {
     branch,
     excludeRunID: input.resumeRunID || undefined,
   })
+  // `features.specs: false` keeps OpenSpec out of the plan entirely: nothing
+  // attached, no change selection required, and an explicit --change refused.
+  const specsEnabled = featuresOf(await loadMergedConvoyConfig(input.targetDir).catch(() => undefined)).specs
+  if (!specsEnabled && (input.changes?.length ?? 0) > 0) {
+    throw new Error("--change needs OpenSpec, which this project turned off (features.specs: false)")
+  }
   // An OpenSpec contract, when the repo has one: discovered against the launch
   // checkout (before any worktree isolate), so the launcher and `--change`
   // resolve the change the same way the runtime attaches it later.
-  const openspec = await loadOpenSpecBundle({
-    targetDir: input.targetDir,
-    explicitIds: input.changes,
-  })
+  const openspec = specsEnabled
+    ? await loadOpenSpecBundle({
+        targetDir: input.targetDir,
+        explicitIds: input.changes,
+      })
+    : undefined
   // Every explicitly requested id must resolve: a typo or an archived id
   // refuses the run naming it, rather than silently dropping that contract.
   const requested = input.changes ?? []
@@ -1157,12 +1192,18 @@ export async function prepareWorktreeForRun(sourceDir: string, options: RunOptio
   return { ...options, targetDir: worktree.dir, branch: worktree.branch, includeDirty: false }
 }
 
+/**
+ * Opens the run launcher and carries out what it resolves to. Answers "quit"
+ * when the operator left the launcher itself, so a root launcher (no worktree
+ * board) ends the session, and "continue" after a navigation or a run.
+ */
 async function launchInteractiveRun(
   targetDir: string,
   presetChanges?: readonly string[],
   presetFeature?: LaunchFeaturePreset,
   route?: TuiRoute,
-) {
+  navigation: { root?: boolean; specsDestination?: boolean } = {},
+): Promise<"quit" | "continue"> {
   // Imported lazily so normal CLI invocations don't pull in OpenTUI until they
   // explicitly ask for the zero-argument interactive launcher.
   const { launchRunTui } = await import("./launch-tui")
@@ -1180,17 +1221,22 @@ async function launchInteractiveRun(
       prepareRun: (runSelection) => prepareInteractiveRun(targetDir, runSelection),
       proposeBranchName: (input) => proposeInteractiveBranchName(targetDir, input),
       checkBranchName: (name) => checkInteractiveBranchName(targetDir, name),
+      ...navigation,
     },
     route,
   )
-  if (!selection) return
+  if (!selection) return "quit"
   if (selection.action === "runs") {
     await openRunsBrowser(undefined, route)
-    return
+    return "continue"
   }
   if (selection.action === "config") {
     await openConfigEditor(targetDir, route)
-    return
+    return "continue"
+  }
+  if (selection.action === "specs") {
+    await openSpecsBrowser(targetDir, route)
+    return "continue"
   }
 
   let options = selection.options
@@ -1227,6 +1273,7 @@ async function launchInteractiveRun(
   // second writer in the claimed checkout exactly like the headless one.
   await refuseConflictingWriter(options.targetDir, plan)
   await executeRun(options, plan, route)
+  return "continue"
 }
 
 /**
@@ -2429,7 +2476,7 @@ export async function resolveRunOptions(parsed: ParsedArgs): Promise<Omit<RunOpt
     // A resumed run continues in the directory its metadata recorded — which is
     // already the worktree, when the original run made one — so it never creates
     // another.
-    worktree: parsed.resumeRunID ? false : await resolveWorktreeOption(parsed, defaults),
+    worktree: parsed.resumeRunID ? false : await resolveWorktreeOption(parsed, defaults, featuresOf(config).worktrees),
     ...(parsed.branch ? { branch: parsed.branch } : {}),
     includeDirty: parsed.includeDirty ?? false,
     yolo: parsed.yolo ?? false,
@@ -2465,15 +2512,16 @@ export async function resolveRunOptions(parsed: ParsedArgs): Promise<Omit<RunOpt
   return options
 }
 
-// Worktree source: flag > config defaults.worktree > the current branch.
+// Worktree source: flag > config defaults.worktree > features.worktrees off >
+// the current branch.
 // An unset config means "decide per branch", not "always isolate": on a trunk a
 // run should get its own worktree, but on a branch you're already where you
 // want the work. The launcher applies the same default itself, so an interactive
 // run reaches this with parsed.worktree already set.
-async function resolveWorktreeOption(parsed: ParsedArgs, defaults: ConvoyDefaults): Promise<boolean> {
+async function resolveWorktreeOption(parsed: ParsedArgs, defaults: ConvoyDefaults, worktreesEnabled: boolean): Promise<boolean> {
   const explicit = parsed.worktree ?? defaults.worktree
   if (explicit !== undefined) return explicit
-  const auto = await resolveWorktreeDefault(parsed.targetDir)
+  const auto = await worktreeDefaultFor(parsed.targetDir, worktreesEnabled)
   log.info(`worktree: ${auto.isolate ? "on" : "off"} (${auto.reason})`)
   return auto.isolate
 }
@@ -2796,7 +2844,8 @@ Commands:
   opencode install          Install the global /convoy-spin OpenCode command — a thin wrapper at
                              ~/.config/opencode/commands/convoy-spin.md that runs convoy spin
                              from a session (opt-in, idempotent; touches no other command file)
-  config                   View and edit the global (~/.convoy) and current project config in a TUI
+  config                   List the global (~/.convoy) and project config files, show whether each
+                           loads, and open one in $EDITOR
   auth openrouter          Store an OpenRouter management key in the macOS Keychain for the
                            header credits meter (--remove deletes it; "auth status" lists sources)
 
@@ -2854,9 +2903,10 @@ Flags:
 Headless (scripts, CI, agents):
   Off a terminal, a launch prints the plan, then "coordinator <pid> running run <id>",
   streams the run's log, and exits with the run's own code (0 only on success).
-  Pass --change or --manual, plus --smart or --yolo: with interactive permissions
-  a request waits (logged as "[permission] waiting for an answer") until someone
-  answers it from "convoy runs". "convoy runs <id>" prints that run's status.
+  Pass --change or --manual (not needed with features.specs: false), plus --smart
+  or --yolo: with interactive permissions a request waits (logged as "[permission]
+  waiting for an answer") until someone answers it from "convoy runs".
+  "convoy runs <id>" prints that run's status.
 
 Goal mode:
   Pipelines enter goal execution exclusively by declaring one terminal goal
@@ -2878,6 +2928,7 @@ Config keys:
   pipelines:               named step lists mixing agents and human gates
   permissions:             allow/deny additions to the bash policy (deny always wins)
   hooks:                   pre/post shell commands, globally or per pipeline
+  features:                worktrees and specs switches (each on unless set to false)
   attachments:             files attached to every step
   The same schema lives globally at ~/.convoy/config.yaml; project config merges on top.
   Precedence: CLI flags > project config > global config > built-in defaults.

@@ -114,7 +114,7 @@ const hermeticProposeBranchName = async ({ prompt }: { prompt: string }): Promis
   branch: `feat/${prompt.trim().toLowerCase().replace(/\s+/g, "-") || "work"}`,
 })
 
-async function openHome(options: { worktrees?: BoardWorktree[]; width?: number; height?: number; targetDir?: string; proposeBranchName?: (input: { prompt: string }) => Promise<{ branch: string }>; observePr?: (worktree: BoardWorktree) => Promise<PrObservation>; listRunsForWorktree?: (worktree: BoardWorktree) => Promise<DetailRun[]> } = {}) {
+async function openHome(options: { worktrees?: BoardWorktree[]; width?: number; height?: number; targetDir?: string; proposeBranchName?: (input: { prompt: string }) => Promise<{ branch: string }>; observePr?: (worktree: BoardWorktree) => Promise<PrObservation>; listRunsForWorktree?: (worktree: BoardWorktree) => Promise<DetailRun[]>; specs?: boolean } = {}) {
   const testRenderer = await createTestRenderer({ width: options.width ?? 110, height: options.height ?? 30 })
   const instance = new HomeLauncher(testRenderer.renderer, options.targetDir ?? viewDir(), {
     scene: undefined,
@@ -125,6 +125,7 @@ async function openHome(options: { worktrees?: BoardWorktree[]; width?: number; 
     observePr: options.observePr ?? (async () => ({ availability: "unknown", reason: "no PR observation requested by this test", observedAt: 0 })),
     // Hermetic default: no test reads run history unless it injects its own source.
     listRunsForWorktree: options.listRunsForWorktree ?? (async () => []),
+    ...(options.specs === undefined ? {} : { specs: options.specs }),
   })
   await testRenderer.renderOnce()
   // Let any immediately-resolved on-demand observation settle its render
@@ -290,6 +291,36 @@ describe("worktrees-first home (capability home-launcher delta)", () => {
       expect(frame).toContain("Propose a change")
       expect(frame).toContain("New run")
       expect(frame).toContain("Close (archive & merge)")
+    } finally {
+      await closeHome(session)
+    }
+  })
+
+  test("with specs turned off, Home drops the Specs destination and every OpenSpec action", async () => {
+    const session = await openHome({ height: 48, specs: false })
+    try {
+      let frame = frameOf(session)
+      expect(frame).toContain("Pipelines")
+      expect(frame).not.toContain("Specs")
+      // The Specs shortcut does nothing; Runs still resolves.
+      session.press("s")
+      await session.renderOnce()
+      expect(await Promise.race([session.instance.result.then(() => "resolved"), Bun.sleep(30).then(() => "pending")])).toBe("pending")
+
+      session.press("down")
+      await session.renderOnce()
+      session.press("down")
+      await session.renderOnce()
+      session.press("return")
+      await session.renderOnce()
+      frame = frameOf(session)
+      expect(frame).toContain("add-widget")
+      expect(frame).not.toContain("Propose a change")
+      expect(frame).not.toContain("Archive change")
+      expect(frame).not.toContain("OpenSpec")
+      expect(frame).not.toContain("Linked Specs")
+      // Close stays, as the squash merge it still is.
+      expect(frame).toContain("Close (merge)")
     } finally {
       await closeHome(session)
     }

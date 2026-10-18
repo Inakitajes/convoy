@@ -349,6 +349,17 @@ describe("--change wiring through the reviewed run plan", () => {
     expect(plan?.openspec?.specFiles).not.toContain("openspec/changes/add-bar/proposal.md")
   })
 
+  test("features.specs: false keeps OpenSpec out of the plan and refuses --change", async () => {
+    const repo = await repoWithTwoChanges("main")
+    await mkdir(join(repo, ".convoy"), { recursive: true })
+    await writeFile(join(repo, ".convoy", "config.yaml"), "features:\n  specs: false\n")
+
+    // No selection is required and nothing is attached, though changes exist.
+    const plan = await runPlanFor(["--dir", repo, "review this"])
+    expect(plan?.openspec).toBeUndefined()
+    await expect(runPlanFor(["--dir", repo, "--change", "add-foo", "review this"])).rejects.toThrow("features.specs: false")
+  })
+
   test("a headless launch without --change or --manual never binds a lone active change (regression)", async () => {
     const repo = await repoOn("main")
     await mkdir(join(repo, openspecDirName, "changes", "add-login"), { recursive: true })

@@ -166,8 +166,8 @@ const AUXILIARY: ReadonlyArray<{
     id: "config",
     shortcut: "c",
     label: "Config",
-    kicker: "Models and agents",
-    description: "Tune models, agents, permissions, and project defaults.",
+    kicker: "Your config files",
+    description: "See which config files apply and open them in your editor.",
   },
 ]
 
@@ -225,6 +225,8 @@ export async function launchHomeTui(
     onWorktreeSelected?: (selection: { path: string; branch?: string } | undefined) => void
     /** Poll cadence override (defaults to the shared 5s). */
     pollMs?: number
+    /** False when `features.specs` is off: no Specs destination, OpenSpec actions, or linked specs. */
+    specs?: boolean
   } = {},
 ): Promise<HomeResolution> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
@@ -241,6 +243,7 @@ export async function launchHomeTui(
       initialWorktree: options.initialWorktree,
       onWorktreeSelected: options.onWorktreeSelected,
       pollMs: options.pollMs,
+      specs: options.specs,
     }).result
   }
 
@@ -254,11 +257,14 @@ export async function launchHomeTui(
     initialWorktree: options.initialWorktree,
     onWorktreeSelected: options.onWorktreeSelected,
     pollMs: options.pollMs,
+    specs: options.specs,
   }).result
 }
 
 export class HomeLauncher {
   readonly result: Promise<HomeResolution>
+  /** Whether OpenSpec surfaces show (`features.specs`). */
+  private readonly specs: boolean
 
   private resolveResult!: (resolution: HomeResolution) => void
   private finished = false
@@ -421,9 +427,12 @@ export class HomeLauncher {
       onWorktreeSelected?: (selection: { path: string; branch?: string } | undefined) => void
       /** Poll cadence override. */
       pollMs?: number
+      /** False hides every OpenSpec surface (`features.specs: false`). */
+      specs?: boolean
     } = {},
   ) {
     this.scene = options.scene
+    this.specs = options.specs ?? true
     this.proposeBranchName = options.proposeBranchName
     this.boardSource = options.source
     this.onWorktreeSelected = options.onWorktreeSelected
@@ -699,7 +708,7 @@ export class HomeLauncher {
     const rows: ListRow[] = []
     rows.push({ kind: "new" })
     for (const worktree of worktrees) rows.push({ kind: "worktree", worktree })
-    for (const entry of AUXILIARY) {
+    for (const entry of this.destinations()) {
       rows.push({
         kind: "auxiliary",
         destination: entry.id,
@@ -710,6 +719,11 @@ export class HomeLauncher {
       })
     }
     return rows
+  }
+
+  /** The destinations strip, without Specs when the project turned them off. */
+  private destinations() {
+    return this.specs ? AUXILIARY : AUXILIARY.filter((entry) => entry.id !== "specs")
   }
 
   /** Rows before the first auxiliary row: what the worktrees panel renders. */
@@ -726,7 +740,7 @@ export class HomeLauncher {
   private handleListKey(key: KeyEvent) {
     // Direct auxiliary shortcuts stay available from the list (and stay
     // unambiguous: they only fire when not typing into a form).
-    const auxiliary = AUXILIARY.find((entry) => entry.shortcut === key.name)
+    const auxiliary = this.destinations().find((entry) => entry.shortcut === key.name)
     if (auxiliary) {
       this.finish({ type: "destination", destination: auxiliary.id })
       return
@@ -887,7 +901,7 @@ export class HomeLauncher {
       writer?.liveness === "uncertain"
         ? "a managed writer's liveness is uncertain (its process state disagrees with its heartbeat) — inspect or stop it before mutating"
         : "a managed writer is active in this checkout — inspect or stop it before mutating"
-    return [
+    const actions: DetailAction[] = [
       // ── sessions: the OpenCode authoring surfaces ─────────────────────────
       {
         id: "conversation",
@@ -997,6 +1011,12 @@ export class HomeLauncher {
         blocker: !verified ? inaccessible : !attached ? detached : writerBusy ? busy : undefined,
       },
     ]
+    if (this.specs) return actions
+    // Without specs, proposing and archiving changes go, and close is only
+    // the squash merge, so it joins the git operations.
+    return actions
+      .filter((action) => action.id !== "propose" && action.id !== "archive")
+      .map((action) => (action.id === "close" ? { ...action, section: "git" as const, label: "Close (merge)" } : action))
   }
 
   /**
@@ -1021,7 +1041,7 @@ export class HomeLauncher {
       for (const run of runs) entries.push({ kind: "run", run })
     }
     entries.push(...inSection("openspec"))
-    if (!worktree.changesUnknown) {
+    if (this.specs && !worktree.changesUnknown) {
       for (const change of worktree.changes) entries.push({ kind: "change", change })
     }
     entries.push(...inSection("git"))
@@ -2091,6 +2111,8 @@ export class HomeLauncher {
       lines.push(selected ? this.highlighted(chunks, width) : new StyledText(chunks))
     }
     for (const { section, label } of DETAIL_SECTIONS) {
+      // Without specs the OpenSpec section and its linked specs are gone.
+      if (section === "openspec" && !this.specs) continue
       lines.push(...this.headingLines(label, width))
       for (const entry of entryRows(section)) pushEntry(entry)
       // The Runs section lists the checkout's recent runs (or an honest empty

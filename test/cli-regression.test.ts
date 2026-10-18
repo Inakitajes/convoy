@@ -5,7 +5,7 @@ import { join } from "node:path"
 
 import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test"
 
-import { parseAndRun, parseArgs, parseCommand, resolveRunOptions } from "../src/cli"
+import { parseAndRun, parseArgs, parseCommand, resolveRunOptions, runRootLauncherLoop } from "../src/cli"
 import { addWorktree } from "../src/git"
 import { stepNames } from "../src/pipeline"
 import type { RunMetadata } from "../src/metadata"
@@ -409,5 +409,42 @@ describe("parseAndRun init and agents effects", () => {
 
     await parseAndRun(["agents", "eject", "implementer", "--dir", dir, "--force", "--quiet"])
     expect(await readFile(prompt, "utf8")).toContain("# Implementer")
+  })
+})
+
+describe("feature toggles", () => {
+  test("a launcher-first session reopens the launcher after each destination and ends on quit or interrupt", async () => {
+    const outcomes: Array<"quit" | "continue"> = ["continue", "continue", "quit", "continue"]
+    let opened = 0
+    await runRootLauncherLoop(async () => {
+      opened++
+      return outcomes.shift()!
+    }, () => false)
+    expect(opened).toBe(3)
+
+    let interrupted = false
+    opened = 0
+    await runRootLauncherLoop(async () => {
+      opened++
+      interrupted = true
+      return "continue"
+    }, () => interrupted)
+    expect(opened).toBe(1)
+  })
+
+  test("OpenSpec-only commands refuse in a project that turned specs off", async () => {
+    const repo = await mkdtemp(join(tmpdir(), "convoy-specs-off-"))
+    try {
+      await mkdir(join(repo, ".convoy"), { recursive: true })
+      await writeFile(join(repo, ".convoy", "config.yaml"), "features:\n  specs: false\n")
+      for (const command of ["specs", "spin"]) {
+        const proc = Bun.spawn([process.execPath, join(import.meta.dir, "..", "src", "main.ts"), command], { cwd: repo, stdin: "ignore", stdout: "pipe", stderr: "pipe" })
+        const [stderr, code] = await Promise.all([new Response(proc.stderr).text(), proc.exited])
+        expect(code).toBe(1)
+        expect(stderr).toContain(`convoy ${command} needs OpenSpec, which this project turned off (features.specs: false)`)
+      }
+    } finally {
+      await rm(repo, { recursive: true, force: true })
+    }
   })
 })

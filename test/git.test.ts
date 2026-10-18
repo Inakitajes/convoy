@@ -13,6 +13,7 @@ import {
   initializeRepoWithInitialCommit,
   repoBootstrapStatus,
   resolveWorktreeDefault,
+  worktreeDefaultFor,
 } from "../src/git"
 
 describe("findSuspiciousStagedFiles", () => {
@@ -227,6 +228,12 @@ describe("detectBaseRef", () => {
   })
 
   describe("resolveWorktreeDefault", () => {
+    test("worktree management turned off never isolates, even on a trunk", async () => {
+      const dir = await repo("main")
+      expect(await worktreeDefaultFor(dir, false)).toEqual({ isolate: false, reason: "features.worktrees is off" })
+      expect(await worktreeDefaultFor(dir, true)).toEqual({ isolate: true, reason: "main is a base branch" })
+    })
+
     test("isolates on a conventional trunk", async () => {
       const dir = await repo("main")
       expect(await resolveWorktreeDefault(dir)).toEqual({ isolate: true, reason: "main is a base branch" })

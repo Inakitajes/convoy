@@ -144,6 +144,7 @@ export class ConfigScreen {
     if (this.finished || this.renderer.isDestroyed || this.scene?.isClosed) return
     const width = Math.max(20, this.renderer.width - 8)
     const lines: StyledText[] = []
+    const nameWidth = Math.max(...this.entries.map((entry) => entryName(entry).length), 6) + 2
     let scope: string | undefined
     for (const [index, entry] of this.entries.entries()) {
       if (entry.scope !== scope) {
@@ -151,7 +152,7 @@ export class ConfigScreen {
         if (lines.length > 0) lines.push(new StyledText([]))
         lines.push(new StyledText([bold(fg(theme.dim)(entry.scope === "global" ? "GLOBAL · every project" : `PROJECT · ${displayPath(this.targetDir)}`))]))
       }
-      lines.push(this.row(entry, index === this.selected, width))
+      lines.push(this.row(entry, index === this.selected, width, nameWidth))
     }
     const current = this.entries[this.selected]
     lines.push(new StyledText([]))
@@ -171,17 +172,19 @@ export class ConfigScreen {
     this.renderer.requestRender()
   }
 
-  private row(entry: ConfigFileEntry, selected: boolean, width: number): StyledText {
+  private row(entry: ConfigFileEntry, selected: boolean, width: number, nameWidth: number): StyledText {
     const marker: TextChunk = selected ? fg(theme.accent)("▸ ") : fg(theme.faint)("  ")
-    const name = entry.kind === "config" ? "config" : `agent ${entry.name}`
+    const name = entryName(entry)
     const state: TextChunk = !entry.exists
       ? fg(theme.faint)("not created")
       : entry.error
         ? fg(theme.red)("✗ doesn't load")
         : fg(theme.green)(entry.kind === "config" ? "✓ loads" : "✓")
-    const nameText = (selected ? bold : (chunk: TextChunk) => chunk)(fg(selected ? theme.text : theme.dim)(name.padEnd(22)))
-    const path = truncate(displayPath(entry.path), Math.max(10, width - 40))
-    return new StyledText([marker, nameText, fg(theme.faint)(path.padEnd(Math.max(10, width - 40) + 2)), state])
+    const nameText = (selected ? bold : (chunk: TextChunk) => chunk)(fg(selected ? theme.text : theme.dim)(name.padEnd(nameWidth)))
+    const pathWidth = Math.max(10, width - nameWidth - 20)
+    // Project files read relative to the PROJECT heading that names the checkout.
+    const shown = entry.scope === "project" && entry.path.startsWith(`${this.targetDir}/`) ? entry.path.slice(this.targetDir.length + 1) : displayPath(entry.path)
+    return new StyledText([marker, nameText, fg(theme.faint)(truncate(shown, pathWidth).padEnd(pathWidth + 2)), state])
   }
 
   private finish(cause: "back" | "interrupt") {
@@ -193,4 +196,8 @@ export class ConfigScreen {
     if (!this.scene && !this.renderer.isDestroyed) this.renderer.destroy()
     this.resolveResult()
   }
+}
+
+function entryName(entry: ConfigFileEntry): string {
+  return entry.kind === "config" ? "config" : `agent ${entry.name}`
 }

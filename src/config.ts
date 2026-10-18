@@ -1307,7 +1307,7 @@ export function selectPipelineSpec(config: ConvoyConfig | undefined, name: strin
   throw new ConfigError(`unknown pipeline "${name}" (available: ${available.join(", ")})`)
 }
 
-/** True when a string is a valid `provider/model` or `provider/model#variant`. Shared by config validation and the config TUI. */
+/** True when a string is a valid `provider/model` or `provider/model#variant`. */
 export function isValidModelString(value: string): boolean {
   try {
     normalizeStepRunnerModel("opencode", value)
