@@ -13,9 +13,11 @@ import {
   probeConversationService,
   readConversationServiceDiscovery,
   stopConversationService,
+  conversationServiceSecretPath,
   validateConversationServiceRecord,
   type ConversationServiceRecord,
 } from "../src/conversation-service"
+import { convoySecretsDir } from "../src/workspace"
 import { bootOpencodeServerFrom, connectOpencode } from "../src/opencode"
 import { createAuthoringConversation, validateAuthoringSession } from "../src/conversations"
 import { defaultReadinessTimeoutMs } from "../src/managed-server"
@@ -85,14 +87,40 @@ describe("conversation-service discovery and reuse (task 4.3)", () => {
     expect(boots).toBe(1)
   })
 
-  // The record carries the service's V2 password: only the owner may read it.
-  test("the discovery record holding the server password is owner-only", async () => {
+  // The discovery record lives in the checkout's Git dir, which every agent
+  // may read: the service's V2 password is kept out of it, in an owner-only
+  // file under Convoy's private dir, and still reaches a reusing client.
+  test("the server password never lands inside the checkout", async () => {
     const boot = async () => ({ url: "http://127.0.0.1:51009", password: "s3cret", close() {}, pid: 123_459 })
     const started = await ensureConversationService({ commonDir, checkout: repoDir, boot, probe: async () => "stale" })
     expect(started.status).toBe("live")
     const path = join(commonDir, "convoy", "authoring-server.json")
-    expect(JSON.parse(await readFile(path, "utf8")).password).toBe("s3cret")
-    expect((await stat(path)).mode & 0o777).toBe(0o600)
+    const onDisk = await readFile(path, "utf8")
+    expect(onDisk).not.toContain("s3cret")
+    expect(JSON.parse(onDisk).password).toBeUndefined()
+    const secret = conversationServiceSecretPath(commonDir)
+    expect(secret.startsWith(convoySecretsDir())).toBe(true)
+    expect((await stat(secret)).mode & 0o777).toBe(0o600)
+    expect((await stat(join(secret, ".."))).mode & 0o777).toBe(0o700)
+    const reused = await ensureConversationService({ commonDir, checkout: repoDir, boot, probe: async () => "live" })
+    expect(reused.status === "live" && reused.password).toBe("s3cret")
+    // Stopping the service removes the secret with the record.
+    expect((await stopConversationService({ commonDir, activity: "idle", probe: async () => "stale" })).status).toBe("stopped")
+    expect(await Bun.file(secret).exists()).toBe(false)
+  })
+
+  test("a legacy record still carrying its password keeps working until replaced", async () => {
+    await writeJsonFile(join(commonDir, "convoy", "authoring-server.json"), {
+      schemaVersion,
+      url: "http://127.0.0.1:51010",
+      pid: 123_460,
+      bootCheckout: repoDir,
+      startedAt: Date.now(),
+      password: "legacy",
+    })
+    const outcome = await ensureConversationService({ commonDir, checkout: repoDir, boot: async () => { throw new Error("no boot") }, probe: async () => "live" })
+    expect(outcome.status === "live" && outcome.password).toBe("legacy")
+    await stopConversationService({ commonDir, activity: "idle", probe: async () => "stale" })
   })
 
   test("a stale discovery record (dead pid) is replaced by a fresh boot, not trusted", async () => {

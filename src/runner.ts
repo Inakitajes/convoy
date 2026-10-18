@@ -94,7 +94,7 @@ import type { AgentSpec, AgentStep, DeliverableContract, HookSet, HookSpec, Perm
 import { bashPolicy, noAdditions } from "./bash-policy"
 import { consensusStep, loadQualityRubricWeights, parseQualityScoreReport, qualityDimensionWeights, type QualityDimension, type QualityScore } from "./quality-score"
 import { addTokens, emptyTokens, tokensFromValue } from "./usage"
-import { cleanupWorkspace, createWorkspace, resumeWorkspace, runPrivateDir, type Workspace, writeSummary } from "./workspace"
+import { agentDeniedDirs, cleanupWorkspace, createWorkspace, resumeWorkspace, runPrivateDir, type Workspace, writeSummary } from "./workspace"
 
 export type ActiveSession = {
   client: OpencodeClient
@@ -2355,8 +2355,8 @@ async function runPhaseAttempt(
     autoAccept: prepared.autoAccept?.mode ?? "off",
     checkout: targetDir,
     runDir: workspace.dir,
-    privateDir: runPrivateDir(workspace.dir),
-    commands: bashPolicy(targetDir, prepared.permissions ?? noAdditions),
+    privateDirs: agentDeniedDirs(workspace.dir),
+    commands: bashPolicy(targetDir, prepared.permissions ?? noAdditions, agentDeniedDirs(workspace.dir)),
     attachments: prepared.attachments.flatMap((file) => {
       try {
         return [fileURLToPath(file.url)]

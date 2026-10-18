@@ -98,8 +98,10 @@ describe("proposeCommitMessage", () => {
     expect(calls.creates[0]).toMatchObject({ directory: "/repo", title: "convoy commit writer" })
     // The read-only writer is enforced through V2 session permissions, not a
     // per-prompt tools map (which V2 does not have).
-    const perms = (calls.creates[0] as { permissions?: Array<{ action: string }> }).permissions ?? []
-    expect(perms.map((p) => p.action).sort()).toEqual(["bash", "edit", "shell", "webfetch", "write"])
+    // Deny-all first, then only the writer's read tools: last match wins.
+    const perms = (calls.creates[0] as { permissions?: Array<{ action: string; effect: string }> }).permissions ?? []
+    expect(perms[0]).toMatchObject({ action: "*", effect: "deny" })
+    expect(perms.slice(1).map((p) => `${p.action}:${p.effect}`).sort()).toEqual(["glob:allow", "grep:allow", "list:allow", "read:allow"])
     expect(calls.prompts[0]).toMatchObject({
       sessionID: "session-1",
       directory: "/repo",

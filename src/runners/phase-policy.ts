@@ -23,8 +23,8 @@ export type PhasePolicyInput = {
   checkout: string
   /** The run directory (reports, attachments). */
   runDir: string
-  /** The run's private directory (server password, bridge tokens). */
-  privateDir: string
+  /** Private directories no action may touch (the run's server password and bridge tokens, Convoy's secrets). */
+  privateDirs: readonly string[]
   /** The assembled bash ruleset (`bashPolicy`), in evaluation order. */
   commands: Readonly<Record<string, CommandEffect>>
   /** Absolute paths of the attempt's attachments (files or directories), readable wherever they live. */
@@ -59,7 +59,7 @@ export function phasePolicy(input: PhasePolicyInput): PolicyConfig {
     approvals: approvalsFor(input.autoAccept),
     commands: input.commands,
     writeRoots: [...rootForms(input.checkout), ...rootForms(input.runDir)],
-    denyRoots: rootForms(input.privateDir),
+    denyRoots: input.privateDirs.flatMap(rootForms),
     // Reads elsewhere are denied, as OpenCode's external_directory rule does.
     readRoots: (input.attachments ?? []).flatMap(rootForms),
     cwd: input.checkout,

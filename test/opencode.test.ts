@@ -186,8 +186,10 @@ describe("runDirAccessConfig", () => {
     const permission = (parsed as { permission: Record<string, Record<string, string>> }).permission
     expect(permission.external_directory).not.toHaveProperty("*")
     expect(permission.read).not.toHaveProperty("*")
-    expect(Object.keys(permission.external_directory)).toHaveLength(1)
-    expect(Object.keys(permission.read)).toHaveLength(1)
+    // The only allow is the run dir; anything else (its private dir) is a deny.
+    for (const rules of [permission.external_directory, permission.read]) {
+      expect(Object.entries(rules).filter(([, effect]) => effect === "allow")).toEqual([["/tmp/convoy-run/**", "allow"]])
+    }
   })
 
   test("handles a run dir with spaces and quotes", () => {

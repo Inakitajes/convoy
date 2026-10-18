@@ -21,11 +21,11 @@ import { claudeModelLabel, describeClaudeEvent, ndjsonLines, newClaudeStreamStat
 import { withoutHerdrEnv } from "../../herdr"
 import { externalAttachmentDirectories, withAttachmentSection } from "../agent-source"
 import { resolveClaudeAuth, type ClaudeAuthResolution } from "./auth"
-import { startClaudeApprovalBridge, type ClaudeApprovalBridge } from "./approval-bridge"
+import { stagePrivateMcpConfig, startClaudeApprovalBridge, type ClaudeApprovalBridge } from "./approval-bridge"
 import { validateEffectiveAuth, type EffectiveAuthProbe } from "./effective-auth"
 import { assertEnforcementReady, EnforcementNotReadyError, type EnforcementPlan } from "./enforcement"
 import { toolToIntent } from "./hook"
-import { encodeClaudeMcpConfig, encodeClaudeSettings, permissionPromptArgs } from "./settings"
+import { encodeClaudeMcpConfig, encodeClaudeSettings, permissionPromptArgs, withServerEnv } from "./settings"
 
 import type { AttemptOutcome, ExecutionAdapter, ExecutionRequest, ExecutionServices, RunnerEvent, Usage } from "../contracts"
 import { resolveEffectiveCapabilities } from "../capabilities"
@@ -369,26 +369,30 @@ export function createClaudeRunner(options: ClaudeRunnerOptions): ClaudeRunner {
       }
 
       // An ask-level action reaches the attempt's approval service through a
-      // per-attempt loopback bridge the permission host is pointed at.
+      // per-attempt loopback bridge the permission host is pointed at. Its
+      // address and token go to that host's own env in a private config file,
+      // so the agent's tools (which inherit Claude's env) never see the token.
       let bridge: ClaudeApprovalBridge | undefined
+      let staged: { path: string; discard(): Promise<void> } | undefined
       const approvals = services?.approvals
-      if (approvals) {
-        bridge = await startClaudeApprovalBridge(async (ask) => {
-          const decision = await approvals.decide({
-            requestId: randomUUID(),
-            tool: ask.tool,
-            action: approvalAction(ask.tool),
-            ...(ask.resource ? { resources: [ask.resource] } : {}),
-          })
-          return decision === "allow"
-        })
-        Object.assign(invocation.env, bridge.env)
-      }
-
       try {
+        if (approvals && enforcement) {
+          bridge = await startClaudeApprovalBridge(async (ask) => {
+            const decision = await approvals.decide({
+              requestId: randomUUID(),
+              tool: ask.tool,
+              action: approvalAction(ask.tool),
+              ...(ask.resource ? { resources: [ask.resource] } : {}),
+            })
+            return decision === "allow"
+          })
+          staged = await stagePrivateMcpConfig(withServerEnv(enforcement.mcpConfig, bridge.env))
+          invocation.args[invocation.args.indexOf("--mcp-config") + 1] = staged.path
+        }
         return finish(await runInvocation(request, invocation, sink, services))
       } finally {
         await bridge?.close()
+        await staged?.discard()
       }
     },
 

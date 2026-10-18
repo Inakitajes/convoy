@@ -7,7 +7,7 @@ import { bashPolicy, noAdditions } from "./bash-policy"
 import { builtInPrompts } from "./built-in-prompts"
 import { builtInAgents, readOnlyAgentSuffix, verifyAgentSuffix } from "./pipeline"
 import type { AgentSpec, PermissionAdditions } from "./types"
-import { globalAgentsDir, runPrivateDir } from "./workspace"
+import { agentDeniedDirs, globalAgentsDir, runPrivateDir } from "./workspace"
 import { writeReportToolName } from "./report"
 
 const runtimeSafetyPrompt = "runtime-safety"
@@ -252,7 +252,7 @@ function agentConfig(
         edit: "deny",
         // A verifying step gets the same bash policy writable agents get:
         // allowlisted checks run silently, the hard denylist stays deny.
-        bash: verify ? bashPolicy(targetDir, permissions) : "deny",
+        bash: verify ? bashPolicy(targetDir, permissions, agentDeniedDirs(runDir)) : "deny",
         task: "deny",
         question: "deny",
         webfetch: webfetch ? "allow" : "deny",
@@ -286,7 +286,7 @@ function agentConfig(
       edit: advisor ? "ask" : "allow",
       question: "deny",
       doom_loop: doomLoopPermission,
-      bash: bashPolicy(targetDir, permissions),
+      bash: bashPolicy(targetDir, permissions, agentDeniedDirs(runDir)),
       external_directory: runDirAccess(runDir),
     },
     prompt,

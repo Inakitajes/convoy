@@ -99,6 +99,19 @@ export function runPrivateDir(runDir: string): string {
 }
 
 /**
+ * Convoy's owner-only secrets outside any checkout or run dir (the authoring
+ * server's password). Agents are denied it like a run's private dir.
+ */
+export function convoySecretsDir(): string {
+  return join(convoyHome(), "private")
+}
+
+/** Every private dir an attempt of this run must never reach. */
+export function agentDeniedDirs(runDir: string): string[] {
+  return [runPrivateDir(runDir), convoySecretsDir()]
+}
+
+/**
  * Writes one V2 plugin package (`<dir>/plugins/<name>/index.ts`): V2 loads a
  * configured local plugin only from a package directory, not a bare file.
  * Rewrites only on change, since OpenCode watches plugin sources. Returns the

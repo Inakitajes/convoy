@@ -225,8 +225,9 @@ describe("askForBranchName", () => {
 
     expect(readBranchName(reply)).toBe("feat/add-onboarding-flow")
     expect(createInput).toMatchObject({ directory: "/repo", title: "convoy branch namer" })
-    const perms = (createInput as { permissions?: Array<{ action: string }> }).permissions ?? []
-    expect(perms.map((p) => p.action).sort()).toEqual(["bash", "edit", "shell", "write"])
+    const perms = (createInput as { permissions?: Array<{ action: string; effect: string }> }).permissions ?? []
+    expect(perms[0]).toMatchObject({ action: "*", effect: "deny" })
+    expect(perms.slice(1).map((p) => `${p.action}:${p.effect}`).sort()).toEqual(["glob:allow", "grep:allow", "list:allow", "read:allow", "webfetch:allow"])
     expect(promptInput?.sessionID).toBe("namer-session")
     expect(promptInput?.directory).toBe("/repo")
     expect(promptInput?.model).toEqual({ providerID: "openai", modelID: "gpt-5.5" })

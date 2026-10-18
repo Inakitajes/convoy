@@ -259,21 +259,23 @@ export function basicAuthHeader(password: string): string {
 
 /**
  * Translates Convoy's V1 `tools` map (`{ name: allowed }`) into V2's session
- * permission ruleset. V2 has no per-prompt `tools` field; a disabled tool is a
- * denied action at session creation. `"*": false` denies everything, and V2's
+ * permission ruleset. V2 has no per-prompt `tools` field; tools are governed
+ * by the session's rules, where the last match wins. The ruleset starts from
+ * deny-all and re-allows only the tools marked true, so a tool the map does
+ * not name (a `task` subagent, an MCP or plugin tool) is denied as well. V2's
  * `shell` is the counterpart of V1's `bash`, so the two move together.
  */
-export function toolPermissions(tools: Record<string, boolean>): Array<{ action: string; resource: string; effect: "deny" }> {
-  if (tools["*"] === false) return [{ action: "*", resource: "*", effect: "deny" }]
-  const denied = new Set<string>()
-  for (const [name, allowed] of Object.entries(tools)) if (!allowed) denied.add(name)
-  if (denied.has("bash") || denied.has("shell")) {
-    denied.add("bash")
-    denied.add("shell")
+export function toolPermissions(tools: Record<string, boolean>): Array<{ action: string; resource: string; effect: "allow" | "deny" }> {
+  const allowed = new Set<string>()
+  for (const [name, enabled] of Object.entries(tools)) if (enabled && name !== "*") allowed.add(name)
+  if (allowed.has("bash") || allowed.has("shell")) {
+    allowed.add("bash")
+    allowed.add("shell")
   }
-  denied.delete("todoread")
-  denied.delete("todowrite")
-  return [...denied].map((action) => ({ action, resource: "*", effect: "deny" as const }))
+  return [
+    { action: "*", resource: "*", effect: "deny" as const },
+    ...[...allowed].map((action) => ({ action, resource: "*", effect: "allow" as const })),
+  ]
 }
 
 function toModelRef(model: ModelRefInput | undefined, variant?: string): { id: string; providerID: string; variant?: string } | undefined {

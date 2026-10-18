@@ -33,7 +33,7 @@ symlinkSync(privateDir, join(checkout, "leak"))
 afterAll(() => rmSync(root, { recursive: true, force: true }))
 
 function policy(mode: "read-only" | "verify" | "write", attachments: string[] = []) {
-  return phasePolicy({ mode, autoAccept: "off", checkout, runDir, privateDir, commands: { "*": "ask", "cat *": "allow", "grep *": "allow" }, attachments })
+  return phasePolicy({ mode, autoAccept: "off", checkout, runDir, privateDirs: [privateDir], commands: { "*": "ask", "cat *": "allow", "grep *": "allow" }, attachments })
 }
 
 function decide(tool: string, input: Record<string, unknown>, mode: "read-only" | "verify" | "write" = "read-only", attachments: string[] = []) {

@@ -132,10 +132,135 @@ export function commandSegments(command: string): string[] | undefined {
 
 const effectRank: Record<CommandEffect, number> = { allow: 0, ask: 1, deny: 2 }
 
+// Words a shell runs before the real command, or that only introduce one.
+const reservedWords = new Set(["if", "then", "else", "elif", "fi", "do", "done", "while", "until", "!", "time", "{", "}"])
+const commandWrappers = new Set(["command", "builtin", "exec", "nohup", "env", "time", "nice", "stdbuf", "caffeinate"])
+const shells = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish"])
+const assignment = /^[A-Za-z_][A-Za-z0-9_]*=/
+
+/**
+ * The text of `$( … )`, `<( … )`, `>( … )`, and backtick substitutions, each
+ * a command the shell runs; nested substitutions surface in the recursion.
+ */
+function substitutions(command: string): string[] {
+  const found: string[] = []
+  for (let i = 0; i < command.length; i++) {
+    const opener = command[i] === "`" ? "`" : /[$<>]/.test(command[i]!) && command[i + 1] === "(" ? "(" : undefined
+    if (!opener) continue
+    if (opener === "`") {
+      const end = command.indexOf("`", i + 1)
+      found.push(command.slice(i + 1, end === -1 ? undefined : end))
+      i = end === -1 ? command.length : end
+      continue
+    }
+    let depth = 0
+    let j = i + 1
+    for (; j < command.length; j++) {
+      if (command[j] === "(") depth++
+      else if (command[j] === ")" && --depth === 0) break
+    }
+    found.push(command.slice(i + 2, j))
+    i = j
+  }
+  return found
+}
+
+/**
+ * Splits a command into simple commands as the shell would — on unquoted
+ * separators and grouping characters — then removes quoting and escapes from
+ * each word. Unbalanced quotes run to the end, as a conservative reading.
+ */
+function simpleCommands(command: string): string[][] {
+  const commands: string[][] = []
+  let words: string[] = []
+  let word = ""
+  let inWord = false
+  let quote: "'" | '"' | undefined
+  const endWord = () => {
+    if (inWord) words.push(word)
+    word = ""
+    inWord = false
+  }
+  const endCommand = () => {
+    endWord()
+    if (words.length > 0) commands.push(words)
+    words = []
+  }
+  for (let i = 0; i < command.length; i++) {
+    const char = command[i]!
+    if (quote === "'") {
+      if (char === "'") quote = undefined
+      else word += char
+      continue
+    }
+    if (quote === '"') {
+      if (char === '"') quote = undefined
+      else if (char === "\\" && i + 1 < command.length) word += command[++i]
+      else word += char
+      continue
+    }
+    if (char === "'" || char === '"') {
+      quote = char
+      inWord = true
+    } else if (char === "\\" && i + 1 < command.length) {
+      word += command[++i]
+      inWord = true
+    } else if (/[;&|\n()]/.test(char)) {
+      endCommand()
+    } else if (/\s/.test(char)) {
+      endWord()
+    } else {
+      word += char
+      inWord = true
+    }
+  }
+  endCommand()
+  return commands
+}
+
+/** The command a simple command actually runs: assignments, reserved words, and wrappers stripped. */
+function effectiveWords(words: readonly string[]): string[] {
+  let rest = [...words]
+  for (;;) {
+    const head = rest[0]
+    if (head === undefined) return rest
+    if (reservedWords.has(head) || assignment.test(head)) {
+      rest = rest.slice(1)
+    } else if (commandWrappers.has(head)) {
+      rest = rest.slice(1)
+      // A wrapper's own options (`env -i`, `nice -n 5`) come before the command.
+      while (rest[0]?.startsWith("-")) rest = rest.slice(rest[0] === "-n" ? 2 : 1)
+    } else {
+      return rest
+    }
+  }
+}
+
+/**
+ * Every command a shell line can run, in a normalized `word word …` spelling
+ * a prefix rule can judge: quoting and escapes removed, grouping and
+ * wrappers stripped, and `sh -c` scripts and substitutions unfolded.
+ */
+export function normalizedCommands(command: string, depth = 0): string[] {
+  if (depth > 4) return []
+  const out: string[] = []
+  for (const inner of substitutions(command)) out.push(...normalizedCommands(inner, depth + 1))
+  for (const words of simpleCommands(command)) {
+    const effective = effectiveWords(words)
+    if (effective.length === 0) continue
+    out.push(effective.join(" "))
+    const script = shells.has(effective[0]!.split("/").at(-1)!) ? effective.findIndex((arg) => /^-[a-z]*c[a-z]*$/.test(arg)) : -1
+    if (script !== -1 && effective[script + 1] !== undefined) out.push(...normalizedCommands(effective[script + 1]!, depth + 1))
+  }
+  return out
+}
+
 /** The combined effect of a possibly chained command: its strictest segment, unknown segments ask. */
 function chainedCommandEffect(command: string, rules: Readonly<Record<string, CommandEffect>>): CommandEffect {
-  // A hard denial anywhere in the raw text wins before any parsing doubt.
+  // A hard denial anywhere in the raw text wins before any parsing doubt, and
+  // so does one in any command the line runs however it is spelled.
   if (commandEffect(command.trim(), rules) === "deny") return "deny"
+  if (normalizedCommands(command).some((candidate) => commandEffect(candidate, rules) === "deny")) return "deny"
   const segments = commandSegments(command)
   if (!segments || segments.length === 0) return "ask"
   let worst: CommandEffect = "allow"

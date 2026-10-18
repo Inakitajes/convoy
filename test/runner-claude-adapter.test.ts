@@ -1,3 +1,5 @@
+import { existsSync, readFileSync, statSync } from "node:fs"
+
 import { describe, expect, test } from "bun:test"
 
 import type { ExecutionRequest, RunnerEvent } from "../src/runners/contracts"
@@ -9,7 +11,10 @@ import {
   usageFromTokens,
   type ClaudeProcess,
 } from "../src/runners/claude/adapter"
+import { approvalTokenEnv, approvalUrlEnv } from "../src/runners/claude/approval-bridge"
 import type { EnforcementPlan } from "../src/runners/claude/enforcement"
+import { redactSecrets } from "../src/runners/redaction"
+import { convoySecretsDir } from "../src/workspace"
 import { buildPermissionPromptTool } from "../src/runners/claude/permission-broker"
 import { buildClaudeSettings, buildPermissionMcpConfig } from "../src/runners/claude/settings"
 
@@ -342,5 +347,46 @@ describe("claude adapter (robustness)", () => {
     ])
     expect(events.some((event) => event.type === "activity" && event.kind === "tool")).toBe(true)
     expect(outcome.status).toBe("completed")
+  })
+})
+
+// The approval bridge's bearer token lets whoever holds it answer the attempt's
+// approval prompts. Claude's tools inherit its environment and anything in its
+// argv shows in `ps`, so the token must reach only the permission host: through
+// that server's own env in a private config file the attempt cannot read.
+describe("Claude approval bridge token", () => {
+  test("never enters the child env or argv, and is redacted from diagnostics", async () => {
+    let seen: { argv: string[]; env: NodeJS.ProcessEnv } | undefined
+    let mcpConfigPath: string | undefined
+    let mcpConfig: { mcpServers: Record<string, { env?: Record<string, string> }> } | undefined
+    let mode = 0
+    const runner = createClaudeRunner({
+      cwd: "/tmp",
+      env: { PATH: "/bin" },
+      enforcement: enforcementPlan(),
+      deps: {
+        ...subscriptionLogin,
+        spawn: (argv, options) => {
+          seen = { argv, env: options.env }
+          mcpConfigPath = argv[argv.indexOf("--mcp-config") + 1]
+          mcpConfig = JSON.parse(readFileSync(mcpConfigPath!, "utf8"))
+          mode = statSync(mcpConfigPath!).mode & 0o777
+          return fakeProcess(fixture)
+        },
+      },
+    })
+    await runner.executeAttempt(request({ approvals: "interactive" }), () => {}, { approvals: { decide: async () => "allow" } })
+
+    const token = mcpConfig?.mcpServers.convoy?.env?.[approvalTokenEnv]
+    expect(token).toMatch(/^[0-9a-f]{64}$/)
+    expect(mcpConfig?.mcpServers.convoy?.env?.[approvalUrlEnv]).toStartWith("http://127.0.0.1:")
+    expect(seen?.env[approvalTokenEnv]).toBeUndefined()
+    expect(seen?.env[approvalUrlEnv]).toBeUndefined()
+    expect(seen?.argv.join(" ")).not.toContain(token!)
+    expect(mode).toBe(0o600)
+    expect(mcpConfigPath!.startsWith(convoySecretsDir())).toBe(true)
+    expect(redactSecrets(`token=${token}`)).not.toContain(token!)
+    // The staged config is removed with the attempt.
+    expect(existsSync(mcpConfigPath!)).toBe(false)
   })
 })

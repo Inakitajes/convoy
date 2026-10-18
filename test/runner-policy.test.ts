@@ -95,3 +95,47 @@ describe("command rules, write roots and protected roots", () => {
     expect(evaluateAction({ tool: "Read", intent: "read", resource: "/run/report.md" }, config).effect).toBe("allow")
   })
 })
+
+// A hard denial is never relaxed by auto-approval, so it must hold whatever
+// shell spelling reaches the same command: quoting, escaping, grouping,
+// wrappers, `sh -c`, and substitutions all still run `git push`.
+describe("hard denials survive shell spelling", () => {
+  const commands = { "*": "ask", "cat*": "allow", "echo*": "allow", "git push*": "deny", "rm -rf /*": "deny" } as const
+  const write: PolicyConfig = { mode: "write", approvals: "auto", commands }
+  const bypasses = [
+    `"git" push origin main`,
+    `'git' push`,
+    `g"it" push`,
+    `git "push" origin`,
+    `\\git push`,
+    `g\\it push`,
+    `(git push)`,
+    `{ git push; }`,
+    `( cd sub && git push )`,
+    `FOO=1 git push`,
+    `env git push`,
+    `command git push`,
+    `exec git push`,
+    `nohup git push`,
+    `time git push`,
+    `sh -c "git push"`,
+    `bash -lc 'git push origin'`,
+    `echo $(git push)`,
+    "echo `git push`",
+    `cat <(git push)`,
+    `git push > /tmp/out`,
+    `if true; then git push; fi`,
+    `"rm" -rf /etc`,
+  ]
+  for (const command of bypasses) {
+    test(`denies: ${command}`, () => {
+      expect(evaluateAction({ tool: "Bash", intent: "execute", resource: command }, write).effect).toBe("deny")
+    })
+  }
+
+  test("ordinary commands keep their effect", () => {
+    expect(evaluateAction({ tool: "Bash", intent: "execute", resource: `echo "git push is Convoy's job"` }, { ...write, approvals: "interactive" }).effect).toBe("allow")
+    expect(evaluateAction({ tool: "Bash", intent: "execute", resource: "cat a.txt" }, { ...write, approvals: "interactive" }).effect).toBe("allow")
+    expect(evaluateAction({ tool: "Bash", intent: "execute", resource: "make build > log.txt" }, { ...write, approvals: "interactive" }).effect).toBe("ask")
+  })
+})

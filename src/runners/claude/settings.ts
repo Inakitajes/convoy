@@ -62,6 +62,20 @@ export function buildPermissionMcpConfig(server: string, command: string, args: 
   return { mcpServers: { [server]: { command, args: [...args] } } }
 }
 
+/**
+ * The MCP config with `env` added to every declared server. Claude passes a
+ * server's own `env` to that server only, so a secret placed here never
+ * reaches the agent's tools the way Claude's inherited environment does.
+ */
+export function withServerEnv(mcpConfig: Record<string, unknown>, env: Record<string, string>): Record<string, unknown> {
+  const servers = (mcpConfig.mcpServers ?? {}) as Record<string, Record<string, unknown>>
+  const withEnv: Record<string, Record<string, unknown>> = {}
+  for (const [name, server] of Object.entries(servers)) {
+    withEnv[name] = { ...server, env: { ...((server.env ?? {}) as Record<string, string>), ...env } }
+  }
+  return { ...mcpConfig, mcpServers: withEnv }
+}
+
 /** The `--permission-prompt-tool` argument pair for a hosted permission tool. */
 export function permissionPromptArgs(tool: string): string[] {
   return ["--permission-prompt-tool", tool]

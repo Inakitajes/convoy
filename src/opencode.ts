@@ -17,6 +17,7 @@ import type { ProcessRecordStore } from "./process-records"
 import type { StopOutcome, StopPolicy } from "./process-stop"
 import { openSessionCommand, sessionShellCommand, shellQuote, type SessionWindowBackend } from "./terminal-host"
 import { withoutHerdrEnv } from "./herdr"
+import { runPrivateDir } from "./workspace"
 
 export { openSessionCommand, sessionShellCommand, shellQuote }
 export type { SessionWindowBackend }
@@ -219,10 +220,13 @@ export function runDirAccessConfig(runDir: string): string {
   if (!isAbsolute(glob) || glob === "/**") {
     throw new Error(`run dir must be an absolute directory, got: ${JSON.stringify(runDir)}`)
   }
+  // The private dir (server password, bridge-token plugins) is denied after
+  // the allow, as run agents get it: the last matching rule wins.
+  const secrets = join(runPrivateDir(runDir), "**")
   return JSON.stringify({
     permission: {
-      external_directory: { [glob]: "allow" },
-      read: { [glob]: "allow" },
+      external_directory: { [glob]: "allow", [secrets]: "deny" },
+      read: { [glob]: "allow", [secrets]: "deny" },
     },
   })
 }

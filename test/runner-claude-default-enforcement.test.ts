@@ -50,7 +50,7 @@ function verifyPolicy(): PolicyConfig {
     autoAccept: "off",
     checkout: "/repo",
     runDir: "/runs/r1",
-    privateDir: "/runs/r1/.private",
+    privateDirs: ["/runs/r1/.private"],
     commands: bashPolicy("/nonexistent", noAdditions),
   })
 }
@@ -76,7 +76,7 @@ describe("phase policy", () => {
   })
 
   test("confines writes to the checkout and run dir and protects the private dir", () => {
-    const policy = phasePolicy({ mode: "write", autoAccept: "all", checkout: "/repo", runDir: "/runs/r1", privateDir: "/runs/r1/.private", commands: {} })
+    const policy = phasePolicy({ mode: "write", autoAccept: "all", checkout: "/repo", runDir: "/runs/r1", privateDirs: ["/runs/r1/.private"], commands: {} })
     expect(policy).toMatchObject({ mode: "write", approvals: "auto", writeRoots: ["/repo", "/runs/r1"], denyRoots: ["/runs/r1/.private"] })
   })
 })
@@ -85,7 +85,7 @@ test("roots match a path in both its given and its real form", async () => {
   const dir = await mkdtemp(join(tmpdir(), "convoy-roots-"))
   dirs.push(dir)
   const real = realpathSync(dir)
-  const policy = phasePolicy({ mode: "write", autoAccept: "off", checkout: dir, runDir: dir, privateDir: join(dir, "missing"), commands: {} })
+  const policy = phasePolicy({ mode: "write", autoAccept: "off", checkout: dir, runDir: dir, privateDirs: [join(dir, "missing")], commands: {} })
   expect(policy.writeRoots).toContain(dir)
   expect(policy.writeRoots).toContain(real)
   expect(evaluateAction({ tool: "Write", intent: "write", resource: join(real, "hello.txt") }, policy).effect).toBe("allow")
@@ -189,7 +189,7 @@ describe("Claude attempt", () => {
       cancelAttempt: async () => undefined,
     }
     const services: ExecutionServices = { deliverables: { expected: ["report"], submit: async () => ({ ok: true }) } }
-    const policy = phasePolicy({ mode: "write", autoAccept: "off", checkout: dir, runDir: dir, privateDir: join(dir, ".private"), commands: {} })
+    const policy = phasePolicy({ mode: "write", autoAccept: "off", checkout: dir, runDir: dir, privateDirs: [join(dir, ".private")], commands: {} })
     const context: AttemptContext = {
       identity: { runId: "run", phaseName: "implement", attempt: 1 },
       runner: "claude-code",
