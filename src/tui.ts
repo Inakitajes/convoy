@@ -3419,10 +3419,10 @@ export class TuiProgress implements ProgressUI {
           isBudgetGate
             ? [fg(theme.accent)("r"), fg(theme.dim)(" reset and continue   "), fg(theme.accent)("a"), fg(theme.dim)(" abort")]
             : isFailure && gate.info.canRetry
-            ? [fg(theme.accent)("r"), fg(theme.dim)(" retry clean   "), fg(theme.accent)("o"), fg(theme.dim)(" open OpenCode   "), fg(theme.accent)("a"), fg(theme.dim)(" abort")]
+            ? [fg(theme.accent)("r"), fg(theme.dim)(" retry clean   "), fg(theme.accent)("o"), fg(theme.dim)(" open session   "), fg(theme.accent)("a"), fg(theme.dim)(" abort")]
             : isFailure
-              ? [fg(theme.accent)("o"), fg(theme.dim)(" open OpenCode   "), fg(theme.accent)("a"), fg(theme.dim)(" abort")]
-              : [fg(theme.accent)("c"), fg(theme.dim)(" continue pipeline   "), fg(theme.accent)("o"), fg(theme.dim)(" open OpenCode   "), fg(theme.accent)("a"), fg(theme.dim)(" abort")],
+              ? [fg(theme.accent)("o"), fg(theme.dim)(" open session   "), fg(theme.accent)("a"), fg(theme.dim)(" abort")]
+              : [fg(theme.accent)("c"), fg(theme.dim)(" continue pipeline   "), fg(theme.accent)("o"), fg(theme.dim)(" open session   "), fg(theme.accent)("a"), fg(theme.dim)(" abort")],
         ),
       )
       // A budget gate has no iterate action, so its counter is always zero —
@@ -4281,7 +4281,7 @@ function humanReviewActionLabel(action: HumanReviewAction, kind: "interactive" |
     case "continue":
       return `${gate}: continue`
     case "iterate":
-      return `${gate}: open OpenCode`
+      return `${gate}: open session`
     case "abort":
       return `${gate}: abort`
     case "retry":

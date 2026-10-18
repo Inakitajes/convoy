@@ -515,7 +515,7 @@ export function dashboardActions(state: DashboardActionState): Action[] {
       group: "review",
       available: !state.permissionPending && state.humanReviewGate !== undefined && state.humanReviewGate !== "budget-gate",
       keys: "o",
-      hint: "open OpenCode",
+      hint: "open session",
       style: "spaced",
       help: "open the session",
       priority: 2,

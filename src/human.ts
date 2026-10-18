@@ -158,10 +158,10 @@ const humanActionKeys: Record<HumanReviewAction, string> = {
   reset: "r",
 }
 
-/** The words each key completes in the [k]ey prompt style ("[o]pen OpenCode"); every label starts with its key. */
+/** The words each key completes in the [k]ey prompt style ("[o]pen session"); every label starts with its key. */
 const humanActionLabels: Record<HumanReviewAction, string> = {
   continue: "continue pipeline",
-  iterate: "open OpenCode",
+  iterate: "open session",
   abort: "abort",
   retry: "retry clean",
   reset: "reset and continue",
@@ -169,7 +169,7 @@ const humanActionLabels: Record<HumanReviewAction, string> = {
 
 /** Extra words an action answers to, beyond its key and action name. */
 const humanActionAliases: Partial<Record<HumanReviewAction, readonly string[]>> = {
-  iterate: ["open", "opencode"],
+  iterate: ["open", "opencode", "session"],
 }
 
 /** The actions a pipeline human step answers with. */
@@ -177,7 +177,7 @@ const humanStepActions = ["continue", "iterate", "abort"] as const
 
 /**
  * The bracketed-key menu every readline gate shows:
- * "[r]etry clean, [o]pen OpenCode, [a]bort".
+ * "[r]etry clean, [o]pen session, [a]bort".
  */
 export function humanActionMenu(allowed: ReadonlyArray<HumanReviewAction>): string {
   return allowed.map((action) => `[${humanActionKeys[action]}]${humanActionLabels[action].slice(1)}`).join(", ")
@@ -320,7 +320,7 @@ async function runInteractiveOpencode(options: RunOptions, server: ServerAuth, s
 }
 
 /**
- * Commits one human OpenCode iteration as the step's intermediate commit. The
+ * Commits one human iteration (OpenCode or Claude) as the step's intermediate commit. The
  * message is composed inside the commit seam from the exact staged paths —
  * never the fixed `apply manual iteration` — and carries the active run's
  * `Convoy-Run` trailer (capability `step-commit-messages`). The commit is

@@ -253,34 +253,34 @@ describe("runHumanReviewGate", () => {
 describe("humanActionMenu", () => {
   test("renders the bracketed-key menu in [k]ey style for each allowed action", () => {
     // Every label starts with its key so the bracket strips the first letter.
-    expect(humanActionMenu(["continue", "iterate", "abort"])).toBe("[c]ontinue pipeline, [o]pen OpenCode, [a]bort")
-    expect(humanActionMenu(["retry", "iterate", "abort"])).toBe("[r]etry clean, [o]pen OpenCode, [a]bort")
+    expect(humanActionMenu(["continue", "iterate", "abort"])).toBe("[c]ontinue pipeline, [o]pen session, [a]bort")
+    expect(humanActionMenu(["retry", "iterate", "abort"])).toBe("[r]etry clean, [o]pen session, [a]bort")
   })
 
   test("a failure gate without a baseline shows only open and abort", () => {
-    expect(humanActionMenu(["iterate", "abort"])).toBe("[o]pen OpenCode, [a]bort")
+    expect(humanActionMenu(["iterate", "abort"])).toBe("[o]pen session, [a]bort")
   })
 })
 
 describe("phaseGatePrompt", () => {
   test("a failure gate puts the error on its own line above the menu", () => {
     const prompt = phaseGatePrompt({ stepName: "implementer", kind: "failure", error: "network down", allowed: ["retry", "iterate", "abort"] })
-    expect(prompt).toBe('Step "implementer" failed: network down\n[r]etry clean, [o]pen OpenCode, [a]bort > ')
+    expect(prompt).toBe('Step "implementer" failed: network down\n[r]etry clean, [o]pen session, [a]bort > ')
   })
 
   test("a failure gate collapses whitespace in a multi-line error", () => {
     const prompt = phaseGatePrompt({ stepName: "tests", kind: "failure", error: "provider\ntemporarily\nunavailable", allowed: ["iterate", "abort"] })
-    expect(prompt).toBe('Step "tests" failed: provider temporarily unavailable\n[o]pen OpenCode, [a]bort > ')
+    expect(prompt).toBe('Step "tests" failed: provider temporarily unavailable\n[o]pen session, [a]bort > ')
   })
 
   test("a failure gate without an error still shows the menu on the second line", () => {
     const prompt = phaseGatePrompt({ stepName: "plan", kind: "failure", allowed: ["retry", "iterate", "abort"] })
-    expect(prompt).toBe('Step "plan" failed\n[r]etry clean, [o]pen OpenCode, [a]bort > ')
+    expect(prompt).toBe('Step "plan" failed\n[r]etry clean, [o]pen session, [a]bort > ')
   })
 
   test("an interactive gate uses the session wording on a single line", () => {
     const prompt = phaseGatePrompt({ stepName: "implementer", kind: "interactive", allowed: ["continue", "iterate", "abort"] })
-    expect(prompt).toBe('Interactive session on step "implementer": [c]ontinue pipeline, [o]pen OpenCode, [a]bort > ')
+    expect(prompt).toBe('Interactive session on step "implementer": [c]ontinue pipeline, [o]pen session, [a]bort > ')
   })
 
   test("a budget gate offers reset and abort without a transparent continue action", () => {
