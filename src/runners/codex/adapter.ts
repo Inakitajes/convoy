@@ -21,6 +21,7 @@
 import { randomUUID } from "node:crypto"
 
 import { RawStreamLog } from "../../raw-stream-log"
+import { convoySecretsDir } from "../../workspace"
 import { withAttachmentSection } from "../agent-source"
 import { stagePrivateFile, startAttemptBridge, toolsEnv, toolsUrlEnv, approvalTokenEnv, type AttemptBridge } from "../attempt-bridge"
 import { convoyToolHandlers } from "../attempt-tools"
@@ -28,10 +29,11 @@ import { firstWriteMessage } from "../../advisor-runtime"
 import { resolveEffectiveCapabilities } from "../capabilities"
 import type { AttemptOutcome, ExecutionAdapter, ExecutionRequest, ExecutionServices, LoopDecision, RunnerEvent, Usage } from "../contracts"
 import { codexDeclaration } from "../declarations"
-import { evaluateAction, unwrapShellScript, type PolicyConfig, type PolicyDecision } from "../policy"
+import { commandHardDenied, evaluateAction, unwrapShellScript, type PolicyConfig, type PolicyDecision } from "../policy"
 import { redactSecrets } from "../redaction"
 import { startCodexAppServer, type CodexAppServer, type CodexSpawn } from "./app-server"
 import { codexAccountMismatch, prepareCodexAuth, type CodexAuthEnvironment, type CodexLogin } from "./auth"
+import { inspectionReads } from "./inspection"
 import { asRecord, stringField, type CodexItem, type CodexReasoningEffort, type CodexSandboxMode, type TokenUsageBreakdown } from "./protocol"
 
 export const codexBinaryName = "codex"
@@ -100,6 +102,9 @@ export function usageFromCodexTokens(tokens: TokenUsageBreakdown | undefined): U
 
 export type ApprovalVerdict = { accept: boolean; reason: string }
 
+/** Why the first advised write was declined: its advice was steered into the turn instead. */
+export const heldForAdvisor = "held for the advisor's first-write consultation"
+
 export type ApprovalContext = {
   policy: PolicyConfig
   services?: ExecutionServices
@@ -122,11 +127,37 @@ async function operatorVerdict(context: ApprovalContext, tool: string, action: s
   return outcome === "allow" ? { accept: true, reason: "operator approved" } : { accept: false, reason: "operator did not approve" }
 }
 
-/** Decides one command approval request with Convoy's policy and, for an ask, the operator gate. */
+/**
+ * Decides one command approval request with Convoy's policy and, for an ask,
+ * the operator gate. A command that only inspects is judged as the reads it
+ * performs (Codex reads through its shell), so it is allowed wherever a read
+ * is — never past a hard-denied spelling or a protected path.
+ */
 export async function decideCommand(context: ApprovalContext, command: string, cwd: string | undefined): Promise<ApprovalVerdict> {
   const script = unwrapShellScript(command)
+  const reads = inspectionReads(script)
+  if (reads && !commandHardDenied(script, context.policy.commands ?? {})) {
+    const decisions = (reads.paths.length > 0 ? reads.paths : [undefined]).map((path) =>
+      evaluateAction({ tool: "shell", intent: "read", ...(path !== undefined ? { resource: path } : {}), ...(reads.tree ? { scope: "tree" as const } : {}), ...(cwd ? { cwd } : {}) }, context.policy, { advisorSatisfied: true }),
+    )
+    const denied = decisions.find((decision) => decision.effect !== "allow")
+    return denied ? { accept: false, reason: denied.reason } : { accept: true, reason: "read-only inspection" }
+  }
   const decision = evaluateAction({ tool: "shell", intent: "execute", resource: script, ...(cwd ? { cwd } : {}) }, context.policy, { advisorSatisfied: true })
   return decisionToVerdict(decision) ?? (await operatorVerdict(context, "shell", "bash", [script], decision.reason))
+}
+
+/**
+ * What a phase's mode means for Codex, appended to its instructions: the shell
+ * is how Codex reads, so a read-only phase's "no commands" never forbids
+ * inspection, while anything that writes or runs project code is declined.
+ */
+export function codexModeInstructions(mode: ExecutionRequest["mode"]): string {
+  const reading =
+    "Convoy runs this phase on Codex, where the shell is how you read: plain inspection commands (cat, sed -n, head, tail, ls, rg, grep, find without -exec, wc, git diff/log/show/status) are always allowed for reading the checkout, the run directory and the attachments, even where these instructions say commands or bash are unavailable — use them to read every file you are asked to read."
+  if (mode === "read-only") return `${reading} Anything that writes a file, installs, or runs project code is declined in this phase.`
+  if (mode === "verify") return `${reading} Only the repository's approved verification commands run beyond that; writes are declined.`
+  return reading
 }
 
 /**
@@ -152,7 +183,7 @@ export async function decideFileChange(context: ApprovalContext, paths: readonly
         const delivered = await context.steer(firstWriteMessage(advice.text))
         if (delivered) {
           await advisor.delivered?.(advice.callId, "follow-up")
-          return { accept: false, reason: "held for the advisor's first-write consultation" }
+          return { accept: false, reason: heldForAdvisor }
         }
       }
     }
@@ -220,7 +251,16 @@ export function createCodexRunner(options: CodexRunnerOptions): CodexRunner {
   async function runAttempt(request: ExecutionRequest, sink: (event: RunnerEvent) => void, services: ExecutionServices | undefined, auth: CodexAuthEnvironment): Promise<AttemptOutcome> {
     const attempt = request.identity.attempt
     const emit = (event: RunnerEvent) => sink(event)
-    const policy: PolicyConfig = request.policy ?? { mode: request.mode, approvals: request.approvals }
+    // Without a reviewed policy the attempt still enforces its own mode and
+    // approvals, confined to its checkout and never Convoy's private directory.
+    const policy: PolicyConfig = request.policy ?? {
+      mode: request.mode,
+      approvals: request.approvals,
+      writeRoots: [request.checkout],
+      readRoots: [],
+      denyRoots: [convoySecretsDir()],
+      cwd: request.checkout,
+    }
     const items = new Map<string, CodexItem>()
     const state: TurnState = { textChars: 0, reasoningChars: 0 }
     const rawLog = request.streamLogPath ? new RawStreamLog(request.streamLogPath, request.identity.phaseName) : undefined
@@ -260,19 +300,28 @@ export function createCodexRunner(options: CodexRunnerOptions): CodexRunner {
 
     const approvalContext: ApprovalContext = { policy, ...(services ? { services } : {}), advised: Boolean(request.advised), steer }
 
+    // Codex tells the model only that "the user" rejected an action; the
+    // reason reaches the running turn so the agent can adapt (split a
+    // command, stay inside the checkout) instead of giving up.
+    const declined = (action: string, reason: string, explain = true) => {
+      emit({ type: "activity", runner: "codex", attempt, message: `declined ${action} (${reason})`, kind: "error" })
+      if (explain) void steer(`Convoy declined ${action}: ${reason}. This is Convoy's policy for this phase, not a person; adjust and continue (for example, read only inside the checkout, the run directory and the attachments, and keep reads separate from other commands).`)
+    }
+
     const onServerRequest = async (method: string, params: unknown): Promise<unknown> => {
       const record = asRecord(params)
       switch (method) {
         case "item/commandExecution/requestApproval": {
           const command = stringField(record, "command") ?? ""
           const verdict = await decideCommand(approvalContext, command, stringField(record, "cwd") ?? request.checkout)
-          if (!verdict.accept) emit({ type: "activity", runner: "codex", attempt, message: `denied: ${truncate(unwrapShellScript(command), 100)} (${verdict.reason})`, kind: "error" })
+          if (!verdict.accept) declined(`the command \`${truncate(unwrapShellScript(command), 160)}\``, verdict.reason)
           return { decision: verdict.accept ? "accept" : "decline" }
         }
         case "item/fileChange/requestApproval": {
           const paths = itemPaths(items.get(stringField(record, "itemId") ?? ""))
           const verdict = await decideFileChange(approvalContext, paths, request.checkout)
-          if (!verdict.accept) emit({ type: "activity", runner: "codex", attempt, message: `edit declined: ${verdict.reason}`, kind: "error" })
+          // A held first write already steered the advisor's advice in.
+          if (!verdict.accept) declined(`the edit of ${paths.join(", ") || "an unknown path"}`, verdict.reason, verdict.reason !== heldForAdvisor)
           return { decision: verdict.accept ? "accept" : "decline" }
         }
         case "mcpServer/elicitation/request":
@@ -430,7 +479,7 @@ export function createCodexRunner(options: CodexRunnerOptions): CodexRunner {
         config: codexThreadConfig(operatorServers, host),
         serviceName: "convoy",
         ...(request.agent.model.modelId && request.agent.model.modelId !== "default" ? { model: request.agent.model.modelId } : {}),
-        ...(request.agent.instructions ? { developerInstructions: request.agent.instructions } : {}),
+        developerInstructions: [request.agent.instructions, codexModeInstructions(request.mode)].filter(Boolean).join("\n\n"),
       }
       const resumed = request.continueSession?.runner === "codex" ? request.continueSession.sessionId : undefined
       const started = asRecord(resumed ? await server.request("thread/resume", { threadId: resumed, ...threadParams }) : await server.request("thread/start", threadParams))

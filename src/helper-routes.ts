@@ -28,7 +28,8 @@ export function cliHelperRoute(model: string | undefined): { runner: StepRunnerI
   if (typeof model !== "string") return undefined
   const route = qualifiedModelRoute(model)
   if (!route) return undefined
-  if (route.model || route.variant) return route
+  if (route.model && route.model !== "default") return route
+  if (route.variant) return { ...route, model: "default" }
   return qualifiedModelRoute(defaultHelperRoute(route.runner)) ?? route
 }
 

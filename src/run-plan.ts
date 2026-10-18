@@ -158,11 +158,15 @@ export function soleCliRunner(pipeline: Pipeline): StepRunnerId | undefined {
   return runners.length === 1 && stepRunnerFor(runners[0]).qualifiedModels ? runners[0] : undefined
 }
 
-/** The runner-qualified default helper route for a CLI runner (`claude-code/haiku`, `codex/#low`). */
+/**
+ * The runner-qualified default helper route for a CLI runner
+ * (`claude-code/haiku`, `codex/default#low`); `default` keeps the CLI's own
+ * model.
+ */
 export function defaultHelperRoute(runner: StepRunnerId, model?: string): string {
   const fallback = runnerDescriptor(runner).helperModel
   const chosen = model ? { model } : (fallback ?? { model: "" })
-  return `${runner}/${chosen.model}${"variant" in chosen && chosen.variant ? `#${chosen.variant}` : ""}`
+  return `${runner}/${chosen.model || "default"}${"variant" in chosen && chosen.variant ? `#${chosen.variant}` : ""}`
 }
 
 export type AdvisorPlanOverrides = {
@@ -267,8 +271,9 @@ export function resolveRunnerQualifiedModel(configured: string, gateway: ModelGa
   const route = qualifiedModelRoute(configured)
   if (!route) return resolveModel(configured, gateway, overrides)
   const fallback = purpose === "helper" ? runnerDescriptor(route.runner).helperModel : runnerDescriptor(route.runner).advisorModel
-  const variant = route.variant ?? (route.model ? undefined : fallback?.variant)
-  const selected = normalizeQualifiedModel(route.runner, `${route.model || fallback?.model || ""}${variant ? `#${variant}` : ""}`)
+  const named = route.model && route.model !== "default" ? route.model : undefined
+  const variant = route.variant ?? (named ? undefined : fallback?.variant)
+  const selected = normalizeQualifiedModel(route.runner, `${named ?? fallback?.model ?? ""}${variant ? `#${variant}` : ""}`)
   const modelID = selected.model || "default"
   const target = `${route.runner}/${modelID}${selected.variant ? `#${selected.variant}` : ""}`
   return { configured, logical: modelID, gateway: "configured", providerID: route.runner, modelID, ...(selected.variant ? { variant: selected.variant } : {}), target }

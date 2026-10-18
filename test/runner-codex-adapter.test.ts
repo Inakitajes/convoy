@@ -31,7 +31,7 @@ async function checkout(): Promise<string> {
 }
 
 function writePolicy(dir: string, overrides: Partial<PolicyConfig> = {}): PolicyConfig {
-  return { mode: "write", approvals: "auto", writeRoots: [dir], denyRoots: [join(dir, ".private")], cwd: dir, commands: { "*": "ask", "rm -rf *": "deny" }, ...overrides }
+  return { mode: "write", approvals: "auto", writeRoots: [dir], readRoots: [], denyRoots: [join(dir, ".private")], cwd: dir, commands: { "*": "ask", "rm -rf *": "deny" }, ...overrides }
 }
 
 function request(dir: string, overrides: Partial<ExecutionRequest> = {}): ExecutionRequest {
@@ -121,6 +121,31 @@ describe("codex approvals", () => {
     expect(await decideCommand(context(policy), "/bin/zsh -lc 'git push'", dir)).toMatchObject({ accept: false })
   })
 
+  test("inspection is judged as the reads it performs: allowed in a read-only phase, never past a protected path", async () => {
+    const dir = await checkout()
+    const policy = writePolicy(dir, { mode: "read-only", approvals: "interactive" })
+    const ctx = context(policy)
+    for (const command of ["/bin/zsh -lc 'cat math.js'", "/bin/zsh -lc 'rg -n subtract src'", "/bin/zsh -lc \"sed -n '1,40p' README.md\"", "/bin/zsh -lc 'git diff --stat'", "ls -la", "cat math.js | head -5"]) {
+      expect(await decideCommand(ctx, command, dir)).toMatchObject({ accept: true, reason: "read-only inspection" })
+    }
+    // Listing a directory that holds a protected one is not a recursive read of it.
+    expect(await decideCommand(ctx, `ls -la ${dir}`, dir)).toMatchObject({ accept: true })
+    expect(await decideCommand(ctx, `ls -R ${dir}`, dir)).toMatchObject({ accept: false })
+    for (const command of [`cat ${join(dir, ".private", "token")}`, "cat ~/.ssh/id_rsa", "cat /etc/passwd", "rg secret /", "rg secret ~", "cat ../outside.txt"]) {
+      expect(await decideCommand(ctx, command, dir)).toMatchObject({ accept: false })
+    }
+    // Not inspection: a redirection, a substitution, an in-place edit, a writer option, a program.
+    for (const command of ["cat a > b", "cat $(echo a)", "sed -i 's/a/b/' a", "git log --output=x", "rg --pre ./run x", "node a.js", "find . -delete"]) {
+      expect(await decideCommand(ctx, command, dir)).toMatchObject({ accept: false })
+    }
+  })
+
+  test("a hard-denied spelling stays denied even when it only reads", async () => {
+    const dir = await checkout()
+    const policy = writePolicy(dir, { commands: { "*": "ask", "cat *.env*": "deny" } })
+    expect(await decideCommand(context(policy), "/bin/zsh -lc 'cat .env'", dir)).toMatchObject({ accept: false })
+  })
+
   test("a read-only attempt declines every write, whatever the sandbox would allow", async () => {
     const dir = await checkout()
     const policy = writePolicy(dir, { mode: "read-only" })
@@ -191,11 +216,15 @@ describe("codex attempt", () => {
     expect(answers).toEqual([{ decision: "accept" }, { decision: "decline" }, { action: "accept", content: null }, { action: "decline", content: null }, "Convoy declines item/permissions/requestApproval"])
     expect(codex.spawned[0]!.command).toEqual(["codex", "app-server", ...codexAppServerArgs()])
     const thread = codex.requests("thread/start")[0]!.params as Record<string, unknown>
-    expect(thread).toMatchObject({ cwd: dir, approvalPolicy: "untrusted", sandbox: "workspace-write", model: "gpt-5.5", developerInstructions: "You implement.", config: { "mcp_servers.operator_tools.enabled": false } })
+    expect(thread).toMatchObject({ cwd: dir, approvalPolicy: "untrusted", sandbox: "workspace-write", model: "gpt-5.5", config: { "mcp_servers.operator_tools.enabled": false } })
+    expect(thread.developerInstructions).toStartWith("You implement.\n\nConvoy runs this phase on Codex, where the shell is how you read")
     expect(codex.requests("turn/start")[0]!.params).toMatchObject({ threadId: "thread-1", effort: "high", input: [{ type: "text", text: "do the thing" }] })
     expect(events.find((event) => event.type === "session")).toMatchObject({ session: { sessionId: "thread-1" } })
     expect(events.filter((event) => event.type === "text").map((event) => (event as { text: string }).text)).toEqual(["Working"])
     expect(events.at(-1)).toMatchObject({ type: "terminal", outcome: { status: "completed" } })
+    // The declined command's reason reaches the running turn, not "the user".
+    const steer = codex.requests("turn/steer")[0]!.params as { input: { text: string }[] }
+    expect(steer.input[0]!.text).toStartWith("Convoy declined the command `rm -rf src`: hard-denied command")
   })
 
   test("the final answer is the fallback report; an accepted write_report wins", async () => {

@@ -271,6 +271,16 @@ export function unwrapShellScript(command: string): string {
   return words[2]!.trim() || command
 }
 
+/** True when any spelling of a command line is hard-denied by the ruleset. */
+export function commandHardDenied(command: string, rules: Readonly<Record<string, CommandEffect>>): boolean {
+  return chainedCommandEffect(command, rules) === "deny"
+}
+
+/** The words of each simple command a line runs, quoting removed (see `simpleCommands`). */
+export function commandWords(command: string): string[][] {
+  return simpleCommands(command).map(effectiveWords).filter((words) => words.length > 0)
+}
+
 /** The combined effect of a possibly chained command: its strictest segment, unknown segments ask. */
 function chainedCommandEffect(command: string, rules: Readonly<Record<string, CommandEffect>>): CommandEffect {
   // A hard denial anywhere in the raw text wins before any parsing doubt, and

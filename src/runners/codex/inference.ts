@@ -14,7 +14,9 @@
  */
 
 import type { AuthenticationSelection, Usage } from "../contracts"
-import { commandSegments, unwrapShellScript } from "../policy"
+import { convoySecretsDir } from "../../workspace"
+import { evaluateAction, type PolicyConfig } from "../policy"
+import { inspectionReads } from "./inspection"
 import { redactSecrets } from "../redaction"
 import { codexAppServerArgs, codexEffort, codexThreadConfig, configuredMcpServers, usageFromCodexTokens } from "./adapter"
 import { startCodexAppServer, type CodexAppServer, type CodexSpawn } from "./app-server"
@@ -54,21 +56,18 @@ export class CodexInferenceError extends Error {
 
 const defaultTimeoutMs = 60_000
 
-/** Commands a read-only helper may run: inspection that cannot write, fetch, or execute anything else. */
-const readOnlyCommands = new Set(["cat", "head", "tail", "ls", "wc", "rg", "grep", "file", "stat", "pwd", "tree"])
-const readOnlyGit = new Set(["log", "diff", "show", "status", "branch", "rev-parse", "ls-files", "blame"])
-
-/** True when a helper's command only reads: a short allowlist, no redirection or substitution. */
-export function isReadOnlyHelperCommand(command: string): boolean {
-  const segments = commandSegments(unwrapShellScript(command))
-  if (!segments || segments.length === 0) return false
-  return segments.every((segment) => {
-    const words = segment.split(/\s+/)
-    const head = words[0]?.split("/").at(-1) ?? ""
-    if (head === "git") return readOnlyGit.has(words.find((word, index) => index > 0 && !word.startsWith("-")) ?? "")
-    if (head === "find") return !words.some((word) => /^-(exec|execdir|delete|ok|okdir|fprint|fprintf|fls)$/.test(word))
-    return readOnlyCommands.has(head)
-  })
+/**
+ * True when a helper's command only inspects, and only within its checkout:
+ * a short list of readers, no redirection or substitution, no path outside
+ * `cwd` and never Convoy's private directory.
+ */
+export function isReadOnlyHelperCommand(command: string, cwd = process.cwd()): boolean {
+  const reads = inspectionReads(command)
+  if (!reads) return false
+  const policy: PolicyConfig = { mode: "read-only", approvals: "auto", writeRoots: [cwd], readRoots: [], denyRoots: [convoySecretsDir()], cwd }
+  return (reads.paths.length > 0 ? reads.paths : [undefined]).every(
+    (path) => evaluateAction({ tool: "shell", intent: "read", ...(path !== undefined ? { resource: path } : {}), ...(reads.tree ? { scope: "tree" as const } : {}), cwd }, policy).effect === "allow",
+  )
 }
 
 /**
@@ -115,7 +114,7 @@ export async function codexInference(input: CodexInferenceInput, deps: CodexInfe
       onServerRequest: async (method, params) => {
         if (method === "item/commandExecution/requestApproval") {
           const command = stringField(asRecord(params), "command") ?? ""
-          return { decision: input.tools === "read-only" && isReadOnlyHelperCommand(command) ? "accept" : "decline" }
+          return { decision: input.tools === "read-only" && isReadOnlyHelperCommand(command, input.cwd) ? "accept" : "decline" }
         }
         if (method === "item/fileChange/requestApproval") return { decision: "decline" }
         if (method === "mcpServer/elicitation/request") return { action: "decline", content: null }
