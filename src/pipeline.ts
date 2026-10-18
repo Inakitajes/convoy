@@ -1,4 +1,4 @@
-import { defaultStepRunnerId, normalizeStepRunnerModel, stepRunnerCapabilityReason, stepRunnerFor, type StepRunnerDefinition, type StepRunnerId } from "./step-runners"
+import { defaultStepRunnerId, explicitRunnerOf, normalizeStepRunnerModel, stepRunnerCapabilityReason, stepRunnerFor, type StepRunnerDefinition, type StepRunnerId } from "./step-runners"
 import { qualifiedRunnerOf } from "./runners/descriptors"
 import { defaultGoalMaxIterations, defaultGoalPlateau } from "./quality-score"
 import type { AgentSpec, AgentStep, DeliverableContract, HumanStep, Pipeline, ResolvedGoalPlan, ResolvedPipelineFragment, Step, StepRunner } from "./types"
@@ -1212,7 +1212,7 @@ function resolveAgentStepSpec(raw: string | AgentStepSpec, ctx: ResolveStepConte
   type Variant = { runner: StepRunnerDefinition; value: string; label: string }
   const variants: Variant[] = models
     ? models.map((entry) => {
-        const named = qualifiedRunnerOf(entry)
+        const named = explicitRunnerOf(entry)
         const definition = named ? stepRunnerFor(named) : runnerDefinition
         const value = normalizeOn(definition, named ? entry.slice(named.length + 1) : entry, !named && spec.runner === undefined)
         // An entry on the step's own runner keeps its plain name; one on

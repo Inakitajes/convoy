@@ -197,7 +197,7 @@ function pushStepRows(rows: StyledText[], plan: RunPlan, width: number) {
 
 function pushAgentStep(rows: StyledText[], step: AgentStep, plan: RunPlan, width: number) {
   const runner = stepRunnerFor(step.runner)
-  const engine = runner.id === "opencode" ? "" : `${runner.displayName.toLowerCase()} · `
+  const engine = runner.qualifiedModels ? `${runner.displayName.toLowerCase()} · ` : ""
   const meta = `${engine}${step.readOnly ? "read-only" : "writable"}`
   rows.push(continuation([fg(theme.faint)("○ "), fg(theme.text)(truncate(sanitizeReviewInline(step.name), Math.max(8, width - labelWidth - meta.length - 5))), fg(theme.faint)(` · ${meta}`)]))
   rows.push(...modelRows(step, labelWidth + 2, width))

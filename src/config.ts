@@ -80,8 +80,10 @@ function selectionOf(auth: RunnerAuthConfig): AuthenticationSelection {
  */
 export function runnerAuthOf(config: Pick<ConvoyConfig, "defaults" | "runners"> | undefined): Partial<Record<StepRunnerId, AuthenticationSelection>> {
   const out: Partial<Record<StepRunnerId, AuthenticationSelection>> = {}
+  // Legacy per-runner keys still read when the runner's own block is unset.
+  const legacy: Partial<Record<StepRunnerId, RunnerAuthConfig>> = config?.defaults?.claudeAuth ? { "claude-code": config.defaults.claudeAuth } : {}
   for (const id of stepRunnerIds) {
-    const auth = config?.runners?.[id]?.auth ?? (id === "claude-code" ? config?.defaults?.claudeAuth : undefined)
+    const auth = config?.runners?.[id]?.auth ?? legacy[id]
     if (auth) out[id] = selectionOf(auth)
   }
   return out
@@ -1236,7 +1238,11 @@ function validateStep(v: Validator, raw: unknown, path: string, context: StepCon
     models = rawModels.map((model, index) => {
       const entryPath = `${path}.models[${index}]`
       if (typeof model === "string" || model === null || model === undefined) return validateStepRunnerModel(v, runner ?? "opencode", model, entryPath)
-      return validateModelRoute(v, model, entryPath)
+      // A fan-out entry names its runner explicitly, so it never inherits the
+      // step's: a provider-qualified runner keeps `<runner>/<provider>/<model>`.
+      const route = v.record(model, entryPath)
+      const routed = validateModelRoute(v, model, entryPath)
+      return isStepRunnerId(route.runner) && !stepRunnerFor(route.runner).qualifiedModels ? `${route.runner}/${routed}` : routed
     })
   }
 

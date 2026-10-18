@@ -215,6 +215,19 @@ export function qualifiedModelRoute(reference: string): { runner: StepRunnerId; 
   return { runner, model: hash === -1 ? rest : rest.slice(0, hash), ...(hash === -1 ? {} : { variant: rest.slice(hash + 1) }) }
 }
 
+/**
+ * The runner a reference names explicitly: a runner-qualified one
+ * (`codex/gpt-5.5`), or a provider-qualified runner's id before a
+ * provider-qualified model (`opencode/openai/gpt-5.5`; `opencode/<id>` alone
+ * stays an OpenCode Zen model). Undefined when the reference names none.
+ */
+export function explicitRunnerOf(reference: string): StepRunnerId | undefined {
+  const qualified = qualifiedRunnerOf(reference)
+  if (qualified) return qualified
+  const head = reference.split("/", 1)[0]
+  return isStepRunnerId(head) && reference.slice(head.length + 1).includes("/") ? head : undefined
+}
+
 /** The runner a resolved model reference runs on: its qualifying runner, else the provider-qualified default. */
 export function runnerOfModelReference(reference: { providerID: string } | string): StepRunnerId {
   const head = typeof reference === "string" ? reference : `${reference.providerID}/`
