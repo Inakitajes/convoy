@@ -2,6 +2,7 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 
 import { formatCommitMessage, proposeCommitMessage } from "../commit-message"
+import type { AuthenticationSelection } from "../runners/contracts"
 import { currentHead, diffStat, execFile, resetSoft, resolveCommit } from "../git"
 import { log } from "../log"
 import { readPersistedRunTitle } from "../run-title"
@@ -71,6 +72,8 @@ export type RunFinalizationInput = {
   /** The reviewed feature link, preserved in the cleanup-surviving index (task 5.1). */
   feature?: FeaturePlanLink
   commitMessageModel?: string
+  /** The Claude authentication a `claude-code/<model>` commit writer runs under. */
+  commitMessageAuth?: AuthenticationSelection
   signal?: AbortSignal
   /**
    * Shared cleanup budget for the model-backed commit writer's helper (design
@@ -572,6 +575,7 @@ async function composeMessage(input: RunFinalizationInput, interval: Extract<Run
     ...(summary ? { summary } : {}),
     ...(prompt ? { prompt } : {}),
     ...(input.commitMessageModel ? { model: input.commitMessageModel } : {}),
+    ...(input.commitMessageAuth ? { claudeAuth: input.commitMessageAuth } : {}),
     ...(input.signal ? { signal: input.signal } : {}),
     ...(input.stopPolicy ? { stopPolicy: input.stopPolicy } : {}),
   })

@@ -29,10 +29,11 @@ import {
   type AgentStepSpec,
   type HumanStepSpec,
   type PipelineSpec,
+  type ResolvePipelineInput,
   type StepSpec,
 } from "./pipeline"
 import { isStepRunnerId, normalizeStepRunnerModel, stepRunnerCapabilityReason, stepRunnerFor, type StepRunnerId } from "./step-runners"
-import type { AuthenticationMode } from "./runners/contracts"
+import type { AuthenticationMode, AuthenticationSelection } from "./runners/contracts"
 import type { NotificationSettings } from "./notifications"
 import type { AdvisorAuditPolicy } from "./advisor-events"
 import type { AgentSpec, HookSet, HookSpec, HooksConfig, HookWhen, PermissionAdditions } from "./types"
@@ -682,18 +683,6 @@ function warnIgnoredMaxAttempts() {
   log.warn("maxAttempts is no longer used; a failed step now waits for your decision")
 }
 
-const warnedUnwiredDefaults = new Set<string>()
-
-/**
- * Route keys that parse and round-trip but that no execution path reads yet.
- * A config setting one is told so, instead of believing it took effect.
- */
-function warnUnwiredDefault(key: "runner" | "helperRoutes" | "advisorRoute" | "authoring") {
-  if (warnedUnwiredDefaults.has(key)) return
-  warnedUnwiredDefaults.add(key)
-  log.warn(`defaults.${key} is not applied yet and has no effect on runs`)
-}
-
 function validateDefaults(v: Validator, raw: unknown): ConvoyDefaults {
   const record = v.record(raw, "defaults")
   v.knownKeys(record, "defaults", [
@@ -740,24 +729,49 @@ function validateDefaults(v: Validator, raw: unknown): ConvoyDefaults {
     if (policy !== "summary" && policy !== "redacted" && policy !== "full") v.fail("defaults.advisorAuditPolicy", "must be summary, redacted, or full")
     defaults.advisorAuditPolicy = policy as AdvisorAuditPolicy
   }
-  if (record.runner !== undefined) {
-    warnUnwiredDefault("runner")
-    defaults.runner = validateRunnerId(v, record.runner, "defaults.runner")
-  }
+  if (record.runner !== undefined) defaults.runner = validateRunnerId(v, record.runner, "defaults.runner")
   if (record.claudeAuth !== undefined) defaults.claudeAuth = validateClaudeAuth(v, record.claudeAuth, "defaults.claudeAuth")
-  if (record.helperRoutes !== undefined) {
-    warnUnwiredDefault("helperRoutes")
-    defaults.helperRoutes = validateHelperRoutes(v, record.helperRoutes)
-  }
+  if (record.helperRoutes !== undefined) defaults.helperRoutes = validateHelperRoutes(v, record.helperRoutes)
   if (record.advisorRoute !== undefined) {
-    warnUnwiredDefault("advisorRoute")
     defaults.advisorRoute = validateAdvisorRoute(v, record.advisorRoute)
+    // The key lives with the Claude auth; the route only selects the mode.
+    if (defaults.advisorRoute.authMode === "api-key" && !defaults.claudeAuth?.credentialRef) {
+      v.fail("defaults.advisorRoute.authMode", "api-key needs defaults.claudeAuth.credentialRef naming the key's environment variable")
+    }
   }
   if (record.authoring !== undefined) {
-    warnUnwiredDefault("authoring")
     defaults.authoring = validateAuthoringRoute(v, record.authoring)
+    if (defaults.authoring.authMode === "api-key" && !defaults.claudeAuth?.credentialRef) {
+      v.fail("defaults.authoring.authMode", "api-key needs defaults.claudeAuth.credentialRef naming the key's environment variable")
+    }
   }
   return defaults
+}
+
+/**
+ * The pipeline-resolution defaults a config contributes. `advisorRoute`
+ * qualifies the default advisor with its runner (`claude-code/<model>` for a
+ * Claude advisor) and may name its model, and `runner` is the runner of every
+ * step that names none.
+ */
+export function pipelineDefaultsOf(defaults: ConvoyDefaults | undefined): Pick<ResolvePipelineInput, "defaultModel" | "defaultAdvisor" | "defaultAdvisorMaxCalls" | "defaultRunner"> {
+  const route = defaults?.advisorRoute
+  const advisorModel = route?.model ?? defaults?.advisor
+  const defaultAdvisor =
+    advisorModel && route?.runner === "claude-code" && !advisorModel.startsWith("claude-code/") ? `claude-code/${advisorModel}` : advisorModel
+  return {
+    ...(defaults?.model !== undefined ? { defaultModel: defaults.model } : {}),
+    ...(defaultAdvisor !== undefined ? { defaultAdvisor } : {}),
+    ...(defaults?.advisorMaxCalls !== undefined ? { defaultAdvisorMaxCalls: defaults.advisorMaxCalls } : {}),
+    ...(defaults?.runner !== undefined ? { defaultRunner: defaults.runner } : {}),
+  }
+}
+
+/** The authentication a Claude advisor consults under when `advisorRoute.authMode` selects one. */
+export function advisorAuthOf(defaults: ConvoyDefaults | undefined): AuthenticationSelection | undefined {
+  const mode = defaults?.advisorRoute?.authMode
+  if (!mode) return undefined
+  return mode === "api-key" ? { mode, ...(defaults?.claudeAuth?.credentialRef ? { credentialRef: defaults.claudeAuth.credentialRef } : {}) } : { mode }
 }
 
 const envVarNamePattern = /^[A-Za-z_][A-Za-z0-9_]*$/
@@ -1401,9 +1415,7 @@ export function checkPipelineResolves(name: string, spec: PipelineSpec, config: 
       name,
       spec,
       agents: buildAgentRegistry(config),
-      defaultModel: config?.defaults.model,
-      defaultAdvisor: config?.defaults.advisor,
-      defaultAdvisorMaxCalls: config?.defaults.advisorMaxCalls,
+      ...pipelineDefaultsOf(config?.defaults),
     })
     return undefined
   } catch (error) {

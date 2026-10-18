@@ -44,6 +44,8 @@ export type RunOptions = {
   claudeAuth?: AuthenticationSelection
   /** The reviewed authentication a Claude advisor (`claude-code/<model>`) consults under; defaults to `claudeAuth`. */
   advisorAuth?: AuthenticationSelection
+  /** The commit writer's route for automatic run compaction (`helperRoutes.commitMessage`), runner-qualified for Claude. */
+  commitMessageModel?: string
   files: string[]
   onlySteps: string[]
   skipSteps: string[]

@@ -1105,6 +1105,10 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
             ...(identity.branch ? { branch: identity.branch } : {}),
             // The reviewed feature link survives workspace cleanup (task 5.1).
             ...(options.plan?.feature ? { feature: options.plan.feature } : {}),
+            // The commit writer follows its configured route; a Claude route
+            // runs under the run's Claude auth, never OpenCode.
+            ...(options.commitMessageModel ? { commitMessageModel: options.commitMessageModel } : {}),
+            ...(options.claudeAuth ? { commitMessageAuth: options.claudeAuth } : {}),
             signal: shutdown.signal,
             // The commit writer's helper runs under this coordinator, so its
             // bounded stop draws from the coordinator's remaining shutdown

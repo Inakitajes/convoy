@@ -1,4 +1,4 @@
-import { normalizeStepRunnerModel, stepRunnerCapabilityReason, stepRunnerFor } from "./step-runners"
+import { normalizeStepRunnerModel, stepRunnerCapabilityReason, stepRunnerFor, type StepRunnerId } from "./step-runners"
 import { defaultGoalMaxIterations, defaultGoalPlateau } from "./quality-score"
 import type { AgentSpec, AgentStep, DeliverableContract, HumanStep, Pipeline, ResolvedGoalPlan, ResolvedPipelineFragment, Step, StepRunner } from "./types"
 
@@ -542,9 +542,9 @@ export const builtInPipelines: Record<string, PipelineSpec> = {
     ],
   },
   // Claude-only preset: every step runs the local `claude` CLI on subscription
-  // auth by default, so no OpenCode model or provider credential is needed
-  // (the run still starts its OpenCode server for Convoy's own helpers). The
-  // audits fan out across Claude aliases through the same scheduler as any
+  // auth by default, so no OpenCode installation, server, model, or provider
+  // credential is needed — the judge and helpers follow the plan to Claude.
+  // The audits fan out across Claude aliases through the same scheduler as any
   // other pipeline. Report-only, so it never writes; the verifying scope step
   // runs its checks under Convoy's hook-enforced command policy. Copy it into
   // `.convoy/config.yaml` and adjust the model aliases (or set an explicit
@@ -564,6 +564,38 @@ export const builtInPipelines: Record<string, PipelineSpec> = {
         ],
       },
       { agent: "review-report", name: "report", runner: "claude-code", model: "opus", reports: "all" },
+    ],
+  },
+  // Claude-only full cycle: the full-cycle shape — advised implementation,
+  // audits, tests, then a terminal goal loop scored by two Claude models and a
+  // verified consensus — on the local `claude` CLI alone. The writers consult
+  // an Opus advisor through Convoy's MCP tools and first-write checkpoint;
+  // reports and scores go through write_report exactly as on OpenCode.
+  "claude-full-cycle": {
+    description:
+      "Claude-only full cycle: Sonnet implements and fixes advised by Opus, audits and tests run on Sonnet, then Opus and Sonnet score with a verified Opus consensus; fix gaps up to five times to reach 90/100.",
+    steps: [
+      { agent: "implementer", runner: "claude-code", model: "sonnet", advisor: "claude-code/opus", reports: "none" },
+      { agent: "patterns", runner: "claude-code", model: "sonnet", advisor: false },
+      { agent: "security", runner: "claude-code", model: "sonnet", advisor: false },
+      { agent: "design", runner: "claude-code", model: "sonnet", advisor: false },
+      { agent: "tests", runner: "claude-code", model: "sonnet", advisor: false, reports: "none" },
+      {
+        goal: {
+          target: 90,
+          maxIterations: 5,
+          improve: {
+            briefStep: "fix",
+            steps: [{ agent: "goal-fixer", name: "fix", runner: "claude-code", model: "sonnet", advisor: "claude-code/opus", reports: "none", diff: true, prdHistory: true }],
+          },
+          measure: {
+            steps: [
+              { parallel: [{ agent: "quality-scorer", name: "score", runner: "claude-code", models: ["opus", "sonnet"], reports: "none", diff: true, prdHistory: true }] },
+              { agent: "quality-score-report", name: "score-report", runner: "claude-code", model: "opus", reports: ["score"], verify: true, diff: true, prdHistory: true },
+            ],
+          },
+        },
+      },
     ],
   },
   // The close of the process: the branch is synced with its base, reviewed and
@@ -714,6 +746,8 @@ export type ResolvePipelineInput = {
   defaultAdvisor?: string
   /** Project-wide defaults.advisorMaxCalls; loses to the step's own. */
   defaultAdvisorMaxCalls?: number
+  /** Project-wide defaults.runner: the runner of every step that names none. */
+  defaultRunner?: StepRunnerId
 }
 
 /**
@@ -949,6 +983,7 @@ function resolveFragment(
     ...(input.defaultModel !== undefined ? { defaultModel: input.defaultModel } : {}),
     ...(input.defaultAdvisor !== undefined ? { defaultAdvisor: input.defaultAdvisor } : {}),
     ...(input.defaultAdvisorMaxCalls !== undefined ? { defaultAdvisorMaxCalls: input.defaultAdvisorMaxCalls } : {}),
+    ...(input.defaultRunner !== undefined ? { defaultRunner: input.defaultRunner } : {}),
   }
   const names = new Set<string>()
   const claimName = (name: string, position: string) => {
@@ -1051,7 +1086,7 @@ function asHumanStepSpec(raw: StepSpec): HumanStepSpec | LegacyHumanStepSpec | u
   return undefined
 }
 
-type ResolveStepInput = Pick<ResolvePipelineInput, "name" | "agents" | "defaultModel" | "defaultAdvisor" | "defaultAdvisorMaxCalls">
+type ResolveStepInput = Pick<ResolvePipelineInput, "name" | "agents" | "defaultModel" | "defaultAdvisor" | "defaultAdvisorMaxCalls" | "defaultRunner">
 
 type ResolveStepContext = {
   input: ResolveStepInput
@@ -1099,7 +1134,8 @@ function resolveAgentStepSpec(raw: string | AgentStepSpec, ctx: ResolveStepConte
   // (parallel:/models:) drop it so concurrent runs do not fight over one tree.
   const verify = Boolean(spec.verify && agent.readOnly && !forced)
 
-  const runnerDefinition = stepRunnerFor(spec.runner)
+  // A step names its runner, or inherits defaults.runner.
+  const runnerDefinition = stepRunnerFor(spec.runner ?? ctx.input.defaultRunner)
   // "opencode" is accepted for symmetry but resolves to the default (no runner field).
   const runner: StepRunner | undefined = runnerDefinition.id === "claude-code" ? "claude-code" : undefined
   if (!runnerDefinition.capabilities.modelFanout && spec.models !== undefined) {
@@ -1149,9 +1185,23 @@ function resolveAgentStepSpec(raw: string | AgentStepSpec, ctx: ResolveStepConte
   // defers to the CLI default (""). A `models:` fan-out is expanded for either
   // runner, and each Claude entry is normalized now so an incompatible model
   // fails visibly instead of being dropped.
+  const claudeModel = (value: string) => {
+    try {
+      return normalizeStepRunnerModel("claude-code", value)
+    } catch (error) {
+      // An inherited runner meets a model chosen for OpenCode: say which
+      // setting to change rather than guessing a Claude equivalent.
+      if (spec.runner === undefined) {
+        throw new Error(
+          `pipeline "${ctx.input.name}": step ${ctx.position} ("${baseName}") runs on claude-code through defaults.runner but names the OpenCode model "${value}"; give it a Claude model or set runner: opencode on the step`,
+        )
+      }
+      throw error
+    }
+  }
   const variants: string[] =
     runnerDefinition.id === "claude-code"
-      ? (models ?? (spec.model !== undefined ? [spec.model] : [""])).map((value) => (value ? normalizeStepRunnerModel("claude-code", value) : ""))
+      ? (models ?? (spec.model !== undefined ? [spec.model] : [""])).map((value) => (value ? claudeModel(value) : ""))
       : (models ?? [spec.model ?? agent.model ?? ctx.input.defaultModel ?? agent.defaultModel ?? fallbackModel])
   // Agent configs are registered per agent name. A verifying step that shares
   // its agent with a non-verifying use in this pipeline needs its own variant

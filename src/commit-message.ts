@@ -7,6 +7,9 @@ import type { StopPolicy } from "./process-stop"
 import { splitModelVariant } from "./pipeline"
 import { parseModel } from "./runner"
 import { excerpt } from "./worktree"
+import { claudeHelperModelId, isClaudeHelperModel } from "./helper-routes"
+import { claudeInference } from "./runners/claude/inference"
+import type { AuthenticationSelection } from "./runners/contracts"
 
 /** Read-only tools for the commit writer; translated to V2 session permissions at create. */
 const writerTools: Record<string, boolean> = { read: true, list: true, glob: true, grep: true, webfetch: false, write: false, edit: false, bash: false, todoread: false, todowrite: false }
@@ -42,8 +45,10 @@ export type CommitMessageInput = {
   /** Subjects of the convoy commits being replaced, newest first. */
   commits: readonly string[]
   diffStat?: string
-  /** Override the model that writes the message (provider/model[#variant]). */
+  /** Override the model that writes the message (provider/model[#variant], or `claude-code/<model>`). */
   model?: string
+  /** The Claude authentication a `claude-code/<model>` writer runs under; defaults to subscription. */
+  claudeAuth?: AuthenticationSelection
   signal?: AbortSignal
   /**
    * Shared cleanup budget for the writer's owned helper (design D2). The
@@ -76,6 +81,8 @@ const defaultCommitType = "feat"
 
 type CommitMessageDeps = {
   startOpencode: typeof startOpencode
+  /** The Claude CLI seam for a `claude-code/<model>` writer. */
+  claudeInference?: typeof claudeInference
 }
 
 const defaultCommitMessageDeps: CommitMessageDeps = { startOpencode }
@@ -132,6 +139,23 @@ export async function proposeCommitMessage(
 ): Promise<CommitMessageProposal> {
   let error: string | undefined
   try {
+    const model = input.model ?? defaultCommitMessageModel
+    if (isClaudeHelperModel(model)) {
+      // A Claude route needs no OpenCode server: one read-only inference.
+      const reply = await (deps.claudeInference ?? claudeInference)({
+        prompt: commitMessagePrompt(input),
+        system: commitMessageSystemPrompt,
+        model: claudeHelperModelId(model),
+        auth: input.claudeAuth ?? { mode: "subscription" },
+        cwd: input.targetDir,
+        tools: "read-only",
+        timeoutMs: commitMessageTimeoutMs,
+        ...(input.signal ? { signal: input.signal } : {}),
+      })
+      const message = readCommitMessage(reply.text)
+      if (message) return { message, source: "model" }
+      throw new Error(`the commit writer's reply had no usable message: ${truncate(reply.text, 160)}`)
+    }
     const handle = await deps.startOpencode(
       writerOpencodeConfig(),
       AbortSignal.timeout(commitMessageTimeoutMs),

@@ -12,6 +12,9 @@ import { startOpencode } from "./opencode"
 import { splitModelVariant } from "./pipeline"
 import { parseModel } from "./runner"
 import { convoyHome } from "./workspace"
+import { claudeHelperModelId, isClaudeHelperModel } from "./helper-routes"
+import { claudeInference } from "./runners/claude/inference"
+import type { AuthenticationSelection } from "./runners/contracts"
 
 /** Read-only tools for the branch namer; translated to V2 session permissions at create. */
 const namerTools: Record<string, boolean> = { read: true, list: true, glob: true, grep: true, webfetch: true, write: false, edit: false, bash: false, todoread: false, todowrite: false }
@@ -34,8 +37,10 @@ export type WorktreeInput = {
 export type BranchNameInput = {
   prompt: string
   targetDir: string
-  /** Override the model used to name the branch (provider/model[#variant]). */
+  /** Override the model used to name the branch (provider/model[#variant], or `claude-code/<model>`). */
   model?: string
+  /** The Claude authentication a `claude-code/<model>` namer runs under; defaults to subscription. */
+  claudeAuth?: AuthenticationSelection
   /** Free-text steer from the user, e.g. "call it after the budget limits". Outranks the prompt. */
   guidance?: string
   signal?: AbortSignal
@@ -386,6 +391,23 @@ export async function proposeBranchName(input: BranchNameInput): Promise<BranchN
 
   let error: string | undefined
   try {
+    const model = input.model ?? defaultBranchNameModel
+    if (isClaudeHelperModel(model)) {
+      // A Claude route needs no OpenCode server: one read-only inference.
+      const reply = await claudeInference({
+        prompt: namerMessage(resolved, input.guidance),
+        system: branchNameSystemPrompt,
+        model: claudeHelperModelId(model),
+        auth: input.claudeAuth ?? { mode: "subscription" },
+        cwd: input.targetDir,
+        tools: "read-only",
+        timeoutMs: branchNameTimeoutMs,
+        ...(input.signal ? { signal: input.signal } : {}),
+      })
+      const branch = readBranchName(reply.text)
+      if (branch) return { branch, source: "model" }
+      throw new Error(`the namer's reply had no usable branch name: ${truncate(reply.text, 160)}`)
+    }
     const handle = await startOpencode(namerOpencodeConfig(), AbortSignal.timeout(branchNameTimeoutMs))
     try {
       const reply = await askForBranchName(handle.client, {

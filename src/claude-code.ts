@@ -607,8 +607,8 @@ export function claudeAuthShellPrefix(auth: AuthenticationSelection = { mode: "s
  * prompts, under the reviewed authentication. `resume` reopens that exact
  * session; without it a fresh conversation starts.
  */
-export async function openClaudeInteractiveWindow(input: { targetDir: string; auth?: AuthenticationSelection; resume?: string; label?: string }): Promise<SessionWindowBackend> {
-  const args = [claudeBinaryName, ...(input.resume ? ["--resume", input.resume] : [])].map(shellQuote).join(" ")
+export async function openClaudeInteractiveWindow(input: { targetDir: string; auth?: AuthenticationSelection; resume?: string; label?: string; prompt?: string }): Promise<SessionWindowBackend> {
+  const args = [claudeBinaryName, ...(input.resume ? ["--resume", input.resume] : []), ...(input.prompt ? [input.prompt] : [])].map(shellQuote).join(" ")
   return openSessionCommand(`${claudeAuthShellPrefix(input.auth)} ${args}`, input.targetDir, input.label ?? "claude session")
 }
 

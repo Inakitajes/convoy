@@ -177,7 +177,7 @@ describe("built-in implement pipeline", () => {
 
 describe("built-in pipeline catalog", () => {
   test("offers the consolidated pipelines without private model providers", () => {
-    expect(Object.keys(builtInPipelines).sort()).toEqual(["claude-review", "fixer", "full-cycle", "hunter", "implement", "review", "ship"])
+    expect(Object.keys(builtInPipelines).sort()).toEqual(["claude-full-cycle", "claude-review", "fixer", "full-cycle", "hunter", "implement", "review", "ship"])
     expect(JSON.stringify(builtInPipelines)).not.toMatch(/nan\//i)
     for (const [name, spec] of Object.entries(builtInPipelines)) {
       expect(() => resolvePipeline({ name, spec, agents: builtInAgents })).not.toThrow()

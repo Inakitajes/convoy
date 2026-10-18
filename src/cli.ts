@@ -1,7 +1,7 @@
 import { readFile, stat } from "node:fs/promises"
 import { dirname, join, resolve } from "node:path"
 
-import { buildAgentRegistry, ejectAgentPrompt, emptyHooksConfig, globalConfigPath, loadMergedConvoyConfig, selectPipelineSpec, writeDefaultGlobalConfig, writeDefaultProjectConfig, type ConvoyDefaults } from "./config"
+import { advisorAuthOf, buildAgentRegistry, ejectAgentPrompt, emptyHooksConfig, globalConfigPath, loadMergedConvoyConfig, pipelineDefaultsOf, selectPipelineSpec, writeDefaultGlobalConfig, writeDefaultProjectConfig, type ConvoyDefaults } from "./config"
 import { readControlFile } from "./control-client"
 import { detectBaseRef, currentBranch, listChangedFiles, resolveWorktreeDefault } from "./git"
 import { openRouterKeySources } from "./limits"
@@ -11,6 +11,8 @@ import { consensusStep } from "./quality-score"
 import { defaultMaxConcurrentAgents, parseModel } from "./runner"
 import { buildRunPlan, isClaudeOnlyPipeline, type BuildRunPlanInput } from "./run-plan"
 import { parseModelOverride } from "./step-runners"
+import { helperModel } from "./helper-routes"
+import { defaultCommitMessageModel } from "./commit-message"
 import { confirmRunPlan, renderRunPlan } from "./run-review"
 import { loadPrdHistoryPreview } from "./prd-history"
 import { loadOpenSpecBundle, openSpecPromptFor } from "./openspec"
@@ -1267,9 +1269,10 @@ export async function prepareInteractiveRun(targetDir: string, selection: Launch
 /** Asks the configured naming model for a branch name for the launcher's branch step. */
 async function proposeInteractiveBranchName(targetDir: string, input: { prompt: string; guidance?: string }): Promise<LaunchBranchProposal> {
   const { defaultBranchNameModel, proposeBranchName } = await import("./worktree")
+  const { helperClaudeAuth } = await import("./helper-routes")
   const config = await loadMergedConvoyConfig(targetDir)
-  const model = config?.defaults.branchNameModel ?? defaultBranchNameModel
-  const proposal = await proposeBranchName({ ...input, targetDir, model })
+  const model = helperModel("branchName", config?.defaults, defaultBranchNameModel)
+  const proposal = await proposeBranchName({ ...input, targetDir, model, claudeAuth: helperClaudeAuth(config?.defaults) })
   return { ...proposal, model }
 }
 
@@ -1402,8 +1405,15 @@ async function dispatchSpecsResolution(targetDir: string, resolution: SpecsResol
         // renderer this process no longer owns): the window flow.
         const view = await loadSpecsView(targetDir)
         const input = buildIterateSessionInput(targetDir, view, resolution.changeID)
-        const { openIterateOpencodeWindow } = await import("./opencode")
-        await openIterateOpencodeWindow(input)
+        const authoring = await authoringRouteFor(targetDir)
+        if (authoring.harness === "claude-code") {
+          // The selected harness, under its reviewed auth; no OpenCode involved.
+          const { openClaudeInteractiveWindow } = await import("./claude-code")
+          await openClaudeInteractiveWindow({ targetDir: input.targetDir, prompt: input.prompt, label: "claude iterate", ...(authoring.auth ? { auth: authoring.auth } : {}) })
+        } else {
+          const { openIterateOpencodeWindow } = await import("./opencode")
+          await openIterateOpencodeWindow(input)
+        }
       } else {
         await openCheckoutConversation({ launchDir: targetDir, route, checkout: resolution.checkout, displayName: resolution.changeID })
       }
@@ -1490,9 +1500,16 @@ async function checkoutPreset(checkout: string, requireBranch?: string): Promise
 export async function openCheckoutConversation(input: { launchDir: string; route: TuiRoute; checkout: string; displayName: string }): Promise<void> {
   const { createAuthoringConversation, openConversationForeground, validateAuthoringSession } = await import("./conversations")
 
-  const server = await resolveAuthoringServer({ launchDir: input.launchDir, checkout: input.checkout, route: input.route })
-  if (server.status === "blocked") return
-  const serviceHandle = server.status === "service" ? { url: server.url, ...(server.password ? { password: server.password } : {}) } : undefined
+  // The configured authoring harness; a Claude one needs no server at all.
+  const authoring = await authoringRouteFor(input.launchDir)
+  let serviceHandle: { url: string; password?: string } | undefined
+  const ensureServer = async (): Promise<boolean> => {
+    if (serviceHandle) return true
+    const server = await resolveAuthoringServer({ launchDir: input.launchDir, checkout: input.checkout, route: input.route })
+    if (server.status === "blocked") return false
+    if (server.status === "service") serviceHandle = { url: server.url, ...(server.password ? { password: server.password } : {}) }
+    return true
+  }
 
   // Resume the exactly linked session when a verifiable reference exists
   // (capability work-conversations): the stored reference is navigation
@@ -1510,9 +1527,11 @@ export async function openCheckoutConversation(input: { launchDir: string; route
   if (commonDir) {
     const linked = await readVerifiableConversationRef(commonDir, canonicalCheckout).catch(() => undefined)
     if (linked) {
+      // An exact session reopens on its own harness, whatever the default is now.
+      if (linked.ref.harness === "opencode" && !(await ensureServer())) return
       const validation = await validateAuthoringSession({ ref: linked.ref, checkout: input.checkout, ...(serviceHandle ? { server: serviceHandle } : {}) }).catch((error: unknown) => ({ status: "unavailable" as const, reason: error instanceof Error ? error.message : String(error) }))
       if (validation.status === "available") {
-        await openLinkedConversation(input, linked.ref, serviceHandle)
+        await openLinkedConversation(input, linked.ref, authoring.auth)
         return
       }
       await clearConversationRef(commonDir, canonicalCheckout).catch(() => {})
@@ -1525,7 +1544,8 @@ export async function openCheckoutConversation(input: { launchDir: string; route
     }
   }
 
-  const ref = await createAuthoringConversation({ checkout: input.checkout, title: input.displayName, ...(serviceHandle ? { server: serviceHandle } : {}) })
+  if (authoring.harness === "opencode" && !(await ensureServer())) return
+  const ref = await createAuthoringConversation({ checkout: input.checkout, title: input.displayName, harness: authoring.harness, ...(serviceHandle ? { server: serviceHandle } : {}) })
   if (commonDir && target) await saveConversationRef(commonDir, target, ref).catch(() => {})
   const { currentBranch } = await import("./git")
   const branch = (await currentBranch(input.checkout).catch(() => undefined)) ?? ""
@@ -1534,8 +1554,8 @@ export async function openCheckoutConversation(input: { launchDir: string; route
   // The shared foreground host owns the suspend/clear/resume lifecycle; the
   // conversation client owns the terminal until it exits (design D4).
   const renderer = input.route.session.renderer
-  const exitCode = await openConversationForeground({ checkout: input.checkout, ref, suspend: () => renderer.suspend(), resume: () => renderer.resume() })
-  await releaseAuthoringWriterIfIdle({ launchDir: input.launchDir, checkout: input.checkout, branch, sessionId: ref.sessionId })
+  const exitCode = await openConversationForeground({ checkout: input.checkout, ref, ...(authoring.auth ? { auth: authoring.auth } : {}), suspend: () => renderer.suspend(), resume: () => renderer.resume() })
+  await releaseAuthoringWriterIfIdle({ launchDir: input.launchDir, checkout: input.checkout, branch, ref, foregroundExited: true })
   if (exitCode !== 0) {
     await reportHandoffBlocker(
       `the conversation client exited with code ${exitCode}`,
@@ -1548,16 +1568,16 @@ export async function openCheckoutConversation(input: { launchDir: string; route
 /** Opens a verified linked session in the foreground and returns to the same checkout (shared by create and resume). */
 async function openLinkedConversation(
   input: { launchDir: string; checkout: string; route: TuiRoute; displayName: string },
-  ref: { harness: "opencode"; sessionId: string },
-  serviceHandle: { url: string } | undefined,
+  ref: import("./conversations").AuthoringSessionRef,
+  auth?: import("./runners/contracts").AuthenticationSelection,
 ): Promise<void> {
   const { openConversationForeground } = await import("./conversations")
   const { currentBranch } = await import("./git")
   const branch = (await currentBranch(input.checkout).catch(() => undefined)) ?? ""
   if (!(await claimAuthoringWriter({ launchDir: input.launchDir, checkout: input.checkout, branch, sessionId: ref.sessionId, route: input.route }))) return
   const renderer = input.route.session.renderer
-  const exitCode = await openConversationForeground({ checkout: input.checkout, ref, suspend: () => renderer.suspend(), resume: () => renderer.resume() })
-  await releaseAuthoringWriterIfIdle({ launchDir: input.launchDir, checkout: input.checkout, branch, sessionId: ref.sessionId })
+  const exitCode = await openConversationForeground({ checkout: input.checkout, ref, ...(auth ? { auth } : {}), suspend: () => renderer.suspend(), resume: () => renderer.resume() })
+  await releaseAuthoringWriterIfIdle({ launchDir: input.launchDir, checkout: input.checkout, branch, ref, foregroundExited: true })
   if (exitCode !== 0) {
     await reportHandoffBlocker(
       `the conversation client exited with code ${exitCode}`,
@@ -1578,9 +1598,13 @@ async function openLinkedConversation(
 async function openCheckoutConversationExternal(input: { launchDir: string; checkout: string; branch: string; route?: TuiRoute }): Promise<void> {
   const { createAuthoringConversation, openConversationExternal, validateAuthoringSession } = await import("./conversations")
 
-  const serverResolution = await resolveAuthoringServer({ launchDir: input.launchDir, checkout: input.checkout, route: input.route })
-  if (serverResolution.status === "blocked") return
-  const serviceHandle = serverResolution.status === "service" ? { url: serverResolution.url, ...(serverResolution.password ? { password: serverResolution.password } : {}) } : undefined
+  const authoring = await authoringRouteFor(input.launchDir)
+  let serviceHandle: { url: string; password?: string } | undefined
+  if (authoring.harness === "opencode") {
+    const serverResolution = await resolveAuthoringServer({ launchDir: input.launchDir, checkout: input.checkout, route: input.route })
+    if (serverResolution.status === "blocked") return
+    if (serverResolution.status === "service") serviceHandle = { url: serverResolution.url, ...(serverResolution.password ? { password: serverResolution.password } : {}) }
+  }
 
   // The external pane presents the same exact session reference as the
   // foreground presentation: a verifiable linked session is reused, never
@@ -1588,10 +1612,11 @@ async function openCheckoutConversationExternal(input: { launchDir: string; chec
   const { repoCommonDir } = await import("./repo-store")
   const { readVerifiableConversationRef, saveConversationRef } = await import("./session-hints")
   const commonDir = await repoCommonDir(input.launchDir).catch(() => undefined)
-  let ref: { harness: "opencode"; sessionId: string } | undefined
+  let ref: import("./conversations").AuthoringSessionRef | undefined
   if (commonDir) {
     const linked = await readVerifiableConversationRef(commonDir, input.checkout).catch(() => undefined)
-    if (linked) {
+    // A linked session on another harness is not this flow's to reopen without its server.
+    if (linked && linked.ref.harness === authoring.harness) {
       const validation = await validateAuthoringSession({ ref: linked.ref, checkout: input.checkout, ...(serviceHandle ? { server: serviceHandle } : {}) }).catch(() => ({ status: "unavailable" as const, reason: "probe failed" }))
       if (validation.status === "available") ref = linked.ref
     }
@@ -1600,6 +1625,7 @@ async function openCheckoutConversationExternal(input: { launchDir: string; chec
     ref = await createAuthoringConversation({
       checkout: input.checkout,
       title: input.branch,
+      harness: authoring.harness,
       ...(serviceHandle ? { server: serviceHandle } : {}),
     })
     if (commonDir) {
@@ -1613,6 +1639,7 @@ async function openCheckoutConversationExternal(input: { launchDir: string; chec
     checkout: input.checkout,
     ref,
     ...(serviceHandle ? { server: serviceHandle } : {}),
+    ...(authoring.auth ? { auth: authoring.auth } : {}),
   })
   if (outcome.status === "failed") {
     // No pane was created, so no writer was started: release the claim this
@@ -1632,6 +1659,11 @@ async function openCheckoutConversationExternal(input: { launchDir: string; chec
  * never renames the worktree's branch.
  */
 async function proposeInCheckout(input: { launchDir: string; route: TuiRoute; checkout: string; branch: string; displayName: string }): Promise<void> {
+  const authoring = await authoringRouteFor(input.launchDir)
+  if (authoring.harness === "claude-code") {
+    await proposeInCheckoutWithClaude(input, authoring.auth)
+    return
+  }
   const { bootOpencodeServerFrom } = await import("./opencode")
   const { createAuthoringConversation, listAuthoringCommands, invokeAuthoringCommand, openConversationForeground } = await import("./conversations")
   const { startProposalCommand } = await import("./propose-service")
@@ -1706,7 +1738,7 @@ async function proposeInCheckout(input: { launchDir: string; route: TuiRoute; ch
     releaseClaim: async () => {
       if (claimed && commonDir) await releaseWriterClaim({ commonDir, branch: input.branch, ownerPid: process.pid }).catch(() => {})
     },
-    createConversation: (server) => createAuthoringConversation({ checkout: input.checkout, title: input.displayName, server }),
+    createConversation: (server) => createAuthoringConversation({ checkout: input.checkout, title: input.displayName, server }) as Promise<{ harness: "opencode"; sessionId: string }>,
     invokeCommand: ({ ref, server, command }) => invokeAuthoringCommand({ ref, server, command }),
   })
 
@@ -1724,10 +1756,61 @@ async function proposeInCheckout(input: { launchDir: string; route: TuiRoute; ch
 
   const renderer = input.route.session.renderer
   const exitCode = await openConversationForeground({ checkout: input.checkout, ref: outcome.ref, suspend: () => renderer.suspend(), resume: () => renderer.resume() })
-  await releaseAuthoringWriterIfIdle({ launchDir: input.launchDir, checkout: input.checkout, branch: input.branch, sessionId: outcome.ref.sessionId })
+  await releaseAuthoringWriterIfIdle({ launchDir: input.launchDir, checkout: input.checkout, branch: input.branch, ref: outcome.ref })
   if (exitCode !== 0) {
     await reportHandoffBlocker(`the authoring client exited with code ${exitCode}`, ["reopen the worktree to continue"], input.route)
   }
+}
+
+/**
+ * The proposal workflow through Claude: the project's own slash command
+ * (`.claude/commands/`), found the way OpenCode's is, starts a fresh exact
+ * session as its first message under the writer claim. No server is needed;
+ * a project without the command reports that rather than imitating it.
+ */
+async function proposeInCheckoutWithClaude(
+  input: { launchDir: string; route: TuiRoute; checkout: string; branch: string; displayName: string },
+  auth: import("./runners/contracts").AuthenticationSelection | undefined,
+): Promise<void> {
+  const { createAuthoringConversation, listClaudeAuthoringCommands, openConversationForeground } = await import("./conversations")
+  const { findProposalCommand } = await import("./propose-service")
+  const command = findProposalCommand(await listClaudeAuthoringCommands(input.checkout))
+  if (!command) {
+    await reportHandoffBlocker(
+      "this project has no supported proposal workflow command (looked for opsx:propose under .claude/commands/)",
+      ["check the project's .claude/commands/ directory — Convoy does not install commands into it", "open an ordinary conversation in the worktree instead"],
+      input.route,
+    )
+    return
+  }
+  const ref = await createAuthoringConversation({ checkout: input.checkout, harness: "claude-code" })
+  if (!(await claimAuthoringWriter({ launchDir: input.launchDir, checkout: input.checkout, branch: input.branch, sessionId: ref.sessionId, route: input.route }))) return
+  const { repoCommonDir } = await import("./repo-store")
+  const { saveConversationRef } = await import("./session-hints")
+  const { observeCheckoutTarget } = await import("./worktree-target")
+  const commonDir = await repoCommonDir(input.launchDir).catch(() => undefined)
+  const target = await observeCheckoutTarget(input.checkout).catch(() => undefined)
+  if (commonDir && target) await saveConversationRef(commonDir, target, ref).catch(() => {})
+  const renderer = input.route.session.renderer
+  const exitCode = await openConversationForeground({ checkout: input.checkout, ref, ...(auth ? { auth } : {}), prompt: `/${command}`, suspend: () => renderer.suspend(), resume: () => renderer.resume() })
+  await releaseAuthoringWriterIfIdle({ launchDir: input.launchDir, checkout: input.checkout, branch: input.branch, ref, foregroundExited: true })
+  if (exitCode !== 0) await reportHandoffBlocker(`the authoring client exited with code ${exitCode}`, ["reopen the worktree to continue"], input.route)
+}
+
+/**
+ * The harness authoring flows open (`defaults.authoring.runner`, else the
+ * run-wide `defaults.runner`, else OpenCode) and, for Claude, the reviewed
+ * authentication: `defaults.authoring.authMode` with the Claude credential
+ * reference, else the configured Claude auth.
+ */
+async function authoringRouteFor(launchDir: string): Promise<import("./conversations").AuthoringRoute> {
+  const { helperClaudeAuth } = await import("./helper-routes")
+  const defaults = (await loadMergedConvoyConfig(launchDir).catch(() => undefined))?.defaults
+  const harness = defaults?.authoring?.runner ?? defaults?.runner ?? "opencode"
+  if (harness !== "claude-code") return { harness: "opencode" }
+  const mode = defaults?.authoring?.authMode
+  const auth = mode === "api-key" ? { mode, ...(defaults?.claudeAuth?.credentialRef ? { credentialRef: defaults.claudeAuth.credentialRef } : {}) } : mode ? { mode } : helperClaudeAuth(defaults)
+  return { harness, auth }
 }
 
 /** Reports an unavailable handoff without launching anything. */
@@ -1791,12 +1874,19 @@ async function claimAuthoringWriter(input: { launchDir: string; checkout: string
 }
 
 /** Releases the authoring claim when the session is provably quiescent (design D5). */
-async function releaseAuthoringWriterIfIdle(input: { launchDir: string; checkout: string; branch: string; sessionId: string }): Promise<void> {
+async function releaseAuthoringWriterIfIdle(input: { launchDir: string; checkout: string; branch: string; ref: import("./conversations").AuthoringSessionRef; foregroundExited?: boolean }): Promise<void> {
   const { repoCommonDir } = await import("./repo-store")
   const { releaseWriterClaim } = await import("./writer-claims")
   const { sessionActivity } = await import("./conversations")
   const commonDir = await repoCommonDir(input.launchDir).catch(() => undefined)
   if (!commonDir) return
+  // A Claude conversation runs only inside its client: once the foreground
+  // client exited, the session is provably quiescent. Anything else keeps
+  // the claim for later reconciliation.
+  if (input.ref.harness === "claude-code") {
+    if (input.foregroundExited) await releaseWriterClaim({ commonDir, branch: input.branch, owner: input.ref.sessionId })
+    return
+  }
   // The activity query goes through the authoring service when one is live
   // (task 4.3) so the answer reflects the same server the work ran on; any
   // discovery failure falls back to the adapter's bounded boot, and either
@@ -1810,11 +1900,11 @@ async function releaseAuthoringWriterIfIdle(input: { launchDir: string; checkout
   } catch {
     serviceHandle = undefined
   }
-  const activity = await sessionActivity({ checkout: input.checkout, ref: { harness: "opencode", sessionId: input.sessionId }, ...(serviceHandle ? { server: serviceHandle } : {}) }).catch(() => "unknown" as const)
+  const activity = await sessionActivity({ checkout: input.checkout, ref: input.ref, ...(serviceHandle ? { server: serviceHandle } : {}) }).catch(() => "unknown" as const)
   // A busy or unanswerable session keeps its claim: view detachment is not
   // evidence the agent stopped (design D5). The claim's staleness rules
   // reconcile it later if the process is gone.
-  if (activity === "idle") await releaseWriterClaim({ commonDir, branch: input.branch, owner: input.sessionId })
+  if (activity === "idle") await releaseWriterClaim({ commonDir, branch: input.branch, owner: input.ref.sessionId })
 }
 
 // The browser resumes with default flags; metadata recovers both the repo the
@@ -2278,9 +2368,7 @@ export async function resolveRunOptions(parsed: ParsedArgs): Promise<Omit<RunOpt
       name: pipelineName,
       spec: selectPipelineSpec(config, pipelineName),
       agents,
-      defaultModel: defaults.model,
-      defaultAdvisor: defaults.advisor,
-      defaultAdvisorMaxCalls: defaults.advisorMaxCalls,
+      ...pipelineDefaultsOf(defaults),
     })
   } catch (error) {
     // A resumed run replays the pipeline frozen in its metadata; a config
@@ -2340,6 +2428,8 @@ export async function resolveRunOptions(parsed: ParsedArgs): Promise<Omit<RunOpt
     yolo: parsed.yolo ?? false,
     smart: parsed.smart ?? false,
     smartJudgeModel,
+    commitMessageModel: helperModel("commitMessage", defaults, defaultCommitMessageModel, isClaudeOnlyPipeline(pipeline) ? "claude-code" : undefined),
+    ...(advisorAuthOf(defaults) ? { advisorAuth: advisorAuthOf(defaults)! } : {}),
     ...(defaults.claudeAuth
       ? { claudeAuth: { mode: defaults.claudeAuth.authMode, ...(defaults.claudeAuth.credentialRef ? { credentialRef: defaults.claudeAuth.credentialRef } : {}) } }
       : {}),

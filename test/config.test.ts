@@ -497,7 +497,7 @@ describe("pipeline selection", () => {
     expect(selectPipelineSpec(config, "implement").steps).toEqual(["tests"])
     expect(selectPipelineSpec(undefined, "implement").steps.length).toBeGreaterThan(1)
     expect(() => selectPipelineSpec(config, "ghost")).toThrow(
-      'unknown pipeline "ghost" (available: claude-review, fixer, full-cycle, hunter, implement, quick, review, ship)',
+      'unknown pipeline "ghost" (available: claude-full-cycle, claude-review, fixer, full-cycle, hunter, implement, quick, review, ship)',
     )
     expect(() => selectPipelineSpec(config, "ghost")).toThrow(ConfigError)
   })

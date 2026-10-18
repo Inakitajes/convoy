@@ -1132,8 +1132,9 @@ export class HomeLauncher {
     try {
       const { defaultBranchNameModel } = await import("./worktree")
       const { loadMergedConvoyConfig } = await import("./config")
+      const { helperModel } = await import("./helper-routes")
       const config = await loadMergedConvoyConfig(this.targetDir)
-      this.branchModel = config?.defaults.branchNameModel ?? defaultBranchNameModel
+      this.branchModel = helperModel("branchName", config?.defaults, defaultBranchNameModel)
     } catch {
       // The note is advisory: without a resolvable model the button simply
       // doesn't name one, and the proposal path resolves its own.
