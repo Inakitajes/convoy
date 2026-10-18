@@ -5,7 +5,6 @@ import { dirname, join } from "node:path"
 import { opencodeConfig } from "../src/agents"
 import { validateAuthoringSession } from "../src/conversations"
 import { createOpencodeClient } from "../src/opencode-client"
-import { listServerModels } from "../src/model-catalog"
 import { builtInAgents } from "../src/pipeline"
 import { installWriteReportTool } from "../src/report-bridge"
 import { writeReportToolName } from "../src/report"
@@ -192,15 +191,6 @@ describe.if(opencodeAvailable)("Convoy V2 client boundary on the real runtime", 
     await settled(fixture, sessionID)
     const turn = fixture.provider.requests.find((body) => offeredTools(body).length > 0)
     expect(turn?.reasoning_effort).toBe("high")
-  }, 40_000)
-
-  test("the catalog lists custom providers and their variants as soon as the server is up", async () => {
-    const fixture = await boot(() => ({ text: "done" }))
-    // The same read the model picker makes, warm-up included: a server can
-    // answer before its configured providers have loaded.
-    const choices = (await listServerModels(fixture.booted.client, fixture.runtime.checkout, { warmupMs: 15_000 })).map((choice) => choice.value)
-    expect(choices).toContain("mock/mock-model")
-    expect(choices).toContain("mock/mock-model#deep")
   }, 40_000)
 
   test("history carries its session id and tool call identities", async () => {

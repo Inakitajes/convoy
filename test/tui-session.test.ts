@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test"
 import { createTestRenderer } from "@opentui/core/testing"
 
-import { ConfigEditor } from "../src/config-tui"
+import { ConfigScreen } from "../src/config-tui"
 import { HomeLauncher } from "../src/home-tui"
 import { browseSpecsTui } from "../src/specs-browser"
 import { createTuiProgress } from "../src/tui"
@@ -129,7 +129,7 @@ test("a borrowed config editor treats q as back and leaves renderer ownership wi
 
   try {
     const scene = session.openScene("convoy-config-scene")
-    const editor = new ConfigEditor(testRenderer.renderer, "/work/acme", undefined, undefined, scene)
+    const editor = new ConfigScreen(testRenderer.renderer, "/work/acme", [], scene)
     await testRenderer.renderOnce()
     expect(testRenderer.captureCharFrame()).toContain("q back")
 

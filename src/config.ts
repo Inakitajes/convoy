@@ -10,21 +10,15 @@ import {
   agentAliases,
   builtInAgents,
   builtInPipelines,
-  defaultGptModel,
-  defaultGptVariant,
   defaultImplementAdvisorModel,
   defaultImplementAuditModel,
   defaultImplementerModel,
   defaultImplementReviewModel,
   defaultRunReportModel,
-  defaultPipelineName,
   humanStepType,
   humanReviewStep,
-  isHumanStepSpec,
-  isGoalStepSpec,
   isSafeStepName,
   readOnlyAgentSuffix,
-  resolvePipeline,
   verifyAgentSuffix,
   type AgentStepSpec,
   type HumanStepSpec,
@@ -61,6 +55,25 @@ export type ConvoyConfig = {
   loopGuard?: LoopGuardSettings
   /** Terminal-experience tweaks; only keys the user set take effect. */
   ui?: UiConfig
+  /** Optional product areas; an unset switch keeps the area on. */
+  features?: FeatureToggles
+}
+
+/**
+ * Areas a project can turn off entirely. `worktrees: false` drops the
+ * worktree board (the TUI opens on Pipelines) and automatic run isolation;
+ * an explicit `--worktree` still works. `specs: false` drops OpenSpec from
+ * the TUI and from run plans: nothing is attached and no change selection is
+ * required.
+ */
+export type FeatureToggles = {
+  worktrees?: boolean
+  specs?: boolean
+}
+
+/** The effective switches, each on unless a config turned it off. */
+export function featuresOf(config: Pick<ConvoyConfig, "features"> | undefined): Required<FeatureToggles> {
+  return { worktrees: config?.features?.worktrees ?? true, specs: config?.features?.specs ?? true }
 }
 
 /** TUI motion preferences; see the loading-transition capability. */
@@ -246,6 +259,7 @@ export function mergeConvoyConfigs(global: ConvoyConfig | undefined, project: Co
     },
     ...(global.loopGuard || project.loopGuard ? { loopGuard: { ...global.loopGuard, ...project.loopGuard } } : {}),
     ...(global.ui || project.ui ? { ui: { ...global.ui, ...project.ui } } : {}),
+    ...(global.features || project.features ? { features: { ...global.features, ...project.features } } : {}),
   }
 }
 
@@ -279,8 +293,8 @@ function mergeHookSet(global: HookSet, project: HookSet): HookSet {
 /**
  * The commented YAML template written by `convoy init`. It documents every key
  * (commented out) and inlines the built-in `implement` pipeline so it's an
- * immediately editable starting point. Unlike `defaultConfigTemplate` (used by
- * the TUI's initialize action), this is a human-readable string with comments.
+ * immediately editable starting point. The config screen creates missing
+ * files from it too.
  */
 export const defaultConvoyConfig = `# Convoy configuration.
 # Global default path: ~/.convoy/config.yaml
@@ -329,6 +343,13 @@ defaults:
 # outranks this.
 # ui:
 #   reducedMotion: auto
+
+# Turn off areas you don't use. worktrees: false opens the TUI on Pipelines
+# and stops isolating runs automatically (--worktree still works). specs:
+# false removes OpenSpec from the TUI and from run plans.
+# features:
+#   worktrees: true
+#   specs: true
 
 # Agents are matched by name with Markdown prompts next to this config:
 #   agents/<name>.md
@@ -545,7 +566,7 @@ export function parseConvoyConfig(body: string, source: string, targetDir: strin
   const root = v.record(raw, "")
   // Unknown keys warn instead of failing so configs written for a newer
   // convoy still load; typos surface in the warning either way.
-  v.knownKeys(root, "", ["version", "defaults", "agents", "pipelines", "permissions", "hooks", "attachments", "notifications", "modelRouting", "loopGuard", "ui"])
+  v.knownKeys(root, "", ["version", "defaults", "agents", "pipelines", "permissions", "hooks", "attachments", "notifications", "modelRouting", "loopGuard", "ui", "features"])
 
   if (root.version !== undefined && root.version !== 1) v.fail("version", `unsupported value ${JSON.stringify(root.version)}; this convoy reads version 1`)
 
@@ -564,8 +585,18 @@ export function parseConvoyConfig(body: string, source: string, targetDir: strin
   if (root.modelRouting !== undefined) config.modelRouting = validateModelRouting(v, root.modelRouting)
   if (root.loopGuard !== undefined) config.loopGuard = validateLoopGuard(v, root.loopGuard)
   if (root.ui !== undefined) config.ui = validateUi(v, root.ui)
+  if (root.features !== undefined) config.features = validateFeatures(v, root.features)
 
   return config
+}
+
+function validateFeatures(v: Validator, raw: unknown): FeatureToggles {
+  const record = v.record(raw, "features")
+  v.knownKeys(record, "features", ["worktrees", "specs"])
+  const features: FeatureToggles = {}
+  if (record.worktrees !== undefined) features.worktrees = v.boolean(record.worktrees, "features.worktrees")
+  if (record.specs !== undefined) features.specs = v.boolean(record.specs, "features.specs")
+  return features
 }
 
 function validateUi(v: Validator, raw: unknown): UiConfig {
@@ -1303,6 +1334,7 @@ export function serializeConvoyConfig(config: ConvoyConfig): string {
   if (config.modelRouting && (config.modelRouting.gateway !== undefined || Object.keys(config.modelRouting.overrides).length > 0)) out.modelRouting = config.modelRouting
   if (config.loopGuard && Object.keys(config.loopGuard).length > 0) out.loopGuard = config.loopGuard
   if (config.ui && Object.keys(config.ui).length > 0) out.ui = config.ui
+  if (config.features && Object.keys(config.features).length > 0) out.features = config.features
   return Bun.YAML.stringify(out, null, 2)
 }
 
@@ -1328,105 +1360,6 @@ export async function writeConvoyConfig(path: string, config: ConvoyConfig, targ
   parseConvoyConfig(body, path, targetDir)
   await mkdir(dirname(path), { recursive: true })
   await writeFile(path, body, "utf8")
-}
-
-/**
- * Boilerplate written by the config TUI's "initialize" action: the current
- * effective defaults plus the default pipeline expanded so it stays editable.
- * Agent model preferences that differ from defaults.model are inlined on their
- * steps, because defaults.model would otherwise shadow them.
- */
-export function defaultConfigTemplate(): ConvoyConfig {
-  const globalModel = `${defaultGptModel}#${defaultGptVariant}`
-  return {
-    defaults: { model: globalModel },
-    agents: {},
-    pipelines: { [defaultPipelineName]: materializePipelineSpec(builtInPipelines[defaultPipelineName]!, globalModel) },
-    permissions: { allow: [], deny: [] },
-    hooks: emptyHooksConfig(),
-    attachments: [],
-    notifications: {},
-    modelRouting: { overrides: {} },
-  }
-}
-
-/**
- * Copies a pipeline spec into a config-editable form. Deep-copied, so editing
- * the result can never mutate the source (the built-in specs are shared module
- * constants). When effectiveDefaultModel is set, built-in agent model
- * preferences that differ from it are inlined on their steps, because
- * defaults.model would otherwise shadow them at resolve time; when it's unset
- * the precedence chain already applies them, so steps stay unpinned.
- */
-export function materializePipelineSpec(spec: PipelineSpec, effectiveDefaultModel?: string): PipelineSpec {
-  const steps = spec.steps.map<StepSpec>((raw) => materializeStep(raw, effectiveDefaultModel))
-  // The terminal goal step travels with the copy, fragments included: `ship`
-  // carries its target and subflows in its spec, so dropping them here would
-  // turn "customize this built-in" into "silently disable its loop".
-  return {
-    ...(spec.description ? { description: spec.description } : {}),
-    ...(spec.maxConcurrentAgents !== undefined ? { maxConcurrentAgents: spec.maxConcurrentAgents } : {}),
-    ...(spec.defaultPrompt ? { defaultPrompt: spec.defaultPrompt } : {}),
-    ...(spec.suggestedPrompts?.length ? { suggestedPrompts: [...spec.suggestedPrompts] } : {}),
-    steps,
-  }
-}
-
-function materializeStep(raw: StepSpec, effectiveDefaultModel: string | undefined): StepSpec {
-  if (typeof raw === "object" && raw !== null && "parallel" in raw) {
-    return { parallel: raw.parallel.map((inner) => materializeStep(inner, effectiveDefaultModel) as string | AgentStepSpec) }
-  }
-  if (isHumanStepSpec(raw)) return structuredClone(raw)
-  if (isGoalStepSpec(raw)) {
-    return {
-      goal: {
-        ...structuredClone(raw.goal),
-        improve: { ...structuredClone(raw.goal.improve), steps: raw.goal.improve.steps.map((step) => materializeStep(step, effectiveDefaultModel)) },
-        measure: { steps: raw.goal.measure.steps.map((step) => materializeStep(step, effectiveDefaultModel)) },
-      },
-    }
-  }
-  if (typeof raw === "string") return raw === humanReviewStep ? raw : materializeAgentStep({ agent: raw }, effectiveDefaultModel)
-  if (raw.agent === humanReviewStep) return raw.agent
-  return materializeAgentStep(structuredClone(raw), effectiveDefaultModel)
-}
-
-function materializeAgentStep(step: AgentStepSpec, effectiveDefaultModel: string | undefined): StepSpec {
-  const agent = builtInAgents.find((candidate) => candidate.name === (agentAliases[step.agent] ?? step.agent))
-  const preferred = agent?.defaultModel
-  const hasStepModel = step.model !== undefined || step.models !== undefined
-  if (
-    !hasStepModel &&
-    stepRunnerFor(step.runner).capabilities.globalModelOverride &&
-    effectiveDefaultModel !== undefined &&
-    preferred &&
-    preferred !== effectiveDefaultModel
-  ) {
-    step.model = preferred
-  }
-  // Collapse a bare { agent } back to its string shorthand for clean YAML.
-  return Object.keys(step).length === 1 ? step.agent : step
-}
-
-/**
- * Best-effort resolve check for a pipeline spec: catches what parse-level
- * validation can't (duplicate step names, unknown agents, dangling reports
- * targets). Returns the error message, or undefined when the pipeline
- * resolves. Callers should treat failures as warnings — a global pipeline may
- * legitimately reference agents that only exist in some project's config.
- */
-export function checkPipelineResolves(name: string, spec: PipelineSpec, config: ConvoyConfig | undefined): string | undefined {
-  try {
-    resolvePipeline({
-      name,
-      spec,
-      agents: buildAgentRegistry(config),
-      ...pipelineDefaultsOf(config?.defaults),
-    })
-    return undefined
-  } catch (error) {
-    return error instanceof Error ? error.message : String(error)
-  }
 }
 
 class Validator {
