@@ -5,7 +5,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import type { PermissionPromptInfo, PermissionReply, ProgressUI, RunOutcome } from "../src/progress"
-import type { RunOptions } from "../src/types"
+import type { AgentStep, RunOptions } from "../src/types"
 
 import { preparePhaseRun, run as realRun, hostedTeardownFromError, UserAbortError, compactRunRowName, type RunDeps } from "../src/runner"
 import { buildRunPlan } from "../src/run-plan"
@@ -81,7 +81,22 @@ async function cleanRepo(): Promise<string> {
   return dir
 }
 
-const emptyPipeline = { name: "hosted-test", steps: [] }
+// One OpenCode step, skipped at execution: the run still owns an OpenCode
+// server (a plan with nothing on OpenCode never boots one), so these tests
+// keep exercising the server's hosted teardown without running a phase.
+const skippedOpencodeStep: AgentStep = {
+  type: "agent",
+  name: "opencode-step",
+  agentName: "implementer",
+  description: "skipped",
+  model: "openai/gpt-5.5",
+  inputFiles: [],
+  inputDiff: false,
+  reportPath: "reports/opencode-step.md",
+  groupId: "g-opencode-step",
+  stepName: "opencode-step",
+}
+const emptyPipeline = { name: "hosted-test", steps: [skippedOpencodeStep] }
 
 function makeOptions(repo: string, overrides: Partial<RunOptions> = {}): RunOptions {
   return {
@@ -89,7 +104,7 @@ function makeOptions(repo: string, overrides: Partial<RunOptions> = {}): RunOpti
     prdHistory: true,
     files: [],
     onlySteps: [],
-    skipSteps: [],
+    skipSteps: ["opencode-step"],
     resumeRunID: "",
     keepRunDir: true,
     modelOverride: "",
@@ -879,7 +894,7 @@ describe("run() with a hosted progress", () => {
       },
     }
     try {
-      const result = await run(makeOptions(repo, { pipeline: goalPipeline, progress: dashboard.progress }))
+      const result = await run(makeOptions(repo, { pipeline: goalPipeline, skipSteps: [], progress: dashboard.progress }))
       try {
         // The scheduler published the live goal view through the hosted progress.
         expect(dashboard.events).toContain("setGoalLoop")
@@ -1078,6 +1093,8 @@ describe("automatic run finalization lifecycle", () => {
     try {
       const result = await run(
         makeOptions(repo, {
+          pipeline: { name: "hosted-test", steps: [] },
+          skipSteps: [],
           hooks: { pre: [{ name: "fetch", command: "true" }], post: [{ name: "open PR", command: "true" }], pipelines: {} },
         }),
       )

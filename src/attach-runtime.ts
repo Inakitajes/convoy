@@ -4,9 +4,11 @@ import { aggregateAdvisorEvents, readAdvisorEvents } from "./advisor-events"
 import { goalProgressPhases } from "./goal-phases"
 import { readRunMetadata, type PhaseMetadata, type RunMetadata } from "./metadata"
 import { progressPhases, watchSession, backfillSessionTranscript, withGoalPhases, type SessionWatcher } from "./runner"
-import { progressMessageFromRunnerEvent, type CoordinatorEventItem, type CoordinatorEvents } from "./runners/coordinator-events"
+import { coordinatorJournalPath, progressMessageFromRunnerEvent, type CoordinatorEventItem, type CoordinatorEventSource } from "./runners/coordinator-events"
+import { RunnerJournal } from "./runners/journal"
 
 import type { OpencodeClient } from "./opencode-client"
+import type { RunnerEvent } from "./runners/contracts"
 import type { GoalLoopView, ProgressPhaseSnapshot, ProgressUI } from "./progress"
 
 const pollMs = 1_000
@@ -28,19 +30,25 @@ export class LiveAttach {
   private stopped = false
 
   constructor(
-    private readonly client: OpencodeClient,
+    /**
+     * The run's OpenCode server, for the phases that stream natively. Absent
+     * for a Claude-only run, or until `connect` reaches a server that boots
+     * after the dashboard (a goal-loop iteration's), which `tick` retries.
+     */
+    private client: OpencodeClient | undefined,
     private readonly tui: ProgressUI,
     private readonly targetDir: string,
     private readonly metaPath: string,
     private readonly phasesWithoutLiveAttach: ReadonlySet<string> = new Set(),
     private readonly tickMs = pollMs,
     /**
-     * Coordinator-owned durable event read model (design D6), created per run.
-     * When supplied the dashboard follows the runner-neutral journal instead of
-     * an OpenCode-only SSE subscription, so Claude phases stream and completed
-     * phases reconstruct without any OpenCode server URL.
+     * The coordinator's durable runner-neutral journal (design D6). It carries
+     * the transcript of every phase without native live attach (Claude), from
+     * replay through the live tail, with no OpenCode server URL. Phases that
+     * stream natively keep their own subscription, so nothing renders twice.
      */
-    private readonly events?: CoordinatorEvents,
+    private readonly events?: CoordinatorEventSource,
+    private readonly connect?: (url: string) => Promise<OpencodeClient | undefined>,
   ) {
     this.serverGone = new Promise((resolve) => {
       this.resolveServerGone = resolve
@@ -67,22 +75,20 @@ export class LiveAttach {
 
   private applyNeutral(item: CoordinatorEventItem) {
     if (this.stopped || item.kind === "gap") return
-    const name = item.record.attempt.phase
-    const message = progressMessageFromRunnerEvent(item.record.event)
-    if (message) {
-      this.tui.phaseMessage(name, message)
-      return
-    }
-    const event = item.record.event
-    if (event.type === "session") this.tui.phaseSession(name, event.session.sessionId)
-    else if (event.type === "permission-request") this.tui.phaseActivity(name, `permission: ${event.action}`, "permission")
-    else if (event.type === "permission-settled") this.tui.phaseActivity(name, `permission ${event.decision}`, "permission")
+    if (!this.phasesWithoutLiveAttach.has(item.record.attempt.phase)) return
+    applyJournalRecord(this.tui, item.record)
   }
 
   private async tick() {
     if (this.stopped) return
     const metadata = await readRunMetadata(this.metaPath)
     if (!metadata) return
+    if (!this.client && this.connect && metadata.server?.url) {
+      const url = metadata.server.url
+      this.client = await this.connect(url).catch(() => undefined)
+      if (this.stopped) return
+      if (this.client) this.tui.serverReady(url)
+    }
 
     await reconcileAdvisorJournal(metadata, dirname(this.metaPath))
 
@@ -101,10 +107,9 @@ export class LiveAttach {
           if (phase.model) this.tui.phaseAttempt(name, { attempt: 1, model: phase.model })
         }
         for (const event of phase.advisorEvents ?? []) this.tui.phaseAdvisorEvent(name, event)
-        // When the neutral journal backs this dashboard there is no per-phase
-        // OpenCode SSE subscription to open: the read model already streams the
-        // phase (Claude included) without a server URL.
-        if (!this.events && !this.phasesWithoutLiveAttach.has(name)) this.watch(name, phase.sessionID)
+        // A phase without native live attach streams from the journal; the
+        // rest follow the run's OpenCode server once it is reachable.
+        if (!this.phasesWithoutLiveAttach.has(name)) this.watch(name, phase.sessionID)
       } else if (phase.status !== "pending" && !this.finalized.has(name)) {
         this.finalized.add(name)
         this.tui.phaseRestored(name, snapshotOf(phase, phase.status))
@@ -141,7 +146,7 @@ export class LiveAttach {
   }
 
   private watch(name: string, sessionID: string | undefined) {
-    if (!sessionID || this.watchers.has(name)) return
+    if (!this.client || !sessionID || this.watchers.has(name)) return
     const watcher = watchSession(this.client, {
       directory: this.targetDir,
       phaseName: name,
@@ -176,9 +181,9 @@ export class LiveAttach {
    * no server-held history to read.
    */
   requestSessionBackfill(name: string) {
-    // With a neutral journal the read model's replay already reconstructed every
-    // available phase transcript, so there is no OpenCode server history to ask.
-    if (this.stopped || this.events || this.backfilled.has(name) || this.watchers.has(name) || this.phasesWithoutLiveAttach.has(name)) return
+    // A journal-backed phase was already reconstructed by the replay; without a
+    // server there is no history to ask.
+    if (!this.client || this.stopped || this.backfilled.has(name) || this.watchers.has(name) || this.phasesWithoutLiveAttach.has(name)) return
     const sessionID = this.sessionIDs.get(name)
     if (!sessionID) return
     this.backfilled.add(name)
@@ -209,6 +214,29 @@ export class LiveAttach {
     await Promise.all([...this.watchers.values()].map((watcher) => watcher.stop().catch(() => {})))
     this.watchers.clear()
   }
+}
+
+/** Renders one journal record onto a dashboard. */
+function applyJournalRecord(tui: ProgressUI, record: { attempt: { phase: string }; event: RunnerEvent }) {
+  const name = record.attempt.phase
+  const event = record.event
+  const message = progressMessageFromRunnerEvent(event)
+  if (message) tui.phaseMessage(name, message)
+  else if (event.type === "activity") tui.phaseActivity(name, event.message, event.kind)
+  else if (event.type === "session") tui.phaseSession(name, event.session.sessionId)
+  else if (event.type === "permission-request") tui.phaseActivity(name, `permission: ${event.action}`, "permission")
+  else if (event.type === "permission-settled") tui.phaseActivity(name, `permission ${event.decision}`, "permission")
+}
+
+/**
+ * Replays a stopped run's captured transcripts for the phases without native
+ * history (Claude) from the run dir alone: no harness, credentials, or server.
+ * A missing journal (a run from before it existed) replays nothing, leaving
+ * the dashboard's honest placeholder.
+ */
+export async function replayJournal(tui: ProgressUI, runDir: string, phases: ReadonlySet<string>): Promise<void> {
+  const records = await new RunnerJournal({ path: coordinatorJournalPath(runDir) }).readPersisted().catch(() => [])
+  for (const record of records) if (phases.has(record.attempt.phase)) applyJournalRecord(tui, record)
 }
 
 /** Merge the authoritative append-only journal over metadata's convenience projection. */

@@ -25,7 +25,8 @@ export function preflightTargets(plan: RunPlan): ResolvedModel[] {
   for (const step of plan.pipeline.steps) {
     if (step.type === "agent" && step.resolvedAdvisor) targets.push(step.resolvedAdvisor)
   }
-  if (plan.smartJudge) targets.push(plan.smartJudge.model)
+  // A Claude judge is checked by the Claude CLI's own auth probe, not the OpenCode catalog.
+  if (plan.smartJudge && plan.smartJudge.runner !== "claude-code") targets.push(plan.smartJudge.model)
   // No branch namer here: naming happens in the launcher, before the plan is
   // built, so nothing is left to call once the run is confirmed.
   return targets

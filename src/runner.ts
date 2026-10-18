@@ -65,7 +65,8 @@ import { pickPrdHistory, prdHistoryFile, readPrdHistoryIndex, writePrdHistory } 
 import { installWriteReportTool, startReportBridge, type ReportBridge } from "./report-bridge"
 import { createReportRuntime, type ReportPhaseHandle, type ReportRuntime } from "./report-runtime"
 import { stepCommitMessageFactory } from "./step-commit"
-import { throughputRoutedModels } from "./run-plan"
+import { pipelineRunners, throughputRoutedModels } from "./run-plan"
+import { isClaudeJudge } from "./safety-judge"
 import { promoteScoreReport, runGoalCycle, type GoalCycleOutcome } from "./goal-scheduler"
 import { formatTerminalTitle, projectName, RunStatusTracker, trackRunStatus } from "./run-status"
 import { popTerminalTitle, pushTerminalTitle, writeTerminalTitle } from "./terminal-title"
@@ -409,6 +410,19 @@ function processIsAlive(pid: number): boolean {
  * one batch that runs concurrently. Validation guarantees group members are
  * always contiguous, so a linear scan suffices.
  */
+/**
+ * Whether a run needs its own OpenCode server: an OpenCode step anywhere in the
+ * plan (goal fragments included), an advisor that runs on OpenCode, or an
+ * OpenCode smart judge. Everything else — Claude steps, Claude advisors and
+ * judges, reports, the dashboard journal — works without one.
+ */
+export function runNeedsOpencodeServer(pipeline: Pipeline, smartJudge?: { providerID: string }): boolean {
+  if (pipelineRunners(pipeline).has("opencode")) return true
+  const steps = [...pipeline.steps, ...(pipeline.goalPlan ? [...pipeline.goalPlan.improve.steps, ...pipeline.goalPlan.measure.steps] : [])]
+  if (steps.some((step) => step.type === "agent" && step.resolvedAdvisor !== undefined && step.resolvedAdvisor.providerID !== "claude-code")) return true
+  return smartJudge !== undefined && !isClaudeJudge(smartJudge)
+}
+
 export function planBatches(steps: readonly Step[]): Step[][] {
   const batches: Step[][] = []
   for (const step of steps) {
@@ -833,76 +847,89 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
       (options.plan?.modelRouting.gateway ?? options.gateway ?? "configured") === "nitro"
         ? throughputRoutedModels(pipeline, autoAccept.mode === "smart" ? judgeModel : undefined)
         : []
-    // Every custom tool must exist before the server spawns: the run config
-    // names each plugin package and the server loads them at startup. Every
-    // OpenCode phase owns a report, so this path is deliberately independent
-    // of whether any phase has an advisor.
+    // The run's OpenCode server exists only for what runs on OpenCode: an
+    // OpenCode step (goal fragments included), an OpenCode-routed advisor, or
+    // an OpenCode smart judge. A Claude-only plan never installs, boots, or
+    // authenticates OpenCode (spec runner-execution, "Claude-only workstation").
+    const needsServer = runNeedsOpencodeServer(pipeline, options.smart ? judgeModel : undefined)
+    // The report bridge serves every runner: OpenCode's write_report plugin and
+    // Claude's write_report MCP tool both submit through the run's runtime.
     let reports: ReportRuntime | undefined
     reportBridge = await startReportBridge({ reports: () => reports })
-    // Per-run plugin directory: each package embeds this run's bridge URL and
-    // token, and V2 watches plugin sources, so a shared location would let a
-    // concurrent run rewrite a live run's tools.
-    const pluginDir = runPrivateDir(workspace.dir)
-    const pluginEntries = [await installWriteReportTool({ url: reportBridge.url, token: reportBridge.token, dir: pluginDir })]
-    // The advisor bridge serves a runtime created only after the SDK returns a
-    // client, so it uses the same deferred lookup pattern.
     let advisors: AdvisorRuntime | undefined
-    if (advisorNeeds.agents.size > 0) {
-      // Start the bridge first so we have the URL and token to embed in the
-      // tool source. The tool file must exist before the server spawns, but
-      // the bridge only needs to be listening — no client yet.
-      advisorBridge = await startAdvisorBridge({ advisors: () => advisors })
-      // Embed the URL and token as string literals in the tool source so
-      // subprocesses (bash tool calls) cannot read them via process.env.
-      pluginEntries.push(...(await installAdvisorTool({ url: advisorBridge.url, token: advisorBridge.token, dir: pluginDir })))
-    }
-    try {
-      opencode = await deps.startOpencode(
-        opencodeConfig(workspace.dir, options.targetDir, agents, options.permissions, {
-          advisorAgents: advisorNeeds.agents,
-          advisorModels: advisorNeeds.models,
-          throughputModels,
-          plugins: pluginEntries.map((entry) => dirname(entry)),
-        }),
-        boot.signal,
-        // The run server is owned through the coordinator's release; helpers
-        // default to their own short-lived lifetime class. The run id rides the
-        // lifetime record so a later orphan recovery can tie the child back to
-        // its run (design D6).
-        { lifetime: "run", runId: workspace.runID },
-      )
-    } finally {
+    if (needsServer) {
+      // Every custom tool must exist before the server spawns: the run config
+      // names each plugin package and the server loads them at startup. Every
+      // OpenCode phase owns a report, so this path is deliberately independent
+      // of whether any phase has an advisor.
+      // Per-run plugin directory: each package embeds this run's bridge URL and
+      // token, and V2 watches plugin sources, so a shared location would let a
+      // concurrent run rewrite a live run's tools.
+      const pluginDir = runPrivateDir(workspace.dir)
+      const pluginEntries = [await installWriteReportTool({ url: reportBridge.url, token: reportBridge.token, dir: pluginDir })]
+      // The advisor bridge serves a runtime created only after the SDK returns a
+      // client, so it uses the same deferred lookup pattern.
+      if (advisorNeeds.agents.size > 0) {
+        // Start the bridge first so we have the URL and token to embed in the
+        // tool source. The tool file must exist before the server spawns, but
+        // the bridge only needs to be listening — no client yet.
+        advisorBridge = await startAdvisorBridge({ advisors: () => advisors })
+        // Embed the URL and token as string literals in the tool source so
+        // subprocesses (bash tool calls) cannot read them via process.env.
+        pluginEntries.push(...(await installAdvisorTool({ url: advisorBridge.url, token: advisorBridge.token, dir: pluginDir })))
+      }
+      try {
+        opencode = await deps.startOpencode(
+          opencodeConfig(workspace.dir, options.targetDir, agents, options.permissions, {
+            advisorAgents: advisorNeeds.agents,
+            advisorModels: advisorNeeds.models,
+            throughputModels,
+            plugins: pluginEntries.map((entry) => dirname(entry)),
+          }),
+          boot.signal,
+          // The run server is owned through the coordinator's release; helpers
+          // default to their own short-lived lifetime class. The run id rides the
+          // lifetime record so a later orphan recovery can tie the child back to
+          // its run (design D6).
+          { lifetime: "run", runId: workspace.runID },
+        )
+      } finally {
+        shutdown.signal.removeEventListener("abort", abortBoot)
+      }
+      const server = opencode
+      // A repeated abort or the shutdown deadline forces this owned server
+      // before the process exits; without this edge a wedged cleanup would
+      // abandon the child (design D3).
+      shutdown.setForceHandler(() => {
+        // Start the bounded pane release before the last-resort exit timer. The
+        // normal finally still awaits the same idempotent promise when it wins.
+        void herdr?.forceRelease()
+        server.forceStop()
+      })
+      progress.serverReady(server.url)
+      // Publish the private connection auth for the dashboard's attach path
+      // (design D2): the password stays out of the generic run metadata.
+      await writeServerAuth(workspace.dir, { url: server.url, ...(server.password ? { password: server.password } : {}) }).catch(() => {})
+      // Link the live-server block to the actual child identity (design D6): the
+      // historical coordinator `pid` stays, and the record id / child PID/birth
+      // let an operator (or later recovery) identify the `serve` child without
+      // reinterpreting legacy metadata. An unresolved stop keeps this block.
+      metadata.recordServerChild({
+        ...(server.recordId ? { recordId: server.recordId } : {}),
+        pid: server.pid,
+        ...(server.identity?.birth ? { birth: server.identity.birth } : {}),
+      })
+      // serverReady persists asynchronously through the progress adapter. Flush
+      // before phases (or a hosted return) can expose this run for [o] attach.
+      await metadata.flush()
+      log.info(`opencode SDK ready at ${server.url}`)
+    } else {
       shutdown.signal.removeEventListener("abort", abortBoot)
+      log.info("no step, advisor, or judge of this plan runs on OpenCode: no OpenCode server is started")
     }
-    // A repeated abort or the shutdown deadline forces this owned server
-    // before the process exits; without this edge a wedged cleanup would
-    // abandon the child (design D3).
-    shutdown.setForceHandler(() => {
-      // Start the bounded pane release before the last-resort exit timer. The
-      // normal finally still awaits the same idempotent promise when it wins.
-      void herdr?.forceRelease()
-      opencode?.forceStop()
-    })
-    progress.serverReady(opencode.url)
-    // Publish the private connection auth for the dashboard's attach path
-    // (design D2): the password stays out of the generic run metadata.
-    await writeServerAuth(workspace.dir, { url: opencode.url, ...(opencode.password ? { password: opencode.password } : {}) }).catch(() => {})
-    // Link the live-server block to the actual child identity (design D6): the
-    // historical coordinator `pid` stays, and the record id / child PID/birth
-    // let an operator (or later recovery) identify the `serve` child without
-    // reinterpreting legacy metadata. An unresolved stop keeps this block.
-    metadata.recordServerChild({
-      ...(opencode.recordId ? { recordId: opencode.recordId } : {}),
-      pid: opencode.pid,
-      ...(opencode.identity?.birth ? { birth: opencode.identity.birth } : {}),
-    })
-    // serverReady persists asynchronously through the progress adapter. Flush
-    // before phases (or a hosted return) can expose this run for [o] attach.
-    await metadata.flush()
-    log.info(`opencode SDK ready at ${opencode.url}`)
 
     advisors = createAdvisorRuntime({
-      client: opencode.client,
+      ...(opencode ? { client: opencode.client } : {}),
       directory: options.targetDir,
       signal: shutdown.signal,
       auditPolicy: options.advisorAuditPolicy ?? "summary",
@@ -920,18 +947,23 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
     })
     reports = createReportRuntime(workspace.dir)
 
-    permissions = startPermissionGate({
-      client: opencode.client,
-      progress,
-      interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY),
-      directory: options.targetDir,
-      autoAccept,
-      judgeModel,
-      terminalInput,
-      serverUrl: opencode.url,
-      ...(opencode.password ? { serverPassword: opencode.password } : {}),
-      ...(advisorNeeds.agents.size > 0 ? { advisorCheckpoint: advisors.checkpoint } : {}),
-    })
+    // OpenCode's asks arrive on its server's event bus; Claude's reach the
+    // operator through each attempt's approval service instead.
+    if (opencode) {
+      permissions = startPermissionGate({
+        client: opencode.client,
+        progress,
+        interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY),
+        directory: options.targetDir,
+        autoAccept,
+        judgeModel,
+        ...(options.claudeAuth ? { judgeAuth: options.claudeAuth } : {}),
+        terminalInput,
+        serverUrl: opencode.url,
+        ...(opencode.password ? { serverPassword: opencode.password } : {}),
+        ...(advisorNeeds.agents.size > 0 ? { advisorCheckpoint: advisors.checkpoint } : {}),
+      })
+    }
 
     const resuming = Boolean(options.resumeRunID)
     const gitLock = createGitLock()
@@ -942,9 +974,9 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
     // Narrow once, outside any closure: opencode/metadata are `let`s assigned
     // above, and TS won't retain that narrowing inside the batch's nested
     // arrow functions, but a `const` alias captured here stays narrowed.
-    const client = opencode.client
-    const serverUrl = opencode.url
-    const serverPassword = opencode.password
+    const client = opencode?.client
+    const serverUrl = opencode?.url
+    const serverPassword = opencode?.password
     const runMetadata = metadata
 
     // One shared execution context: the pipeline prefix and every goal
@@ -1292,7 +1324,8 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
  * bindings, and hooks all outlive any single phase group.
  */
 export type PhaseGroupContext = {
-  client: OpencodeClient
+  /** The run's OpenCode server client; absent when nothing in the plan runs on OpenCode. */
+  client: OpencodeClient | undefined
   workspace: Workspace
   metadata: RunMetadataStore
   options: RunOptions
@@ -1304,7 +1337,7 @@ export type PhaseGroupContext = {
   gitLock: GitLock
   limitAgents: ReturnType<typeof createConcurrencyLimiter>
   resuming: boolean
-  serverUrl: string
+  serverUrl: string | undefined
   serverPassword: string | undefined
   permissions: PermissionGate | undefined
   terminalInput: TerminalInput
@@ -1343,7 +1376,7 @@ export async function executePhaseGroups(ctx: PhaseGroupContext, steps: readonly
         await control.checkpointAfterBatch(shutdown.signal)
         continue
       }
-      await runHumanReviewGate(workspace, options, { url: serverUrl, ...(serverPassword ? { password: serverPassword } : {}) }, progress, permissions, first.name, undefined, metadata)
+      await runHumanReviewGate(workspace, options, serverUrl ? { url: serverUrl, ...(serverPassword ? { password: serverPassword } : {}) } : undefined, progress, permissions, first.name, undefined, metadata)
       await control.checkpointAfterBatch(shutdown.signal)
       continue
     }
@@ -1360,7 +1393,7 @@ export async function executePhaseGroups(ctx: PhaseGroupContext, steps: readonly
         await limitAgents(async () => {
           const restored = resuming && (await restorePhaseFromPreviousRun(workspace, metadata, step, progress))
           if (!restored) {
-            await runPhase(client, workspace, metadata, step, options, extraFiles, projectContextFiles, progress, shutdown, gitLock, { serverUrl, ...(serverPassword ? { serverPassword } : {}), permissions, terminalInput }, advisors, reports)
+            await runPhase(client, workspace, metadata, step, options, extraFiles, projectContextFiles, progress, shutdown, gitLock, { ...(serverUrl ? { serverUrl } : {}), ...(serverPassword ? { serverPassword } : {}), permissions, terminalInput }, advisors, reports)
           }
         })
       }),
@@ -1624,7 +1657,8 @@ function recoveryReport(phaseName: string) {
 
 /** What the mid-step interactive gate needs to reopen the session window and hold permission prompts. */
 export type TakeoverContext = {
-  serverUrl: string
+  /** The run's OpenCode server, for reopening an OpenCode phase's session; absent on a Claude-only run. */
+  serverUrl?: string
   /** The run server's generated password; the reopened OpenCode client needs it to connect. */
   serverPassword?: string
   permissions?: PermissionGate
@@ -1633,7 +1667,7 @@ export type TakeoverContext = {
 }
 
 async function runPhase(
-  client: OpencodeClient,
+  client: OpencodeClient | undefined,
   workspace: Workspace,
   metadata: RunMetadataStore,
   phase: AgentStep,
@@ -1836,7 +1870,7 @@ class DeliverableValidationError extends Error {
 
 
 export async function runPhaseUntilResolved(
-  client: OpencodeClient,
+  client: OpencodeClient | undefined,
   workspace: Workspace,
   phase: AgentStep,
   targetDir: string,
@@ -2279,7 +2313,7 @@ function awaitActionOrAbort<T>(action: Promise<T>, signal?: AbortSignal): Promis
  * harness-specific execution branch left in core (tasks 4.1/4.4).
  */
 async function runPhaseAttempt(
-  client: OpencodeClient,
+  client: OpencodeClient | undefined,
   workspace: Workspace,
   phase: AgentStep,
   targetDir: string,
@@ -2311,7 +2345,8 @@ async function runPhaseAttempt(
     runnerId,
     {
       approvals: createOperatorApprovalService({
-        client,
+        ...(client ? { client } : {}),
+        ...(prepared.claudeAuth ? { claudeAuth: prepared.claudeAuth } : {}),
         progress,
         directory: targetDir,
         ...(prepared.autoAccept ? { autoAccept: prepared.autoAccept } : {}),
@@ -2392,7 +2427,7 @@ async function runPhaseAttempt(
       if (event.type === "session" && event.session.sessionId !== activeSessionID) {
         activeSessionID = event.session.sessionId
         beginSession(activeSessionID)
-        if (serverSession) shutdown.setActiveSession({ client, sessionID: activeSessionID, directory: targetDir, phaseName: phase.name })
+        if (serverSession && client) shutdown.setActiveSession({ client, sessionID: activeSessionID, directory: targetDir, phaseName: phase.name })
       }
       render(event)
     },

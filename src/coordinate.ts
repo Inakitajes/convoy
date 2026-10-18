@@ -414,6 +414,9 @@ export async function runCoordinateBoot(
       }
       throw error
     } finally {
+      // The journal's queued tail reaches disk before the coordinator exits,
+      // so a dashboard reopening the run sees the whole transcript.
+      await progress.flushEvents?.().catch(() => {})
       // A renderer/hold failure must not strand the run's Herdr authority or
       // any of the other hosted resources retained through the finish screen.
       await hostedRelease?.()

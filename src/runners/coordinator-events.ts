@@ -23,9 +23,17 @@
  * journal alone.
  */
 
+import { open, stat } from "node:fs/promises"
+import { join } from "node:path"
+
 import type { ProgressMessage } from "../progress"
 import type { RunnerEvent, RunnerId } from "./contracts"
 import { RunnerJournal, type JournalOptions, type JournalRecord } from "./journal"
+
+/** Where a run's coordinator journal lives: private, beside the run's other event logs. */
+export function coordinatorJournalPath(runDir: string): string {
+  return join(runDir, "events", "coordinator-events.ndjson")
+}
 
 /**
  * One event to publish: a neutral `RunnerEvent` already carrying its `runner`
@@ -45,6 +53,11 @@ export type CoordinatorEventItem =
   | { kind: "gap"; from: number; to: number }
 
 export type CoordinatorEventSink = (item: CoordinatorEventItem) => void
+
+/** What a dashboard follows: the in-process read model, or a journal file another process writes. */
+export type CoordinatorEventSource = {
+  subscribe(cursor: number, sink: CoordinatorEventSink): () => void
+}
 
 export type CoordinatorEventsStatus = {
   /** Highest sequence number assigned so far. */
@@ -83,6 +96,7 @@ export class CoordinatorEvents {
   private dropped = 0
   private pumping = false
   private closed = false
+  private restored?: Promise<void>
 
   constructor(options: CoordinatorEventsOptions = {}) {
     this.journal = options.journal ?? new RunnerJournal({
@@ -122,6 +136,8 @@ export class CoordinatorEvents {
    */
   async publish(input: CoordinatorEventInput): Promise<number | undefined> {
     if (this.closed) return undefined
+    // A resumed run appends to its existing journal: continue its sequence.
+    await (this.restored ??= this.journal.restore())
     const seq = await this.journal.append({
       runner: input.event.runner,
       attempt: { runId: input.runId, phase: input.phase, attempt: input.event.attempt },
@@ -318,6 +334,79 @@ export class CoordinatorEvents {
   }
 }
 
+/**
+ * Follows a journal file another process appends to (the coordinator), for a
+ * dashboard that cannot share the coordinator's in-memory read model. Reads
+ * only the bytes appended since the last poll, waits for a partial trailing
+ * line to complete, and delivers each record once in `seq` order, reporting
+ * a skipped interval as a `gap`. A file that shrinks (replaced) is reread
+ * from the start; the high-water mark still suppresses duplicates.
+ */
+export function followJournalFile(path: string, cursor: number, sink: CoordinatorEventSink, options: { pollMs?: number } = {}): () => void {
+  const pollMs = options.pollMs ?? 250
+  let offset = 0
+  let pending = ""
+  let last = Math.max(0, Math.floor(cursor))
+  let active = true
+  let timer: ReturnType<typeof setTimeout> | undefined
+
+  const deliver = (line: string) => {
+    let record: JournalRecord
+    try {
+      record = JSON.parse(line) as JournalRecord
+    } catch {
+      return
+    }
+    if (typeof record.seq !== "number" || record.seq <= last) return
+    if (record.seq > last + 1) sink({ kind: "gap", from: last + 1, to: record.seq - 1 })
+    last = record.seq
+    sink({ kind: "event", record })
+  }
+
+  const poll = async () => {
+    try {
+      const size = (await stat(path)).size
+      if (size < offset) {
+        offset = 0
+        pending = ""
+      }
+      if (size > offset) {
+        const handle = await open(path, "r")
+        try {
+          const buffer = Buffer.alloc(size - offset)
+          const { bytesRead } = await handle.read(buffer, 0, buffer.length, offset)
+          offset += bytesRead
+          pending += buffer.subarray(0, bytesRead).toString("utf8")
+        } finally {
+          await handle.close()
+        }
+        const end = pending.lastIndexOf("\n")
+        if (end !== -1) {
+          const complete = pending.slice(0, end)
+          pending = pending.slice(end + 1)
+          for (const line of complete.split("\n")) if (active && line.length > 0) deliver(line)
+        }
+      }
+    } catch {
+      // Not written yet, or briefly unreadable: try again on the next poll.
+    }
+    if (active) {
+      timer = setTimeout(() => void poll(), pollMs)
+      timer.unref?.()
+    }
+  }
+  void poll()
+  return () => {
+    active = false
+    if (timer) clearTimeout(timer)
+  }
+}
+
+/** A `CoordinatorEventSource` over a journal file, for a dashboard in another process. */
+export function journalFileSource(path: string, options: { pollMs?: number } = {}): CoordinatorEventSource {
+  return { subscribe: (cursor, sink) => followJournalFile(path, cursor, sink, options) }
+}
+
 // ---------------------------------------------------------------------------
 // Neutral ProgressMessage <-> RunnerEvent translation
 // ---------------------------------------------------------------------------
@@ -334,8 +423,10 @@ export function runnerEventFromProgressMessage(runner: RunnerId, attempt: number
     case "response":
       return { type: "text", runner, attempt, text: message.text, ...(message.partID ? { partId: message.partID } : {}) }
     case "tool":
-    case "bash":
       return { type: "tool", runner, attempt, name: message.text }
+    case "bash":
+      // Kept as a transcript message so the shell marker renders as a shell line.
+      return { type: "message", runner, attempt, channel: "bash", text: message.text, ...(message.partID ? { partId: message.partID } : {}) }
   }
 }
 
@@ -348,6 +439,8 @@ export function progressMessageFromRunnerEvent(event: RunnerEvent): ProgressMess
       return { channel: "response", text: event.text, ...(event.partId ? { partID: event.partId } : {}) }
     case "tool":
       return { channel: "tool", text: event.detail ? `${event.name}: ${event.detail}` : event.name }
+    case "message":
+      return { channel: event.channel, text: event.text, ...(event.partId ? { partID: event.partId } : {}) }
     default:
       return undefined
   }

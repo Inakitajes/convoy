@@ -9,7 +9,8 @@ import { log } from "./log"
 import { builtInAgents, defaultGptModel, defaultGptVariant, defaultPipeline, defaultPipelineName, hasWritableStep, resolvePipeline, splitModelVariant, validateStepFilters } from "./pipeline"
 import { consensusStep } from "./quality-score"
 import { defaultMaxConcurrentAgents, parseModel } from "./runner"
-import { buildRunPlan, type BuildRunPlanInput } from "./run-plan"
+import { buildRunPlan, isClaudeOnlyPipeline, type BuildRunPlanInput } from "./run-plan"
+import { parseModelOverride } from "./step-runners"
 import { confirmRunPlan, renderRunPlan } from "./run-review"
 import { loadPrdHistoryPreview } from "./prd-history"
 import { loadOpenSpecBundle, openSpecPromptFor } from "./openspec"
@@ -2296,8 +2297,15 @@ export async function resolveRunOptions(parsed: ParsedArgs): Promise<Omit<RunOpt
   if (parsed.smartModel) parseModel(splitModelVariant(parsed.smartModel).model)
   // Smart auto-accept always needs a concrete judge model; resolve the fallback
   // chain here so the runner can stay oblivious to config and built-in defaults.
+  // A Claude-only plan inherits its own runner for the judge (a Claude-scoped
+  // --model, else Haiku) instead of an OpenCode model it could not run.
+  const claudeOverride = parseModelOverride(parsed.modelOverride)
   const smartJudgeModel =
-    parsed.smartModel || defaults.autoAcceptJudgeModel || parsed.modelOverride || defaults.model || `${defaultGptModel}#${defaultGptVariant}`
+    parsed.smartModel ||
+    defaults.autoAcceptJudgeModel ||
+    (isClaudeOnlyPipeline(pipeline)
+      ? `claude-code/${claudeOverride.scope === "claude-code" && claudeOverride.model ? claudeOverride.model : "haiku"}`
+      : parsed.modelOverride || defaults.model || `${defaultGptModel}#${defaultGptVariant}`)
 
   // Goal execution is enabled exclusively by the pipeline's own terminal goal
   // step: `pipeline.goalPlan` was resolved and validated by resolvePipeline, and

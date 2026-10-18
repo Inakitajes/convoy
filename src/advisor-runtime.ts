@@ -17,6 +17,7 @@ import {
   type AdvisorFeedbackOutcome,
 } from "./advisor-events"
 import type { AdvisorCheckpoint, AdvisorGateDecision } from "./permissions"
+import type { AuthenticationSelection } from "./runners/contracts"
 import type { AgentStep } from "./types"
 
 /**
@@ -52,7 +53,8 @@ export type AdvisorPhaseHandle = {
 }
 
 export type AdvisorRuntimeOptions = {
-  client: OpencodeClient
+  /** The run's OpenCode server, for OpenCode executors and OpenCode advising models; absent on a Claude-only run. */
+  client?: OpencodeClient
   directory: string
   signal?: AbortSignal
   /** Injected in tests; defaults to the real consultation. */
@@ -60,6 +62,14 @@ export type AdvisorRuntimeOptions = {
   auditPolicy?: AdvisorAuditPolicy
   /** Called synchronously with runtime ordering; persistence failures must be handled by the sink. */
   onEvent?: (event: AdvisorEvent) => void | Promise<void>
+  /**
+   * The rendered transcript of an executor session that does not live on the
+   * OpenCode server (Claude), recorded from its normalized events; undefined
+   * for an OpenCode session, whose transcript the server holds.
+   */
+  transcriptFor?: (sessionID: string) => string | undefined
+  /** The reviewed authentication a Claude advising model consults under. */
+  claudeAuth?: AuthenticationSelection
 }
 
 export type AdvisorRuntime = {
@@ -133,8 +143,11 @@ export function createAdvisorRuntime(options: AdvisorRuntimeOptions): AdvisorRun
     })
     const startedAt = performance.now()
     let transcript: string | undefined
+    const recorded = options.transcriptFor?.(sessionID)
     const result = await consultFn({
-      client: options.client,
+      ...(options.client ? { client: options.client } : {}),
+      ...(recorded !== undefined ? { transcript: recorded } : {}),
+      ...(options.claudeAuth ? { claudeAuth: options.claudeAuth } : {}),
       sessionID,
       directory: options.directory,
       model,

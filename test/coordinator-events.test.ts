@@ -231,7 +231,7 @@ describe("CoordinatorEvents", () => {
     expect(events.status().degraded).toBe(false)
   })
 
-  test("a dashboard consumes neutral journal events for any runner", async () => {
+  test("a dashboard consumes neutral journal events for the phases without native live attach", async () => {
     const dir = await scratch()
     const { store } = memoryStore()
     const events = new CoordinatorEvents({ path: "ignored", store })
@@ -242,7 +242,7 @@ describe("CoordinatorEvents", () => {
         ;(messages[name] ??= []).push(message)
       },
     }
-    const attach = new LiveAttach({} as OpencodeClient, tui, dir, join(dir, "metadata.json"), new Set(), 10, events)
+    const attach = new LiveAttach({} as OpencodeClient, tui, dir, join(dir, "metadata.json"), new Set(["implement"]), 10, events)
     try {
       await attach.start()
       await events.publish({ runId: "run-1", phase: "implement", event: { type: "text", runner: "claude-code", attempt: 1, text: "hello" } })

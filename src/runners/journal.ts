@@ -115,6 +115,28 @@ export class RunnerJournal {
     return this.lastSeq
   }
 
+  /**
+   * Continues the sequence of records already on disk, so a resumed
+   * coordinator never reuses a `seq` a follower has already consumed. A file
+   * that cannot be read leaves the sequence where it is.
+   */
+  async restore(): Promise<void> {
+    let text: string
+    try {
+      text = await this.store.read(this.path)
+    } catch {
+      return
+    }
+    for (const line of text.split("\n")) {
+      try {
+        const seq = (JSON.parse(line) as { seq?: unknown }).seq
+        if (typeof seq === "number" && seq > this.lastSeq) this.lastSeq = seq
+      } catch {
+        // A partial or malformed line carries no usable sequence.
+      }
+    }
+  }
+
   status(): JournalStatus {
     return this.degradedReason === undefined ? { degraded: false } : { degraded: true, reason: this.degradedReason }
   }

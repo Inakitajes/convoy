@@ -1,6 +1,8 @@
 import type { OpencodeClient } from "./opencode-client"
 
 import { log } from "./log"
+import type { AuthenticationSelection } from "./runners/contracts"
+import { claudeInference, type ClaudeInferenceDeps } from "./runners/claude/inference"
 
 /** An external classifier's call on whether a permission request is safe to auto-approve. */
 export type SafetyVerdict = { safe: boolean; reason: string }
@@ -15,12 +17,26 @@ export type JudgeRequest = {
 
 export type JudgeInput = {
   request: JudgeRequest
-  /** The prompt body accepts providerID/modelID only — no variant. */
+  /**
+   * The judge route's model. `providerID: "claude-code"` (a `claude-code/<model>`
+   * route) judges through the Claude CLI under `claudeAuth`, so a Claude-only
+   * install needs no OpenCode; any other provider judges on the run's OpenCode
+   * server. The prompt body accepts providerID/modelID only — no variant.
+   */
   model: { providerID: string; modelID: string }
   directory: string
   signal?: AbortSignal
   /** Override for the per-request budget; defaults to 20s. */
   timeoutMs?: number
+  /** The reviewed Claude authentication for a Claude-routed judge; defaults to subscription. */
+  claudeAuth?: AuthenticationSelection
+  /** Test seam for the Claude CLI. */
+  claudeDeps?: Partial<ClaudeInferenceDeps>
+}
+
+/** True when the judge route runs on the Claude CLI rather than an OpenCode server. */
+export function isClaudeJudge(model: { providerID: string }): boolean {
+  return model.providerID === "claude-code"
 }
 
 const defaultTimeoutMs = 20_000
@@ -69,7 +85,7 @@ const explainSystemPrompt = [
  * (best-effort) in the finally block. Throws on error or timeout.
  */
 async function runJudgeSession(
-  client: OpencodeClient,
+  client: OpencodeClient | undefined,
   input: {
     directory: string
     model: { providerID: string; modelID: string }
@@ -77,8 +93,30 @@ async function runJudgeSession(
     text: string
     signal?: AbortSignal
     timeoutMs: number
+    claudeAuth?: AuthenticationSelection
+    claudeDeps?: Partial<ClaudeInferenceDeps>
   },
 ): Promise<string> {
+  if (isClaudeJudge(input.model)) {
+    // Tool-less, one-shot, under the reviewed auth: it can only classify.
+    const answer = await claudeInference(
+      {
+        prompt: input.text,
+        system: input.system,
+        model: input.model.modelID,
+        auth: input.claudeAuth ?? { mode: "subscription" },
+        cwd: input.directory,
+        tools: "none",
+        timeoutMs: input.timeoutMs,
+        ...(input.signal ? { signal: input.signal } : {}),
+      },
+      input.claudeDeps,
+    ).catch((error: unknown) => {
+      throw new Error(error instanceof Error && error.message.endsWith("timed out") ? "safety judge timed out" : error instanceof Error ? error.message : String(error))
+    })
+    return answer.text
+  }
+  if (!client) throw new Error(`no OpenCode server is running for the ${input.model.providerID}/${input.model.modelID} judge`)
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(new Error("safety judge timed out")), input.timeoutMs)
   const onParentAbort = () => controller.abort(input.signal?.reason)
@@ -132,7 +170,7 @@ async function runJudgeSession(
   }
 }
 
-export async function judgeCommand(client: OpencodeClient, input: JudgeInput): Promise<SafetyVerdict> {
+export async function judgeCommand(client: OpencodeClient | undefined, input: JudgeInput): Promise<SafetyVerdict> {
   try {
     const text = await runJudgeSession(client, {
       directory: input.directory,
@@ -141,6 +179,8 @@ export async function judgeCommand(client: OpencodeClient, input: JudgeInput): P
       text: renderRequest(input.request),
       signal: input.signal,
       timeoutMs: input.timeoutMs ?? defaultTimeoutMs,
+      ...(input.claudeAuth ? { claudeAuth: input.claudeAuth } : {}),
+      ...(input.claudeDeps ? { claudeDeps: input.claudeDeps } : {}),
     })
     const verdict = parseVerdict(text)
     if (!verdict) {
@@ -165,7 +205,7 @@ export type ExplainInput = JudgeInput & {
  * Unlike `judgeCommand`, this is not fail-closed: on error or timeout it returns
  * a human-readable fallback string instead of throwing.
  */
-export async function explainCommand(client: OpencodeClient, input: ExplainInput): Promise<string> {
+export async function explainCommand(client: OpencodeClient | undefined, input: ExplainInput): Promise<string> {
   try {
     const text = await runJudgeSession(client, {
       directory: input.directory,
@@ -174,6 +214,8 @@ export async function explainCommand(client: OpencodeClient, input: ExplainInput
       text: renderRequest(input.request, input.verdictReason),
       signal: input.signal,
       timeoutMs: input.timeoutMs ?? defaultExplainTimeoutMs,
+      ...(input.claudeAuth ? { claudeAuth: input.claudeAuth } : {}),
+      ...(input.claudeDeps ? { claudeDeps: input.claudeDeps } : {}),
     })
     return text || "the judge returned an empty explanation"
   } catch (error) {

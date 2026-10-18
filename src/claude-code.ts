@@ -9,6 +9,9 @@ import { withoutHerdrEnv } from "./herdr"
 import { log } from "./log"
 import { openSessionCommand, shellQuote, type SessionWindowBackend } from "./opencode"
 import { baseAgentName } from "./runners/agent-source"
+import { resolveClaudeAuth } from "./runners/claude/auth"
+import { applyAuthOverlay } from "./runners/claude/effective-auth"
+import type { AuthenticationSelection } from "./runners/contracts"
 import type { ProgressMessage, ProgressTokens, ProgressUI } from "./progress"
 import { stepRunnerFor } from "./step-runners"
 import type { AgentStep, Pipeline } from "./types"
@@ -580,4 +583,44 @@ async function readClaudeSessionDirectories(runDir: string, sessionID: string): 
 
 function claudeSessionDirectoriesPath(runDir: string, sessionID: string): string {
   return join(runDir, "logs", `claude-${encodeURIComponent(sessionID)}-directories.json`)
+}
+
+/**
+ * The shell prefix that gives an interactive Claude client the reviewed
+ * billing source, as the headless adapter's overlay does: subscription drops
+ * ambient API credentials so the operator's login is used, and api-key reads
+ * the key from its named variable at launch. Only variable names are typed,
+ * never a credential value, so nothing secret lands in argv or the pane.
+ */
+export function claudeAuthShellPrefix(auth: AuthenticationSelection = { mode: "subscription" }): string {
+  if (auth.mode === "api-key") {
+    const ref = auth.credentialRef
+    if (!ref || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(ref)) throw new Error("Claude api-key mode needs credentialRef naming the variable that holds the key")
+    return `unset ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN; ANTHROPIC_API_KEY="$${ref}"`
+  }
+  return "unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN;"
+}
+
+/**
+ * Opens an interactive Claude session in the checkout for a human iteration
+ * or authoring conversation: a normal Claude client with its own permission
+ * prompts, under the reviewed authentication. `resume` reopens that exact
+ * session; without it a fresh conversation starts.
+ */
+export async function openClaudeInteractiveWindow(input: { targetDir: string; auth?: AuthenticationSelection; resume?: string; label?: string }): Promise<SessionWindowBackend> {
+  const args = [claudeBinaryName, ...(input.resume ? ["--resume", input.resume] : [])].map(shellQuote).join(" ")
+  return openSessionCommand(`${claudeAuthShellPrefix(input.auth)} ${args}`, input.targetDir, input.label ?? "claude session")
+}
+
+/** Runs an interactive Claude client in this terminal until it exits, under the reviewed authentication. */
+export async function runInteractiveClaude(input: { targetDir: string; auth?: AuthenticationSelection; resume?: string }): Promise<number> {
+  const resolution = resolveClaudeAuth({ selection: input.auth ?? { mode: "subscription" } })
+  const proc = Bun.spawn([claudeBinaryName, ...(input.resume ? ["--resume", input.resume] : [])], {
+    cwd: input.targetDir,
+    stdin: "inherit",
+    stdout: "inherit",
+    stderr: "inherit",
+    env: applyAuthOverlay(withoutHerdrEnv(process.env), resolution),
+  })
+  return proc.exited
 }

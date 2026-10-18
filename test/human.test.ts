@@ -85,6 +85,38 @@ describe("runHumanReviewGate", () => {
     await expect(readFile(join(workspace.dir, "reports", "human-review.md"), "utf8")).resolves.toContain("- Result: approved")
   })
 
+  // A Claude-only run never boots OpenCode, so its human gate iterates with
+  // Claude under the run's reviewed authentication instead.
+  test("without an OpenCode server the iteration opens Claude, and its changes commit with the run trailer", async () => {
+    const { workspace, options } = await fixture()
+    const changed = join(options.targetDir, "claude-fix.md")
+    const opened: Array<{ targetDir: string; auth?: unknown }> = []
+    const { calls, progress } = progressWithActions(["iterate", "continue"])
+    await runHumanReviewGate(
+      workspace,
+      { ...options, claudeAuth: { mode: "subscription" } },
+      undefined,
+      progress,
+      undefined,
+      "human-review",
+      {
+        openInteractiveOpencodeWindow: async () => {
+          throw new Error("OpenCode must not be opened for a Claude-only run")
+        },
+        openClaudeInteractiveWindow: async (input) => {
+          opened.push(input)
+          await writeFile(changed, "edited in Claude\n")
+          return "terminal"
+        },
+      },
+    )
+    expect(opened).toMatchObject([{ targetDir: options.targetDir, auth: { mode: "subscription" } }])
+    expect(calls.activities).toContain("Claude iteration opened in terminal; return here and press c to continue")
+    const log = Bun.spawnSync(["git", "log", "-1", "--format=%B"], { cwd: options.targetDir }).stdout.toString()
+    expect(log).toContain(`Convoy-Run: ${workspace.runID}`)
+    await expect(readFile(join(workspace.dir, "reports", "human-review.md"), "utf8")).resolves.toContain("- Manual Claude iterations: 1")
+  })
+
   test("an iteration's committed changes carry the run trailer and describe the staged paths", async () => {
     const { workspace, options } = await fixture()
     // A human iteration leaves an uncommitted change behind; the "continue"

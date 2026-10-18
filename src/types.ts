@@ -342,7 +342,12 @@ export type RunPlan = {
   feature?: FeaturePlanLink
   pipeline: Pipeline
   modelRouting: { gateway: ModelGateway }
-  smartJudge?: { model: ResolvedModel }
+  /**
+   * The smart auto-accept judge route. `runner` absent means OpenCode; a
+   * `claude-code` judge runs through the Claude CLI under the run's Claude
+   * authentication, so a Claude-only plan needs no OpenCode to judge.
+   */
+  smartJudge?: { model: ResolvedModel; runner?: "claude-code" }
   hooks: HookSet
   attachments: string[]
   /**

@@ -59,9 +59,7 @@ export function buildRunPlan(input: BuildRunPlanInput): RunPlan {
   })
   const claudeAuthMode = input.claudeAuthMode ?? input.claudeAuth?.mode
   if (claudeAuthMode) registerClaudeAuth(pipeline, claudeAuthMode)
-  const judge = input.smart
-    ? resolveModel(input.smartJudgeModel, gateway, overrides)
-    : undefined
+  const judge = input.smart ? resolveJudge(input.smartJudgeModel, gateway, overrides) : undefined
   const hooks = hooksForPlan(input, pipeline.name)
   return deepFreeze({
     prompt: { source: input.promptSource ?? (input.resumeRunID ? "resume" : "inline"), text: input.prompt },
@@ -75,7 +73,7 @@ export function buildRunPlan(input: BuildRunPlanInput): RunPlan {
     },
     pipeline,
     modelRouting: { gateway },
-    ...(judge ? { smartJudge: { model: judge } } : {}),
+    ...(judge ? { smartJudge: judge } : {}),
     hooks,
     attachments: [...input.files],
     ...(input.openspec ? { openspec: input.openspec } : {}),
@@ -94,6 +92,35 @@ export function buildRunPlan(input: BuildRunPlanInput): RunPlan {
         }
       : {}),
   })
+}
+
+/**
+ * The judge route: `claude-code/<model>` judges through the Claude CLI and is
+ * never gateway-routed (Claude's model id is opaque to OpenCode's catalog);
+ * anything else is an OpenCode model routed like a step's.
+ */
+function resolveJudge(configured: string, gateway: ModelGateway, overrides: ModelRoutingOverrides): NonNullable<RunPlan["smartJudge"]> {
+  const scoped = parseModelOverride(configured)
+  if (scoped.scope === "claude-code") {
+    const modelID = normalizeStepRunnerModel("claude-code", scoped.model || "haiku")
+    return {
+      runner: "claude-code",
+      model: { configured, logical: modelID, gateway: "configured", providerID: "claude-code", modelID, target: `claude-code/${modelID}` },
+    }
+  }
+  return { model: resolveModel(configured, gateway, overrides) }
+}
+
+/** Every runner an agent step of the pipeline (goal fragments included) executes on. */
+export function pipelineRunners(pipeline: Pipeline): Set<"opencode" | "claude-code"> {
+  const steps: Step[] = [...pipeline.steps, ...(pipeline.goalPlan ? [...pipeline.goalPlan.improve.steps, ...pipeline.goalPlan.measure.steps] : [])]
+  return new Set(steps.flatMap((step) => (step.type === "agent" ? [stepRunnerFor(step.runner).id] : [])))
+}
+
+/** True when every agent step runs on Claude: such a plan never needs OpenCode by default. */
+export function isClaudeOnlyPipeline(pipeline: Pipeline): boolean {
+  const runners = pipelineRunners(pipeline)
+  return runners.size > 0 && !runners.has("opencode")
 }
 
 export type AdvisorPlanOverrides = {
