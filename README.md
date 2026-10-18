@@ -79,3 +79,7 @@ Every pipeline is YAML you can copy and change. [Models, steps, and stopping rul
 | [Permissions and safety](docs/safety.md) | Approval policies, commits, compaction, and publication |
 | [Models and providers](docs/models.md) | Authentication and model gateways |
 | [Development](docs/development.md) | Building, testing, and the source layout |
+
+## License
+
+[MIT](LICENSE) © Iñaki Tajes
