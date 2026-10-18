@@ -65,8 +65,8 @@ export function isReadOnlyHelperCommand(command: string, cwd = process.cwd()): b
   const reads = inspectionReads(command)
   if (!reads) return false
   const policy: PolicyConfig = { mode: "read-only", approvals: "auto", writeRoots: [cwd], readRoots: [], denyRoots: [convoySecretsDir()], cwd }
-  return (reads.paths.length > 0 ? reads.paths : [undefined]).every(
-    (path) => evaluateAction({ tool: "shell", intent: "read", ...(path !== undefined ? { resource: path } : {}), ...(reads.tree ? { scope: "tree" as const } : {}), cwd }, policy).effect === "allow",
+  return reads.every(
+    (read) => evaluateAction({ tool: "shell", intent: "read", ...(read.path !== undefined ? { resource: read.path } : {}), ...(read.tree ? { scope: "tree" as const } : {}), cwd }, policy).effect === "allow",
   )
 }
 

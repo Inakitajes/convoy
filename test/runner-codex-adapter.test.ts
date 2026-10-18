@@ -140,6 +140,59 @@ describe("codex approvals", () => {
     }
   })
 
+  test("no option, expansion or glob spelling carries an inspection past a protected path", async () => {
+    const dir = await checkout()
+    const ctx = context(writePolicy(dir, { mode: "read-only", approvals: "interactive" }))
+    const secret = join(dir, ".private", "token")
+    for (const command of [
+      // An option the classifier took for one with a value swallowed the path.
+      `cat -n ${secret}`,
+      `wc -c ${secret}`,
+      `grep -c . ${secret}`,
+      `rg -c secret ${secret}`,
+      `ls -C ${join(dir, ".private")}`,
+      `head -n ${secret}`,
+      // The shell, not the classifier, decides what these name.
+      "cat $XDG_CONFIG_HOME/gh/hosts.yml",
+      'cat "$SECRET_FILE"',
+      "cat ~root/.ssh/id_rsa",
+      `cat ${dir}/{.private,x}/token`,
+      `cat ${dir}/.priv*/token`,
+      `rg -n x ${dir}/.*`,
+      `RIPGREP_CONFIG_PATH=${dir}/rc rg foo`,
+    ]) {
+      expect({ command, verdict: await decideCommand(ctx, command, dir) }).toMatchObject({ command, verdict: { accept: false } })
+    }
+    for (const command of ["cat -n math.js", "wc -l src/a.ts", "grep -c foo math.js", "ls -C src", "rg -n 'foo$' src", "head -n 20 math.js", "tail -n +5 math.js", "cat src/*.ts", "rg -g '*.ts' -e subtract src"]) {
+      expect({ command, verdict: await decideCommand(ctx, command, dir) }).toMatchObject({ command, verdict: { accept: true } })
+    }
+  })
+
+  test("git inspection checks its paths and never writes a ref, reads outside the repository, or runs a program", async () => {
+    const dir = await checkout()
+    const ctx = context(writePolicy(dir, { mode: "read-only", approvals: "interactive" }))
+    const secret = join(dir, ".private", "token")
+    for (const command of [
+      "git branch -D other",
+      "git branch new-branch",
+      "git branch -m old new",
+      "git diff --no-index /etc/passwd /dev/null",
+      "git diff /etc/passwd /dev/null",
+      `git show -- ${secret}`,
+      "git grep --no-index secret /etc/hosts",
+      "git grep -O vim x",
+      "git -c diff.external=./x diff",
+      "git -cdiff.external=./x diff",
+      "git log --ext-diff -p",
+      `git -C ${join(dir, ".private")} status`,
+    ]) {
+      expect({ command, verdict: await decideCommand(ctx, command, dir) }).toMatchObject({ command, verdict: { accept: false } })
+    }
+    for (const command of ["git branch", "git branch -a -v", "git branch --show-current", "git branch --list 'feat/*'", "git log --oneline -n 5", "git diff --stat HEAD~1", "git show HEAD:math.js", "git grep -n subtract", "git -C src status --short", "git --no-pager log -p math.js"]) {
+      expect({ command, verdict: await decideCommand(ctx, command, dir) }).toMatchObject({ command, verdict: { accept: true } })
+    }
+  })
+
   test("a hard-denied spelling stays denied even when it only reads", async () => {
     const dir = await checkout()
     const policy = writePolicy(dir, { commands: { "*": "ask", "cat *.env*": "deny" } })

@@ -137,8 +137,8 @@ export async function decideCommand(context: ApprovalContext, command: string, c
   const script = unwrapShellScript(command)
   const reads = inspectionReads(script)
   if (reads && !commandHardDenied(script, context.policy.commands ?? {})) {
-    const decisions = (reads.paths.length > 0 ? reads.paths : [undefined]).map((path) =>
-      evaluateAction({ tool: "shell", intent: "read", ...(path !== undefined ? { resource: path } : {}), ...(reads.tree ? { scope: "tree" as const } : {}), ...(cwd ? { cwd } : {}) }, context.policy, { advisorSatisfied: true }),
+    const decisions = reads.map((read) =>
+      evaluateAction({ tool: "shell", intent: "read", ...(read.path !== undefined ? { resource: read.path } : {}), ...(read.tree ? { scope: "tree" as const } : {}), ...(cwd ? { cwd } : {}) }, context.policy, { advisorSatisfied: true }),
     )
     const denied = decisions.find((decision) => decision.effect !== "allow")
     return denied ? { accept: false, reason: denied.reason } : { accept: true, reason: "read-only inspection" }

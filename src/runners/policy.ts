@@ -166,21 +166,49 @@ function substitutions(command: string): string[] {
 }
 
 /**
+ * One word of a simple command, quoting removed, with what the shell would
+ * still do to it: `glob` when it holds an unquoted `*`, `?` or `[`, and
+ * `opaque` when its final text is not knowable from the line — a variable
+ * (other than a leading `$HOME`), a brace expansion, or `~user`.
+ */
+export type ShellWord = { text: string; glob: boolean; opaque: boolean }
+
+const leadingHome = /^(\$HOME|\$\{HOME\})(\/|$)/
+
+/**
  * Splits a command into simple commands as the shell would — on unquoted
  * separators and grouping characters — then removes quoting and escapes from
  * each word. Unbalanced quotes run to the end, as a conservative reading.
  */
 function simpleCommands(command: string): string[][] {
-  const commands: string[][] = []
-  let words: string[] = []
+  return shellWordCommands(command).map((words) => words.map((word) => word.text))
+}
+
+function shellWordCommands(command: string): ShellWord[][] {
+  const commands: ShellWord[][] = []
+  let words: ShellWord[] = []
   let word = ""
   let inWord = false
   let quote: "'" | '"' | undefined
+  let glob = false
+  let opaque = false
+  let variables: number[] = []
+  let tilde = false
   const endWord = () => {
-    if (inWord) words.push(word)
+    if (inWord) {
+      const homeOnly = variables.length === 1 && variables[0] === 0 && leadingHome.test(word)
+      words.push({ text: word, glob, opaque: opaque || (variables.length > 0 && !homeOnly) || (tilde && !/^~(\/|$)/.test(word)) })
+    }
     word = ""
     inWord = false
+    glob = false
+    opaque = false
+    variables = []
+    tilde = false
   }
+  // A `$` the shell expands: not single-quoted, and followed by a name, a
+  // special parameter, a brace, or (unquoted) an ANSI-C or locale string.
+  const expands = (i: number, quoted: boolean) => /[A-Za-z0-9_{@*#?!$-]/.test(command[i + 1] ?? "") || (!quoted && /['"]/.test(command[i + 1] ?? ""))
   const endCommand = () => {
     endWord()
     if (words.length > 0) commands.push(words)
@@ -196,7 +224,10 @@ function simpleCommands(command: string): string[][] {
     if (quote === '"') {
       if (char === '"') quote = undefined
       else if (char === "\\" && i + 1 < command.length) word += command[++i]
-      else word += char
+      else {
+        if (char === "$" && expands(i, true)) variables.push(word.length)
+        word += char
+      }
       continue
     }
     if (char === "'" || char === '"') {
@@ -210,6 +241,10 @@ function simpleCommands(command: string): string[][] {
     } else if (/\s/.test(char)) {
       endWord()
     } else {
+      if (char === "$" && expands(i, false)) variables.push(word.length)
+      else if (/[*?[]/.test(char)) glob = true
+      else if (char === "{") opaque = true
+      else if (char === "~" && !inWord) tilde = true
       word += char
       inWord = true
     }
@@ -274,6 +309,21 @@ export function unwrapShellScript(command: string): string {
 /** True when any spelling of a command line is hard-denied by the ruleset. */
 export function commandHardDenied(command: string, rules: Readonly<Record<string, CommandEffect>>): boolean {
   return chainedCommandEffect(command, rules) === "deny"
+}
+
+/**
+ * The words of each simple command a line runs, with what the shell still
+ * expands in each (see `ShellWord`), and whether assignments, reserved words
+ * or wrappers came before them (`prefixed`): `FOO=x cat a` runs `cat a` in a
+ * changed environment.
+ */
+export function commandShellWords(command: string): { words: ShellWord[]; prefixed: boolean }[] {
+  return shellWordCommands(command)
+    .map((words) => {
+      const kept = effectiveWords(words.map((word) => word.text)).length
+      return { words: words.slice(words.length - kept), prefixed: kept !== words.length }
+    })
+    .filter((command) => command.words.length > 0)
 }
 
 /** The words of each simple command a line runs, quoting removed (see `simpleCommands`). */

@@ -184,6 +184,10 @@ describe("Codex helper inference", () => {
   test("only plain inspection commands count as read-only", () => {
     for (const command of ["ls -la", "cat a.ts | head -5", "git diff --stat", "rg foo src", "/bin/zsh -lc 'git status'", "find . -name '*.ts'"]) expect(isReadOnlyHelperCommand(command)).toBe(true)
     for (const command of ["git push", "rm a", "cat a > b", "echo $(id)", "find . -delete", "npm test", "ls; curl x"]) expect(isReadOnlyHelperCommand(command)).toBe(false)
+    // Option and expansion spellings that once hid the path they read.
+    for (const command of [`cat -n ${convoySecretsDir()}/x`, `wc -c ${convoySecretsDir()}/x`, "cat $XDG_CONFIG_HOME/x", "git diff --no-index /etc/passwd /dev/null", "git branch -D main"]) {
+      expect({ command, readOnly: isReadOnlyHelperCommand(command) }).toEqual({ command, readOnly: false })
+    }
   })
 })
 
