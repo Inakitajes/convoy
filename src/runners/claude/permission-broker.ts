@@ -14,14 +14,9 @@ import { decideToolCall, type PreToolUseInput } from "./hook"
 
 import type { PolicyConfig, PolicyDecision, PolicyState } from "../policy"
 
-export type PermissionAsk = {
-  tool: string
-  resource?: string
-  reason: string
-}
+import type { ApprovalProvider, PermissionAsk } from "../attempt-bridge"
 
-/** Resolves an `ask` to a boolean operator decision. */
-export type ApprovalProvider = (ask: PermissionAsk) => Promise<boolean>
+export type { ApprovalProvider, PermissionAsk }
 
 export type ResolvePermissionInput = {
   call: PreToolUseInput

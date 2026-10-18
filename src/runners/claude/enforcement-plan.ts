@@ -10,10 +10,12 @@
  * `CONVOY_CLAUDE_*` variables only override the commands.
  */
 
-import { convoySourceEntry, isOfficialStandaloneExecutable } from "../../update"
+import { convoySubcommandArgv, shellCommandLine } from "../subcommand"
 import { buildPermissionPromptTool } from "./permission-broker"
 import { buildClaudeSettings, buildPermissionMcpConfig } from "./settings"
 import type { EnforcementPlan } from "./enforcement"
+
+export { convoySubcommandArgv, shellCommandLine }
 
 export type EnforcementCommands = {
   /** Shell command Claude runs before every tool call (the PreToolUse hook). */
@@ -42,21 +44,6 @@ export function claudeEnforcementFromEnv(env: NodeJS.ProcessEnv = process.env): 
   const permissionCommand = env.CONVOY_CLAUDE_MCP_COMMAND
   if (!hookCommand || !permissionCommand) return undefined
   return buildEnforcementPlan({ hookCommand, permissionCommand })
-}
-
-/**
- * The argv that re-invokes this Convoy with an internal subcommand: a release
- * executable runs `execPath <sub>`, a source checkout re-runs its entry script
- * with the same runtime flags.
- */
-export function convoySubcommandArgv(sub: string, standalone = isOfficialStandaloneExecutable()): string[] {
-  if (standalone) return [process.execPath, sub]
-  return [process.execPath, ...process.execArgv, convoySourceEntry, sub]
-}
-
-/** POSIX-quotes an argv into one shell command line (Claude runs hooks through a shell). */
-export function shellCommandLine(argv: readonly string[]): string {
-  return argv.map((arg) => (/^[\w@%+=:,./-]+$/.test(arg) ? arg : `'${arg.replace(/'/g, `'\\''`)}'`)).join(" ")
 }
 
 /** The enforcement plan that routes Claude's hook and permission host to this Convoy. */

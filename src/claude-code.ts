@@ -1,17 +1,19 @@
-import { mkdir, open, readFile, writeFile } from "node:fs/promises"
-import { dirname, isAbsolute, join, relative } from "node:path"
+import { mkdir, readFile, writeFile } from "node:fs/promises"
+import { isAbsolute, join, relative } from "node:path"
 import { fileURLToPath } from "node:url"
 
 import type { FilePartInput } from "./opencode-client"
 
 import { withoutHerdrEnv } from "./herdr"
-import { log } from "./log"
+import { ndjsonLines } from "./ndjson"
+import { RawStreamLog } from "./raw-stream-log"
 import { openSessionCommand, shellQuote, type SessionWindowBackend } from "./opencode"
 import { resolveClaudeAuth } from "./runners/claude/auth"
 import { applyAuthOverlay } from "./runners/claude/effective-auth"
 import type { AuthenticationSelection } from "./runners/contracts"
 import type { ProgressMessage, ProgressTokens, ProgressUI } from "./progress"
 import { stepRunnerFor } from "./step-runners"
+import { ensureRunnersAvailable, whichOnPath } from "./runner-installation"
 import type { Pipeline } from "./types"
 
 /**
@@ -21,6 +23,8 @@ import type { Pipeline } from "./types"
  * `[o]`) or an interactive window under the reviewed auth overlay. Attempts
  * themselves run through the adapter, never through this module.
  */
+
+export { ndjsonLines }
 
 export const claudeBinaryName = "claude"
 
@@ -41,30 +45,16 @@ export function pipelineUsesClaudeCode(pipeline: Pipeline): boolean {
   return pipeline.steps.some((step) => step.type === "agent" && step.runner === "claude-code")
 }
 
+export { whichOnPath }
+
 /**
  * Fail-fast dependency check: Claude Code is optional — only a pipeline that
  * actually contains a claude-code step requires the CLI, and it must fail at
- * launch, never minutes into a run.
+ * launch, never minutes into a run. (The runner-generic check is
+ * `ensureRunnersAvailable`.)
  */
-/**
- * Resolves a binary against the current `PATH`. `Bun.which` alone reads the
- * PATH the process started with, while spawning resolves against the live
- * environment, so a check without this can disagree with the launch it guards.
- */
-export function whichOnPath(bin: string): string | null {
-  return Bun.which(bin, { PATH: process.env.PATH ?? "" })
-}
-
 export function ensureClaudeAvailable(pipeline: Pipeline, which: (bin: string) => string | null = whichOnPath) {
-  if (!pipelineUsesClaudeCode(pipeline)) return
-  if (which(claudeBinaryName)) return
-  const steps = pipeline.steps
-    .filter((step) => step.type === "agent" && step.runner === "claude-code")
-    .map((step) => step.name)
-    .join(", ")
-  throw new Error(
-    `pipeline "${pipeline.name}" uses runner: claude-code (steps: ${steps}) but the \`claude\` CLI was not found in PATH; install Claude Code (https://code.claude.com) or remove those steps`,
-  )
+  ensureRunnersAvailable(pipeline, which, ["claude-code"])
 }
 
 /** Display label for attempt lines and usage rows, mirroring provider/model formatting. */
@@ -263,64 +253,8 @@ function isWithin(path: string, root: string): boolean {
   return pathFromRoot === "" || (!pathFromRoot.startsWith("..") && !isAbsolute(pathFromRoot))
 }
 
-/** Tees a Claude attempt's raw stream-json lines to an owner-only file; a write failure warns once and never fails the attempt. */
-export class ClaudeRawStreamLog {
-  private file: Awaited<ReturnType<typeof open>> | undefined
-  private failed = false
-
-  constructor(private readonly path: string, private readonly phaseName: string) {}
-
-  async append(line: string) {
-    if (this.failed) return
-    try {
-      const file = await this.openFile()
-      await file.write(`${line}\n`)
-    } catch (error) {
-      await this.fail(error)
-    }
-  }
-
-  async close() {
-    try {
-      await this.file?.close()
-      this.file = undefined
-    } catch (error) {
-      await this.fail(error)
-    }
-  }
-
-  private async openFile() {
-    if (this.file) return this.file
-    await mkdir(dirname(this.path), { recursive: true, mode: 0o700 })
-    this.file = await open(this.path, "w", 0o600)
-    await this.file.chmod(0o600)
-    return this.file
-  }
-
-  private async fail(error: unknown) {
-    if (this.failed) return
-    this.failed = true
-    await this.file?.close().catch(() => undefined)
-    this.file = undefined
-    log.warn(`[${this.phaseName}] couldn't write claude stream log: ${error instanceof Error ? error.message : String(error)}`)
-  }
-}
-
-export async function* ndjsonLines(stream: ReadableStream<Uint8Array>): AsyncGenerator<string> {
-  const decoder = new TextDecoder()
-  let buffer = ""
-  for await (const chunk of stream) {
-    buffer += decoder.decode(chunk, { stream: true })
-    const lines = buffer.split("\n")
-    buffer = lines.pop() ?? ""
-    for (const line of lines) {
-      const trimmed = line.trim()
-      if (trimmed) yield trimmed
-    }
-  }
-  const tail = (buffer + decoder.decode()).trim()
-  if (tail) yield tail
-}
+/** Tees a Claude attempt's raw stream-json lines to an owner-only file (the shared raw stream log). */
+export const ClaudeRawStreamLog = RawStreamLog
 
 // ---------------------------------------------------------------------------
 // post-step interactive resume ([o] on a finished claude-code step)

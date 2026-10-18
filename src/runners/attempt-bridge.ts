@@ -1,12 +1,13 @@
 /**
- * Claude approval bridge (change `runner-parity-opencode-v2`, task 6.5).
+ * The attempt bridge (change `runner-parity-opencode-v2`, task 6.5; shared by
+ * the CLI runners since `add-codex-runner`).
  *
- * Claude's permission host (`convoy mcp`) is a grandchild of the coordinator,
- * so an ask-level decision cannot reach the operator in process. The adapter
- * starts this loopback endpoint per attempt and hands the permission host its
- * URL and a random bearer token through the child environment; the host
- * forwards each `ask` here and the attempt's approval service decides it the
- * way OpenCode's permission gate does.
+ * Convoy's MCP host (`convoy mcp`) is a grandchild of the coordinator, so an
+ * ask-level decision, a `write_report` submission, or an advisor consultation
+ * cannot reach the attempt in process. The adapter starts this loopback
+ * endpoint per attempt and hands the host its URL and a random bearer token;
+ * the host forwards each call here and the attempt's services decide it the
+ * way OpenCode's permission gate and tools do.
  *
  * A caller without the token is refused, and every failure — an unreachable
  * bridge, a bad response, a rejected token — denies. The token reaches the
@@ -19,9 +20,17 @@ import { randomBytes, timingSafeEqual } from "node:crypto"
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 
-import { registerSecret } from "../redaction"
-import { convoySecretsDir } from "../../workspace"
-import type { ApprovalProvider, PermissionAsk } from "./permission-broker"
+import { registerSecret } from "./redaction"
+import { convoySecretsDir } from "../workspace"
+
+export type PermissionAsk = {
+  tool: string
+  resource?: string
+  reason: string
+}
+
+/** Resolves an `ask` to a boolean operator decision. */
+export type ApprovalProvider = (ask: PermissionAsk) => Promise<boolean>
 
 export const approvalUrlEnv = "CONVOY_APPROVAL_URL"
 export const approvalTokenEnv = "CONVOY_APPROVAL_TOKEN"
@@ -147,6 +156,11 @@ export async function startClaudeAttemptBridge(handlers: ClaudeAttemptHandlers):
   }
 }
 
+/** The runner-neutral names for the attempt bridge. */
+export const startAttemptBridge = startClaudeAttemptBridge
+export type AttemptHandlers = ClaudeAttemptHandlers
+export type AttemptBridge = ClaudeAttemptBridge
+
 /** Calls one of the attempt's tool routes; any failure is a tool error, never a success. */
 export function attemptToolsClient(env: NodeJS.ProcessEnv = process.env): { tools: ConvoyToolName[]; call(route: string, body: unknown): Promise<Record<string, unknown>> } | undefined {
   const url = env[toolsUrlEnv]
@@ -177,8 +191,8 @@ export function attemptToolsClient(env: NodeJS.ProcessEnv = process.env): { tool
  * Writes the hook's bridge address to an owner-only file under Convoy's
  * private dir; the hook command names only the file's path.
  */
-export async function stagePrivateFile(name: string, contents: string): Promise<{ path: string; discard(): Promise<void> }> {
-  const root = join(convoySecretsDir(), "claude-mcp")
+export async function stagePrivateFile(name: string, contents: string, area = "claude-mcp"): Promise<{ path: string; discard(): Promise<void> }> {
+  const root = join(convoySecretsDir(), area)
   await mkdir(root, { recursive: true, mode: 0o700 })
   const dir = await mkdtemp(join(root, "attempt-"))
   const path = join(dir, name)

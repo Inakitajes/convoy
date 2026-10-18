@@ -11,7 +11,7 @@ import {
   usageFromTokens,
   type ClaudeProcess,
 } from "../src/runners/claude/adapter"
-import { approvalTokenEnv, approvalUrlEnv } from "../src/runners/claude/approval-bridge"
+import { approvalTokenEnv, approvalUrlEnv } from "../src/runners/attempt-bridge"
 import type { EnforcementPlan } from "../src/runners/claude/enforcement"
 import { redactSecrets } from "../src/runners/redaction"
 import { convoySecretsDir } from "../src/workspace"

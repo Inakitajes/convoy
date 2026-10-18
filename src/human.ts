@@ -6,6 +6,10 @@ import { addAllAndCommit } from "./git"
 import { recordLedgeredCommit } from "./finalization/ledger"
 import type { CommitLedgerEntry } from "./finalization/types"
 import { openClaudeInteractiveWindow, runInteractiveClaude } from "./claude-code"
+import { openCodexInteractiveWindow, runInteractiveCodex } from "./codex-cli"
+import { pipelineRunners } from "./run-plan"
+import { stepRunnerFor, stepRunnerIds, type StepRunnerId } from "./step-runners"
+import type { AuthenticationSelection } from "./runners/contracts"
 import { log } from "./log"
 import { openInteractiveOpencodeWindow, serverPasswordEnv } from "./opencode"
 import { resolveOpencodeBin } from "./opencode-runtime"
@@ -23,18 +27,48 @@ type HumanReviewGateDeps = {
   runInteractiveOpencode: typeof runInteractiveOpencode
   openClaudeInteractiveWindow: typeof openClaudeInteractiveWindow
   runInteractiveClaude: typeof runInteractiveClaude
+  openCodexInteractiveWindow: typeof openCodexInteractiveWindow
+  runInteractiveCodex: typeof runInteractiveCodex
 }
 
-const defaultHumanReviewGateDeps: HumanReviewGateDeps = { openInteractiveOpencodeWindow, runInteractiveOpencode, openClaudeInteractiveWindow, runInteractiveClaude }
+const defaultHumanReviewGateDeps: HumanReviewGateDeps = {
+  openInteractiveOpencodeWindow,
+  runInteractiveOpencode,
+  openClaudeInteractiveWindow,
+  runInteractiveClaude,
+  openCodexInteractiveWindow,
+  runInteractiveCodex,
+}
 
 /**
  * The harness a human iteration opens: the run's OpenCode server when it has
- * one, otherwise Claude under the run's reviewed authentication (a Claude-only
- * run never boots OpenCode, so its iterations never need it either).
+ * one, otherwise the CLI runner the plan runs on, under its reviewed
+ * authentication (a run without OpenCode never boots it, so its iterations
+ * never need it either).
  */
-type IterationHarness = { kind: "opencode"; server: ServerAuth } | { kind: "claude-code" }
+type IterationHarness = { kind: "opencode"; server: ServerAuth } | { kind: "cli"; runner: StepRunnerId }
 
-const harnessName = { opencode: "OpenCode", "claude-code": "Claude" } as const
+type CliIteration = {
+  open(deps: HumanReviewGateDeps, input: { targetDir: string; auth?: AuthenticationSelection; label: string }): ReturnType<typeof openClaudeInteractiveWindow>
+  run(deps: HumanReviewGateDeps, input: { targetDir: string; auth?: AuthenticationSelection }): Promise<number>
+}
+
+/** The interactive client of each CLI runner, by runner id. */
+const cliIterations: Partial<Record<StepRunnerId, CliIteration>> = {
+  "claude-code": { open: (deps, input) => deps.openClaudeInteractiveWindow(input), run: (deps, input) => deps.runInteractiveClaude(input) },
+  codex: { open: (deps, input) => deps.openCodexInteractiveWindow(input), run: (deps, input) => deps.runInteractiveCodex(input) },
+}
+
+/** The CLI runner a human iteration uses when the run has no OpenCode server: the plan's first one with an interactive client. */
+function iterationRunner(options: RunOptions): StepRunnerId {
+  const pipeline = options.plan?.pipeline ?? options.pipeline
+  const used = pipeline ? pipelineRunners(pipeline) : new Set<StepRunnerId>()
+  return stepRunnerIds.find((runner) => used.has(runner) && cliIterations[runner]) ?? "claude-code"
+}
+
+function harnessName(harness: IterationHarness): string {
+  return harness.kind === "opencode" ? "OpenCode" : stepRunnerFor(harness.runner).displayName.replace(/ Code$/, "")
+}
 
 export async function runHumanReviewGate(
   workspace: Workspace,
@@ -71,7 +105,7 @@ export async function runHumanReviewGate(
 
   const deps: HumanReviewGateDeps = { ...defaultHumanReviewGateDeps, ...overrides }
   let iterations = 0
-  const harness: IterationHarness = server ? { kind: "opencode", server } : { kind: "claude-code" }
+  const harness: IterationHarness = server ? { kind: "opencode", server } : { kind: "cli", runner: iterationRunner(options) }
   const askAction = async () =>
     askInTui
       ? askInTui({ stepName, iterations })
@@ -87,14 +121,14 @@ export async function runHumanReviewGate(
     for (;;) {
       if (action === "continue") {
         await commitHumanChanges(workspace, options, stepName, metadata)
-        await writeHumanReviewReport(workspace, "approved", iterations, stepName, harness.kind)
+        await writeHumanReviewReport(workspace, "approved", iterations, stepName, harness)
         progress.phaseCompleted(stepName, "approved")
         return
       }
 
       if (action === "iterate") {
         iterations++
-        progress.phaseRunning(stepName, `interactive ${harnessName[harness.kind]} iteration`)
+        progress.phaseRunning(stepName, `interactive ${harnessName(harness)} iteration`)
         if (askInTui) {
           // The external client owns its own permission prompts. Keep
           // Convoy's dashboard gate paused until the user returns to this gate
@@ -120,7 +154,7 @@ export async function runHumanReviewGate(
         continue
       }
 
-      await writeHumanReviewReport(workspace, "aborted", iterations, stepName, harness.kind)
+      await writeHumanReviewReport(workspace, "aborted", iterations, stepName, harness)
       progress.phaseFailed(stepName, "aborted by user")
       throw new Error("aborted by human review")
     }
@@ -240,9 +274,9 @@ async function openExternalIteration(
   harness: IterationHarness,
   progress: ProgressUI,
   stepName: string,
-  deps: Pick<HumanReviewGateDeps, "openInteractiveOpencodeWindow" | "openClaudeInteractiveWindow">,
+  deps: HumanReviewGateDeps,
 ) {
-  const name = harnessName[harness.kind]
+  const name = harnessName(harness)
   progress.phaseActivity(stepName, `opening ${name} iteration in a new window`, "system")
   try {
     const backend =
@@ -252,7 +286,11 @@ async function openExternalIteration(
             ...(harness.server.password ? { password: harness.server.password } : {}),
             targetDir: options.targetDir,
           })
-        : await deps.openClaudeInteractiveWindow({ targetDir: options.targetDir, ...(options.claudeAuth ? { auth: options.claudeAuth } : {}), label: `claude ${stepName}` })
+        : await cliIterations[harness.runner]!.open(deps, {
+            targetDir: options.targetDir,
+            ...(options.runnerAuth?.[harness.runner] ? { auth: options.runnerAuth[harness.runner]! } : {}),
+            label: `${stepRunnerFor(harness.runner).sessionName} ${stepName}`,
+          })
     progress.phaseActivity(stepName, `${name} iteration opened in ${backend}; return here and press c to continue`, "system")
     return true
   } catch (error) {
@@ -267,9 +305,9 @@ async function runSuspendedInteractiveIteration(
   progress: ProgressUI,
   stepName: string,
   permissions: PermissionGate | undefined,
-  deps: Pick<HumanReviewGateDeps, "runInteractiveOpencode" | "runInteractiveClaude">,
+  deps: HumanReviewGateDeps,
 ) {
-  progress.phaseActivity(stepName, `falling back to interactive ${harnessName[harness.kind]} in this terminal`, "system")
+  progress.phaseActivity(stepName, `falling back to interactive ${harnessName(harness)} in this terminal`, "system")
   progress.suspend()
   try {
     await runInteractiveIteration(options, harness, stepName, permissions, deps)
@@ -283,7 +321,7 @@ async function runInteractiveIteration(
   harness: IterationHarness,
   stepName: string,
   permissions: PermissionGate | undefined,
-  deps: Pick<HumanReviewGateDeps, "runInteractiveOpencode" | "runInteractiveClaude">,
+  deps: HumanReviewGateDeps,
 ) {
   // The interactive client answers its own permission prompts; Convoy's
   // gate must not race it for the same requests.
@@ -293,9 +331,13 @@ async function runInteractiveIteration(
       await deps.runInteractiveOpencode(options, harness.server, stepName)
       return
     }
-    log.info(`[${stepName}] handing control to Claude in ${options.targetDir}`)
-    const code = await deps.runInteractiveClaude({ targetDir: options.targetDir, ...(options.claudeAuth ? { auth: options.claudeAuth } : {}) })
-    if (code !== 0) throw new Error(`[${stepName}] interactive Claude exited with code ${code}`)
+    const name = harnessName(harness)
+    log.info(`[${stepName}] handing control to ${name} in ${options.targetDir}`)
+    const code = await cliIterations[harness.runner]!.run(deps, {
+      targetDir: options.targetDir,
+      ...(options.runnerAuth?.[harness.runner] ? { auth: options.runnerAuth[harness.runner]! } : {}),
+    })
+    if (code !== 0) throw new Error(`[${stepName}] interactive ${name} exited with code ${code}`)
   } finally {
     permissions?.resume()
   }
@@ -339,7 +381,7 @@ async function commitHumanChanges(workspace: Workspace, options: RunOptions, ste
   if (committed) log.info(`[${stepName}] committed manual changes (${workspace.runID})`)
 }
 
-async function writeHumanReviewReport(workspace: Workspace, result: "approved" | "aborted", iterations: number, stepName: string, harness: IterationHarness["kind"]) {
+async function writeHumanReviewReport(workspace: Workspace, result: "approved" | "aborted", iterations: number, stepName: string, harness: IterationHarness) {
   const reportPath = join(workspace.dir, "reports", `${stepName}.md`)
   await mkdir(dirname(reportPath), { recursive: true })
   await writeFile(
@@ -348,7 +390,7 @@ async function writeHumanReviewReport(workspace: Workspace, result: "approved" |
       "# human step",
       "",
       `- Result: ${result}`,
-      `- Manual ${harnessName[harness]} iterations: ${iterations}`,
+      `- Manual ${harnessName(harness)} iterations: ${iterations}`,
       "",
     ].join("\n"),
   )

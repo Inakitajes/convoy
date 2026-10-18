@@ -13,9 +13,9 @@ import {
   listClaudeAuthoringCommands,
   validateAuthoringSession,
 } from "../src/conversations"
-import { helperClaudeAuth, helperModel } from "../src/helper-routes"
+import { helperAuth, helperModel } from "../src/helper-routes"
 import { builtInAgents, resolvePipeline } from "../src/pipeline"
-import type { ClaudeInferenceInput } from "../src/runners/claude/inference"
+import type { HelperInferenceInput } from "../src/runners/helper-inference"
 import type { AgentStep } from "../src/types"
 
 const dirs: string[] = []
@@ -37,14 +37,14 @@ describe("helper routes", () => {
   })
 
   test("a Claude commit writer runs one read-only Claude inference, never OpenCode", async () => {
-    let seen: ClaudeInferenceInput | undefined
+    let seen: HelperInferenceInput | undefined
     const proposal = await proposeCommitMessage(
-      { targetDir: "/tmp", branch: "feat/x", commits: ["convoy(implement): add x"], model: "claude-code/haiku", claudeAuth: { mode: "subscription" } },
+      { targetDir: "/tmp", branch: "feat/x", commits: ["convoy(implement): add x"], model: "claude-code/haiku", auth: { mode: "subscription" } },
       {
         startOpencode: async () => {
           throw new Error("OpenCode must not start for a Claude writer")
         },
-        claudeInference: async (input) => {
+        inference: () => async (input) => {
           seen = input
           return { text: JSON.stringify({ type: "feat", subject: "add the x flow", body: ["wire x"] }) }
         },
@@ -54,9 +54,12 @@ describe("helper routes", () => {
     expect(seen).toMatchObject({ model: "haiku", tools: "read-only", auth: { mode: "subscription" }, cwd: "/tmp" })
   })
 
-  test("Claude helpers inherit the configured Claude auth", () => {
-    expect(helperClaudeAuth(undefined)).toEqual({ mode: "subscription" })
-    expect(helperClaudeAuth({ claudeAuth: { authMode: "api-key", credentialRef: "CONVOY_KEY" } })).toEqual({ mode: "api-key", credentialRef: "CONVOY_KEY" })
+  test("CLI helpers inherit their runner's configured auth", () => {
+    expect(helperAuth(undefined, "claude-code/haiku")).toEqual({ mode: "subscription" })
+    expect(helperAuth({ defaults: { claudeAuth: { authMode: "api-key", credentialRef: "CONVOY_KEY" } } }, "claude-code/haiku")).toEqual({ mode: "api-key", credentialRef: "CONVOY_KEY" })
+    expect(helperAuth({ defaults: {}, runners: { codex: { auth: { authMode: "api-key", credentialRef: "CONVOY_OPENAI_KEY" } } } }, "codex/gpt-5.5")).toEqual({ mode: "api-key", credentialRef: "CONVOY_OPENAI_KEY" })
+    // An OpenCode helper authenticates through its own provider configuration.
+    expect(helperAuth({ defaults: {}, runners: { codex: { auth: { authMode: "api-key", credentialRef: "CONVOY_OPENAI_KEY" } } } }, "openai/gpt-5.5")).toEqual({ mode: "subscription" })
   })
 })
 
@@ -76,7 +79,7 @@ defaults:
     runner: claude-code
 `, "config.yaml", "/tmp")
     expect(pipelineDefaultsOf(config.defaults)).toMatchObject({ defaultRunner: "claude-code", defaultAdvisor: "claude-code/opus" })
-    expect(advisorAuthOf(config.defaults)).toEqual({ mode: "subscription" })
+    expect(advisorAuthOf(config)).toEqual({ mode: "subscription" })
     const pipeline = resolvePipeline({ name: "p", spec: { steps: [{ agent: "implementer", model: "sonnet" }] }, agents: builtInAgents, ...pipelineDefaultsOf(config.defaults) })
     const step = pipeline.steps[0] as AgentStep
     expect(step.runner).toBe("claude-code")
@@ -86,7 +89,7 @@ defaults:
   test("an inherited Claude runner refuses an OpenCode model instead of guessing", () => {
     expect(() =>
       resolvePipeline({ name: "p", spec: { steps: [{ agent: "implementer", model: "openai/gpt-5.5" }] }, agents: builtInAgents, defaultRunner: "claude-code" }),
-    ).toThrow(/runs on claude-code through defaults.runner but names the OpenCode model "openai\/gpt-5.5"/)
+    ).toThrow(/runs on claude-code through defaults.runner but names the model "openai\/gpt-5.5", which claude-code does not execute/)
   })
 
   test("claudeAuth defaults to subscription, so a billing policy alone is valid", () => {

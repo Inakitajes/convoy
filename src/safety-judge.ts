@@ -2,7 +2,8 @@ import type { OpencodeClient } from "./opencode-client"
 
 import { log } from "./log"
 import type { AuthenticationSelection } from "./runners/contracts"
-import { claudeInference, type ClaudeInferenceDeps } from "./runners/claude/inference"
+import { helperInferenceFor, type HelperInferenceSeams } from "./runners/helper-inference"
+import { runnerOfModelReference } from "./step-runners"
 
 /** An external classifier's call on whether a permission request is safe to auto-approve. */
 export type SafetyVerdict = { safe: boolean; reason: string }
@@ -18,25 +19,26 @@ export type JudgeRequest = {
 export type JudgeInput = {
   request: JudgeRequest
   /**
-   * The judge route's model. `providerID: "claude-code"` (a `claude-code/<model>`
-   * route) judges through the Claude CLI under `claudeAuth`, so a Claude-only
-   * install needs no OpenCode; any other provider judges on the run's OpenCode
-   * server. The prompt body accepts providerID/modelID only — no variant.
+   * The judge route's model. A runner-qualified route (`providerID` naming a
+   * CLI runner, as `claude-code/<model>` or `codex/<model>`) judges through
+   * that runner's CLI under `auth`, so a Claude- or Codex-only install needs
+   * no OpenCode; any other provider judges on the run's OpenCode server. The
+   * OpenCode prompt body accepts providerID/modelID only — no variant.
    */
-  model: { providerID: string; modelID: string }
+  model: { providerID: string; modelID: string; variant?: string }
   directory: string
   signal?: AbortSignal
   /** Override for the per-request budget; defaults to 20s. */
   timeoutMs?: number
-  /** The reviewed Claude authentication for a Claude-routed judge; defaults to subscription. */
-  claudeAuth?: AuthenticationSelection
-  /** Test seam for the Claude CLI. */
-  claudeDeps?: Partial<ClaudeInferenceDeps>
+  /** The reviewed authentication for a CLI-routed judge; defaults to subscription. */
+  auth?: AuthenticationSelection
+  /** Test seams for the CLI runners. */
+  inferenceSeams?: HelperInferenceSeams
 }
 
-/** True when the judge route runs on the Claude CLI rather than an OpenCode server. */
-export function isClaudeJudge(model: { providerID: string }): boolean {
-  return model.providerID === "claude-code"
+/** True when the judge route runs on a CLI runner rather than an OpenCode server. */
+export function isCliJudge(model: { providerID: string }): boolean {
+  return helperInferenceFor(runnerOfModelReference(model)) !== undefined
 }
 
 const defaultTimeoutMs = 20_000
@@ -88,30 +90,29 @@ async function runJudgeSession(
   client: OpencodeClient | undefined,
   input: {
     directory: string
-    model: { providerID: string; modelID: string }
+    model: { providerID: string; modelID: string; variant?: string }
     system: string
     text: string
     signal?: AbortSignal
     timeoutMs: number
-    claudeAuth?: AuthenticationSelection
-    claudeDeps?: Partial<ClaudeInferenceDeps>
+    auth?: AuthenticationSelection
+    inferenceSeams?: HelperInferenceSeams
   },
 ): Promise<string> {
-  if (isClaudeJudge(input.model)) {
+  const infer = helperInferenceFor(runnerOfModelReference(input.model), input.inferenceSeams)
+  if (infer) {
     // Tool-less, one-shot, under the reviewed auth: it can only classify.
-    const answer = await claudeInference(
-      {
-        prompt: input.text,
-        system: input.system,
-        model: input.model.modelID,
-        auth: input.claudeAuth ?? { mode: "subscription" },
-        cwd: input.directory,
-        tools: "none",
-        timeoutMs: input.timeoutMs,
-        ...(input.signal ? { signal: input.signal } : {}),
-      },
-      input.claudeDeps,
-    ).catch((error: unknown) => {
+    const answer = await infer({
+      prompt: input.text,
+      system: input.system,
+      model: input.model.modelID,
+      ...(input.model.variant ? { variant: input.model.variant } : {}),
+      auth: input.auth ?? { mode: "subscription" },
+      cwd: input.directory,
+      tools: "none",
+      timeoutMs: input.timeoutMs,
+      ...(input.signal ? { signal: input.signal } : {}),
+    }).catch((error: unknown) => {
       throw new Error(error instanceof Error && error.message.endsWith("timed out") ? "safety judge timed out" : error instanceof Error ? error.message : String(error))
     })
     return answer.text
@@ -146,7 +147,7 @@ async function runJudgeSession(
       {
         sessionID,
         directory: input.directory,
-        model: input.model,
+        model: { providerID: input.model.providerID, modelID: input.model.modelID },
         system: input.system,
         // Every tool off: the judge classifies, it never executes.
         tools: { read: false, write: false, edit: false, bash: false, webfetch: false, todoread: false, todowrite: false },
@@ -179,8 +180,8 @@ export async function judgeCommand(client: OpencodeClient | undefined, input: Ju
       text: renderRequest(input.request),
       signal: input.signal,
       timeoutMs: input.timeoutMs ?? defaultTimeoutMs,
-      ...(input.claudeAuth ? { claudeAuth: input.claudeAuth } : {}),
-      ...(input.claudeDeps ? { claudeDeps: input.claudeDeps } : {}),
+      ...(input.auth ? { auth: input.auth } : {}),
+      ...(input.inferenceSeams ? { inferenceSeams: input.inferenceSeams } : {}),
     })
     const verdict = parseVerdict(text)
     if (!verdict) {
@@ -214,8 +215,8 @@ export async function explainCommand(client: OpencodeClient | undefined, input: 
       text: renderRequest(input.request, input.verdictReason),
       signal: input.signal,
       timeoutMs: input.timeoutMs ?? defaultExplainTimeoutMs,
-      ...(input.claudeAuth ? { claudeAuth: input.claudeAuth } : {}),
-      ...(input.claudeDeps ? { claudeDeps: input.claudeDeps } : {}),
+      ...(input.auth ? { auth: input.auth } : {}),
+      ...(input.inferenceSeams ? { inferenceSeams: input.inferenceSeams } : {}),
     })
     return text || "the judge returned an empty explanation"
   } catch (error) {

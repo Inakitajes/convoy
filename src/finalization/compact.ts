@@ -575,7 +575,7 @@ async function composeMessage(input: RunFinalizationInput, interval: Extract<Run
     ...(summary ? { summary } : {}),
     ...(prompt ? { prompt } : {}),
     ...(input.commitMessageModel ? { model: input.commitMessageModel } : {}),
-    ...(input.commitMessageAuth ? { claudeAuth: input.commitMessageAuth } : {}),
+    ...(input.commitMessageAuth ? { auth: input.commitMessageAuth } : {}),
     ...(input.signal ? { signal: input.signal } : {}),
     ...(input.stopPolicy ? { stopPolicy: input.stopPolicy } : {}),
   })

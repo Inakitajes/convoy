@@ -27,7 +27,7 @@ describe("registered attempt dispatch", () => {
 
   test("a run-lifetime composition exposes the registry and the attempts together", () => {
     const composition = composeRunners({ cwd: "/tmp" })
-    expect([...composition.registry.list()].sort()).toEqual(["claude-code", "opencode"])
+    expect([...composition.registry.list()].sort()).toEqual(["claude-code", "codex", "opencode"])
     void composition.close()
   })
 })

@@ -9,7 +9,7 @@
  * adapter honors cannot disagree.
  */
 
-import { claudeDeclaration, opencodeDeclaration } from "./declarations"
+import { runnerDescriptor } from "./descriptors"
 import type {
   Capability,
   CapabilityDeclaration,
@@ -24,14 +24,9 @@ import type {
 /** Runtime/auth/enforcement evidence; same shape as the contract's `CapabilityEvidence`. */
 export type CapabilityInput = CapabilityEvidence
 
-const declarations: Record<RunnerId, CapabilityDeclaration> = {
-  "opencode": opencodeDeclaration,
-  "claude-code": claudeDeclaration,
-}
-
-/** The authoritative declaration for a runner. */
+/** The authoritative declaration for a runner, from its descriptor. */
 export function declarationFor(runner: RunnerId): CapabilityDeclaration {
-  return declarations[runner]
+  return runnerDescriptor(runner).declaration
 }
 
 function reasonText(value: string | ((evidence: CapabilityEvidence) => string), evidence: CapabilityEvidence): string {

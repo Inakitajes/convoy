@@ -7,7 +7,7 @@ import { getSessionEventHub, payloadProperties } from "./event-hub"
 import { log } from "./log"
 import { writeReportToolName } from "./report"
 import { noopProgress, type AutoAccept, type PermissionPromptInfo, type PermissionReply, type ProgressUI } from "./progress"
-import { explainCommand, isClaudeJudge, judgeCommand } from "./safety-judge"
+import { explainCommand, isCliJudge, judgeCommand } from "./safety-judge"
 import { createTerminalInput, type TerminalInput } from "./terminal-input"
 
 type PermissionRequest = {
@@ -65,8 +65,8 @@ export type StartGateOptions = {
   /** When enabled, ask-level requests are auto-allowed ("once") instead of prompting. */
   autoAccept?: AutoAccept
   /** Model used by the smart auto-accept judge; required for "smart" mode to do anything. */
-  judgeModel?: { providerID: string; modelID: string }
-  /** The reviewed Claude authentication a `claude-code/<model>` judge runs under. */
+  judgeModel?: { providerID: string; modelID: string; variant?: string }
+  /** The reviewed authentication a CLI-routed judge (`claude-code/<model>`, `codex/<model>`) runs under. */
   judgeAuth?: AuthenticationSelection
   /**
    * Consulted for `edit` requests before anything else, including --yolo. It is
@@ -162,7 +162,7 @@ async function handleRequest(
   progress: ProgressUI,
   directory: string,
   autoAccept?: AutoAccept,
-  judgeModel?: { providerID: string; modelID: string },
+  judgeModel?: { providerID: string; modelID: string; variant?: string },
   signal?: AbortSignal,
   advisorCheckpoint?: AdvisorCheckpoint,
   terminalInput: TerminalInput = createTerminalInput(),
@@ -222,7 +222,7 @@ async function handleRequest(
   let verdictReason: string | undefined
   if (autoAccept?.mode === "smart" && judgeModel) {
     progress.message(`evaluating safety: ${summary}`)
-    const verdict = await judgeCommand(client, { request: promptInfo(request), model: judgeModel, directory, ...(signal ? { signal } : {}), ...(judgeAuth ? { claudeAuth: judgeAuth } : {}) })
+    const verdict = await judgeCommand(client, { request: promptInfo(request), model: judgeModel, directory, ...(signal ? { signal } : {}), ...(judgeAuth ? { auth: judgeAuth } : {}) })
     if (verdict.safe) {
       log.info(`[permission] smart-allowed: ${summary} — ${verdict.reason}`)
       progress.message(`smart-allowed: ${summary} — ${verdict.reason}`)
@@ -275,7 +275,7 @@ async function handleRequest(
               request: promptInfo(request),
               model: judgeModel,
               directory,
-              ...(judgeAuth ? { claudeAuth: judgeAuth } : {}),
+              ...(judgeAuth ? { auth: judgeAuth } : {}),
               signal: AbortSignal.any([signal ?? new AbortController().signal, new AbortController().signal]),
               verdictReason,
             })
@@ -339,21 +339,21 @@ function promptInfoForUser(
   request: PermissionRequest,
   judgeReason?: string,
   verdictReason?: string,
-  judgeModel?: { providerID: string; modelID: string },
+  judgeModel?: { providerID: string; modelID: string; variant?: string },
   client?: OpencodeClient,
   directory?: string,
   signal?: AbortSignal,
   judgeAuth?: AuthenticationSelection,
 ): PermissionPromptInfo {
   const info = promptInfo(request, judgeReason)
-  if (judgeModel && directory && (client || isClaudeJudge(judgeModel))) {
+  if (judgeModel && directory && (client || isCliJudge(judgeModel))) {
     info.explain = (explainSignal?: AbortSignal) => {
       const combined = signal && explainSignal ? AbortSignal.any([signal, explainSignal]) : (signal ?? explainSignal)
       return explainCommand(client, {
         request: promptInfo(request),
         model: judgeModel,
         directory,
-        ...(judgeAuth ? { claudeAuth: judgeAuth } : {}),
+        ...(judgeAuth ? { auth: judgeAuth } : {}),
         signal: combined,
         verdictReason,
       })
@@ -421,23 +421,24 @@ function serialQueue() {
 }
 
 export type OperatorApprovalOptions = {
-  /** The run's OpenCode client, which hosts an OpenCode-routed smart judge; absent on a Claude-only run. */
+  /** The run's OpenCode client, which hosts an OpenCode-routed smart judge; absent on a run with no OpenCode server. */
   client?: OpencodeClient
-  /** The reviewed Claude authentication a `claude-code/<model>` judge runs under. */
-  claudeAuth?: AuthenticationSelection
+  /** The reviewed authentication a CLI-routed judge (`claude-code/<model>`, `codex/<model>`) runs under. */
+  judgeAuth?: AuthenticationSelection
   progress: ProgressUI
   directory: string
   /** The run's live auto-accept reference, read when each request arrives. */
   autoAccept?: AutoAccept
-  judgeModel?: { providerID: string; modelID: string }
+  judgeModel?: { providerID: string; modelID: string; variant?: string }
   signal?: AbortSignal
   /** The attempt's session, once known. */
   session?: () => string | undefined
 }
 
 /**
- * The approval service for a runner whose asks arrive out of process (Claude's
- * permission host): the same decision order as the OpenCode gate above — live
+ * The approval service for a runner whose asks the engine decides itself
+ * (Claude's permission host, Codex's approval requests): the same decision
+ * order as the OpenCode gate above — live
  * auto-accept, then the smart judge, then the operator — so an ask is never
  * denied merely because it came from the other runner. With no operator UI at
  * all it denies.
@@ -470,7 +471,7 @@ export function createOperatorApprovalService(options: OperatorApprovalOptions):
           model: options.judgeModel,
           directory: options.directory,
           ...(options.signal ? { signal: options.signal } : {}),
-          ...(options.claudeAuth ? { claudeAuth: options.claudeAuth } : {}),
+          ...(options.judgeAuth ? { auth: options.judgeAuth } : {}),
         })
         if (verdict.safe) {
           log.info(`[permission] smart-allowed: ${summary} — ${verdict.reason}`)

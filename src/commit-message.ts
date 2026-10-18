@@ -7,8 +7,8 @@ import type { StopPolicy } from "./process-stop"
 import { splitModelVariant } from "./pipeline"
 import { parseModel } from "./runner"
 import { excerpt } from "./worktree"
-import { claudeHelperModelId, isClaudeHelperModel } from "./helper-routes"
-import { claudeInference } from "./runners/claude/inference"
+import { cliHelperRoute } from "./helper-routes"
+import { helperInferenceFor, type HelperInference } from "./runners/helper-inference"
 import type { AuthenticationSelection } from "./runners/contracts"
 
 /** Read-only tools for the commit writer; translated to V2 session permissions at create. */
@@ -45,10 +45,10 @@ export type CommitMessageInput = {
   /** Subjects of the convoy commits being replaced, newest first. */
   commits: readonly string[]
   diffStat?: string
-  /** Override the model that writes the message (provider/model[#variant], or `claude-code/<model>`). */
+  /** Override the model that writes the message (provider/model[#variant], or a CLI runner's `<runner>/<model>`). */
   model?: string
-  /** The Claude authentication a `claude-code/<model>` writer runs under; defaults to subscription. */
-  claudeAuth?: AuthenticationSelection
+  /** The authentication a CLI runner's writer route runs under; defaults to subscription. */
+  auth?: AuthenticationSelection
   signal?: AbortSignal
   /**
    * Shared cleanup budget for the writer's owned helper (design D2). The
@@ -81,8 +81,8 @@ const defaultCommitType = "feat"
 
 type CommitMessageDeps = {
   startOpencode: typeof startOpencode
-  /** The Claude CLI seam for a `claude-code/<model>` writer. */
-  claudeInference?: typeof claudeInference
+  /** The CLI-runner inference seam for a `<runner>/<model>` writer. */
+  inference?: (runner: Parameters<typeof helperInferenceFor>[0]) => HelperInference | undefined
 }
 
 const defaultCommitMessageDeps: CommitMessageDeps = { startOpencode }
@@ -140,13 +140,16 @@ export async function proposeCommitMessage(
   let error: string | undefined
   try {
     const model = input.model ?? defaultCommitMessageModel
-    if (isClaudeHelperModel(model)) {
-      // A Claude route needs no OpenCode server: one read-only inference.
-      const reply = await (deps.claudeInference ?? claudeInference)({
+    const route = cliHelperRoute(model)
+    const infer = route ? (deps.inference ?? helperInferenceFor)(route.runner) : undefined
+    if (route && infer) {
+      // A CLI runner's route needs no OpenCode server: one read-only inference.
+      const reply = await infer({
         prompt: commitMessagePrompt(input),
         system: commitMessageSystemPrompt,
-        model: claudeHelperModelId(model),
-        auth: input.claudeAuth ?? { mode: "subscription" },
+        model: route.model,
+        ...(route.variant ? { variant: route.variant } : {}),
+        auth: input.auth ?? { mode: "subscription" },
         cwd: input.targetDir,
         tools: "read-only",
         timeoutMs: commitMessageTimeoutMs,

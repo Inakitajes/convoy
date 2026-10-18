@@ -1,14 +1,18 @@
 import { existsSync } from "node:fs"
 
-import { claudeBinaryName, whichOnPath } from "./claude-code"
+import { claudeBinaryName } from "./claude-code"
+import { whichOnPath } from "./runner-installation"
 import { startOpencode, type OpencodeHandle } from "./opencode"
 import { resolveOpencodeBin } from "./opencode-runtime"
-import type { RunPlan } from "./types"
+import type { ReviewedRunnerAuth, RunPlan } from "./types"
 import { type ProviderCatalog, preflightTargets, validatePreflightTargets } from "./preflight-validation"
 import { resolveClaudeAuth } from "./runners/claude/auth"
 import { cliAuthProbe, validateEffectiveAuth, type EffectiveAuthProbe } from "./runners/claude/effective-auth"
+import { codexModelRequirements, preflightCodex, type CodexPreflightInput } from "./runners/codex/preflight"
 import type { RunnerId } from "./runners/contracts"
+import { runnerDescriptor } from "./runners/descriptors"
 import { assertPlanDependenciesAvailable, planDependencyOptions } from "./runners/plan-dependencies"
+import { stepRunnerIds } from "./step-runners"
 
 const preflightTimeoutMs = 15_000
 export type PreflightDiscovery = (directory: string, signal: AbortSignal) => Promise<ProviderCatalog>
@@ -20,11 +24,15 @@ export type PreflightOptions = {
   available?: (runner: RunnerId) => boolean
   /** The Claude effective-auth probe; defaults to `claude auth status --json`. */
   claudeAuthProbe?: EffectiveAuthProbe
+  /** The Codex account and model preflight; defaults to an owned app-server's `account/read` and `model/list`. */
+  codexPreflight?: (input: CodexPreflightInput) => Promise<string | undefined>
   env?: NodeJS.ProcessEnv
 }
 
-function installedRunner(runner: RunnerId): boolean {
-  if (runner === "claude-code") return whichOnPath(claudeBinaryName) !== null
+/** True when the runner's CLI is on PATH (or, for OpenCode, its resolved binary exists). */
+export function installedRunner(runner: RunnerId): boolean {
+  const binary = runnerDescriptor(runner).binary
+  if (binary) return whichOnPath(binary) !== null
   const bin = resolveOpencodeBin()
   return bin.includes("/") ? existsSync(bin) : whichOnPath(bin) !== null
 }
@@ -42,7 +50,12 @@ export async function preflightRunPlan(plan: RunPlan, discover?: PreflightDiscov
   // binary and auth probes then run only when injected too.
   const production = discover === undefined
   assertPlanDependenciesAvailable(plan.pipeline, planDependencyOptions(plan), options.available ?? (production ? installedRunner : () => true))
-  if (plan.claude) await preflightClaude(plan.claude, { ...options, ...(production || options.claudeAuthProbe ? {} : { skipProbe: true }) })
+  for (const runner of stepRunnerIds) {
+    const reviewed = plan.runnerAuth?.[runner]
+    if (!reviewed) continue
+    const injected: Partial<Record<RunnerId, unknown>> = { "claude-code": options.claudeAuthProbe, codex: options.codexPreflight }
+    await preflightRunnerAuth(runner, reviewed, plan, { ...options, ...(production || injected[runner] ? {} : { skipProbe: true }) })
+  }
   const targets = preflightTargets(plan)
   if (targets.length === 0) return
 
@@ -141,7 +154,7 @@ export function withinPreflightTimeout<T>(
 }
 
 /**
- * The Claude route's launch gates (design D3). The CLI offers no control that
+ * A CLI runner's launch gates (design D3). Neither CLI offers a control that
  * enforces included-only usage, so an explicit `included-only` request is
  * refused rather than promised; any other subscription launch may consume
  * usage credits under the account's policy, which the operator accepts by
@@ -149,24 +162,32 @@ export function withinPreflightTimeout<T>(
  * the effective authentication is probed under the exact child overlay, so a
  * legacy or ambiguous setup fails here instead of after earlier steps ran.
  */
-async function preflightClaude(claude: NonNullable<RunPlan["claude"]>, options: PreflightOptions & { skipProbe?: boolean }): Promise<void> {
-  const { auth, billing } = claude
+async function preflightRunnerAuth(runner: RunnerId, reviewed: ReviewedRunnerAuth, plan: RunPlan, options: PreflightOptions & { skipProbe?: boolean }): Promise<void> {
+  const { auth, billing } = reviewed
+  const name = runnerDescriptor(runner).displayName
   if (auth.mode === "subscription" && auth.billingPolicy === "included-only") {
     throw new Error(
-      `Cannot start run\n\nClaude billing: included-only was requested, but ${billing.reason}.\n\n` +
-        "Set defaults.claudeAuth.billingPolicy: account-policy to accept the account's own usage policy (Convoy never changes provider spend settings), or select an explicit api-key route.",
+      `Cannot start run\n\n${name} billing: included-only was requested, but ${billing.reason}.\n\n` +
+        `Set runners.${runner}.auth.billingPolicy: account-policy to accept the account's own usage policy (Convoy never changes provider spend settings), or select an explicit api-key route.`,
     )
   }
   if (auth.mode === "subscription" && auth.billingPolicy === undefined && !options.reviewed) {
     throw new Error(
-      "Cannot start run\n\nClaude billing: an unattended launch must state its billing decision — subscription login alone is not a no-charge guarantee.\n\n" +
-        "Set defaults.claudeAuth.billingPolicy: account-policy (subscription usage credits or paid features may apply), or review the plan interactively.",
+      `Cannot start run\n\n${name} billing: an unattended launch must state its billing decision — subscription login alone is not a no-charge guarantee.\n\n` +
+        `Set runners.${runner}.auth.billingPolicy: account-policy (subscription usage credits or paid features may apply), or review the plan interactively.`,
     )
   }
   if (options.skipProbe) return
   const env = options.env ?? process.env
-  const resolution = resolveClaudeAuth({ selection: auth, env })
-  const probe = options.claudeAuthProbe ?? cliAuthProbe((command, spawnOptions) => Bun.spawn(command, spawnOptions), claudeBinaryName, process.cwd())
-  const effective = await validateEffectiveAuth({ resolution, probe, env })
-  if (!effective.ok) throw new Error(`Cannot start run\n\n${effective.error}\n\nSet defaults.claudeAuth to choose Claude's billing source explicitly.`)
+  const probes: Partial<Record<RunnerId, () => Promise<string | undefined>>> = {
+    "claude-code": async () => {
+      const resolution = resolveClaudeAuth({ selection: auth, env })
+      const probe = options.claudeAuthProbe ?? cliAuthProbe((command, spawnOptions) => Bun.spawn(command, spawnOptions), claudeBinaryName, process.cwd())
+      const effective = await validateEffectiveAuth({ resolution, probe, env })
+      return effective.ok ? undefined : effective.error
+    },
+    codex: async () => (options.codexPreflight ?? preflightCodex)({ selection: auth, models: codexModelRequirements(plan), cwd: plan.target.directory, env }),
+  }
+  const error = await probes[runner]?.()
+  if (error) throw new Error(`Cannot start run\n\n${error}\n\nSet runners.${runner}.auth to choose ${name}'s billing source explicitly.`)
 }

@@ -255,6 +255,22 @@ export function normalizedCommands(command: string, depth = 0): string[] {
   return out
 }
 
+/**
+ * The script a shell wrapper runs (`/bin/zsh -lc 'npm test'` runs
+ * `npm test`), or the command itself when it is not exactly one such wrapper.
+ * A harness that executes every command through the user's login shell hands
+ * Convoy the wrapped form; policy judges the script, so a prefix rule such as
+ * `npm test*` still matches.
+ */
+export function unwrapShellScript(command: string): string {
+  const commands = simpleCommands(command)
+  if (commands.length !== 1) return command
+  const words = commands[0]!
+  const shell = words[0]?.split("/").at(-1)
+  if (!shell || !shells.has(shell) || words.length !== 3 || !/^-[a-z]*c[a-z]*$/.test(words[1]!)) return command
+  return words[2]!.trim() || command
+}
+
 /** The combined effect of a possibly chained command: its strictest segment, unknown segments ask. */
 function chainedCommandEffect(command: string, rules: Readonly<Record<string, CommandEffect>>): CommandEffect {
   // A hard denial anywhere in the raw text wins before any parsing doubt, and

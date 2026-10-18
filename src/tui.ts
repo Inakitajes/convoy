@@ -26,6 +26,7 @@ import { readServerAuth } from "./server-auth"
 import { validateAuthoringSession } from "./conversations"
 import { formatTerminalTitle } from "./run-status"
 import { stepRunnerFor, type StepRunnerId } from "./step-runners"
+import { openCodexSessionWindow } from "./codex-cli"
 import { autoAcceptModeLabel, comparePaletteActions, dashboardActions, shortcutGroupOrder, shortcutGroupTitle } from "./tui-actions"
 import { PhaseUsage, addTokens, emptyTokens } from "./usage"
 import {
@@ -163,6 +164,7 @@ const runnerSessionOpeners: Record<StepRunnerId, (context: RunnerSessionContext)
         ? openVerifiedStoredSessionWindow({ targetDir: context.targetDir, sessionID: context.sessionID, runDir: context.runDir })
         : undefined,
   "claude-code": (context) => openClaudeSessionWindow({ targetDir: context.targetDir, sessionID: context.sessionID, runDir: context.runDir }),
+  codex: (context) => openCodexSessionWindow({ targetDir: context.targetDir, sessionID: context.sessionID }),
 }
 
 // The right-hand content panel is a three-tab view of the focused phase.

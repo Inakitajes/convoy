@@ -1,4 +1,5 @@
-import { normalizeStepRunnerModel, stepRunnerCapabilityReason, stepRunnerFor, type StepRunnerId } from "./step-runners"
+import { defaultStepRunnerId, normalizeStepRunnerModel, stepRunnerCapabilityReason, stepRunnerFor, type StepRunnerDefinition, type StepRunnerId } from "./step-runners"
+import { qualifiedRunnerOf } from "./runners/descriptors"
 import { defaultGoalMaxIterations, defaultGoalPlateau } from "./quality-score"
 import type { AgentSpec, AgentStep, DeliverableContract, HumanStep, Pipeline, ResolvedGoalPlan, ResolvedPipelineFragment, Step, StepRunner } from "./types"
 
@@ -348,7 +349,11 @@ export type AgentStepSpec = {
   model?: string
   /** Fans this step out into one concurrent, forced-read-only invocation per model. Mutually exclusive with `model`. */
   models?: string[]
-  /** Execution engine. Default is OpenCode; "claude-code" spawns the local `claude` CLI under Convoy's hook-enforced policy. */
+  /**
+   * Execution engine. Default is OpenCode (or defaults.runner); "claude-code"
+   * spawns the local `claude` CLI under Convoy's hook-enforced policy, and
+   * "codex" an owned `codex app-server` whose every action Convoy approves.
+   */
   runner?: "opencode" | StepRunner
   /**
    * Advising model consulted at this step's decision points, or `false` to run
@@ -1136,8 +1141,6 @@ function resolveAgentStepSpec(raw: string | AgentStepSpec, ctx: ResolveStepConte
 
   // A step names its runner, or inherits defaults.runner.
   const runnerDefinition = stepRunnerFor(spec.runner ?? ctx.input.defaultRunner)
-  // "opencode" is accepted for symmetry but resolves to the default (no runner field).
-  const runner: StepRunner | undefined = runnerDefinition.id === "claude-code" ? "claude-code" : undefined
   if (!runnerDefinition.capabilities.modelFanout && spec.models !== undefined) {
     const reason = stepRunnerCapabilityReason(runnerDefinition.id, "model-fanout")
     throw new Error(
@@ -1172,37 +1175,71 @@ function resolveAgentStepSpec(raw: string | AgentStepSpec, ctx: ResolveStepConte
       )
     }
   }
-  const advisor = runnerDefinition.capabilities.advisor ? advisorConfigured : undefined
-  const advisorMaxCalls = advisor ? (spec.advisorMaxCalls ?? ctx.input.defaultAdvisorMaxCalls) : undefined
-  if (spec.advisorMaxCalls !== undefined && !advisor) {
+  if (spec.advisorMaxCalls !== undefined && !(advisorConfigured && runnerDefinition.capabilities.advisor)) {
     throw new Error(
       `pipeline "${ctx.input.name}": step ${ctx.position} ("${baseName}") sets advisorMaxCalls without an advisor; add advisor: <model> or remove the cap`,
     )
   }
 
-  // OpenCode inherits the run-wide defaults chain; Claude's models live in the
-  // CLI's own namespace, so a Claude step uses only its own model and otherwise
-  // defers to the CLI default (""). A `models:` fan-out is expanded for either
-  // runner, and each Claude entry is normalized now so an incompatible model
-  // fails visibly instead of being dropped.
-  const claudeModel = (value: string) => {
+  // Each variant runs on the step's runner unless a `models:` entry names its
+  // own (`claude-code/sonnet`, written in config as `{ runner, model }`). A
+  // runner-qualified runner normalizes its model now, so a model it cannot
+  // execute fails visibly instead of being dropped or guessed. A model the
+  // step only inherits (from its agent or defaults.model) applies where the
+  // runner accepts it; otherwise the runner keeps its own default.
+  const normalizeOn = (definition: StepRunnerDefinition, value: string, inheritedRunner: boolean): string => {
     try {
-      return normalizeStepRunnerModel("claude-code", value)
+      return normalizeStepRunnerModel(definition.id, value)
     } catch (error) {
-      // An inherited runner meets a model chosen for OpenCode: say which
-      // setting to change rather than guessing a Claude equivalent.
-      if (spec.runner === undefined) {
+      // An inherited runner meets a model chosen for another runner: say which
+      // setting to change rather than guessing an equivalent.
+      if (inheritedRunner) {
         throw new Error(
-          `pipeline "${ctx.input.name}": step ${ctx.position} ("${baseName}") runs on claude-code through defaults.runner but names the OpenCode model "${value}"; give it a Claude model or set runner: opencode on the step`,
+          `pipeline "${ctx.input.name}": step ${ctx.position} ("${baseName}") runs on ${definition.id} through defaults.runner but names the model "${value}", which ${definition.id} does not execute; give it a model ${definition.id} executes or set runner: on the step`,
         )
       }
       throw error
     }
   }
-  const variants: string[] =
-    runnerDefinition.id === "claude-code"
-      ? (models ?? (spec.model !== undefined ? [spec.model] : [""])).map((value) => (value ? claudeModel(value) : ""))
-      : (models ?? [spec.model ?? agent.model ?? ctx.input.defaultModel ?? agent.defaultModel ?? fallbackModel])
+  const accepted = (definition: StepRunnerDefinition, value: string | undefined): string | undefined => {
+    if (value === undefined || qualifiedRunnerOf(value)) return undefined
+    try {
+      return normalizeStepRunnerModel(definition.id, value)
+    } catch {
+      return undefined
+    }
+  }
+  type Variant = { runner: StepRunnerDefinition; value: string; label: string }
+  const variants: Variant[] = models
+    ? models.map((entry) => {
+        const named = qualifiedRunnerOf(entry)
+        const definition = named ? stepRunnerFor(named) : runnerDefinition
+        const value = normalizeOn(definition, named ? entry.slice(named.length + 1) : entry, !named && spec.runner === undefined)
+        // An entry on the step's own runner keeps its plain name; one on
+        // another runner is named with its runner, so names never collide.
+        return { runner: definition, value, label: named && named !== runnerDefinition.id ? `${named}/${value}` : value }
+      })
+    : [
+        runnerDefinition.qualifiedModels
+          ? (() => {
+              const own = spec.model !== undefined ? normalizeOn(runnerDefinition, spec.model, spec.runner === undefined) : undefined
+              const value = own ?? accepted(runnerDefinition, agent.model) ?? accepted(runnerDefinition, ctx.input.defaultModel) ?? ""
+              return { runner: runnerDefinition, value, label: value }
+            })()
+          : (() => {
+              const inherited = [agent.model, ctx.input.defaultModel].find((candidate) => candidate !== undefined && !qualifiedRunnerOf(candidate))
+              const value = spec.model ?? inherited ?? agent.defaultModel ?? fallbackModel
+              return { runner: runnerDefinition, value, label: value }
+            })(),
+      ]
+  for (const variant of variants) {
+    if (variant.runner.id === runnerDefinition.id) continue
+    if (!variant.runner.capabilities.modelFanout) {
+      throw new Error(
+        `pipeline "${ctx.input.name}": step ${ctx.position} ("${baseName}") fans out to runner: ${variant.runner.id}, which can't run a "models" fan-out (${stepRunnerCapabilityReason(variant.runner.id, "model-fanout")})`,
+      )
+    }
+  }
   // Agent configs are registered per agent name. A verifying step that shares
   // its agent with a non-verifying use in this pipeline needs its own variant
   // so bash does not leak. Forced writable steps still get `__ro`.
@@ -1214,12 +1251,17 @@ function resolveAgentStepSpec(raw: string | AgentStepSpec, ctx: ResolveStepConte
       ? `${agent.name}${readOnlyAgentSuffix}`
       : agent.name
 
-  return variants.map((modelValue, variantIndex) => {
-    const name = models ? `${baseName}__${slugifyModel(modelValue)}` : baseName
+  return variants.map((entry, variantIndex) => {
+    const name = models ? `${baseName}__${slugifyModel(entry.label)}` : baseName
     ctx.claimName(name, models ? `${ctx.position}[${variantIndex + 1}]` : ctx.position)
 
-    const { model, variant } = runner ? { model: modelValue, variant: undefined } : splitModelVariant(modelValue)
+    const { model, variant } = entry.value ? splitModelVariant(entry.value) : { model: "", variant: undefined }
+    // A variant on a runner without an advisor bridge drops an inherited advisor.
+    const advisor = entry.runner.capabilities.advisor ? advisorConfigured : undefined
+    const advisorMaxCalls = advisor ? (spec.advisorMaxCalls ?? ctx.input.defaultAdvisorMaxCalls) : undefined
     const advisorParts = advisor ? splitModelVariant(advisor) : undefined
+    const runnerId = entry.runner.id
+    const runner: StepRunner | undefined = runnerId === defaultStepRunnerId ? undefined : runnerId
     const step: AgentStep = {
       type: "agent",
       name,

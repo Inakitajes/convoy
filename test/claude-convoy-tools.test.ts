@@ -9,7 +9,7 @@ import { buildRunPlan } from "../src/run-plan"
 import { preflightTargets } from "../src/preflight-validation"
 import { runNeedsOpencodeServer } from "../src/runner"
 import { createClaudeRunner, toolReportSubmission, type ClaudeProcess } from "../src/runners/claude/adapter"
-import { attemptToolsClient, bridgeFileEnv } from "../src/runners/claude/approval-bridge"
+import { attemptToolsClient, bridgeFileEnv } from "../src/runners/attempt-bridge"
 import { buildPermissionPromptTool } from "../src/runners/claude/permission-broker"
 import { handleMcpPermissionRequest } from "../src/runners/claude/mcp-permission-server"
 import { buildClaudeSettings, buildPermissionMcpConfig } from "../src/runners/claude/settings"
@@ -204,7 +204,7 @@ describe("Claude advisors", () => {
       model: { providerID: "claude-code", modelID: "opus" },
       reason: "first-write",
       transcript: "### USER\nfix the bug\n\n### ASSISTANT\nI will edit a.ts",
-      claudeDeps: {
+      inferenceSeams: { claude: {
         probeAuth: async () => ({ authMethod: "claude.ai" }),
         spawn: (_argv, options) => {
           void options.stdin.text().then((text) => (prompt = text))
@@ -216,7 +216,7 @@ describe("Claude advisors", () => {
           })
           return { stdout: out, stderr: new ReadableStream({ start: (c) => c.close() }), exited: Promise.resolve(0), exitCode: 0, kill: () => {} }
         },
-      },
+      } },
     })
     expect(result).toEqual({ kind: "advice", text: "Edit b.ts instead.", usage: { cost: 0.02, tokens: { input: 100, output: 8, reasoning: 0, cacheRead: 0, cacheWrite: 0 }, model: "claude-code/opus" } })
     expect(prompt).toContain("I will edit a.ts")

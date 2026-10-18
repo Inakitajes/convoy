@@ -85,7 +85,7 @@ function options(targetDir: string, acceptStep: AgentStep): RunOptions {
     smart: false,
     smartJudgeModel: "claude-code/haiku",
     // Acceptance accepts the subscription's account policy explicitly.
-    claudeAuth: { mode: "subscription", billingPolicy: "account-policy" },
+    runnerAuth: { "claude-code": { mode: "subscription", billingPolicy: "account-policy" } },
     pipeline: { name: "acceptance", steps: [acceptStep] },
     agents: [...builtInAgents],
     permissions: { allow: [], deny: [] },

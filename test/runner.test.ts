@@ -253,7 +253,7 @@ describe("runner helpers", () => {
     const pipeline: Pipeline = { name: "review", steps: [agentStep("security-gpt"), claude] }
 
     expect(modelOverrideNotice(pipeline, "openai/gpt-5.6#xhigh")).toBe(
-      "--model applies to OpenCode steps only; Claude Code steps keep their configured model: security-claude",
+      "--model applies to OpenCode steps only (scope it with <runner>/<model> for a CLI runner); these steps keep their configured model: security-claude",
     )
     expect(modelOverrideNotice(pipeline, "")).toBeUndefined()
     expect(modelOverrideNotice({ name: "review", steps: [agentStep("security-gpt")] }, "openai/gpt-5.6")).toBeUndefined()

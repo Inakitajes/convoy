@@ -9,6 +9,7 @@
  */
 
 import type { AgentStep, Pipeline } from "../types"
+import { runnerOfModelReference, stepRunnerFor } from "../step-runners"
 
 import type { RunnerId } from "./contracts"
 
@@ -27,16 +28,17 @@ export type PlanDependencyOptions = {
 }
 
 function runnerOf(step: AgentStep): RunnerId {
-  return step.runner ?? "opencode"
+  return stepRunnerFor(step.runner).id
 }
 
 function collectFromSteps(steps: readonly AgentStep[], dependencies: PlanDependency[]): void {
   for (const step of steps) {
     dependencies.push({ kind: "step", runner: runnerOf(step), label: step.name })
     if (step.resolvedAdvisor) {
-      // A `claude-code/<model>` advisor runs on Claude; any other on OpenCode,
-      // whatever runner the executor uses (a cross-runner consultation).
-      dependencies.push({ kind: "advisor", runner: step.resolvedAdvisor.providerID === "claude-code" ? "claude-code" : "opencode", label: `${step.name} advisor` })
+      // A runner-qualified advisor (`claude-code/<model>`, `codex/<model>`) runs
+      // on that runner; any other on OpenCode, whatever runner the executor
+      // uses (a cross-runner consultation).
+      dependencies.push({ kind: "advisor", runner: runnerOfModelReference(step.resolvedAdvisor), label: `${step.name} advisor` })
     }
   }
 }
@@ -88,9 +90,9 @@ export function assertPlanDependenciesAvailable(
 }
 
 /** The plan's judge and helper dependencies, from its frozen routes. */
-export function planDependencyOptions(plan: { smartJudge?: { runner?: "claude-code" }; commitMessageModel?: string }): PlanDependencyOptions {
+export function planDependencyOptions(plan: { smartJudge?: { runner?: RunnerId }; commitMessageModel?: string }): PlanDependencyOptions {
   return {
-    ...(plan.smartJudge ? { judge: plan.smartJudge.runner ?? ("opencode" as const) } : {}),
-    ...(plan.commitMessageModel ? { helpers: [{ role: "commit-message", runner: plan.commitMessageModel.startsWith("claude-code/") ? ("claude-code" as const) : ("opencode" as const) }] } : {}),
+    ...(plan.smartJudge ? { judge: stepRunnerFor(plan.smartJudge.runner).id } : {}),
+    ...(plan.commitMessageModel ? { helpers: [{ role: "commit-message", runner: runnerOfModelReference(plan.commitMessageModel) }] } : {}),
   }
 }

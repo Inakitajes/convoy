@@ -5,7 +5,7 @@ import { join } from "node:path"
 
 import { builtInAgents } from "../src/pipeline"
 import { readRunMetadata } from "../src/metadata"
-import { buildRunPlan, isClaudeOnlyPipeline } from "../src/run-plan"
+import { buildRunPlan, soleCliRunner } from "../src/run-plan"
 import { run, runNeedsOpencodeServer, type RunDeps } from "../src/runner"
 import { cachedCompositionCount } from "../src/runners/attempt-composition"
 import type { AgentStep, Pipeline, RunOptions } from "../src/types"
@@ -79,7 +79,7 @@ const noOpencode: RunDeps["startOpencode"] = async () => {
 
 describe("Claude-only run", () => {
   test("needs no OpenCode server unless a step, advisor, or judge runs there", () => {
-    expect(isClaudeOnlyPipeline(claudeOnly)).toBe(true)
+    expect(soleCliRunner(claudeOnly)).toBe("claude-code")
     expect(runNeedsOpencodeServer(claudeOnly)).toBe(false)
     expect(runNeedsOpencodeServer(claudeOnly, { providerID: "claude-code" })).toBe(false)
     // An explicitly OpenCode-routed judge or advisor still gets its server.
