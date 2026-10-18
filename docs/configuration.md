@@ -6,7 +6,8 @@ Configure pipelines, agents, advisors, hooks, and project context.
 
 - [Project configuration (`.convoy/config.yaml`)](#project-configuration-convoyconfigyaml)
 - [Global configuration](#global-configuration)
-- [Editing config interactively (`convoy config`)](#editing-config-interactively-convoy-config)
+- [Config files (`convoy config`)](#config-files-convoy-config)
+- [Turning off worktrees or specs (`features`)](#turning-off-worktrees-or-specs-features)
 - [Initializing config files (`convoy init`)](#initializing-config-files-convoy-init)
 - [Overriding an agent prompt (`convoy agents eject`)](#overriding-an-agent-prompt-convoy-agents-eject)
 - [Project Context And Custom Agents](#project-context-and-custom-agents)
@@ -152,20 +153,33 @@ The rules:
 
 Both files are merged before a run, with the project winning: `defaults`, `agents`, and `pipelines` merge by key/name (a project entry overrides the global one of the same name), while `permissions`, `hooks`, and `attachments` concatenate (global first; `deny` still wins). The home directory convoy reads can be relocated with `CONVOY_HOME` (it points at the directory that holds `.convoy`, and also moves `~/.convoy/runs`).
 
-## Editing config interactively (`convoy config`)
+## Config files (`convoy config`)
 
-`convoy config` opens a TUI to view and edit both configs without hand-editing YAML — two tabs, **Global** (`~/.convoy/config.yaml`) and **Project** (the current repo's `.convoy/config.yaml`):
+`convoy config` (or **Config** in the TUI) shows the [feature switches](#turning-off-worktrees-or-specs-features) as toggles, then lists the files that shape the current project and opens them in your own editor. Apart from the switches, Convoy doesn't edit YAML through forms; your editor is better at it.
 
-- Pick OpenCode models from an autocompleting list: it queries enabled providers (including reasoning variants like `#xhigh`), falls back to [models.dev](https://models.dev), and accepts free-typed `provider/model[#variant]`. Claude Code steps use a runner-aware text editor for CLI aliases/IDs instead.
-- Edit `defaults` and each agent's model, temperature, and tri-state `readOnly` override.
-- Materialize built-in pipelines as editable overrides; add/delete pipelines; edit sequential and parallel steps, model fan-out, names, reports, diff behavior, and the step runner. Switching runner clears an incompatible model with confirmation, and the detail panel shows each runner's capability reasons.
-- When a tab has no file yet, `initialize` writes a starter config (the built-in `implement` pipeline, expanded and ready to edit).
+The **Features** rows show each switch's value and where it comes from (default, the global config, or this project). `space` flips one and saves it in the project's `.convoy/config.yaml`, which wins over the global config. Only that line changes, so the file keeps its comments; a missing project config is created from the `convoy init` template first, and one that doesn't load is left alone until you fix it.
 
-Keys: `↑/↓` move, `enter` edit/expand, `tab` switch tab, `a` add, `d` delete, `shift+↑/↓` reorder, `t` agent temperature, `M` model fan-out, `g` group/ungroup, `n` step name, `r` reports or agent read-only, `R` step runner, `x` diff, `s` save, `q` quit. Saving re-validates and rewrites clean YAML (comments are not preserved); the dashboard never paints backgrounds, like the run TUIs. Needs an interactive terminal.
+- **Global:** `~/.convoy/config.yaml` and any agent prompt overrides in `~/.convoy/agents/`.
+- **Project:** `.convoy/config.yaml` (or `config.yml`) and any agent prompt overrides in `.convoy/agents/`.
+
+Each row says whether the file loads, and a file that doesn't load shows the parser's error. `enter` opens the selected file in `$VISUAL`, then `$EDITOR` (arguments allowed, such as `code -w`), then the first of `nano`, `vim`, or `vi` found on `PATH`. A config file that doesn't exist yet is created from the same commented template `convoy init` writes, then opened. When the editor closes, the screen loads the file again and tells you if it stopped loading. `r` refreshes, `q` goes back. Needs an interactive terminal.
+
+## Turning off worktrees or specs (`features`)
+
+Both areas are on by default. Turn off the ones you don't use from the Features toggles in `convoy config`, or in YAML, globally or per project (the project wins, per switch):
+
+```yaml
+features:
+  worktrees: false   # open the TUI on Pipelines, and don't isolate runs automatically
+  specs: false       # no OpenSpec in the TUI or in run plans
+```
+
+- **`worktrees: false`** drops the worktree board. The TUI opens on the run launcher, which becomes the first screen: `r` opens Runs, `c` Config, `o` Specs (when specs are on), and `q` quits. Runs no longer get their own worktree by default. An explicit `--worktree` or `defaults.worktree: true` still isolates, and `convoy worktrees` still works when you call it.
+- **`specs: false`** removes the Specs destination, the OpenSpec actions and linked specs from a worktree's detail, and the launcher's change picker. Run plans attach no OpenSpec bundle and don't ask for `--change` or `--manual`, even in a repo with an `openspec/` folder. `--change`, `convoy specs`, and `convoy spin` refuse with a message that names the switch. The close action stays, as the squash merge it still is.
 
 ## Initializing config files (`convoy init`)
 
-`convoy config` is interactive; `convoy init` is its non-interactive counterpart: it writes a commented starter config.
+`convoy init` writes a commented starter config without opening anything; `convoy config` creates the same file when you open a missing one.
 
 ```bash
 convoy init                # .convoy/config.yaml in the current repo

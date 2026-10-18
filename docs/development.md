@@ -52,7 +52,8 @@ convoy/
 │   ├── runs-tui.ts      # OpenTUI run-history browser rendering
 │   ├── metadata.ts      # per-run metadata.json: frozen pipeline + --resume restore
 │   ├── config.ts        # config loader/validation, global+project merge, YAML writer
-│   ├── config-tui.ts    # interactive config editor (convoy config)
+│   ├── config-tui.ts    # config screen: lists config files, opens $EDITOR (convoy config)
+│   ├── config-files.ts  # which config files exist, whether they load, the editor command
 │   ├── model-catalog.ts # available-model list via OpenCode SDK, models.dev fallback
 │   ├── version.ts       # injected version/commit/platform + --version and TUI header formatting
 │   ├── update.ts        # GitHub Releases update check + verified atomic self-install

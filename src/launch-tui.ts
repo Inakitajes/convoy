@@ -7,8 +7,8 @@ import { BoxRenderable, StyledText, TextRenderable, bg, bold, createCliRenderer,
 
 import { defaultAdvisorMaxCalls } from "./advisor"
 import { confirmedChangeSelection, markAllChanges, toggleMarkedChange } from "./change-selection"
-import { buildAgentRegistry, emptyHooksConfig, loadMergedConvoyConfig, pipelineDefaultsOf } from "./config"
-import { currentBranch, dirtyFilesPreview, mainWorktreeDir, resolveWorktreeDefault, statusPorcelain } from "./git"
+import { buildAgentRegistry, emptyHooksConfig, featuresOf, loadMergedConvoyConfig, pipelineDefaultsOf } from "./config"
+import { currentBranch, dirtyFilesPreview, mainWorktreeDir, statusPorcelain, worktreeDefaultFor } from "./git"
 import { hooksForPipeline } from "./hooks"
 import { openRouterLowBalance, startLimitsPoller } from "./limits"
 import { builtInPipelines, defaultPipelineName, hasWritableStep, resolvePipeline } from "./pipeline"
@@ -96,6 +96,7 @@ export type LaunchBranchCheck = {
 export type LaunchNavigationSelection =
   | { action: "runs" }
   | { action: "config" }
+  | { action: "specs" }
 
 export type LaunchRunPreparation = {
   /** The exact options and immutable plan that will be handed to the runner. */
@@ -121,6 +122,10 @@ export type LaunchRunTuiResult = LaunchReviewedRun | LaunchNavigationSelection |
 
 export type LaunchRunTuiOptions = {
   targetDir: string
+  /** The launcher is the session's first screen (`features.worktrees: false`): q quits instead of going back. */
+  root?: boolean
+  /** Offers `o` to open the specs viewer; only a root launcher has no other way there. */
+  specsDestination?: boolean
   /**
    * The operator's explicit change selection handed in pre-selected (the
    * specs viewer's "apply this spec" handoff, or `worktrees run --change`),
@@ -460,12 +465,14 @@ export async function loadLauncherResources(options: LaunchRunTuiOptions): Promi
 
   // Unset config means "decide per branch": isolating is right on a trunk, but
   // on a branch you're already where the work should land.
+  const features = featuresOf(config)
   const worktree =
     config?.defaults.worktree === undefined
-      ? await resolveWorktreeDefault(options.targetDir)
+      ? await worktreeDefaultFor(options.targetDir, features.worktrees)
       : { isolate: config.defaults.worktree, reason: "set by defaults.worktree" }
   const history = await loadLaunchHistory(resourceDir, config?.defaults.prdHistory ?? true)
-  const specs = await listOpenSpecChanges(resourceDir)
+  // With specs off the launcher offers no change selection at all.
+  const specs = features.specs ? await listOpenSpecChanges(resourceDir) : []
   const insideWorktree = await detectInsideWorktree(options.targetDir)
   return { config, choices, worktree, history, specs, ...(insideWorktree ? { insideWorktree } : {}) }
 }
@@ -778,7 +785,7 @@ export class LaunchPicker {
     if (modal) {
       if (modal.kind === "gateway") {
         // The gateway dropdown: a closed five-option list, so navigation
-        // clamps the way the config editor's pickers do. Enter applies the
+        // clamps at both ends. Enter applies the
         // highlighted row; escape (or q) keeps the current gateway.
         if (key.name === "up" || key.name === "k") modal.index = Math.max(0, modal.index - 1)
         else if (key.name === "down" || key.name === "j") modal.index = Math.min(modelGateways.length - 1, modal.index + 1)
@@ -854,7 +861,7 @@ export class LaunchPicker {
     private gateway: ModelGateway,
     private readonly worktreeDefault: WorktreeDefault,
     // Named `callbacks` rather than `hooks`: this file already uses "hooks" for the pipeline's shell hooks.
-    private readonly callbacks: Pick<LaunchRunTuiOptions, "prepareRun" | "proposeBranchName" | "checkBranchName" | "readDirtyStatus">,
+    private readonly callbacks: Pick<LaunchRunTuiOptions, "prepareRun" | "proposeBranchName" | "checkBranchName" | "readDirtyStatus" | "root" | "specsDestination">,
     private readonly history: LaunchHistoryContext = { enabled: true, entries: [] },
     private readonly specs: readonly OpenSpecChangeSummary[] = [],
     /** The operator's explicit change selection handed in pre-selected, in review order. */
@@ -1102,6 +1109,9 @@ export class LaunchPicker {
         return
       case "c":
         this.finish({ action: "config" })
+        return
+      case "o":
+        if (this.callbacks.specsDestination) this.finish({ action: "specs" })
         return
       case "q":
       case "escape":
@@ -2642,8 +2652,9 @@ this.detailBox.title = reviewing ? " review " : " run setup "
           { keys: "↑/↓", label: "select", priority: 2, tone: "dim" },
           { keys: "enter", label: "prompt", priority: 3 },
           { keys: "r", label: "runs", priority: 4 },
+          ...(this.callbacks.specsDestination ? [{ keys: "o", label: "specs", priority: 6 }] : []),
           { keys: "c", label: "config", priority: 5 },
-          { keys: "q", label: this.scene ? "back" : "quit", priority: 1 },
+          { keys: "q", label: this.scene && !this.callbacks.root ? "back" : "quit", priority: 1 },
         ],
         [fg(theme.faint)(`${this.selected + 1}/${this.choices.length}`)],
       )

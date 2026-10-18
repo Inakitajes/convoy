@@ -527,6 +527,15 @@ export type WorktreeDefault = {
  * `develop`; the conventional names cover that. Never throws — anything
  * unexpected falls back to isolating, which is the older, safer behavior.
  */
+/**
+ * The isolation default when no flag or `defaults.worktree` decides it: off
+ * when the project turned worktree management off, else the per-branch rule.
+ */
+export async function worktreeDefaultFor(cwd: string, worktreesEnabled: boolean): Promise<WorktreeDefault> {
+  if (!worktreesEnabled) return { isolate: false, reason: "features.worktrees is off" }
+  return resolveWorktreeDefault(cwd)
+}
+
 export async function resolveWorktreeDefault(cwd: string): Promise<WorktreeDefault> {
   try {
     // Covers both a detached HEAD and "not a repo at all"; the latter fails in

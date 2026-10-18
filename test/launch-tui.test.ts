@@ -65,7 +65,7 @@ async function createLauncher(
   choiceCount = 1,
   specs: readonly OpenSpecChangeSummary[] = [],
   presetChanges?: readonly string[],
-  callbacks: Partial<Pick<LaunchRunTuiOptions, "readDirtyStatus" | "prepareRun">> = {},
+  callbacks: Partial<Pick<LaunchRunTuiOptions, "readDirtyStatus" | "prepareRun" | "root" | "specsDestination">> = {},
 ) {
   const testRenderer = await createTestRenderer({ width, height })
   const picker = new LaunchPicker(
@@ -128,6 +128,33 @@ function panelRow(frame: string, title: string) {
   expect(row, `missing ${title} panel`).toBeGreaterThanOrEqual(0)
   return row
 }
+
+describe("launcher as the session's first screen", () => {
+  test("a root launcher quits on q and offers Specs on o only when asked to", async () => {
+    const root = await createLauncher(120, 30, 1, [], undefined, { root: true, specsDestination: true })
+    try {
+      await root.renderOnce()
+      const frame = root.captureCharFrame()
+      expect(frame).toContain("o specs")
+      expect(frame).toContain("q quit")
+      root.mockInput.pressKey("o")
+      await expect(root.picker.result).resolves.toEqual({ action: "specs" })
+    } finally {
+      root.renderer.destroy()
+    }
+
+    const plain = await createLauncher(120, 30, 1, [], undefined, {})
+    try {
+      await plain.renderOnce()
+      expect(plain.captureCharFrame()).not.toContain("o specs")
+      plain.mockInput.pressKey("o")
+      expect(await Promise.race([plain.picker.result.then(() => "resolved"), Bun.sleep(30).then(() => "pending")])).toBe("pending")
+      await closeLauncher(plain)
+    } finally {
+      plain.renderer.destroy()
+    }
+  })
+})
 
 describe("launch TUI compact layout", () => {
   test("switches panels at the 84-column breakpoint", async () => {

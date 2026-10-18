@@ -8,16 +8,14 @@ import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:tes
 import { modelGateways } from "../src/model-routing"
 import {
   buildAgentRegistry,
-  checkPipelineResolves,
   ConfigError,
-  defaultConfigTemplate,
   defaultConvoyConfig,
   ejectAgentPrompt,
+  featuresOf,
   isValidModelString,
   loadConvoyConfig,
   loadGlobalConvoyConfig,
   loadMergedConvoyConfig,
-  materializePipelineSpec,
   mergeConvoyConfigs,
   parseConvoyConfig,
   selectPipelineSpec,
@@ -30,20 +28,13 @@ import { loadAgentPrompt } from "../src/agents"
 import {
   builtInAgents,
   builtInPipelines,
-  defaultGptModel,
-  defaultGptVariant,
   defaultImplementAuditModel,
   defaultImplementAdvisorModel,
   defaultImplementerModel,
   defaultImplementReviewModel,
   defaultRunReportModel,
-  defaultOpusModel,
-  isHumanStepSpec,
-  isGoalStepSpec,
-  isParallelSpec,
   resolvePipeline,
 } from "../src/pipeline"
-import type { PipelineSpec } from "../src/pipeline"
 
 const dirs: string[] = []
 
@@ -717,21 +708,6 @@ describe("pipeline selection", () => {
     const config = parse("pipelines:\n  quick:\n    steps:\n      - implementer\n    suggestedPrompts:\n      - '  padded  '", dir)
     expect(selectPipelineSpec(config, "quick").suggestedPrompts).toEqual(["padded"])
   })
-
-  test("materializePipelineSpec carries defaultPrompt and suggestedPrompts into the editable copy", async () => {
-    const spec: PipelineSpec = {
-      description: "x",
-      defaultPrompt: "Do the thing.",
-      suggestedPrompts: ["A", "B"],
-      steps: ["implementer"],
-    }
-    const materialized = materializePipelineSpec(spec)
-    expect(materialized.defaultPrompt).toBe("Do the thing.")
-    expect(materialized.suggestedPrompts).toEqual(["A", "B"])
-    expect(materialized.steps).toEqual(["implementer"])
-    materialized.suggestedPrompts![0] = "changed"
-    expect(spec.suggestedPrompts).toEqual(["A", "B"])
-  })
 })
 
 describe("isValidModelString", () => {
@@ -981,6 +957,32 @@ describe("loopGuard config", () => {
   })
 })
 
+describe("features config", () => {
+  test("every area is on unless a config turns it off", () => {
+    expect(featuresOf(undefined)).toEqual({ worktrees: true, specs: true })
+    expect(featuresOf(parse("defaults:\n  prdHistory: true"))).toEqual({ worktrees: true, specs: true })
+    expect(featuresOf(parse("features:\n  specs: false"))).toEqual({ worktrees: true, specs: false })
+    expect(featuresOf(parse("features:\n  worktrees: false\n  specs: false"))).toEqual({ worktrees: false, specs: false })
+  })
+
+  test("rejects non-boolean switches and unknown areas warn like other keys", () => {
+    expect(() => parse("features:\n  specs: maybe")).toThrow("features.specs")
+    expect(() => parse("features:\n  worktrees: 1")).toThrow("features.worktrees")
+  })
+
+  test("the project switch wins over the global one, per area", () => {
+    const global = parse("features:\n  worktrees: false\n  specs: false")
+    const project = parse("features:\n  specs: true")
+    expect(featuresOf(mergeConvoyConfigs(global, project))).toEqual({ worktrees: false, specs: true })
+  })
+
+  test("round-trips through serialize and is documented in the template", () => {
+    const config = parse("features:\n  worktrees: false")
+    expect(parse(serializeConvoyConfig(config)).features).toEqual({ worktrees: false })
+    expect(defaultConvoyConfig).toContain("# features:")
+  })
+})
+
 describe("ui config", () => {
   test("parses the reduced-motion switch and leaves it unset by default", () => {
     expect(parse("ui:\n  reducedMotion: on").ui).toEqual({ reducedMotion: "on" })
@@ -1053,18 +1055,6 @@ describe("serialization", () => {
     )
     const reparsed = parse(serializeConvoyConfig(config))
     expect(reparsed.hooks).toEqual(config.hooks)
-  })
-
-  test("defaultConfigTemplate materializes the default pipeline's step model overrides and round-trips", () => {
-    const template = defaultConfigTemplate()
-    expect(template.defaults.model).toBe(`${defaultGptModel}#${defaultGptVariant}`)
-    const steps = template.pipelines["full-cycle"]!.steps
-    expect(steps.find((step) => typeof step !== "string" && !isParallelSpec(step) && !isHumanStepSpec(step) && !isGoalStepSpec(step) && step.agent === "design")).toEqual({ agent: "design", model: defaultImplementReviewModel, advisor: "openai/gpt-6-astra#xhigh" })
-    expect(steps.find((step) => typeof step !== "string" && !isParallelSpec(step) && !isHumanStepSpec(step) && !isGoalStepSpec(step) && step.agent === "implementer")).toEqual({ agent: "implementer", model: defaultImplementerModel, advisor: defaultImplementAdvisorModel, reports: "none" })
-    const reparsed = parse(serializeConvoyConfig(template))
-    expect(reparsed.defaults).toEqual(template.defaults)
-    expect(reparsed.pipelines).toEqual(template.pipelines)
-    expect(reparsed.hooks).toEqual(template.hooks)
   })
 })
 
@@ -1375,94 +1365,6 @@ describe("runner field on steps", () => {
         ].join("\n"),
       ),
     ).toThrow("pipelines.p.steps[0].models[1] runner claude-code executes Anthropic models")
-  })
-})
-
-describe("materializing built-in pipelines", () => {
-  const fallback = `${defaultGptModel}#${defaultGptVariant}`
-  const emptyConfig = (pipelines: Record<string, ReturnType<typeof materializePipelineSpec>>) => ({
-    defaults: {},
-    agents: {},
-    pipelines,
-    permissions: { allow: [] as string[], deny: [] as string[] },
-    hooks: { pre: [], post: [], pipelines: {} },
-    attachments: [] as string[],
-    notifications: {},
-  })
-
-  test("without an effective default model, every built-in materializes to an identical spec", () => {
-    for (const spec of Object.values(builtInPipelines)) {
-      expect(materializePipelineSpec(spec)).toEqual(spec)
-    }
-  })
-
-  test("the materialized copy is independent of the built-in spec", () => {
-    const spec = materializePipelineSpec(builtInPipelines.review!)
-    const group = spec.steps[1]
-    if (group === undefined || !isParallelSpec(group)) throw new Error("expected a parallel block")
-    const member = group.parallel[0]
-    if (typeof member === "string") throw new Error("expected a member object")
-    member.models!.push("mutated/model")
-    member.name = "mutated"
-    group.parallel.push("mutated-agent")
-    spec.steps.push("mutated-step")
-
-    const original = builtInPipelines.review!
-    const originalGroup = original.steps[1]
-    if (originalGroup === undefined || !isParallelSpec(originalGroup)) throw new Error("expected a parallel block")
-    const originalMember = originalGroup.parallel[0]
-    if (typeof originalMember === "string") throw new Error("expected a member object")
-    expect(original.steps).toHaveLength(5)
-    expect(originalGroup.parallel).toHaveLength(3)
-    expect(originalMember.models).toHaveLength(2)
-    expect(originalMember.name).toBe("clean-code")
-  })
-
-  test("carries the terminal goal step into the copy, so customizing ship does not disable its loop", () => {
-    const materialized = materializePipelineSpec(builtInPipelines.ship!)
-    const goalIndex = materialized.steps.length - 1
-    const node = materialized.steps[goalIndex] as { goal?: { target: number; improve: unknown; measure: unknown } }
-    expect(node.goal?.target).toBe(90)
-    // The fragments travel with the copy, deep-cloned: editing the copy can
-    // never touch the built-in's goal definition.
-    expect(node.goal?.improve).toBeDefined()
-    expect(node.goal?.measure).toBeDefined()
-    expect(builtInPipelines.ship!.steps[goalIndex]).not.toBe(materialized.steps[goalIndex])
-  })
-
-  test("inlines built-in agent model preferences only when a default model would shadow them", () => {
-    const spec = { steps: [{ agent: "implementer", reports: "none" as const }, "patterns", { agent: "design", model: "x/y" }] }
-    expect(materializePipelineSpec(spec, "other/model").steps).toEqual([
-      { agent: "implementer", reports: "none", model: fallback },
-      { agent: "patterns", model: fallback },
-      { agent: "design", model: "x/y" },
-    ])
-    // A matching default doesn't shadow anything, so nothing gets pinned.
-    expect(materializePipelineSpec(spec, fallback).steps).toEqual(spec.steps)
-  })
-
-  test("never injects an OpenCode model into a model-less Claude Code step", () => {
-    const spec = { steps: [{ agent: "review-report", runner: "claude-code" as const }] }
-
-    expect(materializePipelineSpec(spec, "other/model").steps).toEqual([{ agent: "review-report", runner: "claude-code" }])
-  })
-
-  test("every materialized built-in serializes, re-parses, and resolves", () => {
-    for (const [name, spec] of Object.entries(builtInPipelines)) {
-      const materialized = materializePipelineSpec(spec, fallback)
-      const config = parse(serializeConvoyConfig(emptyConfig({ [name]: materialized })))
-      expect(config.pipelines[name]).toEqual(materialized)
-      expect(checkPipelineResolves(name, config.pipelines[name]!, config)).toBeUndefined()
-    }
-  })
-
-  test("checkPipelineResolves reports duplicate names, unknown agents, and dangling reports", () => {
-    expect(checkPipelineResolves("x", { steps: ["patterns", "patterns"] }, undefined)).toContain("duplicate step name")
-    expect(checkPipelineResolves("x", { steps: ["nope"] }, undefined)).toContain("unknown agent")
-    expect(checkPipelineResolves("x", { steps: ["patterns", { agent: "security", reports: ["missing"] }] }, undefined)).toContain(
-      "not an earlier agent step",
-    )
-    expect(checkPipelineResolves("x", { steps: ["patterns"] }, undefined)).toBeUndefined()
   })
 })
 
