@@ -43,6 +43,11 @@ describe("convoyCoordinateArgv", () => {
     expect(argv).toContain("--coordinate")
     expect(argv[argv.length - 1]).toBe("/tmp/launch.json")
   })
+
+  test("a source checkout re-runs Convoy's entry, never the embedding script", () => {
+    const argv = convoyCoordinateArgv("/tmp/launch.json")
+    expect(argv.at(-3)).toBe(join(import.meta.dir, "..", "src", "main.ts"))
+  })
 })
 
 describe("launch file round-trip", () => {

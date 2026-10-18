@@ -98,6 +98,9 @@ describe("default Claude enforcement", () => {
     const source = convoySubcommandArgv("mcp", false)
     expect(source[0]).toBe(process.execPath)
     expect(source.at(-1)).toBe("mcp")
+    // Always Convoy's own entry, never argv[1]: a script embedding Convoy (the
+    // acceptance runner) re-ran itself per hook call and forked without bound.
+    expect(source.at(-2)).toBe(join(import.meta.dir, "..", "src", "main.ts"))
   })
 
   test("quotes the hook command line for the shell Claude runs it through", () => {

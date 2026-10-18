@@ -7,7 +7,7 @@ import { ControlProgress, type ControlProgressOptions } from "./control-progress
 import { hasWritableStep } from "./pipeline"
 import { pidAlive } from "./runs"
 import { hostedTeardownFromError, installShutdownSignals, isUserAbortError, run, RunShutdown } from "./runner"
-import { isOfficialStandaloneExecutable } from "./update"
+import { convoySourceEntry, isOfficialStandaloneExecutable } from "./update"
 import { convoyHome } from "./workspace"
 import type { RunOptions, RunPlan } from "./types"
 
@@ -40,12 +40,12 @@ export type CoordinateReady = {
 /**
  * Spawn argv for the coordinator: the same binary, tail-fixed with the
  * internal `--coordinate` flag. A standalone release executable runs
- * `execPath --coordinate <launch>`; a source checkout re-invokes this script
- * with its node args preserved (`bun run src/main.ts --coordinate <launch>`).
+ * `execPath --coordinate <launch>`; a source checkout re-invokes Convoy's entry
+ * script with its node args preserved (`bun run src/main.ts --coordinate <launch>`).
  */
 export function convoyCoordinateArgv(launchPath: string): string[] {
   if (isOfficialStandaloneExecutable()) return [process.execPath, "--coordinate", launchPath]
-  return [process.execPath, ...process.execArgv, process.argv[1], "--coordinate", launchPath]
+  return [process.execPath, ...process.execArgv, convoySourceEntry, "--coordinate", launchPath]
 }
 
 export function pendingRoot(): string {

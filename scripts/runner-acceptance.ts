@@ -25,6 +25,19 @@ if (process.env.CONVOY_ACCEPT !== "1") {
   console.error("refusing to spend: set CONVOY_ACCEPT=1 to run the bounded acceptance")
   process.exit(1)
 }
+// Spend bounds. A nested start means something re-ran this script (a hook or
+// helper must re-invoke Convoy's entry, never its embedder), and the deadline
+// stops a hung attempt from consuming quota unattended.
+if (process.env.CONVOY_ACCEPT_ACTIVE === "1") {
+  console.error("refusing a nested acceptance start: something re-ran this script")
+  process.exit(1)
+}
+process.env.CONVOY_ACCEPT_ACTIVE = "1"
+const deadlineMs = 8 * 60_000
+setTimeout(() => {
+  console.error(`acceptance exceeded ${deadlineMs / 60_000} minutes; aborting`)
+  process.exit(1)
+}, deadlineMs).unref()
 
 async function git(args: string[], cwd: string): Promise<void> {
   const proc = Bun.spawn(["git", "-c", "commit.gpgsign=false", ...args], { cwd, stdout: "ignore", stderr: "pipe" })

@@ -10,7 +10,7 @@
  * `CONVOY_CLAUDE_*` variables only override the commands.
  */
 
-import { isOfficialStandaloneExecutable } from "../../update"
+import { convoySourceEntry, isOfficialStandaloneExecutable } from "../../update"
 import { buildPermissionPromptTool } from "./permission-broker"
 import { buildClaudeSettings, buildPermissionMcpConfig } from "./settings"
 import type { EnforcementPlan } from "./enforcement"
@@ -51,7 +51,7 @@ export function claudeEnforcementFromEnv(env: NodeJS.ProcessEnv = process.env): 
  */
 export function convoySubcommandArgv(sub: string, standalone = isOfficialStandaloneExecutable()): string[] {
   if (standalone) return [process.execPath, sub]
-  return [process.execPath, ...process.execArgv, process.argv[1] ?? "", sub]
+  return [process.execPath, ...process.execArgv, convoySourceEntry, sub]
 }
 
 /** POSIX-quotes an argv into one shell command line (Claude runs hooks through a shell). */
