@@ -246,8 +246,10 @@ export async function forwardCoordinatorLogs(
     })
     await pumping
   }
+  // Deliberately ref'd: the parent unrefs its detached coordinator, so this
+  // poll is what keeps a --no-tui parent waiting on it. Unref'd, Bun let the
+  // parent exit 0 right after the boot while the run was still executing.
   const timer = setInterval(() => void pump().catch(() => {}), pollMs)
-  timer.unref?.()
   return {
     stop: async () => {
       stopped = true

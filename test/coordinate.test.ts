@@ -200,6 +200,29 @@ describe("forwardCoordinatorLogs", () => {
     expect(chunks.join("")).toBe("first line\nsecond line\nthird line\n")
   })
 
+  test("holds the event loop open until stopped, so a --no-tui parent keeps waiting", async () => {
+    // The parent unrefs its detached coordinator, and Bun does not keep the
+    // loop alive for that child's exit; the forwarder's poll must. With it
+    // unref'd too, the CLI exited 0 right after the boot while the run was
+    // still executing, and an agent driving Convoy saw a finished, green job.
+    const dir = await scratch()
+    const logPath = join(dir, "coordinator.log")
+    await writeFile(logPath, "coordinator line\n")
+    const script = join(dir, "parent.ts")
+    await writeFile(
+      script,
+      [
+        `import { forwardCoordinatorLogs } from ${JSON.stringify(join(import.meta.dir, "..", "src", "coordinate.ts"))}`,
+        `const forwarder = await forwardCoordinatorLogs(${JSON.stringify(logPath)}, (chunk) => process.stdout.write(chunk), 20)`,
+        // Nothing else holds the loop: only the forwarder can keep this alive.
+        "setTimeout(async () => { await forwarder.stop(); process.stdout.write('stopped\\n') }, 300).unref()",
+      ].join("\n"),
+    )
+    const parent = Bun.spawn([process.execPath, script], { stdout: "pipe", stderr: "pipe" })
+    const [stdout] = await Promise.all([new Response(parent.stdout).text(), parent.exited])
+    expect(stdout).toBe("coordinator line\nstopped\n")
+  })
+
   test("rmPendingLaunch deletes the dir and tolerates it being gone already", async () => {
     const dir = await scratch()
     await rmPendingLaunch(dir)
