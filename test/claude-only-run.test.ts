@@ -128,6 +128,9 @@ describe("Claude-only run", () => {
     const streamLog = join(result.dir, "logs", "review.1.claude.jsonl")
     expect(await readFile(streamLog, "utf8")).toContain('"session_id":"ses-claude-1"')
     expect((await stat(streamLog)).mode & 0o777).toBe(0o600)
+    // [o] reopens the finished session with the directories it could read.
+    const directories = JSON.parse(await readFile(join(result.dir, "logs", "claude-ses-claude-1-directories.json"), "utf8")) as string[]
+    expect(directories[0]).toBe(result.dir)
     // The run's attempt composition ended with it.
     expect(cachedCompositionCount()).toBe(0)
     // The Claude CLI ran the step under a verified subscription login.

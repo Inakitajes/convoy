@@ -147,11 +147,6 @@ export async function startClaudeAttemptBridge(handlers: ClaudeAttemptHandlers):
   }
 }
 
-/** Starts a loopback bridge that answers each forwarded ask with `decide`. */
-export async function startClaudeApprovalBridge(decide: ApprovalProvider): Promise<ClaudeApprovalBridge> {
-  return startClaudeAttemptBridge({ approve: decide })
-}
-
 /** Calls one of the attempt's tool routes; any failure is a tool error, never a success. */
 export function attemptToolsClient(env: NodeJS.ProcessEnv = process.env): { tools: ConvoyToolName[]; call(route: string, body: unknown): Promise<Record<string, unknown>> } | undefined {
   const url = env[toolsUrlEnv]

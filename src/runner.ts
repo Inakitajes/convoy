@@ -16,7 +16,7 @@ import { aggregateAdvisorEvents, createAdvisorEventJournal, readAdvisorEvents, t
 import { opencodeConfig, loadAgentPrompt } from "./agents"
 import { fileParts } from "./attachments"
 import { Caffeinate } from "./caffeinate"
-import { ensureClaudeAvailable, openClaudeSessionWindow } from "./claude-code"
+import { claudeReadableDirectories, ensureClaudeAvailable, openClaudeSessionWindow, writeClaudeSessionDirectories } from "./claude-code"
 import { baseAgentName } from "./runners/agent-source"
 import { attemptCompositionFor, releaseAttemptCompositions } from "./runners/attempt-composition"
 import { resolveAttempt, type AttemptContext } from "./runners/attempt"
@@ -2451,7 +2451,15 @@ async function runPhaseAttempt(
       // OpenCode's phase logs its session and usage itself; a process-owned
       // session (Claude) reports them only as events, so log the same lines
       // here for whoever follows the coordinator's log, such as a CLI agent.
-      if (!serverSession && event.type === "session" && event.session.sessionId !== activeSessionID) log.info(`[${phase.name}] session: ${event.session.sessionId}`)
+      if (!serverSession && event.type === "session" && event.session.sessionId !== activeSessionID) {
+        log.info(`[${phase.name}] session: ${event.session.sessionId}`)
+        // [o] reopens a finished Claude session with the directories it could read.
+        if (runnerId === "claude-code") {
+          void writeClaudeSessionDirectories(workspace.dir, event.session.sessionId, claudeReadableDirectories(prepared.attachments, targetDir, workspace.dir)).catch((error: unknown) =>
+            log.warn(`[${phase.name}] couldn't record the session's readable directories: ${error instanceof Error ? error.message : String(error)}`),
+          )
+        }
+      }
       if (!serverSession && event.type === "usage") log.info(`[${phase.name}] usage: ${formatUsageForLog(toProgressUsage(event.usage))}`)
       if (event.type === "session" && event.session.sessionId !== activeSessionID) {
         activeSessionID = event.session.sessionId

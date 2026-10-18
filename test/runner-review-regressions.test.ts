@@ -11,7 +11,7 @@ import { join } from "node:path"
 import { evaluateHookInput } from "../src/runners/commands"
 import { phasePolicy } from "../src/runners/phase-policy"
 import { createClaudeRunner, type ClaudeProcess } from "../src/runners/claude/adapter"
-import { startClaudeApprovalBridge, approvalBridgeProvider } from "../src/runners/claude/approval-bridge"
+import { startClaudeAttemptBridge, approvalBridgeProvider } from "../src/runners/claude/approval-bridge"
 import { resolvePermission } from "../src/runners/claude/permission-broker"
 import { executeClaudeAttempt } from "../src/runners/claude/attempt"
 import { parseModelOverride } from "../src/step-runners"
@@ -88,10 +88,10 @@ describe("M3: Claude reads are confined like OpenCode's external_directory", () 
 describe("M2: Claude asks reach the operator", () => {
   test("an ask is forwarded over the authenticated bridge and the operator's answer wins", async () => {
     const seen: string[] = []
-    const bridge = await startClaudeApprovalBridge(async (ask) => {
+    const bridge = await startClaudeAttemptBridge({ approve: async (ask) => {
       seen.push(`${ask.tool}:${ask.resource}`)
       return ask.resource === "mkdir newdir"
-    })
+    } })
     try {
       const config = policy("write")
       const call = (command: string) => ({ tool_name: "Bash", tool_input: { command } })
@@ -105,7 +105,7 @@ describe("M2: Claude asks reach the operator", () => {
   })
 
   test("the `convoy mcp` permission host forwards an ask to the bridge", async () => {
-    const bridge = await startClaudeApprovalBridge(async (ask) => ask.resource === "mkdir newdir")
+    const bridge = await startClaudeAttemptBridge({ approve: async (ask) => ask.resource === "mkdir newdir" })
     try {
       const call = (id: number, command: string) =>
         JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "permission", arguments: { tool_name: "Bash", input: { command } } } })
@@ -126,7 +126,7 @@ describe("M2: Claude asks reach the operator", () => {
   }, 30_000)
 
   test("a caller without the bridge token is refused", async () => {
-    const bridge = await startClaudeApprovalBridge(async () => true)
+    const bridge = await startClaudeAttemptBridge({ approve: async () => true })
     try {
       const forged = approvalBridgeProvider({ ...bridge.env, CONVOY_APPROVAL_TOKEN: "wrong" })!
       expect(await forged({ tool: "Bash", resource: "mkdir x", reason: "operator decides" })).toBe(false)

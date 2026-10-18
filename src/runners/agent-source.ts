@@ -9,18 +9,12 @@
  * silently dropped.
  */
 
-import { loadAgentPrompt } from "../agents"
 
 import type { AttachmentDescriptor } from "./contracts"
 
 /** Synthesized read-only variants (`agent__ro`) share the base agent's prompt. */
 export function baseAgentName(agentName: string): string {
   return agentName.endsWith("__ro") ? agentName.slice(0, -"__ro".length) : agentName
-}
-
-/** Resolves an agent's full instructions exactly as the config renderer does. */
-export function resolveAgentInstructions(input: { agentName: string; targetDir: string; advisor?: boolean }): string {
-  return loadAgentPrompt(baseAgentName(input.agentName), input.targetDir, input.advisor ? { advisor: true } : {})
 }
 
 export type AttachmentInput = {
