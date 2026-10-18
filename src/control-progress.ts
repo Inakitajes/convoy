@@ -2,6 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 
 import type { ControlReset, ControlServer } from "./control-server"
+import { log } from "./log"
 import type {
   AutoAccept,
   GoalLoopView,
@@ -10,13 +11,18 @@ import type {
   KeepAwakeState,
   PermissionPromptInfo,
   PermissionReply,
+  ProgressAttempt,
   ProgressHostControls,
   ProgressPhase,
+  ProgressMessage,
   ProgressUI,
   RunControlState,
   RunOutcome,
   RunStatus,
 } from "./progress"
+import type { ActivityKind } from "./progress"
+import type { RunnerId } from "./runners/contracts"
+import { coordinatorJournalPath, CoordinatorEvents, runnerEventFromProgressMessage } from "./runners/coordinator-events"
 import type { Pipeline } from "./types"
 
 /**
@@ -33,8 +39,16 @@ import type { Pipeline } from "./types"
  *   this fires once at run start rather than once per iteration).
  * - pause/abort/keep-awake are wired when the runner calls `setHostControls` /
  *   `setAbortHandler`.
- * - The live view is *not* duplicated here: the attach client follows the
- *   OpenCode server through `LiveAttach` exactly like an observer does.
+ * - The live view is *not* rendered here: an attached dashboard follows either
+ *   the OpenCode server through `LiveAttach` (native live attach) or, for
+ *   Claude and any runner without native attach, the neutral journal below.
+ * - Runner-neutral transcript delivery (design D6): phase messages and
+ *   activity are appended to the run's durable journal
+ *   (`<runDir>/events/coordinator-events.ndjson`, one per run, rebound on a
+ *   goal-loop reset) for any runner instead of being dropped, each attributed
+ *   to its phase's runner. The append is buffered behind a bounded queue, so a
+ *   slow journal write or dashboard never blocks native intake or the
+ *   permission gate. A dashboard in another process follows the file.
  */
 
 export type ControlProgressOptions = {
@@ -44,6 +58,13 @@ export type ControlProgressOptions = {
   readyPath?: string
   /** Token recorded in `control.json`; defaults to the server's. */
   token?: string
+  /**
+   * A fixed read model to publish into (tests, a shared instance). Without
+   * one the progress opens each run's own journal in its run dir.
+   */
+  events?: CoordinatorEvents
+  /** The runner of a phase the plan does not name; defaults to `opencode`. */
+  runner?: RunnerId
 }
 
 export class ControlProgress implements ProgressUI {
@@ -53,6 +74,15 @@ export class ControlProgress implements ProgressUI {
   private readonly server: ControlServer
   private readonly readyPath?: string
   private readonly controlToken: string
+  private events?: CoordinatorEvents
+  /** The run dir the per-run journal is bound to; unset with a fixed read model. */
+  private journalDir?: string
+  private readonly fixedEvents: boolean
+  private readonly runner: RunnerId
+  /** Each planned phase's runner, so a mixed plan's fragments are attributed right. */
+  private readonly phaseRunners = new Map<string, RunnerId>()
+  /** Structured attempt counter per phase, so published fragments are qualified. */
+  private readonly attempts = new Map<string, number>()
   private abortHandler?: () => void
   private pauseToggle?: () => void
   private keepAwakeToggle?: () => void
@@ -68,6 +98,9 @@ export class ControlProgress implements ProgressUI {
     this.server = options.server
     this.readyPath = options.readyPath
     this.controlToken = options.token ?? options.server.token
+    this.events = options.events
+    this.fixedEvents = options.events !== undefined
+    this.runner = options.runner ?? "opencode"
     // The server command routes resolve against the runner objects as they are
     // handed over via setHostControls/setAbortHandler; /status reads adapter
     // state that is only known after run() creates the RunControl.
@@ -77,17 +110,54 @@ export class ControlProgress implements ProgressUI {
   start(runID: string, targetDir: string, runDir?: string): void {
     this.runID = runID
     const dir = runDir ?? targetDir
+    // Only an explicit run dir hosts a journal, never the checkout itself.
+    if (runDir) this.bindJournal(runDir)
     void this.persistControlAndReady(runID, dir)
+  }
+
+  /** Points publication at the run dir's own journal; the previous run's tail drains first. */
+  private bindJournal(runDir: string): void {
+    if (this.fixedEvents || this.journalDir === runDir) return
+    const previous = this.events
+    if (previous) void previous.whenIdle().then(() => previous.close())
+    this.journalDir = runDir
+    this.events = new CoordinatorEvents({ path: coordinatorJournalPath(runDir) })
+  }
+
+  /** Resolves once every queued fragment reached the journal (the run is about to exit). */
+  async flushEvents(): Promise<void> {
+    await this.events?.whenIdle()
+  }
+
+  private publish(name: string, event: (runner: RunnerId, attempt: number) => Parameters<CoordinatorEvents["enqueue"]>[0]["event"]): void {
+    if (!this.events || !this.runID) return
+    const runner = this.phaseRunners.get(name) ?? this.runner
+    this.events.enqueue({ runId: this.runID, phase: name, event: event(runner, this.attempts.get(name) ?? 1) })
   }
 
   serverReady(_url: string): void {}
 
   phaseStarted(): void {}
   phaseRunning(): void {}
-  phaseAttempt(): void {}
+  phaseAttempt(name: string, info: ProgressAttempt): void {
+    this.attempts.set(name, info.attempt)
+  }
   phaseSession(): void {}
-  phaseActivity(): void {}
-  phaseMessage(): void {}
+  /** Summarized activity lines join the journal too; spinner pulses carry nothing to replay. */
+  phaseActivity(name: string, detail: string, kind?: ActivityKind, pulse?: boolean): void {
+    if (pulse) return
+    this.publish(name, (runner, attempt) => ({ type: "activity", runner, attempt, message: detail, ...(kind ? { kind } : {}) }))
+  }
+  /**
+   * Runner-neutral transcript intake (design D6): buffer the chunk onto the
+   * durable journal's bounded queue and return immediately. Claude and OpenCode
+   * both deliver through here, so a dashboard following the journal never needs
+   * an OpenCode server URL. Dropped fragments under back pressure are reported
+   * through `CoordinatorEvents.status()` rather than silently lost.
+   */
+  phaseMessage(name: string, message: ProgressMessage): void {
+    this.publish(name, (runner, attempt) => runnerEventFromProgressMessage(runner, attempt, message))
+  }
   phaseStepUsage(): void {}
   phaseUsageTotal(): void {}
   phaseAdvisorEvent(): void {}
@@ -99,11 +169,25 @@ export class ControlProgress implements ProgressUI {
   phaseRestored(): void {}
 
   askPermission(info: PermissionPromptInfo): Promise<PermissionReply> {
+    if (!this.server.hasController()) {
+      const what = info.command ?? info.target ?? info.patterns.join(", ")
+      this.warnUnattended(`[permission] waiting for an answer: ${info.permission}${what ? `: ${what}` : ""}`)
+    }
     return this.server.pending.holdPermission(info)
   }
 
   askHumanReview(info: HumanReviewPromptInfo): Promise<HumanReviewAction> {
+    if (!this.server.hasController()) this.warnUnattended(`[human] ${info.stepName} is waiting for a decision${info.error ? ` after: ${info.error}` : ""}`)
     return this.server.pending.holdHuman(info)
+  }
+
+  /**
+   * A hold without a controller waits by design (a dashboard may attach later),
+   * but its log reader, often an agent following a --no-tui launch, would
+   * otherwise see only silence. Say what is held and how to release it.
+   */
+  private warnUnattended(what: string): void {
+    log.warn(`${what} — no controller is attached; answer it from \`convoy runs ${this.runID}\`, or launch unattended runs with --smart or --yolo`)
   }
 
   isInteractiveTakeover(name: string): boolean {
@@ -180,6 +264,12 @@ export class ControlProgress implements ProgressUI {
     next: { runID: string; targetDir: string; runDir: string; pipeline: Pipeline; retainMessage?: string },
   ): void {
     this.runID = next.runID
+    // A goal cycle reuses phase names across iterations; drop the previous
+    // iteration's attempt counters so a fragment is never misattributed.
+    this.attempts.clear()
+    this.phaseRunners.clear()
+    for (const phase of phases) if (phase.runner) this.phaseRunners.set(phase.name, phase.runner)
+    this.bindJournal(next.runDir)
     const reset: ControlReset = {
       runID: next.runID,
       targetDir: next.targetDir,

@@ -1,4 +1,5 @@
 import { log } from "./log"
+import type { RunnerExecutionRecord } from "./runners/provenance"
 import type { Pipeline, StepRunner } from "./types"
 import type { AdvisorEvent, AdvisorPhaseAggregate } from "./advisor-events"
 
@@ -337,6 +338,8 @@ export type ProgressUI = {
   /** Structured attempt counter and model for the phase, so UIs can place them without parsing detail strings. */
   phaseAttempt(name: string, info: ProgressAttempt): void
   phaseSession(name: string, sessionID: string): void
+  /** The attempt's versioned runner provenance (runner, auth, model, session, identity); persisted, not rendered. */
+  phaseExecution?(name: string, execution: RunnerExecutionRecord): void
   /** `pulse` marks heartbeat noise (provider busy, streaming…) that updates the live status line but stays out of the activity feed. */
   phaseActivity(name: string, detail: string, kind?: ActivityKind, pulse?: boolean): void
   /**

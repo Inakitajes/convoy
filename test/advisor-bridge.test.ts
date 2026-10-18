@@ -178,18 +178,23 @@ describe("advisor bridge server", () => {
 })
 
 describe("advisor tool file", () => {
-  test("is written with restrictive permissions and no imports, so it survives a failed dep install", async () => {
+  test("registers the advisor and feedback tools as V2 plugins with restrictive permissions", async () => {
     const dir = await scratch()
-    const path = await installAdvisorTool({ dir })
+    const [path, feedbackPath] = await installAdvisorTool({ dir })
 
     const source = await readFile(path, "utf8")
-    expect(path).toBe(join(dir, "tools", "advisor.ts"))
-    expect(source).not.toContain("import ")
-    expect(source).toContain("args: {}")
+    expect(path).toBe(join(dir, "plugins", "advisor", "index.ts"))
+    expect(JSON.parse(await readFile(join(dir, "plugins", "advisor", "package.json"), "utf8"))).toMatchObject({ main: "index.ts", type: "module" })
+    // V2 hides plugin tools behind Code Mode unless told otherwise.
+    expect(source).toContain("options: { codemode: false }")
+    expect(source).toContain('import { Plugin } from "@opencode/plugin"')
+    expect(source).toContain("ctx.tool.transform")
+    expect(source).toContain('"advisor"')
+    expect(source).toContain('input: { type: "object", properties: {} }')
     expect(source).toContain("context?.sessionID")
     expect((await stat(path)).mode & 0o777).toBe(0o600)
 
-    const feedbackPath = join(dir, "tools", "advisor_feedback.ts")
+    expect(feedbackPath).toBe(join(dir, "plugins", "advisor_feedback", "index.ts"))
     const feedbackSource = await readFile(feedbackPath, "utf8")
     expect(feedbackSource).toContain('url.pathname = "/feedback"')
     expect(feedbackSource).toContain("context?.sessionID")
@@ -197,32 +202,41 @@ describe("advisor tool file", () => {
     expect((await stat(feedbackPath)).mode & 0o777).toBe(0o600)
   })
 
-  test("is valid JavaScript that returns the bridge's advice", async () => {
+  test("is a valid plugin that returns the bridge's advice", async () => {
     const dir = await scratch()
-    // Rewritten as .mjs so it can be imported directly; the source is identical.
+    // The generated plugin imports "@opencode/plugin"; rewrite the bare
+    // specifier to the resolved module URL so the temp copy can be imported.
     const modulePath = join(dir, "advisor.mjs")
-    const installedPath = await installAdvisorTool({ dir })
-    await writeFile(modulePath, await readFile(installedPath, "utf8"))
-    const tool = (await import(modulePath)).default
+    const [installedPath] = await installAdvisorTool({ dir })
+    const source = (await readFile(installedPath, "utf8")).replace(
+      '"@opencode/plugin"',
+      JSON.stringify(import.meta.resolve("@opencode/plugin")),
+    )
+    await writeFile(modulePath, source)
+    const plugin = (await import(modulePath)).default
 
-    expect(tool.args).toEqual({})
-    expect(tool.description).toContain("Takes no parameters")
+    let tool: { name: string; description: string; input: unknown; execute: (args: unknown, ctx: unknown) => Promise<{ content?: string }> } | undefined
+    await plugin.setup({ tool: { transform: async (cb: (editor: { add: (t: typeof tool) => void }) => void) => { cb({ add: (t) => { tool = t } }) } } })
+    expect(plugin.id).toBe("convoy-advisor")
+    expect(tool?.name).toBe("advisor")
+    expect(tool?.input).toEqual({ type: "object", properties: {} })
+    expect(tool?.description).toContain("Takes no parameters")
 
     // No bridge configured: says so instead of throwing.
     delete process.env.CONVOY_ADVISOR_URL
     delete process.env.CONVOY_ADVISOR_TOKEN
-    expect(await tool.execute({}, { sessionID: "ses_1" })).toContain("no advisor configured")
+    expect((await tool!.execute({}, { sessionID: "ses_1" })).content).toContain("no advisor configured")
 
     // Against a real bridge, it returns the advice verbatim.
     const bridge = await startAdvisorBridge({ advisors: () => stubRuntime({ ses_1: "Read the migration first." }).runtime })
     try {
       process.env.CONVOY_ADVISOR_URL = bridge.url
       process.env.CONVOY_ADVISOR_TOKEN = bridge.token
-      expect(await tool.execute({}, { sessionID: "ses_1" })).toBe("Read the migration first.")
+      expect((await tool!.execute({}, { sessionID: "ses_1" })).content).toBe("Read the migration first.")
 
       // A rejected token degrades rather than throwing into the agent loop.
       process.env.CONVOY_ADVISOR_TOKEN = "wrong"
-      expect(await tool.execute({}, { sessionID: "ses_1" })).toContain("advisor bridge returned 401")
+      expect((await tool!.execute({}, { sessionID: "ses_1" })).content).toContain("advisor bridge returned 401")
     } finally {
       bridge.close()
       delete process.env.CONVOY_ADVISOR_URL
@@ -232,7 +246,7 @@ describe("advisor tool file", () => {
 
   test("rewrites only when the content changed, so OpenCode's watcher isn't churned", async () => {
     const dir = await scratch()
-    const path = await installAdvisorTool({ dir })
+    const [path] = await installAdvisorTool({ dir })
     const expected = await readFile(path, "utf8")
     const first = (await stat(path)).mtimeMs
 

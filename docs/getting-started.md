@@ -24,6 +24,20 @@ Bun is included in the release binary; it is **not** a user requirement. See [pr
 - `opencode` installed and authenticated (`opencode auth login`)
 - `git`
 
+### OpenCode runtime
+
+Convoy drives the operator's locally resolved `opencode` executable and requires **OpenCode V2**. The tested set is **2.0.26**; any `2.x` is accepted. Convoy verifies the runtime's version before any model work or repository-mutating hook and never installs, updates or replaces OpenCode:
+
+- The binary is resolved from `PATH`; set `CONVOY_OPENCODE_BIN` to point at an explicit one.
+- A missing, V1 or unsupported runtime fails with an actionable error naming the detected version and the supported target, and leaves your installation, runtime selection and configuration unchanged.
+- The V2 connection is authenticated per boot: Convoy captures the server's one-time password from its startup output and redacts it from every diagnostic it retains.
+
+Convoy resumes existing conversations by exact session id and verifies the session before opening it, rather than letting V2's `--session` silently create a replacement. Session windows receive the run server's password through a one-shot owner-only file, never on the command line.
+
+Known gap on 2.0.26: OpenCode does not apply a configured agent or advisor `temperature` to model requests, so those agents run at the provider's default temperature until the runtime forwards it. To roll back, restore a previous Convoy build and use an explicitly compatible OpenCode V1 environment: Convoy never downgrades your OpenCode, never repoints a V1 build at V2-only data, and keeps your run history and worktrees intact.
+
+See [Running Convoy](running.md) for the operator-facing behavior.
+
 ## Installation
 
 ### Install script (recommended)

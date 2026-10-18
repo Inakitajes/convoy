@@ -7,7 +7,7 @@ import { BoxRenderable, StyledText, TextRenderable, bg, bold, createCliRenderer,
 
 import { defaultAdvisorMaxCalls } from "./advisor"
 import { confirmedChangeSelection, markAllChanges, toggleMarkedChange } from "./change-selection"
-import { buildAgentRegistry, emptyHooksConfig, loadMergedConvoyConfig } from "./config"
+import { buildAgentRegistry, emptyHooksConfig, loadMergedConvoyConfig, pipelineDefaultsOf } from "./config"
 import { currentBranch, dirtyFilesPreview, mainWorktreeDir, resolveWorktreeDefault, statusPorcelain } from "./git"
 import { hooksForPipeline } from "./hooks"
 import { openRouterLowBalance, startLimitsPoller } from "./limits"
@@ -545,9 +545,7 @@ export function pipelineChoices(config: ConvoyConfig | undefined, agents: readon
         name,
         spec,
         agents,
-        defaultModel: config?.defaults.model,
-        defaultAdvisor: config?.defaults.advisor,
-        defaultAdvisorMaxCalls: config?.defaults.advisorMaxCalls,
+        ...pipelineDefaultsOf(config?.defaults),
       })
       return {
         name,

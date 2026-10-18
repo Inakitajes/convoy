@@ -75,7 +75,7 @@ describe("runHumanReviewGate", () => {
     const { workspace, options } = await fixture()
     const { calls, progress } = progressWithActions(["continue"])
 
-    await runHumanReviewGate(workspace, options, "http://127.0.0.1:1234", progress)
+    await runHumanReviewGate(workspace, options, { url: "http://127.0.0.1:1234" }, progress)
 
     expect(calls.suspend).toBe(0)
     expect(calls.resume).toBe(0)
@@ -83,6 +83,38 @@ describe("runHumanReviewGate", () => {
     expect(calls.prompts).toHaveLength(1)
     expect(calls.prompts[0]).toMatchObject({ stepName: "human-review", iterations: 0 })
     await expect(readFile(join(workspace.dir, "reports", "human-review.md"), "utf8")).resolves.toContain("- Result: approved")
+  })
+
+  // A Claude-only run never boots OpenCode, so its human gate iterates with
+  // Claude under the run's reviewed authentication instead.
+  test("without an OpenCode server the iteration opens Claude, and its changes commit with the run trailer", async () => {
+    const { workspace, options } = await fixture()
+    const changed = join(options.targetDir, "claude-fix.md")
+    const opened: Array<{ targetDir: string; auth?: unknown }> = []
+    const { calls, progress } = progressWithActions(["iterate", "continue"])
+    await runHumanReviewGate(
+      workspace,
+      { ...options, claudeAuth: { mode: "subscription" } },
+      undefined,
+      progress,
+      undefined,
+      "human-review",
+      {
+        openInteractiveOpencodeWindow: async () => {
+          throw new Error("OpenCode must not be opened for a Claude-only run")
+        },
+        openClaudeInteractiveWindow: async (input) => {
+          opened.push(input)
+          await writeFile(changed, "edited in Claude\n")
+          return "terminal"
+        },
+      },
+    )
+    expect(opened).toMatchObject([{ targetDir: options.targetDir, auth: { mode: "subscription" } }])
+    expect(calls.activities).toContain("Claude iteration opened in terminal; return here and press c to continue")
+    const log = Bun.spawnSync(["git", "log", "-1", "--format=%B"], { cwd: options.targetDir }).stdout.toString()
+    expect(log).toContain(`Convoy-Run: ${workspace.runID}`)
+    await expect(readFile(join(workspace.dir, "reports", "human-review.md"), "utf8")).resolves.toContain("- Manual Claude iterations: 1")
   })
 
   test("an iteration's committed changes carry the run trailer and describe the staged paths", async () => {
@@ -97,7 +129,7 @@ describe("runHumanReviewGate", () => {
     await runHumanReviewGate(
       workspace,
       options,
-      "http://127.0.0.1:1234",
+      { url: "http://127.0.0.1:1234" },
       progress,
       undefined,
       "human-review",
@@ -131,7 +163,7 @@ describe("runHumanReviewGate", () => {
     await runHumanReviewGate(
       workspace,
       options,
-      "http://127.0.0.1:1234",
+      { url: "http://127.0.0.1:1234" },
       progress,
       {
         stop: async () => {},
@@ -157,6 +189,32 @@ describe("runHumanReviewGate", () => {
     await expect(readFile(join(workspace.dir, "reports", "human-review.md"), "utf8")).resolves.toContain("- Manual OpenCode iterations: 1")
   })
 
+  // The run's V2 server is password-protected; the iteration window has to
+  // carry the password or the OpenCode client is rejected at connect.
+  test("opens the iteration window with the run server's password", async () => {
+    const { workspace, options } = await fixture()
+    const opened: unknown[] = []
+    const { progress } = progressWithActions(["iterate", "continue"])
+
+    await runHumanReviewGate(
+      workspace,
+      options,
+      { url: "http://127.0.0.1:1234", password: "s3cret" },
+      progress,
+      undefined,
+      "human-review",
+      {
+        openInteractiveOpencodeWindow: async (input) => {
+          opened.push(input)
+          return "terminal"
+        },
+        runInteractiveOpencode: async () => {},
+      },
+    )
+
+    expect(opened).toEqual([{ url: "http://127.0.0.1:1234", password: "s3cret", targetDir: options.targetDir }])
+  })
+
   test("falls back to suspended same-terminal iteration when the TUI window cannot open", async () => {
     const { workspace, options } = await fixture()
     const events: string[] = []
@@ -166,7 +224,7 @@ describe("runHumanReviewGate", () => {
     await runHumanReviewGate(
       workspace,
       options,
-      "http://127.0.0.1:1234",
+      { url: "http://127.0.0.1:1234" },
       progress,
       {
         stop: async () => {},
@@ -195,34 +253,34 @@ describe("runHumanReviewGate", () => {
 describe("humanActionMenu", () => {
   test("renders the bracketed-key menu in [k]ey style for each allowed action", () => {
     // Every label starts with its key so the bracket strips the first letter.
-    expect(humanActionMenu(["continue", "iterate", "abort"])).toBe("[c]ontinue pipeline, [o]pen OpenCode, [a]bort")
-    expect(humanActionMenu(["retry", "iterate", "abort"])).toBe("[r]etry clean, [o]pen OpenCode, [a]bort")
+    expect(humanActionMenu(["continue", "iterate", "abort"])).toBe("[c]ontinue pipeline, [o]pen session, [a]bort")
+    expect(humanActionMenu(["retry", "iterate", "abort"])).toBe("[r]etry clean, [o]pen session, [a]bort")
   })
 
   test("a failure gate without a baseline shows only open and abort", () => {
-    expect(humanActionMenu(["iterate", "abort"])).toBe("[o]pen OpenCode, [a]bort")
+    expect(humanActionMenu(["iterate", "abort"])).toBe("[o]pen session, [a]bort")
   })
 })
 
 describe("phaseGatePrompt", () => {
   test("a failure gate puts the error on its own line above the menu", () => {
     const prompt = phaseGatePrompt({ stepName: "implementer", kind: "failure", error: "network down", allowed: ["retry", "iterate", "abort"] })
-    expect(prompt).toBe('Step "implementer" failed: network down\n[r]etry clean, [o]pen OpenCode, [a]bort > ')
+    expect(prompt).toBe('Step "implementer" failed: network down\n[r]etry clean, [o]pen session, [a]bort > ')
   })
 
   test("a failure gate collapses whitespace in a multi-line error", () => {
     const prompt = phaseGatePrompt({ stepName: "tests", kind: "failure", error: "provider\ntemporarily\nunavailable", allowed: ["iterate", "abort"] })
-    expect(prompt).toBe('Step "tests" failed: provider temporarily unavailable\n[o]pen OpenCode, [a]bort > ')
+    expect(prompt).toBe('Step "tests" failed: provider temporarily unavailable\n[o]pen session, [a]bort > ')
   })
 
   test("a failure gate without an error still shows the menu on the second line", () => {
     const prompt = phaseGatePrompt({ stepName: "plan", kind: "failure", allowed: ["retry", "iterate", "abort"] })
-    expect(prompt).toBe('Step "plan" failed\n[r]etry clean, [o]pen OpenCode, [a]bort > ')
+    expect(prompt).toBe('Step "plan" failed\n[r]etry clean, [o]pen session, [a]bort > ')
   })
 
   test("an interactive gate uses the session wording on a single line", () => {
     const prompt = phaseGatePrompt({ stepName: "implementer", kind: "interactive", allowed: ["continue", "iterate", "abort"] })
-    expect(prompt).toBe('Interactive session on step "implementer": [c]ontinue pipeline, [o]pen OpenCode, [a]bort > ')
+    expect(prompt).toBe('Interactive session on step "implementer": [c]ontinue pipeline, [o]pen session, [a]bort > ')
   })
 
   test("a budget gate offers reset and abort without a transparent continue action", () => {

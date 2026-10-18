@@ -8,7 +8,7 @@ import { LiveAttach } from "../src/attach-runtime"
 import { noopProgress, type ProgressPhaseSnapshot, type ProgressUI } from "../src/progress"
 
 import type { AdvisorEvent } from "../src/advisor-events"
-import type { OpencodeClient } from "@opencode-ai/sdk/v2"
+import type { OpencodeClient } from "../src/opencode-client"
 
 const dirs: string[] = []
 

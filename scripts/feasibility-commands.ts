@@ -5,15 +5,16 @@
  * No global command installation is performed. Run with
  * `bun run scripts/feasibility-commands.ts` from this repository.
  */
-import { createOpencodeClient, createOpencodeServer } from "@opencode-ai/sdk/v2"
+import { createOpencodeClient } from "../src/opencode-client"
+import { bootV2Server } from "./v2-fixture"
 
 const record = (step: string, outcome: unknown) => console.log(`STEP ${step}: ${JSON.stringify(outcome).slice(0, 400)}`)
 const errText = (e: unknown) => (e && typeof e === "object" ? JSON.stringify(e).slice(0, 200) : String(e))
 
 const repoDir = new URL("..", import.meta.url).pathname.replace(/\/$/, "")
-const server = await createOpencodeServer({ hostname: "127.0.0.1", port: 0, timeout: 30_000 })
+const server = await bootV2Server(repoDir)
 record("server", { url: server.url, cwd: repoDir })
-const client = createOpencodeClient({ baseUrl: server.url })
+const client = createOpencodeClient({ baseUrl: server.url, ...(server.password ? { password: server.password } : {}) })
 
 // 1. Discovery through the public command API.
 const commands = await client.command.list()
@@ -41,5 +42,5 @@ record("raw-command-list", {
 //    `Session.command` → url "/session/{id}/command".
 record("invocation-endpoint", { method: "POST", url: "/session/{id}/command", body: { command: "opsx-propose", arguments: "<change name or description>" }, note: "shape documented from SDK types; not executed to avoid a real proposal run" })
 
-server.close()
+await server.stop()
 console.log("PROBE COMPLETE")

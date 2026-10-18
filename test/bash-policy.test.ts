@@ -23,6 +23,17 @@ describe("bash policy", () => {
     expect(policy["*"]).toBe("ask")
   })
 
+  test("orders rules for last-match-wins evaluation: the ask fallback first, every denial last", () => {
+    // OpenCode V2 turns this map into an ordered ruleset where the last
+    // matching rule wins, so a trailing "*" would override every denial and a
+    // denial before an overlapping allow would lose to it.
+    const effects = Object.entries(bashPolicy(process.cwd(), { allow: ["git *"], deny: [] })).map(([, effect]) => effect)
+    expect(Object.keys(bashPolicy())[0]).toBe("*")
+    const firstDeny = effects.indexOf("deny")
+    expect(firstDeny).toBeGreaterThan(0)
+    expect(effects.slice(firstDeny).every((effect) => effect === "deny")).toBe(true)
+  })
+
   test("avoids destructive allows and over-broad denies", () => {
     const policy = bashPolicy()
 

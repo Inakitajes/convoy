@@ -1,4 +1,4 @@
-import type { Provider } from "@opencode-ai/sdk/v2"
+import type { Provider } from "./opencode-client"
 
 import { log } from "./log"
 import { startOpencode } from "./opencode"
@@ -26,14 +26,12 @@ type ModelCatalogDeps = {
     config: Parameters<typeof startOpencode>[0],
     signal: AbortSignal,
   ) => Promise<{
-    client: {
-      provider: {
-        list(input: { directory: string }): Promise<{ error?: unknown; data?: { all: Provider[]; connected: string[] } }>
-      }
-    }
+    client: ProviderLister
     close(): void
   }>
   fetch?: (url: string, init: { signal: AbortSignal }) => Promise<Pick<Response, "ok" | "status" | "json">>
+  /** Overrides the provider warm-up bound (tests). */
+  warmupMs?: number
 }
 
 /**
@@ -49,7 +47,7 @@ export async function listModels(targetDir: string, deps?: ModelCatalogDeps): Pr
   const start = deps?.startOpencode ?? startOpencode
   const fetchCatalog = deps?.fetch ?? fetch
 
-  const fromSdk = await safe(() => listModelsFromSdk(targetDir, start), "opencode SDK")
+  const fromSdk = await safe(() => listModelsFromSdk(targetDir, start, deps?.warmupMs), "opencode SDK")
   if (fromSdk && fromSdk.length > 0) {
     if (!deps) cached = fromSdk
     return fromSdk
@@ -64,12 +62,41 @@ export async function listModels(targetDir: string, deps?: ModelCatalogDeps): Pr
   return []
 }
 
-async function listModelsFromSdk(targetDir: string, start: NonNullable<ModelCatalogDeps["startOpencode"]>): Promise<ModelChoice[]> {
+type ProviderLister = {
+  provider: {
+    list(input: { directory: string }): Promise<{ error?: unknown; data?: { all: Provider[]; connected: string[] } }>
+  }
+}
+
+/** How long a freshly booted server may take to load its configured providers. */
+const catalogWarmupMs = 3_000
+const catalogPollMs = 150
+
+/**
+ * The picker choices from a running server. A server answers before its
+ * provider state has finished loading, so an empty catalog is re-read for a
+ * short bounded warm-up instead of being taken as "no providers"; a server
+ * that genuinely has none still answers [] once the warm-up elapses.
+ */
+export async function listServerModels(
+  client: ProviderLister,
+  directory: string,
+  options: { warmupMs?: number; pollMs?: number } = {},
+): Promise<ModelChoice[]> {
+  const deadline = Date.now() + (options.warmupMs ?? catalogWarmupMs)
+  for (;;) {
+    const result = await client.provider.list({ directory })
+    if (result.error || !result.data) throw new Error("opencode returned an error listing providers/models")
+    const choices = toModelChoices(result.data.all, result.data.connected)
+    if (choices.length > 0 || Date.now() >= deadline) return choices
+    await Bun.sleep(options.pollMs ?? catalogPollMs)
+  }
+}
+
+async function listModelsFromSdk(targetDir: string, start: NonNullable<ModelCatalogDeps["startOpencode"]>, warmupMs?: number): Promise<ModelChoice[]> {
   const handle = await start({}, AbortSignal.timeout(catalogTimeoutMs))
   try {
-    const result = await handle.client.provider.list({ directory: targetDir })
-    if (result.error || !result.data) throw new Error("opencode returned an error listing providers/models")
-    return toModelChoices(result.data.all, result.data.connected)
+    return await listServerModels(handle.client, targetDir, warmupMs !== undefined ? { warmupMs } : {})
   } finally {
     // Await the bounded owned stop before returning: a helper that kept
     // running after its caller resolved is exactly the leak this fixes.

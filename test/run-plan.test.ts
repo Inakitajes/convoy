@@ -2,9 +2,9 @@ import { describe, expect, test } from "bun:test"
 
 import { builtInAgents, builtInPipelines, resolvePipeline } from "../src/pipeline"
 import { logicalModel } from "../src/model-routing"
-import { buildRunPlan, plannedStepAdvisor, routePipeline, throughputRoutedModels } from "../src/run-plan"
+import { buildRunPlan, plannedStepAdvisor, plannedStepAuthMode, plannedStepModel, routePipeline, throughputRoutedModels } from "../src/run-plan"
 import { stepRunnerFor } from "../src/step-runners"
-import type { AgentStep, RunOptions } from "../src/types"
+import type { AgentStep, RunOptions, Step } from "../src/types"
 
 test("the immutable plan filters and freezes exact routed targets", () => {
   const options: RunOptions = {
@@ -472,9 +472,110 @@ describe("advisor routing", () => {
     expect(plannedStepAdvisor(route(step()))).toBeUndefined()
   })
 
-  test("claude-code steps are never given an advisor by the global override", () => {
-    const routed = route(step({ runner: "claude-code", model: "opus", readOnly: true }), "configured", { advisorOverride: "anthropic/claude-opus-5" })
+  test("claude-code steps route their advisor like any step, a Claude one without the gateway", () => {
+    const opencodeAdvisor = route(step({ runner: "claude-code", model: "opus", readOnly: true }), "configured", { advisorOverride: "anthropic/claude-opus-5" })
+    expect(opencodeAdvisor.advisor).toBe("anthropic/claude-opus-5")
+    const claudeAdvisor = route(step({ runner: "claude-code", model: "sonnet", readOnly: true }), "openrouter", { advisorOverride: "claude-code/opus" })
+    expect(claudeAdvisor.resolvedAdvisor).toMatchObject({ providerID: "claude-code", modelID: "opus", target: "claude-code/opus" })
+  })
+})
 
-    expect(routed.advisor).toBeUndefined()
+describe("runner-qualified model override", () => {
+  const mixed = (override: string): Step[] =>
+    routePipeline(
+      {
+        name: "mixed",
+        steps: [
+          { type: "agent", name: "build", stepName: "build", groupId: "g1", agentName: "a", description: "a", model: "openai/gpt-5.6-sol", inputFiles: ["prd.md"], inputDiff: false, reportPath: "reports/build.md" },
+          { type: "agent", name: "external", stepName: "external", groupId: "g2", agentName: "external", description: "a", runner: "claude-code", model: "opus", inputFiles: ["prd.md"], inputDiff: false, reportPath: "reports/external.md", readOnly: true },
+        ],
+      },
+      "configured",
+      {},
+      override,
+    ).steps
+
+  test("an unqualified override is OpenCode-only and never touches Claude", () => {
+    const [opencode, claude] = mixed("anthropic/claude-opus-5")
+    expect(opencode?.type === "agent" && opencode.resolvedModel?.logical).toBe("anthropic/claude-opus-5")
+    expect(claude?.type === "agent" && claude.model).toBe("opus")
+    expect(claude?.type === "agent" && claude.resolvedModel).toBeUndefined()
+  })
+
+  test("a Claude-scoped override sets the Claude model and leaves OpenCode alone", () => {
+    const [opencode, claude] = mixed("claude-code/sonnet")
+    expect(opencode?.type === "agent" && opencode.resolvedModel?.logical).toBe("openai/gpt-5.6-sol")
+    expect(claude?.type === "agent" && claude.model).toBe("sonnet")
+    expect(claude?.type === "agent" && claude.resolvedModel).toBeUndefined()
+  })
+
+  test("an OpenCode-scoped override applies to OpenCode only", () => {
+    const [opencode, claude] = mixed("opencode/openai/gpt-5.6-sol")
+    expect(opencode?.type === "agent" && opencode.resolvedModel?.logical).toBe("openai/gpt-5.6-sol")
+    expect(claude?.type === "agent" && claude.model).toBe("opus")
+  })
+})
+
+describe("planned step model preview", () => {
+  const claudeStep = (extra: Partial<AgentStep> = {}): AgentStep => ({
+    type: "agent",
+    name: "external",
+    stepName: "external",
+    groupId: "g1",
+    agentName: "external",
+    description: "External audit",
+    runner: "claude-code",
+    model: "opus",
+    inputFiles: ["prd.md"],
+    inputDiff: false,
+    reportPath: "reports/external.md",
+    readOnly: true,
+    ...extra,
+  })
+
+  test("shows the Claude model and its default subscription auth", () => {
+    expect(plannedStepModel(claudeStep())).toBe("claude-code/opus · auth subscription")
+    expect(plannedStepAuthMode(claudeStep())).toBe("subscription")
+  })
+
+  test("shows an explicit api-key auth mode frozen into the plan", () => {
+    const options: RunOptions = {
+      prompt: "review",
+      prdHistory: false,
+      files: [],
+      onlySteps: [],
+      skipSteps: [],
+      resumeRunID: "",
+      keepRunDir: true,
+      modelOverride: "",
+      advisorOverride: "",
+      advisorDisabled: false,
+      tui: false,
+      notify: false,
+      notifications: {},
+      humanReview: false,
+      baseRef: "main",
+      targetDir: "/repo",
+      worktree: false,
+      includeDirty: false,
+      yolo: false,
+      smart: false,
+      smartJudgeModel: "openai/gpt-5.6-sol",
+      pipeline: { name: "claude-only", steps: [claudeStep()] },
+      agents: [],
+      permissions: { allow: [], deny: [] },
+      hooks: { pre: [], post: [], pipelines: {} },
+    }
+    const plan = buildRunPlan({ ...options, claudeAuthMode: "api-key" })
+    const step = plan.pipeline.steps[0]
+    if (step?.type !== "agent") throw new Error("expected an agent step")
+    expect(plannedStepAuthMode(step)).toBe("api-key")
+    expect(plannedStepModel(step)).toBe("claude-code/opus · auth api-key")
+  })
+
+  test("reports no auth mode for an OpenCode step", () => {
+    const opencode = claudeStep({ runner: undefined, model: "openai/gpt-5.6-sol" })
+    expect(plannedStepAuthMode(opencode)).toBeUndefined()
+    expect(plannedStepModel(opencode)).toBe("openai/gpt-5.6-sol")
   })
 })

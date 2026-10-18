@@ -83,6 +83,7 @@ export function renderRunPlan(plan: RunPlan, compact = false, options: RunPlanRe
     }
     lines.push(`Runtime: ${plan.permissions} permissions · ${plan.attachments.length} attachments`)
     if (plan.smartJudge) lines.push(`  Judge: ${sanitizeInline(plan.smartJudge.model.target)}`)
+    if (plan.claude) lines.push(`  Claude: ${claudeRouteSummary(plan.claude)}`)
   }
   return `${lines.join("\n")}\n`
 }
@@ -150,4 +151,20 @@ export function sanitizeReviewText(value: string) {
 /** Single-line sanitize for untrusted plan fields (paths, names, commands), shared with the TUI review. */
 export function sanitizeReviewInline(value: string) {
   return sanitizeInline(value)
+}
+
+/**
+ * The Claude route's authentication and billing, as the operator accepts it
+ * by confirming the plan: subscription login is not a no-charge guarantee, so
+ * the review always says whether usage credits may apply.
+ */
+export function claudeRouteSummary(claude: NonNullable<RunPlan["claude"]>): string {
+  const auth = claude.auth.mode === "api-key" ? `api-key (${claude.auth.credentialRef ?? "unset"})` : "subscription"
+  const billing =
+    claude.auth.mode === "api-key"
+      ? "billed to the API account"
+      : claude.billing.policy === "included-only" && !claude.billing.includedOnlyVerifiable
+        ? "included-only requested but not verifiable — preflight refuses it"
+        : "account policy — usage credits or paid features may apply"
+  return `${auth} · ${billing}`
 }

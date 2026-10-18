@@ -1251,9 +1251,17 @@ async function composeCloseMessage(input: {
     })
     return { message: withPullRequestReference(stripControlBytes(formatCommitMessage(fallback)), input.pullRequest), source: "fallback" }
   }
+  // The squash writer follows the configured commit-message route, a Claude
+  // one included, like run compaction does.
+  const { loadMergedConvoyConfig } = await import("./config")
+  const { helperClaudeAuth, helperModel } = await import("./helper-routes")
+  const { defaultCommitMessageModel } = await import("./commit-message")
+  const defaults = (await loadMergedConvoyConfig(input.checkout).catch(() => undefined))?.defaults
   const proposal = await proposeCommitMessage({
     targetDir: input.checkout,
     branch: input.branch,
+    model: helperModel("commitMessage", defaults, defaultCommitMessageModel),
+    claudeAuth: helperClaudeAuth(defaults),
     commits: input.context.commits,
     ...(input.context.diffStat ? { diffStat: input.context.diffStat } : {}),
     ...(input.context.proposalExcerpt ? { proposalExcerpt: input.context.proposalExcerpt } : {}),

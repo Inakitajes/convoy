@@ -1,16 +1,18 @@
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { stdout } from "node:process"
 
-import { LiveAttach, goalLoopViewFrom, overallStatus, reconcileAdvisorJournal, replayHistory, waitForServerUrl } from "./attach-runtime"
+import { LiveAttach, goalLoopViewFrom, overallStatus, reconcileAdvisorJournal, replayHistory, replayJournal } from "./attach-runtime"
 import { createControlClient, readControlFile, type ControlClient } from "./control-client"
 import type { ControlReset, ControlRole, PendingSnapshot } from "./control-server"
 import { goalProgressPhases } from "./goal-phases"
 import { compactRunRow, compactRunRowName, withGoalPhases } from "./runner"
 import { readRunMetadata, type RunMetadata } from "./metadata"
 import { connectOpencode } from "./opencode"
+import { readServerAuth } from "./server-auth"
 import type { AutoAccept, PermissionPromptInfo, ProgressPhase, ProgressUI, RunFinalizationView } from "./progress"
 import { isControlLive, isServerLive } from "./runs"
 import { progressPhases } from "./runner"
+import { coordinatorJournalPath, journalFileSource } from "./runners/coordinator-events"
 import { stepRunnerFor } from "./step-runners"
 import { createTuiProgress } from "./tui"
 import { runsRoot } from "./workspace"
@@ -110,6 +112,11 @@ function legacyReconstructedPhases(
   // Recorded rows with no planned counterpart sit like steps above the
   // lifecycle row; only post-hook rows follow it.
   return [...pre.map(barePhaseRow), ...steps, ...goalRows, ...other.map(barePhaseRow), compact, ...post.map(barePhaseRow)]
+}
+
+/** The phases whose transcript only the coordinator's journal carries (no native live attach). */
+function phasesWithoutLiveAttach(phases: readonly ProgressPhase[]): Set<string> {
+  return new Set(phases.filter((phase) => !stepRunnerFor(phase.runner).capabilities.liveAttach).map((phase) => phase.name))
 }
 
 /** A recorded row with no planned counterpart: rendered, but with no plan metadata. */
@@ -216,6 +223,7 @@ export async function openRunDashboard(runID: string, options: AttachOptions = {
 
   if (!live) {
     replayHistory(tui, metadata)
+    await replayJournal(tui, dir, phasesWithoutLiveAttach(phases))
     const goalLoop = goalLoopViewFrom(metadata.goal)
     await Promise.race([
       tui.runFinished?.({ status: overallStatus(metadata), runDir: dir, ...(goalLoop ? { goalLoop } : {}), ...(finalizationViewFrom(metadata) ? { finalization: finalizationViewFrom(metadata)! } : {}) }) ?? Promise.resolve(),
@@ -240,7 +248,6 @@ export async function openRunDashboard(runID: string, options: AttachOptions = {
   const coordinatorGone = new Promise<void>((resolve) => {
     resolveCoordinatorGone = resolve
   })
-  const leaving = Promise.race([detached, coordinatorGone])
   detached.then(() => {
     sessionOver = true
   })
@@ -250,24 +257,35 @@ export async function openRunDashboard(runID: string, options: AttachOptions = {
     resolveCoordinatorGone()
   }
 
-  const liveAttachPhases = (phases: readonly ProgressPhase[]) =>
-    new Set(phases.filter((phase) => !stepRunnerFor(phase.runner).capabilities.liveAttach).map((phase) => phase.name))
-
   /**
    * Points the view at a run (the initial one, or the next goal-loop
-   * iteration). Stops the previous LiveAttach, waits for the run's OpenCode
-   * server to record itself in metadata (iteration N+1's server boots seconds
-   * after the reset arrives), then follows it with a fresh LiveAttach.
+   * iteration). Stops the previous LiveAttach and follows the run with a
+   * fresh one: phases without native live attach stream from the run's
+   * journal at once, and the rest from its OpenCode server as soon as that
+   * records itself in metadata (iteration N+1's server boots seconds after the
+   * reset arrives; a Claude-only run never boots one).
    */
   const startView = async (next: AttachView, serverUrl?: string) => {
     const generation = ++viewGeneration
     await attach?.stop()
     attach = undefined
     view = next
-    const url = serverUrl ?? (await waitForServerUrl(next.metaPath, leaving))
-    if (sessionOver || generation !== viewGeneration || !url) return
-    tui.serverReady(url)
-    const fresh = new LiveAttach(connectOpencode(url), tui, next.targetDir, next.metaPath, liveAttachPhases(next.phases))
+    if (sessionOver || generation !== viewGeneration) return
+    // The connection password rides a private 0600 file next to the metadata,
+    // never the generic navigation metadata (design D2).
+    const connect = async (url: string) => connectOpencode(url, (await readServerAuth(dirname(next.metaPath)))?.password)
+    const client = serverUrl ? await connect(serverUrl) : undefined
+    if (serverUrl) tui.serverReady(serverUrl)
+    const fresh = new LiveAttach(
+      client,
+      tui,
+      next.targetDir,
+      next.metaPath,
+      phasesWithoutLiveAttach(next.phases),
+      undefined,
+      journalFileSource(coordinatorJournalPath(next.runDir)),
+      connect,
+    )
     attach = fresh
     // Completed phases' session tabs reconstruct their transcripts through the
     // attach that owns the run's live server; each view rebinds the seam (the

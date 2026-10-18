@@ -22,6 +22,7 @@ import { PhaseUsage } from "./usage"
 import { aggregateAdvisorEvents, type AdvisorEvent, type AdvisorPhaseAggregate } from "./advisor-events"
 import { readCommitLedger, readFinalizationRecord, readRunBoundary, type CommitLedgerEntry, type FinalizationRecord, type RunBoundary } from "./finalization/types"
 import { resolveRunTitleFor } from "./run-title"
+import type { RunnerExecutionRecord } from "./runners/provenance"
 import type { Workspace } from "./workspace"
 
 export type PhaseMetadataStatus = "pending" | "running" | "completed" | "skipped" | "failed"
@@ -48,6 +49,12 @@ export type PhaseMetadata = {
   repositoryBaseline?: RepoSnapshot
   advisor?: AdvisorPhaseAggregate
   advisorEvents?: AdvisorEvent[]
+  /**
+   * Runner-qualified execution provenance for this phase (schema-compatible
+   * optional field). Absent on legacy phases, whose meaning is preserved by the
+   * compatibility reader.
+   */
+  execution?: RunnerExecutionRecord
 }
 
 /** The stage a goal cycle's durable record says the run is in. */
@@ -187,6 +194,8 @@ export type RunMetadataStore = {
   serverStopped(): Promise<void>
   phaseStarted(name: string): Promise<void>
   phaseSession(name: string, sessionID: string): void
+  /** Persists runner-qualified execution provenance for a phase (additive; legacy fields unchanged). */
+  phaseExecution(name: string, execution: RunnerExecutionRecord): void
   phaseStepUsage(name: string, usage: ProgressStepUsage): void
   phaseUsageTotal(name: string, usage: ProgressUsage): void
   phaseAdvisorEvent(name: string, event: AdvisorEvent): void
@@ -442,6 +451,10 @@ export async function openRunMetadata(
       phase(name).sessionID = sessionID
       void persist()
     },
+    phaseExecution(name, execution) {
+      phase(name).execution = execution
+      void persist()
+    },
     phaseStepUsage(name, usage_) {
       if (!phaseUsage(name).addStep(usage_)) return
       recalculate(name)
@@ -533,6 +546,10 @@ export function recordProgress(progress: ProgressUI, store: RunMetadataStore): P
     phaseSession(name, sessionID) {
       store.phaseSession(name, sessionID)
       progress.phaseSession(name, sessionID)
+    },
+    phaseExecution(name, execution) {
+      store.phaseExecution(name, execution)
+      progress.phaseExecution?.(name, execution)
     },
     phaseActivity: (name, detail, kind, pulse) => progress.phaseActivity(name, detail, kind, pulse),
     phaseOutput(name, lines) {

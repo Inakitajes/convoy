@@ -5,11 +5,13 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import type { PermissionPromptInfo, PermissionReply, ProgressUI, RunOutcome } from "../src/progress"
-import type { RunOptions } from "../src/types"
+import type { AgentStep, RunOptions } from "../src/types"
 
 import { preparePhaseRun, run as realRun, hostedTeardownFromError, UserAbortError, compactRunRowName, type RunDeps } from "../src/runner"
 import { buildRunPlan } from "../src/run-plan"
 import { noopProgress } from "../src/progress"
+import { serverAuthPath } from "../src/server-auth"
+import { runPrivateDir, runsRoot } from "../src/workspace"
 import { builtInAgents } from "../src/pipeline"
 import { prdHistoryDir, readPrdHistoryIndex, writePrdHistory } from "../src/prd-history"
 import { loadOpenSpecBundle } from "../src/openspec"
@@ -79,7 +81,22 @@ async function cleanRepo(): Promise<string> {
   return dir
 }
 
-const emptyPipeline = { name: "hosted-test", steps: [] }
+// One OpenCode step, skipped at execution: the run still owns an OpenCode
+// server (a plan with nothing on OpenCode never boots one), so these tests
+// keep exercising the server's hosted teardown without running a phase.
+const skippedOpencodeStep: AgentStep = {
+  type: "agent",
+  name: "opencode-step",
+  agentName: "implementer",
+  description: "skipped",
+  model: "openai/gpt-5.5",
+  inputFiles: [],
+  inputDiff: false,
+  reportPath: "reports/opencode-step.md",
+  groupId: "g-opencode-step",
+  stepName: "opencode-step",
+}
+const emptyPipeline = { name: "hosted-test", steps: [skippedOpencodeStep] }
 
 function makeOptions(repo: string, overrides: Partial<RunOptions> = {}): RunOptions {
   return {
@@ -87,7 +104,7 @@ function makeOptions(repo: string, overrides: Partial<RunOptions> = {}): RunOpti
     prdHistory: true,
     files: [],
     onlySteps: [],
-    skipSteps: [],
+    skipSteps: ["opencode-step"],
     resumeRunID: "",
     keepRunDir: true,
     modelOverride: "",
@@ -153,17 +170,20 @@ describe("run() with a hosted progress", () => {
       expect(dashboard.events).not.toContain("runFinished:failed")
       // The abort handler is cleared on the way out, not left pointing at a dead run.
       expect(dashboard.events).toContain("clearAbortHandler")
-      // Every OpenCode run receives the report shim, even without an advisor.
-      expect(existsSync(join(hostedHome, ".convoy", "opencode", "tools", "write_report.ts"))).toBe(true)
+      // Every OpenCode run receives the report plugin, even without an advisor.
+      expect(existsSync(join(runPrivateDir(result.dir), "plugins", "write_report", "index.ts"))).toBe(true)
 
       // The finally no longer closes the server/lease: those ride on release.
       expect(result.release).toBeFunction()
       const metadata = JSON.parse(await readFile(join(result.dir, "metadata.json"), "utf8"))
       expect(metadata.server).toBeDefined()
+      // The connection auth rides a private file, not the navigation metadata.
+      expect(existsSync(serverAuthPath(result.dir))).toBe(true)
 
       await result.release?.()
       const after = JSON.parse(await readFile(join(result.dir, "metadata.json"), "utf8"))
       expect(after.server).toBeUndefined()
+      expect(existsSync(serverAuthPath(result.dir))).toBe(false)
     } finally {
       await rm(repo, { recursive: true, force: true })
     }
@@ -200,10 +220,14 @@ describe("run() with a hosted progress", () => {
     const repo = await cleanRepo()
     const dashboard = fakeDashboard()
     const commands: string[][] = []
+    let resolveRelease!: (code: number) => void
     const herdr = new HerdrReporter({
       env: { HERDR_ENV: "1", HERDR_PANE_ID: "w1:p1" },
       spawn: (command) => {
         commands.push(command)
+        if (command[2] === "release-agent") {
+          return { exited: new Promise<number>((resolve) => { resolveRelease = resolve }) }
+        }
         return { exited: Promise.resolve(0) }
       },
       now: () => 1_000,
@@ -220,9 +244,51 @@ describe("run() with a hosted progress", () => {
       const lastAgent = [...commands].reverse().find((command) => command[2] === "report-agent")
       expect(lastAgent?.[lastAgent.indexOf("--state") + 1]).toBe("idle")
 
-      await result.release?.()
+      let releaseSettled = false
+      const releasing = result.release?.().then(() => { releaseSettled = true })
+      await Bun.sleep(0)
       expect(verbs()).toContain("release-agent")
       expect(verbs().at(-1)).toBe("release-agent")
+      expect(verbs().slice(-2)).toEqual(["report-metadata", "release-agent"])
+      expect(releaseSettled).toBe(false)
+      resolveRelease(0)
+      await releasing
+      expect(releaseSettled).toBe(true)
+    } finally {
+      await rm(repo, { recursive: true, force: true })
+    }
+  })
+
+  test("starts Herdr release before a hosted server teardown rejects", async () => {
+    const repo = await cleanRepo()
+    const dashboard = fakeDashboard()
+    const commands: string[][] = []
+    const herdr = new HerdrReporter({
+      env: { HERDR_ENV: "1", HERDR_PANE_ID: "w1:p1" },
+      spawn: (command) => {
+        commands.push(command)
+        return { exited: Promise.resolve(0) }
+      },
+      now: () => 1_000,
+    })
+    const rejectingStop: RunDeps["startOpencode"] = async () => ({
+      client: fakeClient as never,
+      url: "http://127.0.0.1:41238",
+      pid: 0,
+      stop: async () => { throw new Error("server teardown failed") },
+      forceStop: () => {},
+      close: async () => { throw new Error("server teardown failed") },
+    })
+
+    try {
+      const result = await realRun(makeOptions(repo, { progress: dashboard.progress }), {
+        startOpencode: rejectingStop,
+        createHerdrReporter: () => herdr,
+      })
+      await expect(result.release?.()).rejects.toThrow(/server teardown failed/)
+
+      const verbs = commands.map((command) => command[2])
+      expect(verbs.slice(-2)).toEqual(["report-metadata", "release-agent"])
     } finally {
       await rm(repo, { recursive: true, force: true })
     }
@@ -492,6 +558,34 @@ describe("run() with a hosted progress", () => {
       })
       // The provider-level timeout settings still ride along.
       expect(captured?.provider?.openrouter?.options?.timeout).toBe(false)
+    } finally {
+      await rm(repo, { recursive: true, force: true })
+    }
+  })
+
+  // V2 loads plugins from the paths the run config names, and each package
+  // embeds that run's bridge URL and token: it must live in the run's own
+  // directory, so a concurrent run can never rewrite a live run's tools.
+  test("the run config names the write_report plugin package inside the run's own directory", async () => {
+    const repo = await cleanRepo()
+    let captured: Awaited<Parameters<RunDeps["startOpencode"]>[0]> | undefined
+    const capturingStart: RunDeps["startOpencode"] = async (config) => {
+      captured = config
+      return fakeOpencodeHandle(fakeClient, "http://127.0.0.1:41237")
+    }
+    try {
+      try {
+        await realRun(makeOptions(repo), { startOpencode: capturingStart })
+      } catch {
+        // Expected: the fake client cannot run the phase.
+      }
+
+      const plugins = captured?.plugins ?? []
+      expect(plugins).toHaveLength(1)
+      expect(plugins[0]).toMatch(new RegExp(`^${runsRoot()}/[^/]+/private/plugins/write_report$`))
+      const source = await readFile(join(plugins[0]!, "index.ts"), "utf8")
+      expect(source).toContain("write_report")
+      expect(source).toContain("codemode: false")
     } finally {
       await rm(repo, { recursive: true, force: true })
     }
@@ -800,7 +894,7 @@ describe("run() with a hosted progress", () => {
       },
     }
     try {
-      const result = await run(makeOptions(repo, { pipeline: goalPipeline, progress: dashboard.progress }))
+      const result = await run(makeOptions(repo, { pipeline: goalPipeline, skipSteps: [], progress: dashboard.progress }))
       try {
         // The scheduler published the live goal view through the hosted progress.
         expect(dashboard.events).toContain("setGoalLoop")
@@ -999,6 +1093,8 @@ describe("automatic run finalization lifecycle", () => {
     try {
       const result = await run(
         makeOptions(repo, {
+          pipeline: { name: "hosted-test", steps: [] },
+          skipSteps: [],
           hooks: { pre: [{ name: "fetch", command: "true" }], post: [{ name: "open PR", command: "true" }], pipelines: {} },
         }),
       )

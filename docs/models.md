@@ -5,6 +5,7 @@
 Authenticate providers and route executor and advisor models through gateways.
 
 - [Authentication And Providers](#authentication-and-providers)
+- [Runner authentication and billing](#runner-authentication-and-billing)
 - [Model gateways](#model-gateways)
 
 ## Authentication And Providers
@@ -22,6 +23,83 @@ opencode models anthropic
 ```
 
 To use different providers, authenticate them in OpenCode and select models as `provider/model`. The default `full-cycle` uses OpenRouter for DeepSeek, GLM and Grok, and OpenAI for Astra. `implement` uses the same writing models, with advice only on implementation and a closing DeepSeek recap. See the [default pipeline](pipelines.md#the-default-pipeline-full-cycle) for the step-by-step model choices.
+
+## Runner authentication and billing
+
+**OpenCode** requires a supported OpenCode V2 on `PATH`; Convoy never installs,
+updates, or replaces it. **Claude** uses the operator's authenticated `claude`
+CLI. Authentication and billing are **separate**: subscription login does not
+guarantee included-only usage, and Convoy never changes account spending
+settings. See [Runners](runners.md) for execution modes, reports, advisors,
+dashboards, and recovery.
+
+### Subscription setup
+
+Sign in once with the CLI's own supported login flow (`claude`, then `/login`);
+Convoy never reads credential stores, extracts tokens, or automates login.
+Claude defaults to `subscription`; state the billing decision explicitly so
+unattended launches can run too:
+
+```yaml
+version: 1
+defaults:
+  claudeAuth:
+    authMode: subscription
+    billingPolicy: account-policy   # usage credits or paid features may apply
+```
+
+A subscription-only configuration requires no API key and no OpenCode
+installation. The Claude CLI exposes no control that enforces included-only
+usage, so `billingPolicy: included-only` is refused at preflight rather than
+promised. Without a `billingPolicy`, the launch review discloses the account
+policy and confirming it is the consent; an unattended launch must configure
+it. Convoy never enables extra usage, buys credits, or raises provider-side
+spend limits.
+
+### API-key opt-in
+
+API-key execution is a separate, explicit mode. Reference an environment
+variable by name; never put the key itself in the file:
+
+```yaml
+version: 1
+defaults:
+  claudeAuth:
+    authMode: api-key
+    credentialRef: CONVOY_ANTHROPIC_KEY   # the variable that holds the key
+```
+
+```bash
+export CONVOY_ANTHROPIC_KEY=sk-ant-...
+```
+
+Convoy sets the key only for the child and removes ambient OAuth/subscription
+tokens for it, so the selected key is the effective billing source. Run metadata
+records the mode and the variable name, never the value.
+
+### Legacy configuration migration
+
+Older configurations declare `runner: claude-code` steps with no
+`defaults.claudeAuth`. They run as `subscription`, and preflight verifies that
+claim with `claude auth status --json` under the child's overlay before any
+work starts: when Claude would actually bill an API key, a key helper, or a
+third-party provider, the launch is refused with guidance to set
+`defaults.claudeAuth` explicitly. Convoy never infers permission to use API
+billing, and existing runner IDs and model strings stay compatible.
+
+### Cost labels
+
+Subscription and API-key figures are labeled differently and never conflated:
+
+| | OpenCode / API key | Claude subscription |
+|---|---|---|
+| Monetary value | estimate of provider charges | **estimate only**, not a cash charge |
+| Quota | provider-side; not tracked as a guarantee | not a remaining-balance report |
+| Missing data | unknown, never zero | unknown, never zero |
+
+Neither column is an invoice. [Runners](runners.md#usage-and-billing) explains
+the distinction and gives retry/resume examples. Tested versions are recorded in
+`openspec/changes/runner-parity-opencode-v2/evidence/compatibility.md`.
 
 ## Model gateways
 

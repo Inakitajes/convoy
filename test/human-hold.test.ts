@@ -98,7 +98,7 @@ describe("human gate hold without a TTY", () => {
     const { workspace, options } = await fixture()
     const h = holdingProgress()
 
-    const gate = runHumanReviewGate(workspace, options, "http://127.0.0.1:1234", h.progress)
+    const gate = runHumanReviewGate(workspace, options, { url: "http://127.0.0.1:1234" }, h.progress)
     const deadline = Date.now() + 2_000
     while (h.prompts.length === 0 && Date.now() < deadline) await Bun.sleep(5)
 
@@ -124,7 +124,7 @@ describe("human gate hold without a TTY", () => {
     const { workspace, options } = await fixture()
     const h = holdingProgress()
 
-    const gate = runHumanReviewGate(workspace, options, "http://127.0.0.1:1234", h.progress)
+    const gate = runHumanReviewGate(workspace, options, { url: "http://127.0.0.1:1234" }, h.progress)
     const deadline = Date.now() + 2_000
     while (h.prompts.length === 0 && Date.now() < deadline) await Bun.sleep(5)
 
@@ -146,7 +146,7 @@ describe("human gate hold without a TTY", () => {
     const h = holdingProgress()
 
     await withoutTty(async () => {
-      await runHumanReviewGate(workspace, { ...options, humanReview: false }, "http://127.0.0.1:1234", h.progress)
+      await runHumanReviewGate(workspace, { ...options, humanReview: false }, { url: "http://127.0.0.1:1234" }, h.progress)
     })
 
     expect(h.prompts).toEqual([])

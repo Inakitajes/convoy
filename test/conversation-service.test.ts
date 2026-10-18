@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
-import { chmod, mkdir, mkdtemp, readFile, rm } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -7,15 +7,17 @@ import { execFile } from "../src/git"
 import { repoCommonDir, writeJsonFile } from "../src/repo-store"
 
 /** The discovery record's schema version (matches conversation-service.ts). */
-const schemaVersion = 1
+const schemaVersion = 2
 import {
   ensureConversationService,
   probeConversationService,
   readConversationServiceDiscovery,
   stopConversationService,
+  conversationServiceSecretPath,
   validateConversationServiceRecord,
   type ConversationServiceRecord,
 } from "../src/conversation-service"
+import { convoySecretsDir } from "../src/workspace"
 import { bootOpencodeServerFrom, connectOpencode } from "../src/opencode"
 import { createAuthoringConversation, validateAuthoringSession } from "../src/conversations"
 import { defaultReadinessTimeoutMs } from "../src/managed-server"
@@ -83,6 +85,42 @@ describe("conversation-service discovery and reuse (task 4.3)", () => {
     expect(second.reused).toBe(true)
     expect(second.url).toBe(first.url)
     expect(boots).toBe(1)
+  })
+
+  // The discovery record lives in the checkout's Git dir, which every agent
+  // may read: the service's V2 password is kept out of it, in an owner-only
+  // file under Convoy's private dir, and still reaches a reusing client.
+  test("the server password never lands inside the checkout", async () => {
+    const boot = async () => ({ url: "http://127.0.0.1:51009", password: "s3cret", close() {}, pid: 123_459 })
+    const started = await ensureConversationService({ commonDir, checkout: repoDir, boot, probe: async () => "stale" })
+    expect(started.status).toBe("live")
+    const path = join(commonDir, "convoy", "authoring-server.json")
+    const onDisk = await readFile(path, "utf8")
+    expect(onDisk).not.toContain("s3cret")
+    expect(JSON.parse(onDisk).password).toBeUndefined()
+    const secret = conversationServiceSecretPath(commonDir)
+    expect(secret.startsWith(convoySecretsDir())).toBe(true)
+    expect((await stat(secret)).mode & 0o777).toBe(0o600)
+    expect((await stat(join(secret, ".."))).mode & 0o777).toBe(0o700)
+    const reused = await ensureConversationService({ commonDir, checkout: repoDir, boot, probe: async () => "live" })
+    expect(reused.status === "live" && reused.password).toBe("s3cret")
+    // Stopping the service removes the secret with the record.
+    expect((await stopConversationService({ commonDir, activity: "idle", probe: async () => "stale" })).status).toBe("stopped")
+    expect(await Bun.file(secret).exists()).toBe(false)
+  })
+
+  test("a legacy record still carrying its password keeps working until replaced", async () => {
+    await writeJsonFile(join(commonDir, "convoy", "authoring-server.json"), {
+      schemaVersion,
+      url: "http://127.0.0.1:51010",
+      pid: 123_460,
+      bootCheckout: repoDir,
+      startedAt: Date.now(),
+      password: "legacy",
+    })
+    const outcome = await ensureConversationService({ commonDir, checkout: repoDir, boot: async () => { throw new Error("no boot") }, probe: async () => "live" })
+    expect(outcome.status === "live" && outcome.password).toBe("legacy")
+    await stopConversationService({ commonDir, activity: "idle", probe: async () => "stale" })
   })
 
   test("a stale discovery record (dead pid) is replaced by a fresh boot, not trusted", async () => {
@@ -179,6 +217,30 @@ describe("conversation-service discovery and reuse (task 4.3)", () => {
     await Bun.write(join(commonDir, "convoy", "authoring-server.json"), "{ not json")
     const outcome = await ensureConversationService({ commonDir, checkout: repoDir, boot })
     expect(outcome.status).toBe("uncertain")
+    expect(boots).toBe(0)
+  })
+
+  // A V1 service left running across the upgrade answers its URL, but the V2
+  // client cannot drive it: it is reported, never reused or booted over.
+  test("a pre-V2 discovery record is reported, never reused or booted over", async () => {
+    let boots = 0
+    const boot = async () => {
+      boots += 1
+      return { url: "http://127.0.0.1:51006", close() {}, pid: 123_460 }
+    }
+    const { writeJsonFile } = await import("../src/repo-store")
+    await writeJsonFile(join(commonDir, "convoy", "authoring-server.json"), {
+      schemaVersion: 1,
+      url: "http://127.0.0.1:51007",
+      pid: process.pid,
+      bootCheckout: repoDir,
+      startedAt: Date.now(),
+    })
+    const outcome = await ensureConversationService({ commonDir, checkout: repoDir, boot, probe: async () => "live" })
+    expect(outcome.status).toBe("uncertain")
+    if (outcome.status !== "uncertain") return
+    expect(outcome.reason).toContain("before the OpenCode V2 migration")
+    expect(outcome.reason).toContain("authoring-server.json")
     expect(boots).toBe(0)
   })
 
@@ -347,7 +409,7 @@ describe("conversation-service shutdown boundaries (task 4.3, real server)", () 
     if (service.status !== "live") return
     try {
       // An authoring session is created through the service.
-      const ref = await createAuthoringConversation({ checkout: realRepoDir, title: "boundary", server: { url: service.url } })
+      const ref = await createAuthoringConversation({ checkout: realRepoDir, title: "boundary", server: { url: service.url, ...(service.password ? { password: service.password } : {}) } })
       expect(ref.sessionId).toMatch(/^ses_/)
       // A run's server (the dashboard's attachment) boots and then closes —
       // the run dashboard goes away entirely.
@@ -360,7 +422,7 @@ describe("conversation-service shutdown boundaries (task 4.3, real server)", () 
       if (again.status !== "live") return
       expect(again.url).toBe(service.url)
       expect(again.reused).toBe(true)
-      const validated = await validateAuthoringSession({ ref, checkout: realRepoDir, server: { url: again.url } })
+      const validated = await validateAuthoringSession({ ref, checkout: realRepoDir, server: { url: again.url, ...(again.password ? { password: again.password } : {}) } })
       expect(validated.status).toBe("available")
     } finally {
       // Explicit stop with idle evidence (a fresh session is quiescent).
@@ -373,14 +435,14 @@ describe("conversation-service shutdown boundaries (task 4.3, real server)", () 
     expect(service.status).toBe("live")
     if (service.status !== "live") return
     try {
-      const client = connectOpencode(service.url)
+      const client = connectOpencode(service.url, service.password)
       const created = await client.session.create({ title: "detach" })
       if (created.error || !created.data) throw new Error("session create failed")
       const sessionId = created.data.id
       // The client view detaches (its process is gone; nobody holds a handle).
       // The service outlives it: the exact session still resolves through the
       // service, and the discovery record still probes live.
-      const validated = await validateAuthoringSession({ ref: { harness: "opencode", sessionId }, checkout: realRepoDir, server: { url: service.url } })
+      const validated = await validateAuthoringSession({ ref: { harness: "opencode", sessionId }, checkout: realRepoDir, server: { url: service.url, ...(service.password ? { password: service.password } : {}) } })
       expect(validated.status).toBe("available")
       const record = await readConversationServiceDiscovery(realCommonDir)
       expect(record.status).toBe("found")

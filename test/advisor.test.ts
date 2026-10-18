@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
-import type { OpencodeClient, Part } from "@opencode-ai/sdk/v2"
+import type { OpencodeClient, Part } from "../src/opencode-client"
 
 import {
   advisorFallbackText,

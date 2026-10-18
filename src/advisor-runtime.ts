@@ -1,4 +1,4 @@
-import type { OpencodeClient } from "@opencode-ai/sdk/v2"
+import type { OpencodeClient } from "./opencode-client"
 
 import {
   advisorFallbackText,
@@ -17,6 +17,7 @@ import {
   type AdvisorFeedbackOutcome,
 } from "./advisor-events"
 import type { AdvisorCheckpoint, AdvisorGateDecision } from "./permissions"
+import type { AuthenticationSelection, RunnerEvent } from "./runners/contracts"
 import type { AgentStep } from "./types"
 
 /**
@@ -52,7 +53,8 @@ export type AdvisorPhaseHandle = {
 }
 
 export type AdvisorRuntimeOptions = {
-  client: OpencodeClient
+  /** The run's OpenCode server, for OpenCode executors and OpenCode advising models; absent on a Claude-only run. */
+  client?: OpencodeClient
   directory: string
   signal?: AbortSignal
   /** Injected in tests; defaults to the real consultation. */
@@ -60,11 +62,25 @@ export type AdvisorRuntimeOptions = {
   auditPolicy?: AdvisorAuditPolicy
   /** Called synchronously with runtime ordering; persistence failures must be handled by the sink. */
   onEvent?: (event: AdvisorEvent) => void | Promise<void>
+  /**
+   * The rendered transcript of an executor session that does not live on the
+   * OpenCode server (Claude), recorded from its normalized events; undefined
+   * for an OpenCode session, whose transcript the server holds.
+   */
+  transcriptFor?: (sessionID: string) => string | undefined
+  /** The reviewed authentication a Claude advising model consults under. */
+  claudeAuth?: AuthenticationSelection
 }
 
 export type AdvisorRuntime = {
   /** Registers a phase attempt's live session. Returns undefined for steps with no advisor. */
   begin(sessionID: string, step: AgentStep, attempt?: number): AdvisorPhaseHandle | undefined
+  /**
+   * Records an executor session's prompt and normalized events, for an
+   * executor whose transcript no OpenCode server holds (Claude): the advisor
+   * then reads this recording instead of asking a server.
+   */
+  record?(sessionID: string, entry: { prompt: string } | { event: RunnerEvent }): void
   /** Wired into the permission gate for the first-write checkpoint. */
   checkpoint: AdvisorCheckpoint
   /** Looks up a live phase by session, for the completion checkpoint and the on-demand tool. */
@@ -74,6 +90,7 @@ export type AdvisorRuntime = {
 export function createAdvisorRuntime(options: AdvisorRuntimeOptions): AdvisorRuntime {
   const consultFn = options.consult ?? consultAdvisor
   const phases = new Map<string, PhaseState>()
+  const recordings = new Map<string, TranscriptRecording>()
 
   type PhaseState = {
     step: AgentStep
@@ -133,8 +150,11 @@ export function createAdvisorRuntime(options: AdvisorRuntimeOptions): AdvisorRun
     })
     const startedAt = performance.now()
     let transcript: string | undefined
+    const recorded = recordings.get(sessionID)?.render() ?? options.transcriptFor?.(sessionID)
     const result = await consultFn({
-      client: options.client,
+      ...(options.client ? { client: options.client } : {}),
+      ...(recorded !== undefined ? { transcript: recorded } : {}),
+      ...(options.claudeAuth ? { claudeAuth: options.claudeAuth } : {}),
       sessionID,
       directory: options.directory,
       model,
@@ -234,6 +254,16 @@ export function createAdvisorRuntime(options: AdvisorRuntimeOptions): AdvisorRun
       return state ? handleOf(sessionID, state) : undefined
     },
 
+    record(sessionID, entry) {
+      let recording = recordings.get(sessionID)
+      if (!recording) {
+        recording = new TranscriptRecording()
+        recordings.set(sessionID, recording)
+      }
+      if ("prompt" in entry) recording.user(entry.prompt)
+      else recording.event(entry.event)
+    },
+
     async checkpoint({ sessionID }): Promise<AdvisorGateDecision> {
       const state = phases.get(sessionID)
       // Unknown session — including a phase whose agent is advised in some
@@ -251,6 +281,64 @@ export function createAdvisorRuntime(options: AdvisorRuntimeOptions): AdvisorRun
       await handleOf(sessionID, state).delivered(advice.callId, "permission")
       return { action: "advise", message: firstWriteMessage(advice.text) }
     },
+  }
+}
+
+/** Upper bound on one recorded transcript; the advisor's own clamp keeps both ends. */
+const maxRecordedChars = 400_000
+const maxRecordedToolChars = 2_000
+
+/**
+ * An executor transcript Convoy recorded from neutral events, rendered in the
+ * same `### ROLE` blocks `renderTranscript` gives an OpenCode session, so the
+ * advisor reads either runner's executor the same way. Streamed fragments of
+ * one part are joined; the total is bounded by dropping the oldest middle.
+ */
+class TranscriptRecording {
+  private readonly blocks: string[] = []
+  private open?: { key: string; index: number }
+  private size = 0
+
+  user(text: string) {
+    this.push(`### USER\n${text.trim()}`)
+  }
+
+  event(event: RunnerEvent) {
+    if (event.type === "text" || event.type === "reasoning" || (event.type === "message" && (event.channel === "response" || event.channel === "reasoning"))) {
+      const reasoning = event.type === "reasoning" || (event.type === "message" && event.channel === "reasoning")
+      const key = `${reasoning ? "r" : "t"}:${"partId" in event && event.partId ? event.partId : ""}`
+      if (this.open?.key === key) {
+        this.size += event.text.length
+        this.blocks[this.open.index] += event.text
+        this.trim()
+        return
+      }
+      this.push(`### ASSISTANT\n${reasoning ? "[reasoning] " : ""}${event.text}`)
+      this.open = { key, index: this.blocks.length - 1 }
+      return
+    }
+    if (event.type === "tool") this.push(`### ASSISTANT\n[tool ${event.name}]${event.detail ? ` ${event.detail.slice(0, maxRecordedToolChars)}` : ""}`)
+    else if (event.type === "message" && (event.channel === "tool" || event.channel === "bash")) this.push(`### ASSISTANT\n[${event.channel}] ${event.text.slice(0, maxRecordedToolChars)}`)
+  }
+
+  render(): string {
+    return this.blocks.length === 0 ? "(the executor's transcript is empty)" : this.blocks.join("\n\n")
+  }
+
+  private push(block: string) {
+    this.open = undefined
+    this.blocks.push(block)
+    this.size += block.length
+    this.trim()
+  }
+
+  private trim() {
+    // Keep the task (the first block) and the newest work; drop from just after the task.
+    while (this.size > maxRecordedChars && this.blocks.length > 2) {
+      const [removed] = this.blocks.splice(1, 1)
+      this.size -= removed!.length
+      if (this.open) this.open = { ...this.open, index: this.open.index - 1 }
+    }
   }
 }
 

@@ -25,6 +25,8 @@ export type FeaturePlanLink = {
 import type { AutoAccept, ProgressUI } from "./progress"
 import type { RunShutdown } from "./runner"
 import type { StepRunnerId } from "./step-runners"
+import type { BillingResolution } from "./runners/billing"
+import type { AuthenticationSelection } from "./runners/contracts"
 import type { ModelGateway, ModelRoutingOverrides, ResolvedModel } from "./model-routing"
 
 export type RunOptions = {
@@ -35,6 +37,16 @@ export type RunOptions = {
   changes?: string[]
   /** The explicit no-change run mode (`--manual`); zero selected changes is valid only through it. */
   manual?: boolean
+  /**
+   * The configured Claude authentication (`defaults.claudeAuth`). Absent means
+   * subscription, which each attempt verifies before it runs. Only a
+   * non-secret credential reference is carried, never a key.
+   */
+  claudeAuth?: AuthenticationSelection
+  /** The reviewed authentication a Claude advisor (`claude-code/<model>`) consults under; defaults to `claudeAuth`. */
+  advisorAuth?: AuthenticationSelection
+  /** The commit writer's route for automatic run compaction (`helperRoutes.commitMessage`), runner-qualified for Claude. */
+  commitMessageModel?: string
   files: string[]
   onlySteps: string[]
   skipSteps: string[]
@@ -335,7 +347,21 @@ export type RunPlan = {
   feature?: FeaturePlanLink
   pipeline: Pipeline
   modelRouting: { gateway: ModelGateway }
-  smartJudge?: { model: ResolvedModel }
+  /**
+   * The smart auto-accept judge route. `runner` absent means OpenCode; a
+   * `claude-code` judge runs through the Claude CLI under the run's Claude
+   * authentication, so a Claude-only plan needs no OpenCode to judge.
+   */
+  smartJudge?: { model: ResolvedModel; runner?: "claude-code" }
+  /**
+   * The reviewed Claude route when anything in the plan runs on Claude (a
+   * step, an advisor, the judge, or the commit writer): its non-secret
+   * authentication and the billing decision it implies, shown in review and
+   * enforced at preflight before any work starts.
+   */
+  claude?: { auth: AuthenticationSelection; billing: BillingResolution }
+  /** The commit writer's frozen route for automatic compaction, when configured. */
+  commitMessageModel?: string
   hooks: HookSet
   attachments: string[]
   /**

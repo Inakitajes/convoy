@@ -1,6 +1,15 @@
 import { describe, expect, test } from "bun:test"
 
-import { isStepRunnerId, normalizeStepRunnerModel, stepRunnerFor, stepRunnerModel } from "../src/step-runners"
+import {
+  isStepRunnerId,
+  modelOverrideTargetsRunner,
+  normalizeStepRunnerModel,
+  parseModelOverride,
+  resolveStepRunnerCapabilities,
+  stepRunnerCapabilityReason,
+  stepRunnerFor,
+  stepRunnerModel,
+} from "../src/step-runners"
 
 describe("stepRunnerFor", () => {
   test("returns opencode definition by default", () => {
@@ -19,14 +28,19 @@ describe("stepRunnerFor", () => {
     expect(runner.capabilities.modelFanout).toBe(true)
   })
 
-  test("returns claude-code definition", () => {
+  test("resolves Claude Code capabilities from the capability model, not a brand flag", () => {
     const runner = stepRunnerFor("claude-code")
     expect(runner.id).toBe("claude-code")
     expect(runner.displayName).toBe("Claude Code")
-    expect(runner.capabilities.advisor).toBe(false)
+    // Claude supports the full execution surface, advisors included; only
+    // native attach, quiesced takeover, and the unqualified override are off.
+    expect(runner.capabilities.writeSteps).toBe(true)
+    expect(runner.capabilities.verifySteps).toBe(true)
+    expect(runner.capabilities.modelFanout).toBe(true)
     expect(runner.capabilities.liveAttach).toBe(false)
-    expect(runner.capabilities.writeSteps).toBe(false)
-    expect(runner.capabilities.modelFanout).toBe(false)
+    expect(runner.capabilities.takeover).toBe(false)
+    expect(runner.capabilities.advisor).toBe(true)
+    expect(runner.capabilities.globalModelOverride).toBe(false)
   })
 
   test("modelLabel formats correctly for opencode", () => {
@@ -39,6 +53,24 @@ describe("stepRunnerFor", () => {
     const runner = stepRunnerFor("claude-code")
     expect(runner.modelLabel("opus")).toBe("claude-code/opus")
     expect(runner.modelLabel("")).toBe("claude-code/default")
+  })
+})
+
+describe("effective step-runner capabilities", () => {
+  test("OpenCode on an unsupported runtime resolves write/verify/fan-out unavailable with a reason", () => {
+    const capabilities = resolveStepRunnerCapabilities("opencode", { version: "1.18.4" })
+    expect(capabilities.writeSteps).toBe(false)
+    expect(capabilities.verifySteps).toBe(false)
+    expect(capabilities.modelFanout).toBe(false)
+    expect(stepRunnerCapabilityReason("opencode", "write", { version: "1.18.4" })).toContain("OpenCode 1.18.4 is not a supported V2 runtime")
+  })
+
+  test("a supported runtime leaves the flags available and reports no reason", () => {
+    const capabilities = resolveStepRunnerCapabilities("claude-code", { enforcementReady: true })
+    expect(capabilities.writeSteps).toBe(true)
+    expect(capabilities.verifySteps).toBe(true)
+    expect(capabilities.modelFanout).toBe(true)
+    expect(stepRunnerCapabilityReason("claude-code", "write")).toBe("")
   })
 })
 
@@ -81,6 +113,33 @@ describe("normalizeStepRunnerModel", () => {
     expect(() => normalizeStepRunnerModel("claude-code", "random")).toThrow()
     expect(() => normalizeStepRunnerModel("claude-code", "")).toThrow()
   })
+
+  test("rejects a #variant on a Claude model rather than silently dropping it", () => {
+    expect(() => normalizeStepRunnerModel("claude-code", "opus#high")).toThrow(/#variant/)
+    expect(() => normalizeStepRunnerModel("claude-code", "anthropic/claude-opus-4#high")).toThrow(/#variant/)
+  })
+})
+
+describe("model override scope", () => {
+  test("an unqualified override is OpenCode-only", () => {
+    const override = parseModelOverride("anthropic/claude-opus-5")
+    expect(override).toEqual({ model: "anthropic/claude-opus-5" })
+    expect(modelOverrideTargetsRunner(override, "opencode")).toBe(true)
+    expect(modelOverrideTargetsRunner(override, "claude-code")).toBe(false)
+  })
+
+  test("a runner-prefixed override is scoped to that runner", () => {
+    expect(parseModelOverride("claude-code/opus")).toEqual({ scope: "claude-code", model: "opus" })
+    expect(parseModelOverride("opencode/openai/gpt-5")).toEqual({ scope: "opencode", model: "openai/gpt-5" })
+    expect(modelOverrideTargetsRunner(parseModelOverride("claude-code/opus"), "claude-code")).toBe(true)
+    expect(modelOverrideTargetsRunner(parseModelOverride("claude-code/opus"), "opencode")).toBe(false)
+  })
+
+  test("an empty override targets neither runner", () => {
+    expect(parseModelOverride("")).toEqual({ model: "" })
+    expect(modelOverrideTargetsRunner(parseModelOverride(""), "opencode")).toBe(false)
+    expect(modelOverrideTargetsRunner(parseModelOverride(""), "claude-code")).toBe(false)
+  })
 })
 
 describe("stepRunnerModel", () => {
@@ -104,16 +163,24 @@ describe("stepRunnerModel", () => {
     expect(result.modelID).toBe("default")
   })
 
-  test("applies global override for opencode when present", () => {
-    const result = stepRunnerModel("opencode", "openai/gpt-4", undefined, "anthropic/claude-opus-4")
-    expect(result.providerID).toBe("anthropic")
-    expect(result.modelID).toBe("claude-opus-4")
+  test("applies an unqualified global override to opencode only", () => {
+    const opencode = stepRunnerModel("opencode", "openai/gpt-4", undefined, "anthropic/claude-opus-4")
+    expect(opencode.providerID).toBe("anthropic")
+    expect(opencode.modelID).toBe("claude-opus-4")
+
+    const claude = stepRunnerModel("claude-code", "opus", undefined, "anthropic/claude-opus-4")
+    expect(claude.providerID).toBe("claude-code")
+    expect(claude.modelID).toBe("opus")
   })
 
-  test("global override is ignored for claude-code", () => {
-    const result = stepRunnerModel("claude-code", "opus", undefined, "anthropic/claude-opus-4")
-    expect(result.providerID).toBe("claude-code")
-    expect(result.modelID).toBe("opus")
+  test("applies a Claude-scoped override to claude-code only", () => {
+    const claude = stepRunnerModel("claude-code", "opus", undefined, "claude-code/sonnet")
+    expect(claude.providerID).toBe("claude-code")
+    expect(claude.modelID).toBe("sonnet")
+
+    const opencode = stepRunnerModel("opencode", "openai/gpt-4", undefined, "claude-code/sonnet")
+    expect(opencode.providerID).toBe("openai")
+    expect(opencode.modelID).toBe("gpt-4")
   })
 
   test("handles undefined runner ID (defaults to opencode)", () => {

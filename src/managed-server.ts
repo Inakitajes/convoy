@@ -25,6 +25,7 @@ import {
   type ProcessIdentity,
 } from "./process-identity"
 import { childStopTarget, stopTarget, type StopOutcome, type StopPolicy } from "./process-stop"
+import { redactSecrets } from "./runners/redaction"
 import {
   createProcessRecordStore,
   newProcessRecord,
@@ -37,6 +38,12 @@ import {
 export type ManagedServer = {
   url: string
   pid: number
+  /**
+   * The V2 server's per-boot HTTP Basic password, parsed from its readiness
+   * output. The connection is authenticated as `opencode:<password>`; the value
+   * is required to build a client and is never retained in diagnostics.
+   */
+  password?: string
   /** Recorded child incarnation when the platform could observe one. */
   identity?: ProcessIdentity
   /** The durable record id when one was published (run/helper only). */
@@ -70,6 +77,8 @@ export type ManagedServerOptions = {
   signal?: AbortSignal
   /** Readiness line parser; returns the URL or undefined for a non-readiness line. */
   parseLine?: (line: string) => { url: string } | "malformed" | undefined
+  /** Credential line parser; returns the per-boot password or undefined. */
+  parsePasswordLine?: (line: string) => string | undefined
   /** Recorded in the lifetime record so an orphan can be tied back to its run. */
   runId?: string
   deps?: {
@@ -95,15 +104,36 @@ export type ManagedServerOptions = {
 export const defaultReadinessTimeoutMs = 30_000
 
 /**
- * Strict readiness parser matching the CLI's own line (`opencode server
- * listening on http://…`). A listening line without a parseable URL is
- * malformed and fails the boot rather than being ignored.
+ * Strict readiness parser matching the V2 CLI's own line (`server listening on
+ * http://…`). A listening line without a parseable URL is malformed and fails
+ * the boot rather than being ignored.
  */
 export function parseReadinessLine(line: string): { url: string } | "malformed" | undefined {
-  if (!line.startsWith("opencode server listening")) return undefined
-  const match = line.match(/on\s+(https?:\/\/[^\s]+)/)
+  const trimmed = line.trim()
+  if (!trimmed.startsWith("server listening")) return undefined
+  const match = trimmed.match(/^server listening on\s+(https?:\/\/\S+)/)
   if (!match?.[1]) return "malformed"
   return { url: match[1] }
+}
+
+/**
+ * Parses the V2 server's per-boot credential line (`server password <token>`).
+ * The token authenticates the owned connection and must never be retained in
+ * diagnostics; readiness is not exposed until it has been captured.
+ */
+export function parseServerPasswordLine(line: string): string | undefined {
+  const trimmed = line.trim()
+  if (!trimmed.startsWith("server password ")) return undefined
+  const value = trimmed.slice("server password ".length).trim()
+  return value || undefined
+}
+
+/**
+ * Strips server/bridge credentials from any text retained for diagnostics so a
+ * failed startup or cleanup can report its tail without leaking the password.
+ */
+export function redactServerCredentials(text: string): string {
+  return text.replace(/server password \S+/g, "server password [redacted]")
 }
 
 /** Bounds diagnostic stdout/stderr retained for error messages. */
@@ -189,6 +219,7 @@ export async function launchManagedServer(options: ManagedServerOptions): Promis
     let stdoutTail = ""
     let childIdentity: ProcessIdentity | undefined
     let stopPromise: Promise<StopOutcome> | undefined
+    let password: string | undefined
     let abortListener: (() => void) | undefined
     let readinessTimer: ReturnType<typeof setTimeout> | undefined
 
@@ -277,7 +308,7 @@ export async function launchManagedServer(options: ManagedServerOptions): Promis
     }
 
     const diagnosticSuffix = () => {
-      const tail = (stderrTail || stdoutTail).trim()
+      const tail = redactSecrets((stderrTail || stdoutTail).trim())
       return tail ? `: ${tail.slice(-diagnosticTailLimit)}` : ""
     }
 
@@ -289,6 +320,7 @@ export async function launchManagedServer(options: ManagedServerOptions): Promis
       resolve({
         url: parsedUrl!,
         pid: child.pid ?? 0,
+        ...(password ? { password } : {}),
         ...(childIdentity ? { identity: childIdentity } : {}),
         ...(record ? { recordId: record.id } : {}),
         stop: performStop,
@@ -297,22 +329,35 @@ export async function launchManagedServer(options: ManagedServerOptions): Promis
     }
 
     let parsedUrl: string | undefined
+    // Set once ownership publication starts: output arriving during its awaits
+    // must not start another, whose failure would stop a server already ready.
+    let publishing = false
 
     const onLine = (line: string) => {
-      if (settled || parsedUrl) return
-      const parsed = (options.parseLine ?? parseReadinessLine)(line)
-      if (!parsed) return
-      if (parsed === "malformed") {
-        settled = true
-        cleanupListeners()
-        void performStop().then((cleanup) => {
-          reject(new ManagedServerStartupError(`${options.label} reported a malformed readiness line: ${line.trim()}`, cleanup))
-        })
-        return
+      if (settled) return
+      // Capture the per-boot credential before anything else: readiness is not
+      // exposed until both the URL and the password are known (design D2/spec
+      // "Managed V2 servers preserve ownership and authentication boundaries").
+      if (!password) {
+        const parsedPassword = (options.parsePasswordLine ?? parseServerPasswordLine)(line)
+        if (parsedPassword) password = parsedPassword
       }
-      parsedUrl = parsed.url
-      // Publish child identity and readiness before exposing the URL.
-      void publishOwnershipThenResolve()
+      if (!parsedUrl) {
+        const parsed = (options.parseLine ?? parseReadinessLine)(line)
+        if (parsed === "malformed") {
+          settled = true
+          cleanupListeners()
+          void performStop().then((cleanup) => {
+            reject(new ManagedServerStartupError(`${options.label} reported a malformed readiness line: ${line.trim()}`, cleanup))
+          })
+          return
+        }
+        if (parsed) parsedUrl = parsed.url
+      }
+      if (parsedUrl && password && !publishing) {
+        publishing = true
+        void publishOwnershipThenResolve()
+      }
     }
 
     const publishOwnershipThenResolve = async () => {
@@ -353,7 +398,7 @@ export async function launchManagedServer(options: ManagedServerOptions): Promis
     const onStdout = (chunk: Buffer | string) => {
       const text = chunk.toString()
       stdoutBuffer += text
-      stdoutTail = (stdoutTail + text).slice(-diagnosticTailLimit)
+      stdoutTail = redactServerCredentials(stdoutTail + text).slice(-diagnosticTailLimit)
       for (;;) {
         const newline = stdoutBuffer.indexOf("\n")
         if (newline === -1) break
@@ -369,7 +414,7 @@ export async function launchManagedServer(options: ManagedServerOptions): Promis
 
     const onStderr = (chunk: Buffer | string) => {
       const text = chunk.toString()
-      stderrTail = (stderrTail + text).slice(-diagnosticTailLimit)
+      stderrTail = redactServerCredentials(stderrTail + text).slice(-diagnosticTailLimit)
     }
 
     child.stdout?.on("data", onStdout)

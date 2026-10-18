@@ -1,5 +1,6 @@
 import { readFileSync, statSync } from "node:fs"
-import { join } from "node:path"
+import { homedir } from "node:os"
+import { dirname, isAbsolute, join, relative } from "node:path"
 
 import type { PermissionAdditions } from "./types"
 
@@ -282,20 +283,71 @@ export function projectScriptAllowPatterns(targetDir = process.cwd()): string[] 
  * Config additions only ever extend the lists: a project can deny more and
  * allow more, but a config allow can never resurrect a denied pattern.
  */
-function assembleBashPolicy(targetDir: string, additions: PermissionAdditions): Record<string, "allow" | "deny" | "ask"> {
-  const policy: Record<string, "allow" | "deny" | "ask"> = {}
-  const denied = new Set([...denyBashPatterns, ...additions.deny])
-  for (const pattern of denied) policy[pattern] = "deny"
+/**
+ * Insertion order is the evaluation order: OpenCode V2 turns this map into an
+ * ordered ruleset where the last matching rule wins. The ask fallback comes
+ * first, allows refine it, and denials come last so they always win.
+ */
+function assembleBashPolicy(targetDir: string, additions: PermissionAdditions, privateDirs: readonly string[]): Record<string, "allow" | "deny" | "ask"> {
+  const policy: Record<string, "allow" | "deny" | "ask"> = { "*": "ask" }
+  const denied = new Set([...denyBashPatterns, ...additions.deny, ...privateDirs.flatMap(privateDirBashPatterns)])
   for (const pattern of [...baseAllowBashPatterns, ...projectScriptAllowPatterns(targetDir), ...additions.allow]) {
     if (denied.has(pattern)) continue
     policy[pattern] = "allow"
   }
-  policy["*"] = "ask"
+  for (const pattern of denied) policy[pattern] = "deny"
   return policy
 }
 
-export function bashPolicy(targetDir = process.cwd(), additions: PermissionAdditions = noAdditions): Record<string, "allow" | "deny" | "ask"> {
-  return assembleBashPolicy(targetDir, additions)
+/**
+ * `privateDirs` are owner-only secrets dirs (the run's server password and
+ * bridge-token plugins, Convoy's authoring secrets): every command naming one,
+ * or recursively searching one of its ancestors, is denied so an allowlisted
+ * `cat`/`grep` cannot read it silently.
+ */
+export function bashPolicy(
+  targetDir = process.cwd(),
+  additions: PermissionAdditions = noAdditions,
+  privateDirs: readonly string[] = [],
+): Record<string, "allow" | "deny" | "ask"> {
+  return assembleBashPolicy(targetDir, additions, privateDirs)
+}
+
+// File names only the private dir holds, so a relative or `..` path to them is
+// caught even when it never spells the private dir out.
+const privateFileHints = ["server-auth.json", "private/plugins", "private/server-auth"]
+
+/**
+ * Deny patterns keeping a private dir out of shell commands. Prefix rules are
+ * not a sandbox (see denyBashPatterns), so this closes the silent paths: the
+ * dir in every spelling a shell expands (absolute, `~`, `$HOME`), its secret
+ * file names, and any command naming one of its ancestors as a whole word,
+ * which is how a recursive `grep`/`rg` would reach it.
+ */
+export function privateDirBashPatterns(privateDir: string): string[] {
+  if (!isAbsolute(privateDir)) throw new Error(`private dir must be absolute, got: ${JSON.stringify(privateDir)}`)
+  const patterns = new Set<string>()
+  for (const spelling of shellSpellings(privateDir)) patterns.add(`*${spelling}*`)
+  for (const hint of privateFileHints) patterns.add(`*${hint}*`)
+  for (let ancestor = dirname(privateDir); ; ancestor = dirname(ancestor)) {
+    for (const spelling of shellSpellings(ancestor)) {
+      for (const form of [spelling, ancestor === "/" ? undefined : `${spelling}/`]) {
+        if (form === undefined) continue
+        patterns.add(`* ${form}`)
+        patterns.add(`* ${form} *`)
+      }
+    }
+    if (ancestor === dirname(ancestor)) break
+  }
+  return [...patterns]
+}
+
+function shellSpellings(path: string): string[] {
+  const home = homedir()
+  const rel = relative(home, path)
+  if (rel.startsWith("..") || isAbsolute(rel)) return [path]
+  if (rel === "") return [path, "~", "$HOME", "${HOME}"]
+  return [path, `~/${rel}`, `$HOME/${rel}`, "${HOME}/" + rel]
 }
 
 function isFile(path: string) {

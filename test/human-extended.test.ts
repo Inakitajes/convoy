@@ -10,7 +10,7 @@ describe("humanActionMenu", () => {
 
   test("returns all actions formatted correctly", () => {
     const menu = humanActionMenu(["continue", "iterate", "abort", "retry"])
-    expect(menu).toBe("[c]ontinue pipeline, [o]pen OpenCode, [a]bort, [r]etry clean")
+    expect(menu).toBe("[c]ontinue pipeline, [o]pen session, [a]bort, [r]etry clean")
   })
 
   test("returns empty string for empty allowed list", () => {
@@ -24,6 +24,6 @@ describe("humanActionMenu", () => {
 
   test("includes iterate label correctly", () => {
     const menu = humanActionMenu(["iterate"])
-    expect(menu).toBe("[o]pen OpenCode")
+    expect(menu).toBe("[o]pen session")
   })
 })

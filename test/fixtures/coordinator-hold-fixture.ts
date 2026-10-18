@@ -52,7 +52,9 @@ const options: RunOptions = {
   worktree: false,
   includeDirty: false,
   yolo: false,
-  smart: false,
+  // An OpenCode judge is what makes this step-less plan own an OpenCode
+  // server, whose finish-hold teardown is the subject under test.
+  smart: true,
   smartJudgeModel: "openai/gpt-5",
   pipeline: { name: "hold", steps: [] },
   agents: [],

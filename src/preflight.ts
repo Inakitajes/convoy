@@ -1,12 +1,48 @@
+import { existsSync } from "node:fs"
+
+import { claudeBinaryName, whichOnPath } from "./claude-code"
 import { startOpencode, type OpencodeHandle } from "./opencode"
+import { resolveOpencodeBin } from "./opencode-runtime"
 import type { RunPlan } from "./types"
 import { type ProviderCatalog, preflightTargets, validatePreflightTargets } from "./preflight-validation"
+import { resolveClaudeAuth } from "./runners/claude/auth"
+import { cliAuthProbe, validateEffectiveAuth, type EffectiveAuthProbe } from "./runners/claude/effective-auth"
+import type { RunnerId } from "./runners/contracts"
+import { assertPlanDependenciesAvailable, planDependencyOptions } from "./runners/plan-dependencies"
 
 const preflightTimeoutMs = 15_000
 export type PreflightDiscovery = (directory: string, signal: AbortSignal) => Promise<ProviderCatalog>
 
-/** Validate the exact physical OpenCode targets after approval and before run/worktree creation. */
-export async function preflightRunPlan(plan: RunPlan, discover?: PreflightDiscovery): Promise<void> {
+export type PreflightOptions = {
+  /** True when the operator reviewed and accepted this plan (its billing line included). */
+  reviewed?: boolean
+  /** Which runners this installation has; defaults to resolving their binaries. */
+  available?: (runner: RunnerId) => boolean
+  /** The Claude effective-auth probe; defaults to `claude auth status --json`. */
+  claudeAuthProbe?: EffectiveAuthProbe
+  env?: NodeJS.ProcessEnv
+}
+
+function installedRunner(runner: RunnerId): boolean {
+  if (runner === "claude-code") return whichOnPath(claudeBinaryName) !== null
+  const bin = resolveOpencodeBin()
+  return bin.includes("/") ? existsSync(bin) : whichOnPath(bin) !== null
+}
+
+/**
+ * Validate the whole plan after approval and before run/worktree creation:
+ * every runner it will need (steps, goal fragments, advisors, judge, commit
+ * writer) is installed, a Claude route's billing decision was made, and its
+ * effective Claude authentication is the reviewed one, then the exact
+ * physical OpenCode targets. A dependency that would only fail in a later
+ * goal fragment fails here, before earlier steps change the repository.
+ */
+export async function preflightRunPlan(plan: RunPlan, discover?: PreflightDiscovery, options: PreflightOptions = {}): Promise<void> {
+  // An injected discovery is a test double for the whole installation: the
+  // binary and auth probes then run only when injected too.
+  const production = discover === undefined
+  assertPlanDependenciesAvailable(plan.pipeline, planDependencyOptions(plan), options.available ?? (production ? installedRunner : () => true))
+  if (plan.claude) await preflightClaude(plan.claude, { ...options, ...(production || options.claudeAuthProbe ? {} : { skipProbe: true }) })
   const targets = preflightTargets(plan)
   if (targets.length === 0) return
 
@@ -51,10 +87,6 @@ async function discoverProviderCatalog(
   const handle = await startOpencode({}, signal)
   track?.(handle)
   try {
-    // Runs use the classic session API, whose provider catalog owns the
-    // credential connections and exact model IDs accepted by session.prompt.
-    // The newer client.v2 catalog is a separate provider system and can omit
-    // working classic providers such as an authenticated OpenAI connection.
     const providerResult = await handle.client.provider.list({ directory })
     if (providerResult.error || !providerResult.data) throw new Error("OpenCode could not list connected providers and models")
     return providerResult.data
@@ -106,4 +138,35 @@ export function withinPreflightTimeout<T>(
       },
     )
   })
+}
+
+/**
+ * The Claude route's launch gates (design D3). The CLI offers no control that
+ * enforces included-only usage, so an explicit `included-only` request is
+ * refused rather than promised; any other subscription launch may consume
+ * usage credits under the account's policy, which the operator accepts by
+ * reviewing the plan or, unattended, by configuring `account-policy`. Then
+ * the effective authentication is probed under the exact child overlay, so a
+ * legacy or ambiguous setup fails here instead of after earlier steps ran.
+ */
+async function preflightClaude(claude: NonNullable<RunPlan["claude"]>, options: PreflightOptions & { skipProbe?: boolean }): Promise<void> {
+  const { auth, billing } = claude
+  if (auth.mode === "subscription" && auth.billingPolicy === "included-only") {
+    throw new Error(
+      `Cannot start run\n\nClaude billing: included-only was requested, but ${billing.reason}.\n\n` +
+        "Set defaults.claudeAuth.billingPolicy: account-policy to accept the account's own usage policy (Convoy never changes provider spend settings), or select an explicit api-key route.",
+    )
+  }
+  if (auth.mode === "subscription" && auth.billingPolicy === undefined && !options.reviewed) {
+    throw new Error(
+      "Cannot start run\n\nClaude billing: an unattended launch must state its billing decision — subscription login alone is not a no-charge guarantee.\n\n" +
+        "Set defaults.claudeAuth.billingPolicy: account-policy (subscription usage credits or paid features may apply), or review the plan interactively.",
+    )
+  }
+  if (options.skipProbe) return
+  const env = options.env ?? process.env
+  const resolution = resolveClaudeAuth({ selection: auth, env })
+  const probe = options.claudeAuthProbe ?? cliAuthProbe((command, spawnOptions) => Bun.spawn(command, spawnOptions), claudeBinaryName, process.cwd())
+  const effective = await validateEffectiveAuth({ resolution, probe, env })
+  if (!effective.ok) throw new Error(`Cannot start run\n\n${effective.error}\n\nSet defaults.claudeAuth to choose Claude's billing source explicitly.`)
 }

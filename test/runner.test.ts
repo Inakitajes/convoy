@@ -42,6 +42,7 @@ import {
   shouldSkip,
   validateDeliverable,
   watchSession,
+  withAttachmentsByPath,
   withReadOnlyRepositoryBoundary,
   softBudgetNudgeText,
   type ActiveSession,
@@ -49,10 +50,12 @@ import {
 import type { AgentStep, DeliverableContract, HumanStep, Pipeline, Step } from "../src/types"
 import type { Workspace } from "../src/workspace"
 import { LoopGuard, LoopGuardError, resolveLoopGuard } from "../src/loop-guard"
+import { createOpencodeLoopGuardService } from "../src/runners/opencode/loop-guard"
 import { createReportRuntime, type ReportPhaseHandle } from "../src/report-runtime"
 import { startReportBridge } from "../src/report-bridge"
 import { writeCommitSidecar } from "../src/step-commit"
 import { qualityDimensionWeights } from "../src/quality-score"
+import { ContextOverflowError } from "../src/runners/errors"
 
 const recoveryDirs: string[] = []
 
@@ -637,6 +640,104 @@ describe("run phase gate", () => {
     expect(restores).toBe(0)
     expect(prompts[0]?.kind).toBe("failure")
     expect(prompts[0]?.canRetry).toBe(true)
+  })
+
+  test("a context overflow retries once with the attachments by path, without a gate", async () => {
+    const seen: { attempt: number; byPath?: boolean }[] = []
+    const prompts: HumanReviewPromptInfo[] = []
+    const workspace = await retryWorkspace()
+    const reports = createReportRuntime(workspace.dir)
+    const phase = { ...agentStep("score"), deliverableContract: { kind: "markdown-report" } as const }
+    const progress: ProgressUI = {
+      ...noopProgress,
+      askHumanReview: (info) => {
+        prompts.push(info)
+        return Promise.resolve("abort")
+      },
+    }
+    const withDiff = { ...prepared, attachments: [{ type: "file" as const, mime: "text/plain", filename: "score.pre.diff", url: "file:///run/diffs/score.pre.diff" }] }
+
+    const result = await runPhaseUntilResolved(
+      {} as never,
+      workspace,
+      phase,
+      "/repo",
+      withDiff,
+      { head: "baseline" },
+      progress,
+      trackedShutdown(),
+      createGitLock(),
+      { serverUrl: "http://127.0.0.1:1" },
+      {
+        runPhaseAttempt: async (_client, _workspace, _phase, _targetDir, attemptPrepared, attempt) => {
+          seen.push({ attempt, byPath: attemptPrepared.attachmentsByPath })
+          // The live failure: the inlined diff overflowed Grok's 500k window.
+          if (!attemptPrepared.attachmentsByPath) throw new ContextOverflowError("The compaction request cannot be reduced further")
+          return "# Scored from the diff on disk"
+        },
+        restorePhaseBaseline: async () => {},
+      },
+      undefined,
+      reports,
+    )
+
+    expect(result).toContain("Scored from the diff on disk")
+    expect(seen).toEqual([{ attempt: 1, byPath: undefined }, { attempt: 2, byPath: true }])
+    expect(prompts).toEqual([])
+  })
+
+  test("a context overflow that persists by path reaches the failure gate", async () => {
+    const attempts: number[] = []
+    const prompts: HumanReviewPromptInfo[] = []
+    const workspace = await retryWorkspace()
+    const reports = createReportRuntime(workspace.dir)
+    const phase = { ...agentStep("score"), deliverableContract: { kind: "markdown-report" } as const }
+    const progress: ProgressUI = {
+      ...noopProgress,
+      askHumanReview: (info) => {
+        prompts.push(info)
+        return Promise.resolve("abort")
+      },
+    }
+    const withDiff = { ...prepared, attachments: [{ type: "file" as const, mime: "text/plain", filename: "score.pre.diff", url: "file:///run/diffs/score.pre.diff" }] }
+
+    await expect(
+      runPhaseUntilResolved(
+        {} as never,
+        workspace,
+        phase,
+        "/repo",
+        withDiff,
+        { head: "baseline" },
+        progress,
+        trackedShutdown(),
+        createGitLock(),
+        { serverUrl: "http://127.0.0.1:1" },
+        {
+          runPhaseAttempt: async (_client, _workspace, _phase, _targetDir, _prepared, attempt) => {
+            attempts.push(attempt)
+            throw new ContextOverflowError("The compaction request cannot be reduced further")
+          },
+          restorePhaseBaseline: async () => {},
+        },
+        undefined,
+        reports,
+      ),
+    ).rejects.toThrow()
+
+    expect(attempts).toEqual([1, 2])
+    expect(prompts.map((prompt) => prompt.kind)).toEqual(["failure"])
+  })
+
+  test("withAttachmentsByPath lists each attachment's path for the agent to read", () => {
+    const prompt = withAttachmentsByPath("base prompt", [
+      { type: "file", mime: "text/plain", filename: "score.pre.diff", url: "file:///run/diffs/score.pre.diff" },
+      { type: "file", mime: "text/plain", filename: "spec.md", url: "file:///repo/openspec/specs/a/spec.md" },
+    ])
+    expect(prompt.startsWith("base prompt\n")).toBe(true)
+    expect(prompt).toContain("## Attachments by path")
+    expect(prompt).toContain("- /run/diffs/score.pre.diff (score.pre.diff)")
+    expect(prompt).toContain("- /repo/openspec/specs/a/spec.md (spec.md)")
   })
 
   test("a loop-guard trip reaches the decision gate instead of being swallowed", async () => {
@@ -2164,6 +2265,17 @@ describe("waitForPhaseGate", () => {
     return { events, permissions, pauseCalls, resumeCalls }
   }
 
+  test("an unattended run fails its failure and budget gates instead of holding, but an armed takeover still asks", async () => {
+    // A coordinated run always has a hold to wait on; without this a headless
+    // failure waited forever for an answer nobody would give.
+    const { calls, progress } = gateProgress(["continue"])
+    expect(await waitForPhaseGate("implementer", "/repo", "ses_1", undefined, progress, { kind: "failure", canRetry: true, unattended: true })).toBe("unavailable")
+    expect(await waitForPhaseGate("implementer", "/repo", "ses_1", undefined, progress, { kind: "budget-gate", canRetry: false, unattended: true })).toBe("unavailable")
+    expect(calls.prompts).toEqual([])
+    expect(await waitForPhaseGate("implementer", "/repo", "ses_1", undefined, progress, { kind: "interactive", canRetry: false, unattended: true })).toBe("continue")
+    expect(calls.prompts).toHaveLength(1)
+  })
+
   test("continue resolves the interactive gate and pauses permissions only while waiting", async () => {
     const { calls, progress } = gateProgress(["continue"])
     const { events, permissions } = trackedPermissions()
@@ -2190,6 +2302,21 @@ describe("waitForPhaseGate", () => {
     expect(opened).toEqual([{ url: "http://127.0.0.1:1", targetDir: "/repo", sessionID: "ses_1" }])
     expect(calls.prompts.map((prompt) => prompt.iterations)).toEqual([0, 1])
     expect(calls.activities).toContain("session reopened in terminal; return here and press c to continue")
+  })
+
+  test("iterate reopens the session with the run server's password", async () => {
+    const { progress } = gateProgress(["iterate", "continue"])
+    const { permissions } = trackedPermissions()
+    const opened: unknown[] = []
+
+    await waitForPhaseGate("implementer", "/repo", "ses_1", { serverUrl: "http://127.0.0.1:1", serverPassword: "s3cret", permissions }, progress, { kind: "interactive", canRetry: false }, {
+      openWindow: async (input) => {
+        opened.push(input)
+        return "terminal"
+      },
+    })
+
+    expect(opened).toEqual([{ url: "http://127.0.0.1:1", password: "s3cret", targetDir: "/repo", sessionID: "ses_1" }])
   })
 
   test("a failed window reopen keeps the gate waiting instead of crashing", async () => {
@@ -2578,13 +2705,67 @@ describe("watchSession turn scoping", () => {
         phaseActivity: (_name, detail) => void activities.push(detail),
       },
       signal: new AbortController().signal,
-      loopGuard: new LoopGuard(resolveLoopGuard({ identicalCalls: 4 })),
+      loopGuard: createOpencodeLoopGuardService(new LoopGuard(resolveLoopGuard({ identicalCalls: 4 }))),
     })
 
     await expect(watcher.result).rejects.toBeInstanceOf(LoopGuardError)
     await Promise.resolve()
     expect(aborted).toEqual(["ses_1"])
     expect(activities.some((line) => line.includes("read called 4 times"))).toBe(true)
+    await watcher.stop()
+  })
+
+  test("a V2 execution failure settles the turn even while the server still lists the session as active", async () => {
+    // The live failure: compaction could not shrink an oversized prompt, the
+    // execution failed, and `session.active` kept reporting the session — the
+    // poll saw it busy and the phase waited until Ctrl+C.
+    async function* stream() {
+      yield { type: "session.execution.failed", data: { sessionID: "ses_1", error: { message: "The compaction request cannot be reduced further" } } }
+      await new Promise<void>(() => {})
+    }
+    const client = {
+      event: { subscribe: async () => ({ stream: stream() }) },
+      session: {
+        messages: async () => ({ data: [] }),
+        status: async () => ({ data: { ses_1: { type: "busy" } } }),
+      },
+    } as never
+    const watcher = watchSession(client, {
+      directory: "/repo",
+      phaseName: "score",
+      sessionID: "ses_1",
+      progress: noopProgress,
+      signal: new AbortController().signal,
+    })
+
+    await expect(watcher.result).rejects.toThrow("compaction request cannot be reduced further")
+    await watcher.stop()
+  })
+
+  test("a V2 compaction failure settles as a context overflow", async () => {
+    async function* stream() {
+      yield {
+        type: "session.execution.failed",
+        data: { sessionID: "ses_1", error: { type: "compaction.failed", message: "The compaction request cannot be reduced further" } },
+      }
+      await new Promise<void>(() => {})
+    }
+    const client = {
+      event: { subscribe: async () => ({ stream: stream() }) },
+      session: {
+        messages: async () => ({ data: [] }),
+        status: async () => ({ data: { ses_1: { type: "busy" } } }),
+      },
+    } as never
+    const watcher = watchSession(client, {
+      directory: "/repo",
+      phaseName: "score",
+      sessionID: "ses_1",
+      progress: noopProgress,
+      signal: new AbortController().signal,
+    })
+
+    await expect(watcher.result).rejects.toBeInstanceOf(ContextOverflowError)
     await watcher.stop()
   })
 
@@ -2654,7 +2835,7 @@ describe("loopGuard seam regressions", () => {
       sessionID: "ses_1",
       progress: noopProgress,
       signal: new AbortController().signal,
-      ...(loopGuard ? { loopGuard } : {}),
+      ...(loopGuard ? { loopGuard: createOpencodeLoopGuardService(loopGuard) } : {}),
     })
     return { watcher }
   }
@@ -2681,16 +2862,16 @@ describe("loopGuard seam regressions", () => {
     // The config is resolved once by preparePhaseRun; promptPhase must not
     // resolve it again (which would re-arm the $20 default over `false`).
     const result = await promptPhase(client, {
+      identity: { runId: "test-run", phaseName: "implementer", attempt: 1 },
+      services: {},
       phase: agentStep("implementer"),
-      workspace: { dir: "/run", runID: "test-run" } as Workspace,
       targetDir: "/repo",
       prompt: "do the thing",
       model: { providerID: "openai", modelID: "gpt-5.5" },
       attachments: [],
       progress: noopProgress,
-      shutdown: trackedShutdown(),
+      signal: trackedShutdown().signal,
       attempt: 1,
-      loopGuardConfig: resolveLoopGuard({ maxPhaseCost: false }),
     })
 
     expect(result.info.id).toBe("msg_1")
@@ -2713,7 +2894,11 @@ describe("loopGuard seam regressions", () => {
       event: { subscribe: async () => ({ stream: stream() }) },
       session: {
         create: async () => ({ data: { id: "ses_1" } }),
-        promptAsync: async () => {
+        promptAsync: async (input: { delivery?: string }) => {
+          if (input?.delivery === "queue") {
+            queued.push(input)
+            return {}
+          }
           v1Prompts++
           started.resolve()
           return {}
@@ -2722,33 +2907,26 @@ describe("loopGuard seam regressions", () => {
         status: async () => ({ data: {} }),
         abort: async () => ({}),
       },
-      v2: {
-        session: {
-          prompt: async (input: unknown) => {
-            queued.push(input)
-            return {}
-          },
-        },
-      },
     } as never
 
     const result = await promptPhase(client, {
+      identity: { runId: "test-run", phaseName: "implementer", attempt: 1 },
+      services: {},
       phase: agentStep("implementer"),
-      workspace: { dir: "/run", runID: "test-run" } as Workspace,
       targetDir: "/repo",
       prompt: "do the thing",
       model: { providerID: "openai", modelID: "gpt-5.5" },
       attachments: [],
       progress: { ...noopProgress, phaseActivity: (_name, detail) => void activities.push(detail) },
-      shutdown: trackedShutdown(),
+      signal: trackedShutdown().signal,
       attempt: 1,
-      loopGuardConfig: resolveLoopGuard({ maxSteps: 200 }),
+      loopGuard: createOpencodeLoopGuardService(new LoopGuard(resolveLoopGuard({ maxSteps: 200 }))),
     })
 
     await Promise.resolve()
     expect(result.info.id).toBe("msg_1")
     expect(v1Prompts).toBe(1)
-    expect(queued).toEqual([{ sessionID: "ses_1", prompt: { text: softBudgetNudgeText }, delivery: "queue" }])
+    expect(queued).toEqual([{ sessionID: "ses_1", parts: [{ type: "text", text: softBudgetNudgeText }], delivery: "queue" }])
     expect(activities.some((detail) => detail.includes("soft budget"))).toBe(false)
   })
 
@@ -2764,13 +2942,14 @@ describe("loopGuard seam regressions", () => {
       yield { type: "session.idle", properties: { sessionID: "ses_1" } }
       await new Promise<void>(() => {})
     }
-    // SessionBusyError-shaped rejection: the v2 queue route can refuse a
+    // SessionBusyError-shaped rejection: the queue route can refuse a
     // mid-turn delivery. The nudge is best-effort, so the turn must survive.
     const client = {
       event: { subscribe: async () => ({ stream: stream() }) },
       session: {
         create: async () => ({ data: { id: "ses_1" } }),
-        promptAsync: async () => {
+        promptAsync: async (input: { delivery?: string }) => {
+          if (input?.delivery === "queue") throw new Error("Session is busy")
           started.resolve()
           return {}
         },
@@ -2781,18 +2960,12 @@ describe("loopGuard seam regressions", () => {
           return {}
         },
       },
-      v2: {
-        session: {
-          prompt: async () => {
-            throw new Error("Session is busy")
-          },
-        },
-      },
     } as never
 
     const result = await promptPhase(client, {
+      identity: { runId: "test-run", phaseName: "implementer", attempt: 1 },
+      services: {},
       phase: agentStep("implementer"),
-      workspace: { dir: "/run", runID: "test-run" } as Workspace,
       targetDir: "/repo",
       prompt: "do the thing",
       model: { providerID: "openai", modelID: "gpt-5.5" },
@@ -2803,9 +2976,9 @@ describe("loopGuard seam regressions", () => {
           activities.push(`${level}:${detail}`)
         },
       },
-      shutdown: trackedShutdown(),
+      signal: trackedShutdown().signal,
       attempt: 1,
-      loopGuardConfig: resolveLoopGuard({ maxSteps: 200 }),
+      loopGuard: createOpencodeLoopGuardService(new LoopGuard(resolveLoopGuard({ maxSteps: 200 }))),
     })
 
     // Give the rejected nudge's catch handler a chance to (wrongly) act.
@@ -2837,7 +3010,7 @@ describe("loopGuard seam regressions", () => {
   })
 
   test("SC-3: a loop-guard trip in the follow-up turn rejects instead of keeping the phase", async () => {
-    const loopGuard = new LoopGuard(resolveLoopGuard({ identicalCalls: 2 }))
+    const loopGuard = createOpencodeLoopGuardService(new LoopGuard(resolveLoopGuard({ identicalCalls: 2 })))
     const advisor = {
       consult: async () => ({ text: "redo the tests", ok: true as const, callId: "call_1" }),
       delivered: async () => {},
@@ -2870,7 +3043,7 @@ describe("loopGuard seam regressions", () => {
           targetDir: "/repo",
           model: { providerID: "openai", modelID: "gpt-5.5" },
           progress: noopProgress,
-          shutdown: trackedShutdown(),
+          signal: trackedShutdown().signal,
           sessionID: "ses_1",
           loopGuard,
         },
@@ -2952,9 +3125,9 @@ describe("applyCompletionCheckpoint lastAssistantParts", () => {
     targetDir: "/repo",
     model: { providerID: "openai", modelID: "gpt-5.5" },
     progress: noopProgress,
-    shutdown: trackedShutdown(),
+    signal: trackedShutdown().signal,
     sessionID: "ses_1",
-    loopGuard: new LoopGuard(resolveLoopGuard()),
+    loopGuard: createOpencodeLoopGuardService(new LoopGuard(resolveLoopGuard())),
   })
 
   test("a read-only phase with an unchanged follow-up keeps the first turn's last parts", async () => {
@@ -3073,23 +3246,21 @@ describe("applyReportCheckpoint", () => {
     return { client, promptCount: () => prompts, sessionIDs }
   }
 
+  // Deliverable service double: no candidate yet, so the checkpoint must remind.
   const emptyReport = {
-    get candidate() {
-      return undefined
-    },
-    write: async () => ({ markdown: "unused" }),
-    end: () => {},
+    expected: ["report"] as const,
+    candidate: () => undefined,
+    submit: async () => ({ ok: true as const }),
   }
 
-  const inputFor = (workspace: Workspace, phase: AgentStep) => ({
+  const inputFor = (_workspace: Workspace, phase: AgentStep) => ({
     phase,
-    workspace,
     targetDir: "/repo",
     model: { providerID: "openai", modelID: "gpt-5.5" },
     progress: noopProgress,
-    shutdown: trackedShutdown(),
+    signal: trackedShutdown().signal,
     sessionID: "ses_1",
-    loopGuard: new LoopGuard(resolveLoopGuard()),
+    loopGuard: createOpencodeLoopGuardService(new LoopGuard(resolveLoopGuard())),
   })
 
   test("never nudges a phase whose contract explicitly owns no deliverable", async () => {
@@ -3106,7 +3277,7 @@ describe("applyReportCheckpoint", () => {
     const phase = { ...agentStep("scope"), deliverableContract: { kind: "none" } as const }
     const first = firstResult()
 
-    const result = await applyReportCheckpoint(client, inputFor(workspace, phase), first, emptyReport as never)
+    const result = await applyReportCheckpoint(client, inputFor(workspace, phase), first, { expected: [], submit: async () => ({ ok: true }) } as never)
 
     // A `none` contract stays an explicit opt-out: no report, no reminders.
     expect(result).toBe(first)
@@ -3122,22 +3293,21 @@ describe("applyReportCheckpoint", () => {
       lastAssistantParts: [],
     } as never
     const report = {
-      candidate: "# Findings\n\nNo blockers.",
-      write: async () => ({ markdown: "unused" }),
-      end: () => {},
+      expected: ["report"] as const,
+      candidate: () => "# Findings\n\nNo blockers.",
+      submit: async () => ({ ok: true as const }),
     }
 
     const result = await applyReportCheckpoint(
       { session: { promptAsync: async () => { prompts++; return {} } } } as never,
       {
         phase: { ...agentStep("scope"), readOnly: true, deliverableContract: { kind: "markdown-report" } },
-        workspace: { dir: "/run", runID: "test-run" },
         targetDir: "/repo",
         model: { providerID: "openai", modelID: "gpt-5.5" },
         progress: noopProgress,
-        shutdown: trackedShutdown(),
+        signal: trackedShutdown().signal,
         sessionID: "ses_1",
-        loopGuard: new LoopGuard(resolveLoopGuard()),
+        loopGuard: createOpencodeLoopGuardService(new LoopGuard(resolveLoopGuard())),
       },
       first,
       report as never,
@@ -3745,6 +3915,33 @@ describe("watchSession transcript backfill", () => {
         { channel: "tool", text: "read: src/a.ts" },
         { channel: "bash", text: "bun test" },
       ])
+    } finally {
+      await watcher.stop()
+    }
+  })
+
+  test("V2 tool markers dedupe against history by their call id", async () => {
+    // V2 names the call `id` on live tool events; history carries it as callID.
+    const { watcher, chunks } = backfillClient(
+      [
+        { type: "session.tool.input.started", data: { sessionID: "ses_1", assistantMessageID: "msg_1", id: "call_1", name: "read" } },
+        { type: "session.tool.called", data: { sessionID: "ses_1", assistantMessageID: "msg_1", id: "call_1", input: { path: "src/a.ts" }, executed: false } },
+        { type: "session.tool.input.started", data: { sessionID: "ses_1", assistantMessageID: "msg_1", id: "call_2", name: "read" } },
+        { type: "session.tool.called", data: { sessionID: "ses_1", assistantMessageID: "msg_1", id: "call_2", input: { path: "src/b.ts" }, executed: false } },
+      ],
+      [
+        assistantMessage("msg_1", "", {
+          completed: false,
+          parts: [{ id: "tp1", sessionID: "ses_1", messageID: "msg_1", type: "tool" as const, callID: "call_1", tool: "read", state: { status: "completed", input: { path: "src/a.ts" }, output: "ok", title: "", metadata: {} } }],
+        }),
+      ],
+      40,
+    )
+    try {
+      await until(chunks, 2)
+      await Bun.sleep(60)
+      expect(chunks.filter((chunk) => chunk.text.includes("src/a.ts"))).toHaveLength(1)
+      expect(chunks.filter((chunk) => chunk.text.includes("src/b.ts"))).toHaveLength(1)
     } finally {
       await watcher.stop()
     }

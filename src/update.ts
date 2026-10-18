@@ -107,6 +107,13 @@ export class UpdateError extends Error {
 }
 
 /**
+ * Convoy's own entry script in a source checkout. Re-invoking Convoy must run
+ * this, never `process.argv[1]`: that is whatever script imported Convoy, and
+ * re-running it from a hook or helper repeats that script instead.
+ */
+export const convoySourceEntry = join(import.meta.dir, "main.ts")
+
+/**
  * Bun 1.4 exposes a zero-cost standalone flag. Bun 1.3 does not expose that
  * API, so use its compiled-entrypoint path as a compatibility fallback.
  */

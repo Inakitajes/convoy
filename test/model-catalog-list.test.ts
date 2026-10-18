@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 
-import { listModels } from "../src/model-catalog"
-import type { Provider } from "@opencode-ai/sdk/v2"
+import { listModels, listServerModels } from "../src/model-catalog"
+import type { Provider } from "../src/opencode-client"
 
 type CatalogDeps = NonNullable<Parameters<typeof listModels>[1]>
 type SdkScenario = "success" | "empty" | "error" | "reject" | "list-reject"
@@ -83,6 +83,7 @@ function createHarness(sdk: SdkScenario, fallback: FetchScenario) {
       if (fallback === "empty") return Response.json({})
       return Response.json({ fallback: { models: { "model-1": { name: "Fallback Model" } } } })
     },
+    warmupMs: 0,
   }
 
   return { calls, deps }
@@ -167,5 +168,34 @@ describe("listModels source failures", () => {
   test("returns an empty array when models.dev has no models", async () => {
     const { deps } = createHarness("reject", "empty")
     expect(await listModels("/test", deps)).toEqual([])
+  })
+})
+
+describe("listServerModels warm-up", () => {
+  const provider = { id: "mock", models: { m: { id: "m", providerID: "mock", name: "M", variants: {} } } }
+
+  test("re-reads an empty catalog until the server's providers have loaded", async () => {
+    let calls = 0
+    const client = {
+      provider: {
+        list: async () => {
+          calls += 1
+          return calls < 3 ? { data: { all: [], connected: [] } } : { data: { all: [provider], connected: ["mock"] } }
+        },
+      },
+    }
+    const choices = await listServerModels(client as never, "/repo", { warmupMs: 2_000, pollMs: 1 })
+    expect(choices.map((choice) => choice.value)).toEqual(["mock/m"])
+    expect(calls).toBe(3)
+  })
+
+  test("a server with genuinely no providers still answers [] once the warm-up elapses", async () => {
+    const client = { provider: { list: async () => ({ data: { all: [], connected: [] } }) } }
+    expect(await listServerModels(client as never, "/repo", { warmupMs: 20, pollMs: 1 })).toEqual([])
+  })
+
+  test("an error is never retried into an empty catalog", async () => {
+    const client = { provider: { list: async () => ({ error: new Error("boom") }) } }
+    await expect(listServerModels(client as never, "/repo", { warmupMs: 2_000, pollMs: 1 })).rejects.toThrow("opencode returned an error")
   })
 })

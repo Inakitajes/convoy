@@ -13,7 +13,7 @@
  */
 
 import { spawnSync } from "node:child_process"
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, writeFileSync, writeSync } from "node:fs"
 import { join, resolve } from "node:path"
 
 import { badgeColor, generateBadgeSVG, parseTextCoverage, type CoverageTotals } from "./coverage-core"
@@ -41,7 +41,9 @@ function runTestsWithCoverage(): CoverageTotals {
   writeFileSync(CACHED_SUMMARY, output, "utf-8")
 
   if (result.error || result.status !== 0) {
-    process.stderr.write(output)
+    // Synchronously: an async write to a pipe is cut short by the exit the
+    // throw causes, which hid the failing tests from CI logs.
+    writeSync(2, output)
     throw result.error ?? new Error(`Tests with coverage failed with exit code ${result.status ?? "unknown"}`)
   }
 

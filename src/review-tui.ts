@@ -6,7 +6,7 @@ import { defaultAdvisorMaxCalls } from "./advisor"
 import { gatewayLabel } from "./model-routing"
 import { prdHistoryPreviewCopy } from "./prd-history"
 import { plannedStepAdvisor, plannedStepModel } from "./run-plan"
-import { sanitizeReviewInline, sanitizeReviewText } from "./run-review"
+import { sanitizeReviewInline, sanitizeReviewText, claudeRouteSummary } from "./run-review"
 import { stepRunnerFor } from "./step-runners"
 import { plain, raw, sectionLabel, theme, truncate } from "./tui-theme"
 
@@ -104,6 +104,8 @@ export function runReviewLines(plan: RunPlan, width: number, options: RunReviewR
     rows.push(labelRow("runtime", [fg(theme.text)(runtime)]))
     if (judge) rows.push(continuation([fg(theme.faint)("judge "), fg(theme.dim)(truncate(judge, Math.max(8, value - 6)))]))
   }
+
+  if (plan.claude) rows.push(labelRow("claude", [fg(theme.dim)(truncate(claudeRouteSummary(plan.claude), value))]))
 
   return rows
 }

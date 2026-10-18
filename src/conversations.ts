@@ -1,4 +1,15 @@
+import { randomUUID } from "node:crypto"
+import { existsSync, realpathSync } from "node:fs"
+import { homedir } from "node:os"
+import { join } from "node:path"
+
+import { claudeAuthShellPrefix, claudeBinaryName } from "./claude-code"
+import { withoutHerdrEnv } from "./herdr"
 import { bootOpencodeServerFrom, connectOpencode } from "./opencode"
+import { resolveOpencodeBin } from "./opencode-runtime"
+import { resolveClaudeAuth } from "./runners/claude/auth"
+import { applyAuthOverlay } from "./runners/claude/effective-auth"
+import type { AuthenticationSelection } from "./runners/contracts"
 import { openSessionCommand, runForegroundChild, shellQuote, type SessionWindowBackend } from "./terminal-host"
 
 /**
@@ -11,12 +22,39 @@ import { openSessionCommand, runForegroundChild, shellQuote, type SessionWindowB
  * against a live server before use and any transient handle stays inside this
  * module. The adapter does not imply support for advisor, model fan-out, or
  * verification flows: those remain the pipeline's `StepRunner` territory.
+ *
+ * Claude is the second harness (`defaults.authoring.runner: claude-code`): its
+ * sessions need no server — a new conversation is a fresh session id the
+ * client starts with `--session-id`, and an existing one is the exact
+ * transcript Claude persisted for that checkout, reopened with `--resume` —
+ * and every client runs under the reviewed Claude authentication.
  */
+
+export type AuthoringHarness = "opencode" | "claude-code"
 
 /** A harness-qualified session reference (durable, storable). */
 export type AuthoringSessionRef = {
-  harness: "opencode"
+  harness: AuthoringHarness
   sessionId: string
+}
+
+/** The harness an authoring flow opens and the authentication a Claude client runs under. */
+export type AuthoringRoute = { harness: AuthoringHarness; auth?: AuthenticationSelection }
+
+/** Where Claude persists a checkout's sessions: `<config>/projects/<checkout with non-alphanumerics as ->/`. */
+export function claudeSessionFile(checkout: string, sessionId: string, env: NodeJS.ProcessEnv = process.env): string {
+  let real = checkout
+  try {
+    real = realpathSync(checkout)
+  } catch {
+    // A missing checkout simply has no sessions.
+  }
+  return join(env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"), "projects", real.replace(/[^A-Za-z0-9]/g, "-"), `${sessionId}.jsonl`)
+}
+
+/** True once Claude has persisted the session for this exact checkout. */
+export function claudeSessionExists(checkout: string, sessionId: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  return /^[0-9a-f-]{36}$/i.test(sessionId) && existsSync(claudeSessionFile(checkout, sessionId, env))
 }
 
 /**
@@ -26,7 +64,7 @@ export type AuthoringSessionRef = {
  * is stopped only through the service's explicit, guarded stop. Adapters
  * never close an injected handle.
  */
-type ServerHandle = { url: string; close?(): void | Promise<unknown> }
+type ServerHandle = { url: string; password?: string; close?(): void | Promise<unknown> }
 
 /**
  * Boots a bounded server rooted at the checkout, creates a session, and
@@ -42,10 +80,13 @@ export async function createAuthoringConversation(input: {
   bootTimeoutMs?: number
   /** Injected server (used by tests / a conversation service that owns one). */
   server?: ServerHandle
+  harness?: AuthoringHarness
 }): Promise<AuthoringSessionRef> {
+  // A Claude conversation exists once its client starts with this id.
+  if (input.harness === "claude-code") return { harness: "claude-code", sessionId: randomUUID() }
   const server = input.server ?? (await bootOpencodeServerFrom(input.checkout, input.bootTimeoutMs))
   try {
-    const client = connectOpencode(server.url)
+    const client = connectOpencode(server.url, server.password)
     const created = await client.session.create(input.title ? { title: input.title } : {})
     if (created.error || !created.data) {
       throw new Error(`opencode session create failed: ${JSON.stringify(created.error ?? "no session returned")}`)
@@ -68,12 +109,17 @@ export async function validateAuthoringSession(input: {
   checkout: string
   server?: ServerHandle
 }): Promise<{ status: "available"; title?: string } | { status: "unavailable"; reason: string }> {
+  if (input.ref.harness === "claude-code") {
+    return claudeSessionExists(input.checkout, input.ref.sessionId)
+      ? { status: "available" }
+      : { status: "unavailable", reason: "Claude has no persisted session with this id for this checkout" }
+  }
   if (input.ref.harness !== "opencode") {
-    return { status: "unavailable", reason: `unsupported conversation harness: ${input.ref.harness}` }
+    return { status: "unavailable", reason: `unsupported conversation harness: ${String(input.ref.harness)}` }
   }
   const server = input.server ?? (await bootOpencodeServerFrom(input.checkout))
   try {
-    const client = connectOpencode(server.url)
+    const client = connectOpencode(server.url, server.password)
     const got = await client.session.get({ sessionID: input.ref.sessionId })
     if (got.error || !got.data) {
       return { status: "unavailable", reason: `the linked session could not be opened through the harness (${JSON.stringify(got.error ?? "not found")})` }
@@ -90,8 +136,21 @@ export async function validateAuthoringSession(input: {
  * resumed. Structured on purpose: the foreground host passes argv straight
  * to the child; shell-based external backends receive the quoted command.
  */
-export function authoringClientArgv(input: { checkout: string; ref: AuthoringSessionRef }): string[] {
-  return ["opencode", input.checkout, "--session", input.ref.sessionId]
+export function authoringClientArgv(input: { checkout: string; ref: AuthoringSessionRef; prompt?: string }): string[] {
+  if (input.ref.harness === "claude-code") {
+    // Resume the exact persisted session, or start this id fresh.
+    const session = claudeSessionExists(input.checkout, input.ref.sessionId) ? ["--resume", input.ref.sessionId] : ["--session-id", input.ref.sessionId]
+    return [claudeBinaryName, ...session, ...(input.prompt ? [input.prompt] : [])]
+  }
+  // --standalone keeps V1's own-server behavior; V2 otherwise joins the
+  // user's background service.
+  return [resolveOpencodeBin(), input.checkout, "--standalone", "--session", input.ref.sessionId, ...(input.prompt ? ["--prompt", input.prompt] : [])]
+}
+
+/** The child environment a Claude client runs with: the reviewed auth overlay, never an ambient billing source. */
+export function claudeClientEnv(auth: AuthenticationSelection = { mode: "subscription" }, env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const child = applyAuthOverlay(withoutHerdrEnv(env), resolveClaudeAuth({ selection: auth, env }))
+  return Object.fromEntries(Object.entries(child).filter((entry): entry is [string, string] => typeof entry[1] === "string"))
 }
 
 /**
@@ -106,15 +165,20 @@ export function openConversationForeground(input: {
   suspend(): void
   resume(): void
   env?: Record<string, string>
+  /** The reviewed authentication for a Claude conversation. */
+  auth?: AuthenticationSelection
+  /** A first message the client starts with (the authoring command). */
+  prompt?: string
   /** Injected primary-screen clear (tests); the host's terminal clear by default. */
   clear?: () => void
 }): Promise<number> {
+  const env = input.env ?? (input.ref.harness === "claude-code" ? claudeClientEnv(input.auth) : undefined)
   return runForegroundChild({
-    argv: authoringClientArgv({ checkout: input.checkout, ref: input.ref }),
+    argv: authoringClientArgv({ checkout: input.checkout, ref: input.ref, ...(input.prompt ? { prompt: input.prompt } : {}) }),
     cwd: input.checkout,
     suspend: input.suspend,
     resume: input.resume,
-    ...(input.env ? { env: input.env } : {}),
+    ...(env ? { env } : {}),
     ...(input.clear ? { clear: input.clear } : {}),
   })
 }
@@ -135,10 +199,15 @@ export async function openConversationExternal(input: {
   openWindow?: () => Promise<SessionWindowBackend>
   /** Injected server for the availability check (tests). */
   server?: Parameters<typeof validateAuthoringSession>[0]["server"]
+  /** The reviewed authentication for a Claude conversation. */
+  auth?: AuthenticationSelection
 }): Promise<{ status: "opened"; backend: string; sessionVerified: true } | { status: "opened-unverified"; backend: string; reason: string } | { status: "failed"; reason: string }> {
   let backend: SessionWindowBackend
   try {
-    const open = input.openWindow ?? (() => openSessionCommand(authoringClientArgv({ checkout: input.checkout, ref: input.ref }).map(shellQuote).join(" "), input.checkout, "convoy conversation"))
+    const command = authoringClientArgv({ checkout: input.checkout, ref: input.ref }).map(shellQuote).join(" ")
+    // A Claude pane's shell gets the same auth overlay, typed as variable names only.
+    const typed = input.ref.harness === "claude-code" ? `${claudeAuthShellPrefix(input.auth)} ${command}` : command
+    const open = input.openWindow ?? (() => openSessionCommand(typed, input.checkout, "convoy conversation"))
     backend = await open()
   } catch (error) {
     return { status: "failed", reason: error instanceof Error ? error.message : String(error) }
@@ -171,7 +240,7 @@ export async function sessionActivity(input: {
   if (input.ref.harness !== "opencode") return "unknown"
   const server = input.server ?? (await bootOpencodeServerFrom(input.checkout))
   try {
-    const client = connectOpencode(server.url)
+    const client = connectOpencode(server.url, server.password)
     const status = await client.session.status()
     if (status.error || !status.data) return "unknown"
     const entry = (status.data as Record<string, { type?: string }>)[input.ref.sessionId]
@@ -196,7 +265,7 @@ export async function listAuthoringCommands(input: {
 }): Promise<string[] | "unknown"> {
   const server = input.server ?? (await bootOpencodeServerFrom(input.checkout))
   try {
-    const client = connectOpencode(server.url)
+    const client = connectOpencode(server.url, server.password)
     const commands = await client.command.list()
     if (commands.error || !commands.data) return "unknown"
     return (commands.data as Array<{ name?: string }>).map((entry) => entry.name).filter((name): name is string => typeof name === "string")
@@ -221,7 +290,7 @@ export async function invokeAuthoringCommand(input: {
   command: string
   arguments?: string
 }): Promise<void> {
-  const client = connectOpencode(input.server.url)
+  const client = connectOpencode(input.server.url, input.server.password)
   const sent = await client.session.command({
     sessionID: input.ref.sessionId,
     command: input.command,
@@ -230,4 +299,17 @@ export async function invokeAuthoringCommand(input: {
   if (sent.error) {
     throw new Error(`authoring command "${input.command}" failed: ${JSON.stringify(sent.error).slice(0, 200)}`)
   }
+}
+
+/**
+ * A Claude project's authoring commands: the slash commands its checkout
+ * defines (`.claude/commands/**.md`, `/a:b` for `a/b.md`). Absence is a real
+ * outcome, as with OpenCode's command API.
+ */
+export async function listClaudeAuthoringCommands(checkout: string): Promise<string[]> {
+  const root = join(checkout, ".claude", "commands")
+  if (!existsSync(root)) return []
+  const names: string[] = []
+  for await (const path of new Bun.Glob("**/*.md").scan({ cwd: root })) names.push(path.slice(0, -".md".length).split("/").join(":"))
+  return names.sort()
 }

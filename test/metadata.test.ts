@@ -995,6 +995,7 @@ describe("recordProgress", () => {
       serverStopped: () => Promise.resolve(),
       phaseStarted: (name: string) => { storeCalls.push(`phaseStarted(${name})`); return Promise.resolve() },
       phaseSession: (name: string) => { storeCalls.push(`phaseSession(${name})`) },
+      phaseExecution: (name: string) => { storeCalls.push(`phaseExecution(${name})`) },
       phaseStepUsage: (name: string) => { storeCalls.push(`phaseStepUsage(${name})`) },
       phaseUsageTotal: (name: string) => { storeCalls.push(`phaseUsageTotal(${name})`) },
       phaseAdvisorEvent: (name: string) => { storeCalls.push(`phaseAdvisorEvent(${name})`) },

@@ -1,11 +1,19 @@
-import { join } from "node:path"
+import { createHash } from "node:crypto"
+import { mkdir, readFile } from "node:fs/promises"
+import { dirname, join } from "node:path"
 
 import { bootOpencodeServerFrom } from "./opencode"
 import { captureIdentity, defaultIdentityProbe, type IdentityProbe, type ProcessIdentity } from "./process-identity"
 import { readJsonFile, removePath, withExclusiveLock, writeJsonFile, type StoreRead } from "./repo-store"
+import { convoySecretsDir } from "./workspace"
 
-/** The discovery record's schema version; bumped only for a wire-format change. */
-const schemaVersion = 1
+/**
+ * The discovery record's schema version; bumped only for a wire-format change.
+ * 2: an OpenCode V2 server. A schema-1 record names a pre-V2 server that the
+ * V2 client cannot drive.
+ */
+const schemaVersion = 2
+const preV2SchemaVersion = 1
 
 /**
  * The authoring conversation service (capability work-conversations, design
@@ -24,6 +32,7 @@ const schemaVersion = 1
  *   out active execution keeps the service alive instead.
  *
  * Layout: <common-dir>/convoy/authoring-server.json (transient discovery)
+ *         <convoy-home>/private/authoring/<repo>.json (its password, owner-only)
  */
 
 /** How long the liveness probe waits for the server to answer. */
@@ -41,6 +50,13 @@ export type ConversationServiceRecord = {
   pid: number
   bootCheckout: string
   startedAt: number
+  /**
+   * The V2 per-boot HTTP Basic password for the recorded server (design D2).
+   * Never written into the record, which lives in the checkout's Git dir that
+   * agents read: it is kept in `conversationServiceSecretPath`. A record from
+   * an earlier build may still carry it, and is honored until replaced.
+   */
+  password?: string
   /**
    * Kernel birth identity of the recorded child for servers booted by this
    * build (design D6). Optional and additive: legacy records simply omit it,
@@ -70,6 +86,7 @@ export function validateConversationServiceRecord(value: unknown): ConversationS
     pid: record.pid,
     bootCheckout: record.bootCheckout,
     startedAt: record.startedAt,
+    ...(typeof record.password === "string" && record.password !== "" ? { password: record.password } : {}),
     ...(typeof record.childBirth === "string" && record.childBirth !== "" ? { childBirth: record.childBirth } : {}),
   }
 }
@@ -98,11 +115,39 @@ function discoveryPath(commonDir: string): string {
   return join(commonDir, "convoy", "authoring-server.json")
 }
 
-/** Reads the transient discovery record; a missing record is simply "none". */
+/** Where the repository's authoring password lives: outside every checkout, keyed by its common dir. */
+export function conversationServiceSecretPath(commonDir: string): string {
+  const key = createHash("sha256").update(commonDir).digest("hex").slice(0, 32)
+  return join(convoySecretsDir(), "authoring", `${key}.json`)
+}
+
+async function readServiceSecret(commonDir: string): Promise<{ url: string; password: string } | undefined> {
+  try {
+    const parsed = JSON.parse(await readFile(conversationServiceSecretPath(commonDir), "utf8")) as Record<string, unknown>
+    if (typeof parsed.url !== "string" || typeof parsed.password !== "string" || parsed.password === "") return undefined
+    return { url: parsed.url, password: parsed.password }
+  } catch {
+    return undefined
+  }
+}
+
+async function removeServiceRecord(commonDir: string): Promise<void> {
+  await removePath(discoveryPath(commonDir))
+  await removePath(conversationServiceSecretPath(commonDir))
+}
+
+/**
+ * Reads the transient discovery record; a missing record is simply "none".
+ * The password is joined from its private file, and only when that file names
+ * the same server, so a stale secret never authenticates a different one.
+ */
 export async function readConversationServiceDiscovery(commonDir: string): Promise<StoreRead<ConversationServiceRecord>> {
-  return readJsonFile(discoveryPath(commonDir), validateConversationServiceRecord, {
-    unsupported: (value) => typeof value.schemaVersion === "number" && value.schemaVersion > schemaVersion,
+  const read = await readJsonFile(discoveryPath(commonDir), validateConversationServiceRecord, {
+    unsupported: (value) => typeof value.schemaVersion === "number" && value.schemaVersion !== schemaVersion,
   })
+  if (read.status !== "found" || read.value.password) return read
+  const secret = await readServiceSecret(commonDir)
+  return secret?.url === read.value.url ? { ...read, value: { ...read.value, password: secret.password } } : read
 }
 
 function pidAlive(pid: number): boolean {
@@ -141,7 +186,7 @@ export async function probeConversationService(record: ConversationServiceRecord
 
 /** The outcome of ensuring the repository's authoring service. */
 export type ConversationServiceOutcome =
-  | { status: "live"; url: string; record: ConversationServiceRecord; reused: boolean }
+  | { status: "live"; url: string; password?: string; record: ConversationServiceRecord; reused: boolean }
   | { status: "uncertain"; reason: string; record?: ConversationServiceRecord }
   | { status: "unavailable"; reason: string }
 
@@ -159,7 +204,7 @@ export async function ensureConversationService(input: {
   checkout: string
   bootTimeoutMs?: number
   /** Injected boot (tests); defaults to the detached OpenCode server boot. */
-  boot?: (checkout: string, timeoutMs?: number) => Promise<{ url: string; close(): void | Promise<unknown>; pid: number; identity?: ProcessIdentity }>
+  boot?: (checkout: string, timeoutMs?: number) => Promise<{ url: string; password?: string; close(): void | Promise<unknown>; pid: number; identity?: ProcessIdentity }>
   /** Injected probe (tests); defaults to the PID + URL liveness probe. */
   probe?: (record: ConversationServiceRecord) => Promise<"live" | "stale" | "uncertain">
 }): Promise<ConversationServiceOutcome> {
@@ -176,7 +221,7 @@ export async function ensureConversationService(input: {
     if (read.status === "found") {
       const liveness = await probe(read.value)
       if (liveness === "live") {
-        outcome = { status: "live", url: read.value.url, record: read.value, reused: true }
+        outcome = { status: "live", url: read.value.url, ...(read.value.password ? { password: read.value.password } : {}), record: read.value, reused: true }
         return
       }
       if (liveness === "uncertain") {
@@ -188,14 +233,20 @@ export async function ensureConversationService(input: {
         return
       }
       // Stale: the recorded server is provably gone; replace the record.
-      await removePath(discoveryPath(input.commonDir))
+      await removeServiceRecord(input.commonDir)
     } else if (read.status !== "missing") {
       // Corrupt/unsupported/unreadable discovery is not evidence of a live
       // server, but it is also not clean state: report instead of overwriting.
-      outcome = { status: "uncertain", reason: `the authoring service discovery record is ${read.status === "unreadable" ? `unreadable: ${read.reason}` : read.status} — inspect ${discoveryPath(input.commonDir)} before conversation work` }
+      outcome = {
+        status: "uncertain",
+        reason:
+          read.status === "unsupported" && read.schemaVersion === preV2SchemaVersion
+            ? `an authoring server from before the OpenCode V2 migration may still be running — stop the pid recorded in ${discoveryPath(input.commonDir)}, then delete that record, before conversation work`
+            : `the authoring service discovery record is ${read.status === "unreadable" ? `unreadable: ${read.reason}` : read.status} — inspect ${discoveryPath(input.commonDir)} before conversation work`,
+      }
       return
     }
-    let booted: { url: string; close(): void | Promise<unknown>; pid: number; identity?: ProcessIdentity }
+    let booted: { url: string; password?: string; close(): void | Promise<unknown>; pid: number; identity?: ProcessIdentity }
     try {
       booted = await boot(input.checkout, input.bootTimeoutMs)
     } catch (error) {
@@ -208,20 +259,29 @@ export async function ensureConversationService(input: {
       pid: booted.pid,
       bootCheckout: input.checkout,
       startedAt: Date.now(),
+      ...(booted.password ? { password: booted.password } : {}),
       // Retain the child's kernel birth identity for newly booted services so
       // the guarded stop can refuse a recycled PID (design D6).
       ...(booted.identity?.birth ? { childBirth: booted.identity.birth } : {}),
     }
     try {
-      await writeJsonFile(discoveryPath(input.commonDir), record)
+      // The password goes first, to a private file outside the checkout: the
+      // record a reader discovers must never be usable without it.
+      if (booted.password) {
+        await mkdir(dirname(conversationServiceSecretPath(input.commonDir)), { recursive: true, mode: 0o700 })
+        await writeJsonFile(conversationServiceSecretPath(input.commonDir), { url: booted.url, password: booted.password }, { mode: 0o600 })
+      }
+      const { password: _password, ...publicRecord } = record
+      await writeJsonFile(discoveryPath(input.commonDir), publicRecord, { mode: 0o600 })
     } catch (error) {
+      await removePath(conversationServiceSecretPath(input.commonDir))
       // An unpublished child has no discovery record to control its lifetime:
       // close it rather than leak an unreachable server (design D6).
       await Promise.resolve(booted.close()).catch(() => {})
       outcome = { status: "unavailable", reason: `the authoring service discovery record could not be written: ${error instanceof Error ? error.message : String(error)}` }
       return
     }
-    outcome = { status: "live", url: booted.url, record, reused: false }
+    outcome = { status: "live", url: booted.url, ...(booted.password ? { password: booted.password } : {}), record, reused: false }
   })
   return outcome
 }
@@ -288,6 +348,6 @@ export async function stopConversationService(input: {
   }
   // Live → killed; stale → already gone: the record describes a service that
   // no longer exists, so it is removed.
-  await removePath(discoveryPath(input.commonDir))
+  await removeServiceRecord(input.commonDir)
   return { status: "stopped" }
 }

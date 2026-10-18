@@ -633,3 +633,45 @@ describe("persisted run titles (capability run-titles)", () => {
     }
   })
 })
+
+describe("plain-text run detail", () => {
+  async function cli(args: string[], home: string) {
+    const proc = Bun.spawn([process.execPath, join(import.meta.dir, "..", "src", "main.ts"), ...args], {
+      env: { ...process.env, CONVOY_HOME: home },
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited])
+    return { stdout, stderr, code }
+  }
+
+  test("a named run off a TTY prints its status, phases, and summary, not the whole history", async () => {
+    const home = await mkdtemp(join(tmpdir(), "convoy-runs-detail-"))
+    try {
+      for (const runID of ["20260610-120000-cccc", "20260611-120000-dddd"]) {
+        const dir = join(home, ".convoy", "runs", runID)
+        await mkdir(join(dir, "reports"), { recursive: true })
+        await writeFile(join(dir, "prd.md"), `# ${runID}\n`)
+        await writeFile(
+          join(dir, "metadata.json"),
+          JSON.stringify({ schemaVersion: 1, runID, targetDir: "/tmp/repo", createdAt: 1, updatedAt: 2, phases: { audit: { status: "completed", cost: 0.0125 }, fix: { status: "failed" } } }),
+        )
+        await writeFile(join(dir, "reports", "audit.md"), "audit found nothing\n")
+      }
+      const detail = await cli(["runs", "20260610-120000-cccc"], home)
+      expect(detail.code).toBe(0)
+      expect(detail.stdout.split("\n")[0]).toMatch(/^run 20260610-120000-cccc: /)
+      expect(detail.stdout).toContain("  audit: completed · $0.0125")
+      expect(detail.stdout).toContain("  fix: failed")
+      expect(detail.stdout).toContain("audit found nothing")
+      expect(detail.stdout).not.toContain("20260611-120000-dddd")
+
+      const listing = await cli(["runs"], home)
+      expect(listing.stdout).toContain("20260611-120000-dddd")
+      expect(listing.stdout).toContain("20260610-120000-cccc")
+    } finally {
+      await rm(home, { recursive: true, force: true })
+    }
+  })
+})

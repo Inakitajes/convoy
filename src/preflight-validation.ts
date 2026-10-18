@@ -5,8 +5,16 @@ type DiscoveredModel = { variants?: unknown }
 type DiscoveredProvider = { id?: unknown; models?: unknown }
 export type ProviderCatalog = { all: readonly DiscoveredProvider[]; connected: readonly string[] }
 
-/** The exact OpenCode targets that must be available before a run can begin. */
+/**
+ * The exact OpenCode targets that must be available before a run can begin.
+ * Claude-routed models (`claude-code/<model>` advisors and judges) are not
+ * OpenCode catalog entries: the Claude CLI's own auth probe checks them.
+ */
 export function preflightTargets(plan: RunPlan): ResolvedModel[] {
+  return opencodeTargets(plan).filter((target) => target.providerID !== "claude-code")
+}
+
+function opencodeTargets(plan: RunPlan): ResolvedModel[] {
   const targets = plan.pipeline.steps.flatMap((step) =>
     step.type === "agent" && step.runner !== "claude-code" && step.resolvedModel ? [step.resolvedModel] : [],
   )
@@ -25,7 +33,8 @@ export function preflightTargets(plan: RunPlan): ResolvedModel[] {
   for (const step of plan.pipeline.steps) {
     if (step.type === "agent" && step.resolvedAdvisor) targets.push(step.resolvedAdvisor)
   }
-  if (plan.smartJudge) targets.push(plan.smartJudge.model)
+  // A Claude judge is checked by the Claude CLI's own auth probe, not the OpenCode catalog.
+  if (plan.smartJudge && plan.smartJudge.runner !== "claude-code") targets.push(plan.smartJudge.model)
   // No branch namer here: naming happens in the launcher, before the plan is
   // built, so nothing is left to call once the run is confirmed.
   return targets

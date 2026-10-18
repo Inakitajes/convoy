@@ -43,7 +43,7 @@ function track(pid: number | undefined): number {
 }
 
 /** Reads the readiness line the managed launcher waits for. */
-const READY_LINE = 'console.log("opencode server listening on http://127.0.0.1:1")\n'
+const READY_LINE = `console.log("server listening on http://127.0.0.1:1")\nconsole.log("server password fixture-pw")\n`
 
 async function fixtureScript(dir: string, name: string, body: string): Promise<string> {
   const path = join(dir, `${name}.js`)
@@ -204,6 +204,34 @@ describe("owned subprocess force edge and startup race", () => {
     expect(await waitForExit(server.pid)).toBe(true)
     const outcome = await server.stop()
     expect(outcome.status).toBe("stopped")
+  }, 15_000)
+
+  // Output arrives in arbitrary chunks: a password split across two of them
+  // must not leak its second half into the startup diagnostic.
+  test("a startup diagnostic never carries a password split across output chunks", async () => {
+    const dir = await scratchDir()
+    const script = await fixtureScript(
+      dir,
+      "split-password",
+      'process.stdout.write("server password firsthalf")\nsetTimeout(() => { process.stdout.write("secondhalf\\n"); setTimeout(() => process.exit(3), 50) }, 100)\n',
+    )
+    const store = createProcessRecordStore(join(dir, "processes"))
+    const failure = await launchManagedServer({
+      command: process.execPath,
+      args: [script],
+      cwd: dir,
+      env: {},
+      lifetime: "helper",
+      label: "fixture helper",
+      timeoutMs: 5_000,
+      deps: { store, policy: { graceMs: 500, forceObservationMs: 500 } },
+    }).then(
+      () => undefined,
+      (error: unknown) => (error instanceof Error ? error.message : String(error)),
+    )
+    expect(failure).toContain("server password [redacted]")
+    expect(failure).not.toContain("firsthalf")
+    expect(failure).not.toContain("secondhalf")
   }, 15_000)
 
   test("a helper that exits before readiness fails with bounded cleanup and no lingering record", async () => {

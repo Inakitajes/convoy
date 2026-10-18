@@ -162,6 +162,25 @@ function frameOf(session: Awaited<ReturnType<typeof openHome>>): string {
 }
 
 /**
+ * Renders until the asynchronous branch proposal has landed. A fixed sleep
+ * raced the proposer on slow CI runners and caught the "proposing" spinner;
+ * this waits for the spinner to go, bounded so a stuck proposal still fails.
+ */
+async function awaitProposal(session: Awaited<ReturnType<typeof openHome>>): Promise<void> {
+  await awaitFrame(session, (frame) => !frame.includes("proposing"))
+}
+
+/** Renders until the frame satisfies `ready`, bounded so a missing update still fails its assertion. */
+async function awaitFrame(session: Awaited<ReturnType<typeof openHome>>, ready: (frame: string) => boolean, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    await session.renderOnce()
+    if (ready(frameOf(session)) || Date.now() >= deadline) return
+    await Bun.sleep(10)
+  }
+}
+
+/**
  * The text of every line that carries a painted background — the selection's
  * full-width highlight. Char frames cannot show colors, so the selection
  * asserts itself here: ordinary rows are transparent; only the selected one
@@ -1130,8 +1149,7 @@ describe("new worktree form (auto by default, manual on tab)", () => {
       for (const char of "Improve review navigation") session.press(char)
       session.press("return")
       await session.renderOnce()
-      await Bun.sleep(30)
-      await session.renderOnce()
+      await awaitProposal(session)
       // The whole draft is shown for review — name, branch, base, destination —
       // and nothing resolves until acceptance.
       expect(frameOf(session)).toContain("name")
@@ -1164,8 +1182,7 @@ describe("new worktree form (auto by default, manual on tab)", () => {
       for (const char of "Improve review navigation") session.press(char)
       session.press("return")
       await session.renderOnce()
-      await Bun.sleep(30)
-      await session.renderOnce()
+      await awaitProposal(session)
       const frame = frameOf(session)
       expect(frame).toContain("name")
       expect(frame).toContain("Improve review navigation")
@@ -1216,9 +1233,8 @@ describe("new worktree form (auto by default, manual on tab)", () => {
       session.press("n")
       await session.renderOnce()
       // The model resolves off the keypress path (config load + import);
-      // give it a beat and re-render before asserting.
-      await Bun.sleep(50)
-      await session.renderOnce()
+      // wait for it to land before asserting.
+      await awaitFrame(session, (frame) => frame.includes("using"))
       const frame = frameOf(session)
       expect(frame).toContain("↵ create")
       expect(frame).toContain("using")
@@ -1249,8 +1265,7 @@ describe("new worktree form (auto by default, manual on tab)", () => {
       expect(footer).not.toContain("enter")
       expect(footer).not.toContain("tab")
       release!({ branch: "feat/improve-review-navigation" })
-      await Bun.sleep(30)
-      await session.renderOnce()
+      await awaitProposal(session)
       expect(frameOf(session)).toContain("↵ confirm")
     } finally {
       await closeHome(session)
@@ -1269,8 +1284,7 @@ describe("new worktree form (auto by default, manual on tab)", () => {
       for (const char of "Improve review navigation") session.press(char)
       session.press("return")
       await session.renderOnce()
-      await Bun.sleep(30)
-      await session.renderOnce()
+      await awaitProposal(session)
       // The namer is advisory: the slug proposal still lands, and the
       // failure never surfaces as a form error.
       expect(frameOf(session)).toContain("feat/improve-review-navigation")
@@ -1312,8 +1326,7 @@ describe("new worktree form (auto by default, manual on tab)", () => {
       for (const char of "Improve review navigation") session.press(char)
       session.press("return")
       await session.renderOnce()
-      await Bun.sleep(30)
-      await session.renderOnce()
+      await awaitProposal(session)
       expect(frameOf(session)).toContain("↵ confirm")
       session.press("escape") // back to the description, form still open
       await session.renderOnce()
@@ -1362,8 +1375,7 @@ describe("new worktree form (auto by default, manual on tab)", () => {
       await session.renderOnce()
       // The deterministic slug is the immediate prefill; the model suggestion
       // lands while the operator has not typed a branch of their own.
-      await Bun.sleep(30)
-      await session.renderOnce()
+      await awaitFrame(session, (frame) => frame.includes("feat/improve-review-navigation-model"))
       expect(frameOf(session)).toContain("feat/improve-review-navigation-model")
       session.press("escape")
       await session.renderOnce()
@@ -1387,8 +1399,7 @@ describe("new worktree form (auto by default, manual on tab)", () => {
       for (const char of "Improve review navigation") session.press(char)
       session.press("return")
       await session.renderOnce()
-      await Bun.sleep(30)
-      await session.renderOnce()
+      await awaitProposal(session)
       expect(frameOf(session)).toContain("improve-review-navigation")
       expect(frameOf(session)).not.toContain("unavailable")
       session.press("escape")
@@ -1500,8 +1511,8 @@ describe("new worktree form (auto by default, manual on tab)", () => {
       session.press("return")
       await session.renderOnce()
       session.press("return") // confirm the branch field: the conventional prefix is prefilled
-      await Bun.sleep(50)
-      await session.renderOnce()
+      // Confirming awaits a free-name check against git; a fixed sleep raced it on slow runners.
+      await awaitFrame(session, (frame) => frame.includes("feat/improve-review-navigation"))
       // The branch is prefilled from the name, editable.
       expect(frameOf(session)).toContain("feat/improve-review-navigation")
       session.press("escape")

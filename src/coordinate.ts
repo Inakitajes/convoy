@@ -7,7 +7,7 @@ import { ControlProgress, type ControlProgressOptions } from "./control-progress
 import { hasWritableStep } from "./pipeline"
 import { pidAlive } from "./runs"
 import { hostedTeardownFromError, installShutdownSignals, isUserAbortError, run, RunShutdown } from "./runner"
-import { isOfficialStandaloneExecutable } from "./update"
+import { convoySourceEntry, isOfficialStandaloneExecutable } from "./update"
 import { convoyHome } from "./workspace"
 import type { RunOptions, RunPlan } from "./types"
 
@@ -40,12 +40,12 @@ export type CoordinateReady = {
 /**
  * Spawn argv for the coordinator: the same binary, tail-fixed with the
  * internal `--coordinate` flag. A standalone release executable runs
- * `execPath --coordinate <launch>`; a source checkout re-invokes this script
- * with its node args preserved (`bun run src/main.ts --coordinate <launch>`).
+ * `execPath --coordinate <launch>`; a source checkout re-invokes Convoy's entry
+ * script with its node args preserved (`bun run src/main.ts --coordinate <launch>`).
  */
 export function convoyCoordinateArgv(launchPath: string): string[] {
   if (isOfficialStandaloneExecutable()) return [process.execPath, "--coordinate", launchPath]
-  return [process.execPath, ...process.execArgv, process.argv[1], "--coordinate", launchPath]
+  return [process.execPath, ...process.execArgv, convoySourceEntry, "--coordinate", launchPath]
 }
 
 export function pendingRoot(): string {
@@ -246,8 +246,10 @@ export async function forwardCoordinatorLogs(
     })
     await pumping
   }
+  // Deliberately ref'd: the parent unrefs its detached coordinator, so this
+  // poll is what keeps a --no-tui parent waiting on it. Unref'd, Bun let the
+  // parent exit 0 right after the boot while the run was still executing.
   const timer = setInterval(() => void pump().catch(() => {}), pollMs)
-  timer.unref?.()
   return {
     stop: async () => {
       stopped = true
@@ -388,14 +390,21 @@ export async function runCoordinateBoot(
     // terminal goal step, it executes the prefix, measurement zero, and the
     // bounded improve/measure rounds inside this one run — one workspace, one
     // metadata store, one server, one hook lifecycle, one finish hold.
+    let hostedRelease: (() => Promise<void>) | undefined
+    let runCompleted = false
     try {
       const result = await deps.run(options)
+      hostedRelease = result.release
+      runCompleted = true
       await holdUntilAbort(progress.runFinished({ status: "completed", runDir: result.dir }), shutdown.signal)
-      await result.release?.()
       return 0
     } catch (error) {
       const teardown = deps.hostedTeardownFromError(error)
-      if (!isUserAbortError(error)) {
+      hostedRelease ??= teardown?.release
+      // A renderer/finish-hold failure happened after a successful run. Do not
+      // relabel it as a failed pipeline or enter a second potentially hanging
+      // finish hold; the finally below must be able to release immediately.
+      if (!runCompleted && !isUserAbortError(error)) {
         await holdUntilAbort(
           progress.runFinished({
             status: "failed",
@@ -405,8 +414,14 @@ export async function runCoordinateBoot(
           shutdown.signal,
         )
       }
-      await teardown?.release?.()
       throw error
+    } finally {
+      // The journal's queued tail reaches disk before the coordinator exits,
+      // so a dashboard reopening the run sees the whole transcript.
+      await progress.flushEvents?.().catch(() => {})
+      // A renderer/hold failure must not strand the run's Herdr authority or
+      // any of the other hosted resources retained through the finish screen.
+      await hostedRelease?.()
     }
   } finally {
     if (writerClaim) {

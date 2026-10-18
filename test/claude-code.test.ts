@@ -1,14 +1,11 @@
 import { describe, expect, test } from "bun:test"
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
+import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { basename, join } from "node:path"
-import { fileURLToPath, pathToFileURL } from "node:url"
+import { join } from "node:path"
 
-import type { FilePartInput } from "@opencode-ai/sdk/v2"
 
 import {
-  claudeArgs,
-  claudePrompt,
+  claudeReadableDirectories,
   claudeResumeArgs,
   claudeTokens,
   describeClaudeEvent,
@@ -16,12 +13,9 @@ import {
   ndjsonLines,
   newClaudeStreamState,
   pipelineUsesClaudeCode,
-  promptClaudePhase,
-  stageClaudeAttachments,
-  type ClaudeShutdown,
+  whichOnPath,
 } from "../src/claude-code"
 import { builtInAgents, resolvePipeline, type PipelineSpec } from "../src/pipeline"
-import { noopProgress, type ProgressUsage } from "../src/progress"
 import type { AgentStep } from "../src/types"
 
 const resolve = (spec: PipelineSpec) => resolvePipeline({ name: "test", spec, agents: builtInAgents })
@@ -50,41 +44,6 @@ const claudePhase: AgentStep = {
   readOnly: true,
 }
 
-function attachment(path: string, mime = "text/markdown"): FilePartInput {
-  return { type: "file", url: pathToFileURL(path).href, filename: basename(path), mime }
-}
-
-function textStream(...lines: string[]): ReadableStream<Uint8Array> {
-  const encoder = new TextEncoder()
-  return new ReadableStream({
-    start(controller) {
-      for (const line of lines) controller.enqueue(encoder.encode(`${line}\n`))
-      controller.close()
-    },
-  })
-}
-
-function executionShutdown(controller: AbortController): ClaudeShutdown {
-  return {
-    signal: controller.signal,
-    get aborted() {
-      return controller.signal.aborted
-    },
-    throwIfRequested() {
-      if (controller.signal.aborted) throw new Error("aborted")
-    },
-    abortError() {
-      return new Error("aborted")
-    },
-  }
-}
-
-async function executionDir(): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), "convoy-claude-execution-"))
-  await mkdir(join(dir, "logs"), { recursive: true })
-  return dir
-}
-
 describe("optional Claude Code dependency", () => {
   test("only pipelines with claude-code steps require the binary", () => {
     let checks = 0
@@ -97,6 +56,22 @@ describe("optional Claude Code dependency", () => {
     expect(pipelineUsesClaudeCode(claudePipeline)).toBe(true)
     expect(() => ensureClaudeAvailable(claudePipeline, () => null)).toThrow(/external-security/)
     expect(() => ensureClaudeAvailable(claudePipeline, () => null)).toThrow(/claude.*not found in PATH/)
+  })
+
+  test("the availability check resolves against the live PATH, as the launch does", async () => {
+    const bin = await mkdtemp(join(tmpdir(), "convoy-which-"))
+    const original = process.env.PATH
+    try {
+      const name = `convoy-fake-cli-${process.pid}`
+      await writeFile(join(bin, name), "#!/bin/sh\n", { mode: 0o755 })
+      expect(whichOnPath(name)).toBeNull()
+      process.env.PATH = `${bin}:${original ?? ""}`
+      // Bun.which alone would still read the startup PATH here.
+      expect(whichOnPath(name)).toBe(join(bin, name))
+    } finally {
+      process.env.PATH = original
+      await rm(bin, { recursive: true, force: true })
+    }
   })
 })
 
@@ -218,53 +193,7 @@ describe("stream-json adapter", () => {
   })
 })
 
-describe("prompt and exact read-only envelope", () => {
-  test("attachments become an absolute-path reading list", () => {
-    const prompt = claudePrompt("# Phase", [
-      { type: "file", url: "file:///runs/r1/prd.md", filename: "prd.md", mime: "text/plain" },
-      { type: "file", url: "file:///runs/r1/reports/scope.md", filename: "scope.md", mime: "text/plain" },
-    ])
-    expect(prompt).toContain("# Phase")
-    expect(prompt).toContain("- /runs/r1/prd.md")
-    expect(prompt).toContain("- /runs/r1/reports/scope.md")
-    expect(claudePrompt("# Phase", [])).toBe("# Phase")
-  })
-
-  test("headless execution uses the exact read-only tool and permission arguments", () => {
-    expect(
-      claudeArgs({
-        systemPromptPath: "/runs/r1/prompts/security.md",
-        runDir: "/runs/r1",
-        targetDir: "/repo",
-        model: "opus",
-        attachments: [],
-      }),
-    ).toEqual([
-      "-p",
-      "--output-format",
-      "stream-json",
-      "--verbose",
-      "--include-partial-messages",
-      "--append-system-prompt-file",
-      "/runs/r1/prompts/security.md",
-      "--add-dir",
-      "/runs/r1",
-      "--safe-mode",
-      "--tools",
-      "Read,Glob,Grep",
-      "--disallowedTools",
-      "Write,Edit,NotebookEdit,Bash,Task,WebFetch,WebSearch",
-      "--permission-mode",
-      "dontAsk",
-      "--model",
-      "opus",
-    ])
-  })
-
-  test("an empty model omits --model so the CLI default applies", () => {
-    expect(claudeArgs({ systemPromptPath: "/r/prompt.md", runDir: "/r", targetDir: "/repo", model: "", attachments: [] })).not.toContain("--model")
-  })
-
+describe("read-only reopen envelope", () => {
   test("interactive resume preserves the exact same read-only envelope", () => {
     expect(claudeResumeArgs("session-123", ["/runs/r1", "/external/review-input"])).toEqual([
       "--safe-mode",
@@ -283,285 +212,17 @@ describe("prompt and exact read-only envelope", () => {
   })
 
   test("external files do not expose their parent directory", () => {
-    const args = claudeArgs({
-      systemPromptPath: "/runs/r1/prompt.md",
-      runDir: "/runs/r1",
-      targetDir: "/repo",
-      model: "opus",
-      attachments: [{ type: "file", url: "file:///external/specs/api.md", filename: "api.md", mime: "text/markdown" }],
-    })
-    expect(args).not.toContain("/external/specs")
+    const dirs = claudeReadableDirectories([{ type: "file", url: "file:///external/specs/api.md", filename: "api.md", mime: "text/markdown" }], "/repo", "/runs/r1")
+    expect(dirs).toEqual(["/runs/r1"])
   })
 
   test("external directory attachments expose the directory but not its parent", () => {
-    const args = claudeArgs({
-      systemPromptPath: "/runs/r1/prompt.md",
-      runDir: "/runs/r1",
-      targetDir: "/repo",
-      model: "opus",
-      attachments: [
-        { type: "file", url: "file:///external/review-input", filename: "review-input", mime: "application/x-directory" },
-      ],
-    })
-    expect(args).toContain("/external/review-input")
-    expect(args).not.toContain("/external")
-  })
-})
-
-describe("stageClaudeAttachments isolation", () => {
-  test("copies external files into the phase's isolated staging directory", async () => {
-    const root = await mkdtemp(join(tmpdir(), "convoy-claude-attachments-"))
-    const externalDir = join(root, "external")
-    const runDir = join(root, "run")
-    const targetDir = join(root, "repo")
-    await Promise.all([mkdir(externalDir), mkdir(runDir), mkdir(targetDir)])
-    const externalFile = join(externalDir, "api.md")
-    await writeFile(externalFile, "API contract")
-
-    try {
-      const stageDir = join(runDir, "attachments", "security", "1")
-      const staged = await stageClaudeAttachments([attachment(externalFile)], targetDir, runDir, stageDir)
-      const stagedPath = fileURLToPath(staged[0]!.url)
-
-      expect(stagedPath).toBe(join(stageDir, "0-api.md"))
-      expect(await readFile(stagedPath, "utf8")).toBe("API contract")
-      expect(fileURLToPath(staged[0]!.url)).not.toBe(externalFile)
-    } finally {
-      await rm(root, { recursive: true, force: true })
-    }
-  })
-
-  test("duplicate filenames cannot collide within or across parallel phases", async () => {
-    const root = await mkdtemp(join(tmpdir(), "convoy-claude-collisions-"))
-    const runDir = join(root, "run")
-    const targetDir = join(root, "repo")
-    const firstDir = join(root, "first")
-    const secondDir = join(root, "second")
-    await Promise.all([mkdir(runDir), mkdir(targetDir), mkdir(firstDir), mkdir(secondDir)])
-    const firstPath = join(firstDir, "scope.md")
-    const secondPath = join(secondDir, "scope.md")
-    await Promise.all([writeFile(firstPath, "first"), writeFile(secondPath, "second")])
-
-    try {
-      const inputs = [attachment(firstPath), attachment(secondPath)]
-      const [bugs, security] = await Promise.all([
-        stageClaudeAttachments(inputs, targetDir, runDir, join(runDir, "attachments", "bugs", "1")),
-        stageClaudeAttachments(inputs, targetDir, runDir, join(runDir, "attachments", "security", "1")),
-      ])
-      const stagedPaths = [...bugs, ...security].map((part) => fileURLToPath(part.url))
-
-      expect(new Set(stagedPaths).size).toBe(4)
-      expect(stagedPaths.map((path) => basename(path))).toEqual(["0-scope.md", "1-scope.md", "0-scope.md", "1-scope.md"])
-      expect(await Promise.all(stagedPaths.map((path) => readFile(path, "utf8")))).toEqual(["first", "second", "first", "second"])
-    } finally {
-      await rm(root, { recursive: true, force: true })
-    }
-  })
-})
-
-describe("promptClaudePhase lifecycle", () => {
-  test("kills a spawned child when abort lands while attachments are staged", async () => {
-    const runDir = await executionDir()
-    const targetDir = await mkdtemp(join(tmpdir(), "convoy-claude-target-"))
-    const controller = new AbortController()
-    let kills = 0
-
-    try {
-      await expect(
-        promptClaudePhase({
-          phase: claudePhase,
-          workspace: { dir: runDir, runID: "test" },
-          targetDir,
-          prompt: "Review",
-          attachments: [],
-          attempt: 1,
-          progress: noopProgress,
-          shutdown: executionShutdown(controller),
-          deps: {
-            async stageAttachments() {
-              controller.abort()
-              return []
-            },
-            spawn() {
-              return {
-                stdout: textStream(),
-                stderr: textStream(),
-                exited: Promise.resolve(1),
-                exitCode: 1,
-                kill() {
-                  kills++
-                },
-              }
-            },
-          },
-        }),
-      ).rejects.toThrow("aborted")
-      expect(kills).toBe(1)
-    } finally {
-      await Promise.all([rm(runDir, { recursive: true, force: true }), rm(targetDir, { recursive: true, force: true })])
-    }
-  })
-
-  test("persists sensitive prompts and raw streams with mode 0600 on failure", async () => {
-    const runDir = await executionDir()
-    const targetDir = await mkdtemp(join(tmpdir(), "convoy-claude-target-"))
-    const rawEvent = JSON.stringify({ type: "system", subtype: "init", session_id: "session-raw" })
-
-    try {
-      await expect(
-        promptClaudePhase({
-          phase: claudePhase,
-          workspace: { dir: runDir, runID: "test" },
-          targetDir,
-          prompt: "Review",
-          attachments: [],
-          attempt: 2,
-          progress: noopProgress,
-          shutdown: executionShutdown(new AbortController()),
-          deps: {
-            async stageAttachments(attachments) {
-              return [...attachments]
-            },
-            spawn() {
-              return {
-                stdout: textStream(rawEvent),
-                stderr: textStream("fatal"),
-                exited: Promise.resolve(1),
-                exitCode: 1,
-                kill() {},
-              }
-            },
-          },
-        }),
-      ).rejects.toThrow("before reporting a result")
-
-      const logPath = join(runDir, "logs", "security.2.claude.jsonl")
-      const promptPath = join(runDir, "prompts", "security.2.claude.md")
-      expect(await readFile(logPath, "utf8")).toBe(`${rawEvent}\n`)
-      if (process.platform !== "win32") {
-        expect((await stat(logPath)).mode & 0o777).toBe(0o600)
-        expect((await stat(promptPath)).mode & 0o777).toBe(0o600)
-      }
-    } finally {
-      await Promise.all([rm(runDir, { recursive: true, force: true }), rm(targetDir, { recursive: true, force: true })])
-    }
-  })
-
-  test("writes streamed events before Claude exits", async () => {
-    const runDir = await executionDir()
-    const targetDir = await mkdtemp(join(tmpdir(), "convoy-claude-target-"))
-    const rawEvent = JSON.stringify({ type: "system", subtype: "init", session_id: "session-live" })
-    let stdoutController: ReadableStreamDefaultController<Uint8Array> | undefined
-    let resolveExit: ((code: number) => void) | undefined
-    let exitCode: number | null = null
-    let resolveSession!: () => void
-    const sessionObserved = new Promise<void>((resolve) => {
-      resolveSession = resolve
-    })
-
-    try {
-      const execution = promptClaudePhase({
-        phase: claudePhase,
-        workspace: { dir: runDir, runID: "test" },
-        targetDir,
-        prompt: "Review",
-        attachments: [],
-        attempt: 4,
-        progress: { ...noopProgress, phaseSession: () => resolveSession() },
-        shutdown: executionShutdown(new AbortController()),
-        deps: {
-          async stageAttachments(attachments) {
-            return [...attachments]
-          },
-          spawn() {
-            const stdout = new ReadableStream<Uint8Array>({
-              start(controller) {
-                stdoutController = controller
-                controller.enqueue(new TextEncoder().encode(`${rawEvent}\n`))
-              },
-            })
-            const exited = new Promise<number>((resolve) => {
-              resolveExit = resolve
-            })
-            return { stdout, stderr: textStream(), exited, get exitCode() { return exitCode }, kill() {} }
-          },
-        },
-      })
-
-      await sessionObserved
-      expect(exitCode).toBeNull()
-      expect(await readFile(join(runDir, "logs", "security.4.claude.jsonl"), "utf8")).toBe(`${rawEvent}\n`)
-
-      stdoutController?.close()
-      exitCode = 1
-      resolveExit?.(1)
-      await expect(execution).rejects.toThrow("before reporting a result")
-    } finally {
-      await Promise.all([rm(runDir, { recursive: true, force: true }), rm(targetDir, { recursive: true, force: true })])
-    }
-  })
-
-  test("publishes and returns usage from an error result", async () => {
-    const runDir = await executionDir()
-    const targetDir = await mkdtemp(join(tmpdir(), "convoy-claude-target-"))
-    const usage: ProgressUsage[] = []
-    const resultEvent = JSON.stringify({
-      type: "result",
-      subtype: "error_during_execution",
-      is_error: true,
-      result: "provider failed",
-      total_cost_usd: 0.25,
-      usage: { input_tokens: 100, output_tokens: 20 },
-    })
-
-    try {
-      const result = await promptClaudePhase({
-        phase: claudePhase,
-        workspace: { dir: runDir, runID: "test" },
-        targetDir,
-        prompt: "Review",
-        attachments: [],
-        attempt: 3,
-        progress: {
-          ...noopProgress,
-          phaseUsageTotal(_name, value) {
-            usage.push(value)
-          },
-        },
-        shutdown: executionShutdown(new AbortController()),
-        deps: {
-          async stageAttachments(attachments) {
-            return [...attachments]
-          },
-          spawn() {
-            return {
-              stdout: textStream(resultEvent),
-              stderr: textStream(),
-              exited: Promise.resolve(1),
-              exitCode: 1,
-              kill() {},
-            }
-          },
-        },
-      })
-
-      expect(result).toMatchObject({
-        assistantText: "provider failed",
-        cost: 0.25,
-        tokens: { input: 100, output: 20, total: 120 },
-        finish: "error_during_execution",
-        error: expect.any(String),
-      })
-      expect(usage).toEqual([
-        {
-          cost: 0.25,
-          tokens: { input: 100, output: 20, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 120 },
-          model: "claude-code/opus",
-        },
-      ])
-    } finally {
-      await Promise.all([rm(runDir, { recursive: true, force: true }), rm(targetDir, { recursive: true, force: true })])
-    }
+    const dirs = claudeReadableDirectories(
+      [{ type: "file", url: "file:///external/review-input", filename: "review-input", mime: "application/x-directory" }],
+      "/repo",
+      "/runs/r1",
+    )
+    expect(dirs).toEqual(["/runs/r1", "/external/review-input"])
   })
 })
 
