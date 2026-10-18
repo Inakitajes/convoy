@@ -2,55 +2,94 @@
 
 [Documentation](README.md) · [Convoy](../README.md)
 
-Choose the harness that executes pipeline steps, configure its authentication,
-and understand its execution modes, customization loading, lifecycle limits,
-reports, advisors, cost labels, and recovery.
+Choose the harness that executes pipeline steps, configure its authentication
+and billing, and understand its execution modes, enforcement, reports,
+advisors, dashboards, lifecycle limits, and recovery.
 
 - [Choosing a runner](#choosing-a-runner)
 - [Authentication and billing](#authentication-and-billing)
 - [Claude execution modes](#claude-execution-modes)
-- [Customization loading](#customization-loading)
-- [Supported restrictions](#supported-restrictions)
-- [Lifecycle limits](#lifecycle-limits)
+- [How Convoy integrates with Claude](#how-convoy-integrates-with-claude)
 - [Reports and advisors](#reports-and-advisors)
-- [Mixed-runner routes](#mixed-runner-routes)
+- [Routes: judge, helpers, advisors, authoring](#routes-judge-helpers-advisors-authoring)
+- [Dashboards and transcripts](#dashboards-and-transcripts)
+- [Lifecycle limits](#lifecycle-limits)
 - [Usage and billing](#usage-and-billing)
 - [Retry and resume](#retry-and-resume)
 - [The runner port and its services](#the-runner-port-and-its-services)
 
-> **In progress.** The explicit runner ports and the Claude-parity capabilities
-> on this page come from the OpenSpec change `runner-parity-opencode-v2`; the
-> release gate is in its `design.md` (D4) and `evidence/compatibility.md`. Until
-> the gate passes, the OpenCode path remains the shipped behavior and Claude
-> steps stay read-only, as described in [Configuration](configuration.md).
-
 ## Choosing a runner
 
-Convoy executes a step with the runner named on that step, defaulting to
-OpenCode. Two runners are supported, and either is independently usable:
+Convoy runs each step with the runner named on that step (`runner:`), else the
+run-wide `defaults.runner`, else OpenCode.
 
 | Runner | ID | Requires |
 |---|---|---|
 | OpenCode | `opencode` (default) | A supported OpenCode **V2** on `PATH`. Convoy never installs, updates, or replaces it. |
 | Claude | `claude-code` | The locally installed `claude` CLI and its own login (subscription), or an explicitly selected API key. |
 
-A Claude-only plan must run without an OpenCode installation, server,
-credentials, or model catalog. Runner selection never changes a pipeline's
-reports, quality contracts, Git behavior, or OpenSpec handling.
+Either runner is independently usable. A plan in which nothing runs on
+OpenCode — no step, no advisor, no smart judge — never boots, authenticates, or
+even needs an OpenCode installation: preflight, execution, reports, quality
+loops, human iterations, helpers, and finalization all run on Claude. Runner
+selection never changes a pipeline's reports, quality contracts, Git behavior,
+or OpenSpec handling.
+
+Two built-in pipelines are Claude-only: `claude-review` (report-only review)
+and `claude-full-cycle` (advised implementation, audits, tests, and a scored
+goal loop). With `defaults.runner: claude-code`, a step that names no runner
+runs on Claude; a step whose model is an OpenCode model then fails validation
+with a message to give it a Claude model or `runner: opencode`, rather than a
+guessed mapping.
+
+Preflight walks the whole plan — every step, the goal cycle's fragments, each
+advisor (on the advisor's own runner), the judge, and the commit writer — and
+refuses to start when a runner it needs is not installed, before any workspace
+or checkout change exists.
 
 ## Authentication and billing
 
 Authentication and billing are independent: a subscription login does not
 guarantee included-only usage, and Convoy never changes account spending
-settings. Setup, the API-key opt-in, legacy migration, and cost labels are in
-[Models and providers](models.md#runner-authentication-and-billing).
+settings. Configure Claude once in `defaults.claudeAuth`:
+
+```yaml
+version: 1
+defaults:
+  claudeAuth:
+    authMode: subscription          # default when unset
+    billingPolicy: account-policy   # accept the account's own usage policy
+```
+
+```yaml
+version: 1
+defaults:
+  claudeAuth:
+    authMode: api-key
+    credentialRef: CONVOY_ANTHROPIC_KEY   # the variable holding the key, never the key
+```
 
 - **Subscription** uses the operator's authenticated `claude` CLI. Convoy never
-  reads credential stores, extracts tokens, proxies requests, or automates login.
-- **API key** is a separately selected mode that references an environment
-  variable by name; the key value is never stored in configuration or metadata.
-- **Billing policy** (`included-only` or `account-policy`) is resolved separately
-  from the mode and applied to executors, helpers, advisors, and authoring.
+  reads credential stores, extracts tokens, proxies requests, or automates
+  login. Ambient `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` are removed from
+  every Claude child so they cannot silently become the billing source.
+- **API key** sets the referenced key only for the child and removes ambient
+  OAuth/subscription tokens for it. Metadata records the mode and the variable
+  name, never the value.
+- **Billing policy.** The Claude CLI offers no control that enforces
+  included-only usage, so Convoy never claims it: `billingPolicy:
+  included-only` is refused at preflight, and every subscription plan is shown
+  in review as "account policy — usage credits or paid features may apply".
+  Confirming that review is the operator's consent. An **unattended** launch
+  (no review: `--no-confirm` or no TTY) must state it in configuration with
+  `billingPolicy: account-policy`, or it is refused with that guidance.
+- **Effective authentication is verified up front.** Preflight runs
+  `claude auth status --json` under the exact child overlay and refuses when
+  Claude would bill anything but the reviewed source (an API key or key helper
+  under subscription mode, a missing login, a third-party provider). Each
+  attempt repeats the check. A legacy configuration with no `claudeAuth`
+  behaves as subscription and is held to the same check; it never falls back
+  to an API key.
 
 ## Claude execution modes
 
@@ -59,202 +98,146 @@ A step's mode comes from the pipeline: a read-only audit, a verifying step
 CLI tool and permission flags; the same Convoy policy then decides every tool
 call.
 
-| Mode | Tools | Permission |
+| Mode | Built-in tools | Permission |
 |---|---|---|
-| read-only | `Read,Glob,Grep` | `dontAsk` — no prompt; anything outside the listed tools is denied |
+| read-only | `Read,Glob,Grep` | `dontAsk` — nothing else runs |
 | verify | `Read,Glob,Grep,Bash` | `dontAsk` — only approved verification commands run; writes and delegation are denied |
 | write | CLI default tool set | `acceptEdits`, still subject to the run's approval policy |
 
+Claude steps fan out across `models:`, run in `parallel:` groups (alone or
+mixed with OpenCode steps), score, verify, and implement under the same
+scheduler, writer coordination, and Git boundaries as OpenCode steps.
+
 Hard denials and mandatory advisor checkpoints apply in all three modes and in
-every approval mode (`interactive`, `auto`, `smart`). `--yolo` (auto-accept)
-approves only eligible ask-level requests; it cannot authorize a hard-denied
-action or bypass a first-write checkpoint. Unknown or unclassifiable actions are
-denied rather than gaining access by default.
+every approval mode (`interactive`, `auto`, `smart`). `--yolo` approves only
+eligible ask-level requests. Hard denials match every spelling a shell reaches
+the same command through — quoting, escapes, grouping, `env`/`command`/`exec`
+wrappers, `sh -c` scripts, and `$(…)`/backtick/`<(…)` substitutions. Unknown or
+unclassifiable actions, including any MCP tool that is not Convoy's own, are
+denied. This is tool-policy enforcement, not an OS sandbox.
 
-## Customization loading
+## How Convoy integrates with Claude
 
-Convoy loads what it needs **per invocation** rather than relying on (or
-disabling) the operator's global configuration:
+Convoy loads what it needs **per invocation** and leaves the operator's own
+configuration alone; `--bare` and blanket `--safe-mode` are never used.
 
-- `--settings` installs the reviewed pre-action hook that runs before any tool.
-- `--mcp-config` declares the loopback MCP servers Convoy owns — the permission
-  prompt host and the report/advisor tools.
+- `--settings` installs the PreToolUse hook (`convoy hook`), which runs before
+  every tool call and decides it with Convoy's policy.
+- `--mcp-config` declares Convoy's MCP host (`convoy mcp`): the
+  `--permission-prompt-tool` that sends ask-level actions to the run's operator
+  gate, plus `write_report`, `advisor`, and `advisor_feedback`.
 
-A `--settings` object is JSON of this shape:
+Each attempt starts one loopback bridge for its approvals, report submissions,
+and advisor consultations. Its address and bearer token reach the MCP host
+through that server's own `env` in an owner-only config staged under
+`~/.convoy/private/`, and reach the hook through a private file the hook
+command names — never through Claude's environment or argv, which the agent's
+tools can read. The token is registered for redaction. Agents (both runners)
+are denied the run's private directory and `~/.convoy/private/` in every shell
+spelling, as well as recursive searches of their ancestors.
 
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "*",
-        "hooks": [
-          { "type": "command", "command": "/usr/local/bin/convoy-hook" }
-        ]
-      }
-    ]
-  }
-}
+## Reports and advisors
+
+Both runners submit the same deliverable contracts through `write_report` —
+OpenCode's plugin tool and Claude's MCP tool share one input schema and one
+validator:
+
+- A Markdown report, a structured score (dimensions, mustFix, gaps,
+  confidence; Convoy derives the number), and an optional structured commit
+  description. Convoy — not the agent — chooses the destination and attempt
+  identity, so a submission cannot target a sibling attempt or a path.
+- A rejected submission is a tool error the agent can correct; the last valid
+  candidate is kept. Process exit is never a deliverable: the contract is
+  validated after the attempt, with bounded correction.
+- For Claude, the final assistant text remains the fallback report when no
+  `write_report` call was accepted.
+
+Advisors are chosen independently of the executor. `advisor: claude-code/opus`
+consults Claude; any other model string consults through OpenCode — so a
+Claude executor can take an OpenCode advisor (OpenCode then boots for it) and
+an OpenCode executor a Claude one.
+
+- A consultation is one stateless, tool-less answer over the executor's
+  transcript — read from the OpenCode server for an OpenCode executor, or
+  recorded by Convoy from a Claude attempt's events — bounded in calls,
+  output, and time, with no repository write authority. Usage is attributed
+  to the requesting attempt separately from the executor's.
+- The **first-write checkpoint** holds an advised phase's first write for one
+  consultation and hands the advice back (OpenCode through its permission
+  gate, Claude through the PreToolUse hook); later writes proceed, and a
+  failed consultation releases the hold so the executor never loses a turn.
+  If the checkpoint itself cannot be reached, the write stays blocked.
+- Executors can also consult on demand (`advisor`) and record what they did
+  with the advice (`advisor_feedback`).
+
+Claude's native `--advisor` is not used: Convoy's consultation route is the one
+with the required routing, checkpoint, context bounds, limits, and attribution.
+
+## Routes: judge, helpers, advisors, authoring
+
+A route names a runner and model, with Claude routes spelled
+`claude-code/<model>` and run under `defaults.claudeAuth`:
+
+```yaml
+version: 1
+defaults:
+  runner: claude-code                    # steps without their own runner
+  autoAcceptJudgeModel: claude-code/haiku
+  advisorRoute:                          # the default advisor
+    runner: claude-code
+    model: opus
+    authMode: subscription               # api-key reuses claudeAuth.credentialRef
+  helperRoutes:
+    branchName: { runner: claude-code, model: haiku }
+    commitMessage: { runner: claude-code, model: haiku }
+  authoring:
+    runner: claude-code                  # Iterate, conversations, Propose
 ```
 
-An `--mcp-config` object is JSON of this shape:
+- **Smart judge**: an explicit judge wins; a Claude-only plan otherwise judges
+  with `claude-code/haiku` (or a Claude-scoped `--model`), never an OpenCode
+  model it could not run. A judge that cannot answer fails closed to the
+  operator prompt.
+- **Helpers** (branch namer, commit writer for compaction and `close`): an
+  explicit `helperRoutes` entry, else an explicit legacy `branchNameModel` /
+  `commitMessageModel` (an existing OpenCode selection is never converted),
+  else `defaults.runner`, else — for run compaction — the plan's own runner
+  when it is Claude-only. Each falls back to its documented deterministic
+  message. Run titles stay deterministic.
+- **Authoring**: Claude conversations are exact sessions — a new one starts
+  with `--session-id`, an existing one reopens with `--resume` once Claude has
+  persisted it for that checkout — under the reviewed auth, with the writer
+  claim taken before and released after the foreground client exits. Propose
+  uses the project's own `.claude/commands/` proposal command. A linked session
+  always reopens on its own harness.
+- **Human gates** in a run with no OpenCode server iterate with Claude.
 
-```json
-{
-  "mcpServers": {
-    "convoy-permissions": {
-      "command": "/usr/local/bin/convoy",
-      "args": ["mcp-permission"]
-    }
-  }
-}
-```
+## Dashboards and transcripts
 
-`--bare` is never used for subscription runs because it does not use
-subscription login. Blanket `--safe-mode` is replaced by this scoped loading, so
-the required Convoy hooks and MCP servers load while other customization sources
-stay controlled. Applicable managed policy is preserved, and reviewed project
-guidance (`CLAUDE.md`, `AGENTS.md`, `.convoy/rules.md`) is loaded intentionally.
-
-## Supported restrictions
-
-- Interception paths whose scope cannot be enforced are disabled rather than
-  broadened; an unverifiable action is refused.
-- Organization-level denials remain effective. Convoy never weakens managed
-  policy or rewrites login state to force a mode.
-- OpenCode-only selections (for example a global `--model` override) are never
-  silently applied to Claude. Claude uses CLI aliases (`opus`, `sonnet`,
-  `haiku`), `claude-*` IDs, or `anthropic/claude-*`, plus supported effort.
-- A feature verified only for API-key mode is disclosed individually; a
-  subscription run is not silently switched to API billing.
-- Claude's native `--advisor` and background attach are candidates, not baseline
-  behavior; see [Reports and advisors](#reports-and-advisors).
+The coordinator journals every phase's transcript (text, reasoning, tool and
+shell markers, activity), attributed to the phase's own runner and attempt, in
+the run's private `events/coordinator-events.ndjson`, with a sequence that a
+resumed run continues. A dashboard — another process — follows that file for
+phases without native live attach (Claude), so their session tabs stream live
+and reconstruct after a late attach without an OpenCode server URL; OpenCode
+phases keep their native stream, so nothing renders twice. A reopened stopped
+run replays the captured Claude transcripts from disk alone, and a hole in the
+journal is shown as an explicit "transcript incomplete" line, never hidden.
 
 ## Lifecycle limits
 
-Convoy owns the `claude` child it starts and stops it within a shared bounded
-deadline: it requests native interruption, stops owned children, escalates if
-needed, and records the observed outcome. A repeated stop shares one result.
-
-Two limits matter when reasoning about safety:
+Convoy owns the `claude` child it starts. Cancelling an attempt sends SIGTERM,
+and if the child has not exited within a bounded grace (5 s) it is killed, so
+an attempt never hangs on a child that ignores the request; the attempt
+settles as interrupted with its session recorded. Two limits matter:
 
 - **This is tool-policy enforcement, not an OS sandbox.** Convoy restricts what
   tools and commands may run; it does not contain arbitrary code.
 - **A child exiting does not prove all descendants stopped.** Claude and its
-  MCP/tool subprocesses can create their own process groups. Convoy signals only
-  descendants with attributable ownership and retains unresolved evidence
-  instead of claiming a confirmed stop. Reconciliation is identity-checked, so a
-  reused PID, an incomplete record, or an independent process is never a kill
-  target.
-
-## Reports and advisors
-
-Both runners submit the same deliverable contracts:
-
-- A Markdown report, a structured score, and an optional structured commit
-  description are validated with identical rules. Convoy — not the agent —
-  chooses the authoritative destination and attempt identity, so a submission
-  cannot target a sibling attempt or an arbitrary path.
-- Process exit or an idle event is not a valid deliverable. Convoy validates the
-  contract and asks for a bounded correction when a replacement is malformed,
-  keeping the last valid candidate.
-- Accepted report/commit metadata is persisted before it is acknowledged, so
-  recovery can reconcile without repeating writes or duplicating a commit.
-
-Advisors are chosen independently of the executor:
-
-- Either runner can advise either executor when the route is explicit and its
-  dependency and authentication preflight passes.
-- A consultation is tool-restricted, uses a bounded normalized snapshot of the
-  executor's context, and is bounded in calls, output, and time. It has no
-  repository write authority and cannot recursively advise.
-- Consultation usage is attributed to the requesting attempt separately from
-  executor usage.
-- A first-write gate is enforced at the permission boundary. Its kind is
-  declared by the runner: `block` denies a protected write until a satisfying
-  consultation, `hold` consults once and then permits the write — releasing the
-  hold even when the consultation fails, so the executor never loses a turn
-  (the OpenCode gate) — and `none` when the phase requires no consultation.
-
-A native Claude advisor (`--advisor`) is used **only** when behavioural
-equivalence is demonstrated by tests covering routing, checkpoint enforcement,
-context scope, limits, and attribution — never because a similarly named flag
-exists. Otherwise Convoy uses its own consultation bridge.
-
-## Mixed-runner routes
-
-Routes are runner-qualified. Advisors, helpers, and authoring can select a
-runner and authentication mode independently of the steps they support.
-
-A subscription executor consulting an OpenCode advisor:
-
-```yaml
-version: 1
-runners:
-  claude-code:
-    authMode: subscription
-    billingPolicy: included-only
-    model: sonnet
-advisor:
-  runner: opencode
-  model: anthropic/claude-opus-5
-```
-
-An OpenCode executor with a Claude subscription advisor and Claude helper:
-
-```yaml
-version: 1
-runners:
-  claude-code:
-    authMode: subscription
-    billingPolicy: included-only
-advisor:
-  runner: claude-code
-  authMode: subscription
-  model: opus
-helpers:
-  commitMessage:
-    runner: claude-code
-    authMode: subscription
-    model: haiku
-```
-
-Role names mirror the existing helper settings: `branchName`, `commitMessage`,
-and `autoAcceptJudge` (the smart auto-accept judge). To reserve API billing for
-one step only, override the mode on that step while the credential reference
-comes from the runner defaults:
-
-```yaml
-version: 1
-runners:
-  claude-code:
-    authMode: subscription
-    billingPolicy: included-only
-    credentialRef: CONVOY_ANTHROPIC_KEY
-pipelines:
-  review:
-    steps:
-      - agent: security
-        runner: claude-code
-        runnerOptions:
-          authMode: api-key
-```
-
-An unspecified helper inherits the applicable selected route. A run-wide helper
-in a mixed plan whose target is ambiguous requires an explicit selection rather
-than a guess. Existing unqualified OpenCode model strings remain OpenCode-only
-and are never applied to Claude.
+  tool subprocesses can create their own process groups; Convoy signals only
+  the child it owns.
 
 ## Usage and billing
-
-Usage and billing are different measurements and are labeled separately:
-
-- **Usage** is measured tokens (input, output, reasoning, cache read/write) and,
-  where the harness reports it, a monetary estimate. Convoy attributes usage to
-  the attempt, executor, and advisors without double-counting resumed cumulative
-  totals. If a reliable delta cannot be derived, the value stays unknown.
-- **Billing** is what the provider charges. Convoy never presents an estimate as
-  an invoice or a quota balance.
 
 | | OpenCode / API key | Claude subscription |
 |---|---|---|
@@ -263,17 +246,10 @@ Usage and billing are different measurements and are labeled separately:
 | Quota | provider-side; not tracked as a guarantee | not a remaining-balance report |
 | Missing data | unknown, never shown as zero | unknown, never shown as zero |
 
-Cost/token budgets disclose their basis (tokens, turns, time, or estimated cost)
-and can overshoot an estimate because in-flight requests settle after a check. A
-reliable cap is described as bounded headroom, not invoice-perfect enforcement;
-if the selected runner cannot measure or enforce a requested guarantee, preflight
-refuses it rather than reporting missing consumption as zero.
+Advisor usage is reported separately from the executor's (`SUMMARY.md`
+executor/advisor split).
 
 ## Retry and resume
-
-Resuming continues the recorded work; retrying starts new work. Convoy never
-replays an uncertain write and never silently substitutes another runner,
-session, or billing mode.
 
 | Goal | Action |
 |---|---|
@@ -281,157 +257,45 @@ session, or billing mode.
 | Retry from step 0 with the original prompt | open `convoy runs`, select the run, press `[r]` |
 | Re-run only the failed/unfinished phases | open `convoy runs`, select the run, press `[R]` |
 
-`--resume` replays the pipeline frozen in the run's `metadata.json`, even if the
-configuration changed since. Phases that already wrote their report are restored
-with their real duration, cost, and session; an interrupted writable phase whose
-work is still in the tree can be committed as that phase after confirmation (or
-is re-run when declined, or in a non-interactive context).
-
-Resume revalidates, and reports rather than guesses when it cannot honor them:
-
-- the exact recorded session, runner, model, and authentication mode;
-- checkout continuity (no moved or reused path);
-- the actual Git effects of the interrupted attempt;
-- the harness version and credential validity.
-
-A missing session, a changed checkout, expired credentials, a changed harness
-version, or ambiguous legacy provenance produces explicit recovery choices; the
-run is not retargeted to a new session or billing mode. A subscription attempt
-that hits a quota limit follows the configured retry or failure policy without
-switching to API billing, and a resumed subscription run re-checks the billing
-policy before its next request.
+`--resume` replays the pipeline frozen in `metadata.json`. Every attempt
+records its versioned provenance — runner, Claude authentication mode and
+credential reference (never a value), model, exact native session, checkout,
+and attempt identity — so recovery and history read what ran instead of
+guessing. Convoy never replays an uncertain write and never silently
+substitutes another runner, session, or billing mode.
 
 ---
 
 ## The runner port and its services
 
-Every runner integrates through one rich, vendor-independent contract
-(`src/runners/contracts.ts`). The contract may name Convoy's own concepts —
-sessions, phases, approvals, deliverables, advisors, limits — because
-"vendor-independent" excludes harness SDKs and protocol objects, not Convoy's
-domain. The same contract serves OpenCode, Claude, and any harness added later;
-there is no privileged OpenCode-only route.
+Every Claude attempt runs through the neutral execution adapter
+(`src/runners/contracts.ts`): run/phase/attempt identity, checkout, agent,
+model, auth, mode, approvals, policy, attachments, and cancellation in;
+normalized events (session, text, reasoning, tool, activity, usage, terminal)
+and an outcome out; optional, capability-gated services (approvals,
+deliverables, advisor). An OpenCode attempt runs on the run-owned server
+through the engine's `executeOpencodeAttempt`, so OpenCode registers only its
+capability declaration.
 
-### What an attempt receives
+Support is declared once (`src/runners/declarations.ts`) and resolved against
+runtime and enforcement evidence (`resolveEffectiveCapabilities`), so preflight
+and the running adapter cannot disagree. A plan that requires a service the
+runner does not advertise is refused before any writable work.
 
-```
-execution.executeAttempt(request, sink, services?)
-  request  — run/phase/attempt identity, verified checkout, agent/model/auth/mode,
-             approvals mode, attachments, cancellation
-  sink     — normalized events: session/text/reasoning/tool/usage/permission/terminal
-  services — optional, capability-gated: approvals, deliverables, advisor, loop-guard
-```
+Claude's matrix: **available** — read-only, write, verify, model fan-out,
+parallel, approvals and the advisor bridge (with the hook and permission host),
+structured deliverables, live observation (through the journal, not a native
+attach), post-exit resume, usage reporting (estimates). **Restricted** —
+explicit handoff (no verified quiesced handoff). **Unavailable** — native live
+attach, native session history (Convoy's journal is the transcript), and the
+loop guard (print mode cannot take a mid-turn nudge).
 
-Optional session facets (history, resume, attach) and an observed runtime
-release live beside execution; a runner implements only what it honors.
-
-### Support versus requirement
-
-Support is declared once, by the adapter's own capability declaration, and
-resolved against runtime, authentication, and enforcement evidence
-(`src/runners/declarations.ts`, `resolveEffectiveCapabilities`). The surface
-preflight quotes and the surface the running adapter honors come from the same
-declaration, so they cannot disagree.
-
-- **Available** means the guarantee holds — a native *or* bridged implementation
-  that preserves the required timing and authority (for example, a checkpoint
-  that blocks *before* a write, not a post-hoc consultation).
-- **Restricted** means it can be honored only under some conditions (an
-  enforcement host, a supported harness version) or not yet at all, with a
-  reason and, usually, a remediation.
-- **Unavailable** means the runner cannot honor it.
-
-A plan that **requires** a service the runner does not advertise is refused
-before any writable work, naming the runner and the service
-(`assertServicesSupported`) — never silently dropped. A runner that simply lacks
-an unrequired capability still runs through the same path; the difference is
-expressed by capability, not by a second kind of runner.
-
-### The optional services
-
-| Service | Contract carries |
-|---|---|
-| deliverables | the report/score/commit-description kinds, structured commit data, and a rejection that preserves the last accepted artifact |
-| advisor | on-demand / first-write / completion triggers, the first-write gate kind (`none`/`hold`/`block`) and its satisfaction, plus separately attributed usage |
-| approvals | a normalized request identity with a cancellable, session-scoped decision |
-| loop guard | typed observations (call id + arguments, results, steps, usage) and a continue/nudge/stop decision the adapter must apply |
-
-Submission semantics differ per harness while the guarantees do not. OpenCode
-submits a report and its optional structured commit metadata in one
-`write_report` call, and a scoring agent supplies its dimensions in that same
-call — Convoy derives the numeric score — so a raw `{ score }` body or a
-separate commit-description artifact is rejected, exactly as the tool boundary
-does. A submission is bound to one exact session: after that session's handle is
-released (a retry, an abort, or the phase decision), a late submission is
-refused as stale rather than accepted into a later attempt.
-
-The loop guard is fed per observation and returns a decision the adapter must
-apply. OpenCode supplies the stable call id and effective arguments (so repeated
-calls and repeated failures are correlated, not collapsed into one tool name)
-and the assistant message id with its cumulative cost (so the delta is counted
-once and not double-counted across the advisor's follow-up turn). A step-budget
-reset renews only the step allowance; the cost and repetition history are
-retained.
-
-An OpenCode permission ask maps to the neutral policy through its native action:
-`edit`/`write`/`patch` → write, `bash`/`shell` → execute, `task`/`subagent` →
-delegate, `webfetch`/`websearch` → network, `read`/`grep`/`glob`/`list`/`view` →
-read, and anything else → other (denied). Hard policy and the advisor checkpoint
-are decided before any ask-level decision; an eligible ask is settled by the
-interactive/auto/smart decider and is cancellable, so a cancelled ask can never
-settle a sibling attempt's request.
-
-Session operations are capability-gated. OpenCode supports `history` (reconstruct
-the exact recorded session's transcript from the server, never fabricated),
-`resume` (continue that exact session), and `attach` (a live window); each is
-present only when the composition supplies the underlying mechanism, so the
-facade never claims a control it cannot honor. Claude supports history and
-post-exit resume but not a native attach. A session that belongs to another
-runner, or a server that cannot return it, is refused rather than guessed at.
-
-Release ownership stays with the adapter. Releasing a runner's runtime reports an
-observed outcome — `released` only when the exit was observed, `not-owned` when
-it never started one, and `unresolved` (with a reason and retained evidence) when
-termination could not be confirmed — so a submitted stop is never reported as
-termination. Session-bound service handles (deliverables, advisor) begin when the
-attempt reports its session — before the first prompt, so the `write_report` and
-advisor bridges can resolve it — and only for the services the runner bound
-(`beginSessionHandles`). They are released at the phase decision through one
-common operation (`releaseSessionHandles`); a late submission or consultation
-from a released session is refused.
-
-The Claude capability matrix is explicit, so an unsupported requirement is
-refused before execution rather than assumed: **available** — read-only, write,
-verify, model fan-out, parallel, approvals (only with the enforcement host),
-structured deliverables, live observation (streamed to the coordinator, not a
-native attach), post-exit resume, usage reporting (estimates). **Restricted** —
-explicit handoff (needs a verified quiesced handoff). **Unavailable** — native
-live attach, session history (print mode exposes no recorded transcript), and the
-advisor bridge (no bridge yet). Loop control is not claimed; the adapter does not
-consume a loop service it cannot apply. Claude's approvals are enforced by the
-hook + permission host, and its resume continues the exact recorded session with
-`--resume`.
-
-### Where the pieces live
-
-- `src/runners/contracts.ts` — the neutral vocabulary (no vendor types).
-- `src/runners/declarations.ts` + `src/runners/capabilities.ts` — the
-  authoritative declaration and its resolution.
-- `src/runners/opencode/**`, `src/runners/claude/**` — the adapters: protocol,
-  sessions, plugin/hook/MCP exposure, event decoding, permissions, process
-  handling. The OpenCode attempt loop and session/checkpoint runtime live here,
-  beside the adapter, not in the engine.
-- Core keeps scheduling, budgets, Git boundaries, retries, and finalization.
-  Dependencies are one-way: an adapter never imports the engine
-  (`src/runner.ts`), which `test/runner-adapter-direction.test.ts` enforces.
-
-> **Status.** Every attempt starts through this contract: the engine prepares one
-> neutral attempt context, validates the phase's required services against the
-> runner's declared capabilities, and calls the runner's registered attempt. The
-> rich OpenCode attempt and the Claude attempt both live in their adapter
-> modules, and an attempt receives only neutral inputs — the phase's data, the
-> event sink, the abort signal and the services it honors — never the engine's
-> report/advisor runtimes, progress target or shutdown handle.
+Where the pieces live: `src/runners/claude/**` (adapter, inference for
+helpers, hook, MCP host, approval/tool bridge), `src/runners/opencode/**`
+(attempt loop, sessions, services), `src/runners/session-*.ts` (the
+session-scoped deliverable and advisor services both runners bind), and core
+for scheduling, budgets, Git boundaries, retries, and finalization. An adapter
+never imports the engine (`test/runner-adapter-direction.test.ts`).
 
 ---
 

@@ -44,3 +44,10 @@ Affects runner orchestration, Claude execution, OpenCode client/config/plugin in
 - Universal access to models outside a harness/account's entitlement, or identical token streams and pricing semantics.
 - Replacing Convoy's worktree, Git, writer-coordination, publication, or OpenSpec ownership rules with harness equivalents.
 - Rewriting user-global authentication/configuration or requiring API billing for ordinary Claude subscription execution.
+
+## Also carried on this branch
+
+Two changes outside this proposal's capabilities ride the same branch and are recorded here rather than left implicit:
+
+- The `review` pipeline's second scorer moved from Grok 4.6 to Kimi K3 (`08a3d50`): Grok's context could not hold a large branch's review prompt.
+- Herdr pane state is released reliably and force-released on shutdown (`0f3e3c9`).

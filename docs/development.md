@@ -85,12 +85,14 @@ Runtime requirements and the current gate:
   credits and paid features are governed by a separate billing policy. API-key
   execution is an explicit, separately selected mode.
 
-Release gate: no part of the parity matrix in
-`openspec/changes/runner-parity-opencode-v2/design.md` (decision D4) ships until
+Release gate: the parity matrix in
+`openspec/changes/runner-parity-opencode-v2/design.md` (decision D4) ships when
 its mandatory cells have passing automated tests plus consented real-harness
-acceptance. Advanced exceptions must name exact versions and authentication modes.
-Until then, treat Claude parity and the runner ports as **in progress**: the
-OpenCode path remains the shipped behavior.
+acceptance. The automated cells pass; real-harness acceptance is opt-in
+(`CONVOY_ACCEPT=1 bun run scripts/runner-acceptance.ts`, which drives real
+`run()`s through preflight, attempt, report, and finalization), and the
+API-key and full paid-cycle cells are recorded as deferred in
+`evidence/compatibility.md` rather than claimed.
 
 The operator-facing guide is [Runners](runners.md); this section is the
 source-facing summary.
@@ -99,31 +101,30 @@ source-facing summary.
 
 ```
 src/runners/
-├── contracts.ts        # vendor-free ports: requests, events, outcomes, capabilities, registry
-├── registry.ts         # composition root that registers the built-in adapters
-├── attempt.ts          # the common attempt context/result + attempt resolution
-├── declarations.ts     # authoritative per-adapter capability declarations
-├── capabilities.ts     # effective capability resolution from a declaration + evidence
-├── policy.ts           # runner-neutral action policy (read/write/execute/delegate decisions)
-├── deliverables.ts     # runner-neutral report/score/commit validator + ledger
-├── quality-contract.ts # contract-based validation of a phase's produced artifact
-├── advisor-consult.ts  # normalized consultation context + first-write checkpoint
-├── advisor-limits.ts   # advisor call/output/time/recursion limits and budget
-├── journal.ts          # versioned append-only normalized event journal
-├── provenance.ts       # per-attempt runner/auth/session/attempt record + legacy reader
-├── usage.ts            # token/cost normalization and cumulative-delta subtraction
-├── redaction.ts        # secret registration and log redaction
-├── abort.ts            # shared user-abort signal (engine, adapters, entrypoints)
-├── errors.ts           # vendor/shape-tolerant error message extraction
-├── shutdown-handle.ts  # the structural shutdown surface an attempt needs
-├── session-handles.ts  # common release of session-bound service handles
-├── claude/             # Claude adapter: adapter, attempt, session-controls, enforcement-plan,
-│                       #   auth, effective-auth, mode, settings, hook, enforcement,
-│                       #   permission-broker, mcp-permission-server, mcp-stdio
-└── opencode/           # OpenCode v2 adapter: adapter, attempt, phase, session,
-                        #   session-controls, deliverables, advisor, loop-guard, approvals,
-                        #   boot, runtime, v2-client, config, history, log-events, permission,
-                        #   server-auth, terminal
+├── contracts.ts          # vendor-free ports: requests, events, outcomes, capabilities, registry
+├── compose.ts            # composition root: registrations, attempts, service binding
+├── attempt.ts            # the common attempt context/result + attempt resolution
+├── attempt-composition.ts# one composition per run, released at run teardown
+├── attempt-sink.ts       # neutral events rendered onto the run's progress target
+├── declarations.ts       # authoritative per-runner capability declarations
+├── capabilities.ts       # effective capability resolution from a declaration + evidence
+├── policy.ts             # runner-neutral action policy (hard denials, roots, shell parsing)
+├── phase-policy.ts       # one attempt's reviewed policy (the rules OpenCode's config encodes)
+├── session-deliverables.ts / session-advisor.ts  # session-scoped services both runners bind
+├── service-runtimes.ts / session-handles.ts      # engine runtimes and their per-session release
+├── coordinator-events.ts # durable per-run journal, in-process read model, file follower
+├── journal.ts / transcript.ts # append-only event journal and its offline (gap-aware) reader
+├── provenance.ts         # per-attempt runner/auth/model/session record + legacy reader
+├── billing.ts            # billing decision for a Claude authentication selection
+├── plan-dependencies.ts  # every runner a whole plan needs, checked at preflight
+├── quality-contract.ts   # contract-based validation of a phase's produced artifact
+├── redaction.ts / errors.ts / abort.ts / agent-source.ts
+├── claude/               # adapter, attempt, inference (helpers/judge/advisor), auth,
+│                         #   effective-auth, enforcement(-plan), settings, hook,
+│                         #   approval-bridge (attempt tools), mcp-permission-server,
+│                         #   mcp-stdio, permission-broker
+└── opencode/             # registration (capabilities), attempt, phase, session,
+                          #   services, loop-guard
 ```
 
 ### Runner ports and ownership responsibilities
@@ -139,10 +140,11 @@ src/runners/
   (`src/runner.ts`). The OpenCode session/watch/checkpoint runtime lives with its
   adapter (`src/runners/opencode/session.ts`) and the engine imports it back, so
   there is no cycle; `test/runner-adapter-direction.test.ts` enforces the
-  direction. `ShutdownHandle` is the structural slice of the engine's
-  `RunShutdown` the runtime needs, which keeps the engine type out of the adapter.
-- `test/helpers/runner-conformance.ts` is the shared conformance suite every
-  adapter must pass; real adapters run it from their own tests.
+  direction.
+- `test/helpers/runner-conformance.ts` is the shared conformance suite for
+  execution adapters; `test/runner-conformance.test.ts` runs it against the
+  real Claude adapter. OpenCode attempts run on the run-owned server through
+  `executeOpencodeAttempt`, covered by the engine tests.
 - **Core keeps** scheduling, goal rounds, budgets, retries, Git coordination,
   writer claims, quality loops, report validation, and advisor policy. **Adapters
   own** their protocol client, native event decoding, permission interception,
@@ -154,8 +156,9 @@ src/runners/
 A new harness needs no engine change:
 
 1. An adapter under `src/runners/<harness>/` implementing `ExecutionAdapter`
-   (capabilities, `executeAttempt`, `cancelAttempt`, optional `release`) plus
-   optional `SessionControls` and Convoy services.
+   (capabilities, `executeAttempt`, `cancelAttempt`, optional `release`), or —
+   for a harness whose attempt the engine binds to its own runtime — a
+   `CapabilitySource` registration plus its attempt.
 2. Its capability declaration in `src/runners/declarations.ts`.
 3. Its phase attempt (`PhaseAttemptRunner`) and its registration in
    `src/runners/compose.ts` (`registry.register` and `attemptFor`).

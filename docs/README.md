@@ -17,6 +17,7 @@ Start with installation, choose a pipeline, then use the guides below as you wor
 | [Configuration](configuration.md) | Configure pipelines, agents, advisors, hooks, and project context. |
 | [Permissions and safety](safety.md) | Control agent actions, protect commits, and understand finalization and publication. |
 | [Models and providers](models.md) | Authenticate providers and route executor and advisor models through gateways. |
+| [Runners](runners.md) | Run steps on OpenCode or Claude: authentication and billing, enforcement, reports, advisors, and routes. |
 | [Development guide](development.md) | Build Convoy, run checks, and find the main source modules. |
 
 ## Common tasks
