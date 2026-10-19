@@ -1786,10 +1786,8 @@ export async function preparePhaseRun(
 ): Promise<PreparedPhaseRun> {
   const inputs = [...phase.inputFiles]
   if (phase.inputDiff) {
-    const diffRel = join("diffs", `${phase.name}.pre.diff`)
-    const diffAbs = join(workspace.dir, diffRel)
-    await writeDiff(diffAbs, options.baseRef, options.targetDir)
-    inputs.push(diffRel)
+    // An oversized diff comes back as its overview; the full diff stays beside it.
+    inputs.push(await writeDiff(join(workspace.dir, "diffs", `${phase.name}.pre.diff`), options.baseRef, options.targetDir))
   }
 
   const phaseFiles = await fileParts(inputs, workspace.dir, "skip")

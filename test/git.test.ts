@@ -8,12 +8,15 @@ import {
   addWorktree,
   branchExists,
   detectBaseRef,
+  diffOverview,
   ensureRepoReady,
   findSuspiciousStagedFiles,
   initializeRepoWithInitialCommit,
+  listChangedFiles,
   repoBootstrapStatus,
   resolveWorktreeDefault,
   worktreeDefaultFor,
+  writeDiff,
 } from "../src/git"
 
 describe("findSuspiciousStagedFiles", () => {
@@ -468,5 +471,90 @@ describe("addWorktree", () => {
     const branch = Bun.spawn(["git", "branch", "--show-current"], { cwd: worktree, stdout: "pipe", stderr: "pipe" })
     expect((await new Response(branch.stdout).text()).trim()).toBe("add-onboarding-flow")
     expect(await branch.exited).toBe(0)
+  })
+})
+
+describe("writeDiff", () => {
+  const dirs: string[] = []
+  afterAll(async () => {
+    await Promise.all(dirs.map((dir) => rm(dir, { recursive: true, force: true })))
+  })
+
+  async function git(args: string[], cwd: string) {
+    const identity = ["-c", "user.name=convoy-test", "-c", "user.email=convoy-test@example.invalid"]
+    const proc = Bun.spawn(["git", "-c", "commit.gpgsign=false", ...identity, ...args], { cwd, stdout: "pipe", stderr: "pipe", env: process.env })
+    if ((await proc.exited) !== 0) throw new Error(`git ${args.join(" ")}: ${await new Response(proc.stderr).text()}`)
+  }
+
+  async function commitFile(repo: string, file: string, content: string) {
+    await writeFile(join(repo, file), content)
+    await git(["add", "-A"], repo)
+    await git(["commit", "-q", "-m", file], repo)
+  }
+
+  /** A feature branch with one change of its own, forked from a main that has since moved on. */
+  async function forkedRepo(): Promise<string> {
+    const repo = await mkdtemp(join(tmpdir(), "convoy-write-diff-"))
+    dirs.push(repo)
+    await git(["init", "-q", "-b", "main"], repo)
+    await commitFile(repo, "README.md", "base\n")
+    await git(["checkout", "-q", "-b", "feat/search"], repo)
+    await commitFile(repo, "search.ts", "export const search = true\n")
+    await git(["checkout", "-q", "main"], repo)
+    await commitFile(repo, "landed-on-main.ts", "export const later = true\n")
+    await git(["checkout", "-q", "feat/search"], repo)
+    return repo
+  }
+
+  test("measures the branch from its merge base, leaving out what main gained after the fork", async () => {
+    const repo = await forkedRepo()
+    await writeFile(join(repo, "README.md"), "base\nuncommitted\n")
+    const path = join(repo, ".run", "scope.pre.diff")
+
+    expect(await writeDiff(path, "main", repo)).toBe(path)
+
+    const diff = await readFile(path, "utf8")
+    expect(diff).toContain("+++ b/search.ts")
+    expect(diff).toContain("+uncommitted")
+    expect(diff).not.toContain("landed-on-main.ts")
+    expect(await listChangedFiles("main", repo)).toEqual(["README.md", "search.ts"])
+  })
+
+  test("attaches an overview instead of a diff over the inline limit, keeping the full diff beside it", async () => {
+    const repo = await forkedRepo()
+    await commitFile(repo, "catalog.json", `${"x".repeat(4096)}\n`)
+    const path = join(repo, ".run", "scope.pre.diff")
+
+    const attached = await writeDiff(path, "main", repo, 2048)
+
+    expect(attached).toBe(join(repo, ".run", "scope.pre.overview.md"))
+    expect(await readFile(path, "utf8")).toContain("x".repeat(4096))
+    const overview = await readFile(attached, "utf8")
+    expect(overview).toContain("- catalog.json (")
+    expect(overview).not.toContain("x".repeat(4096))
+    expect(overview).toContain("+export const search = true")
+    expect(overview).toContain(path)
+  })
+})
+
+describe("diffOverview", () => {
+  const section = (file: string, body: string) => `diff --git a/${file} b/${file}\n--- a/${file}\n+++ b/${file}\n@@ -0,0 +1 @@\n+${body}\n`
+
+  test("inlines the smallest files that fit, in diff order, and lists the rest with sizes", () => {
+    const diff = section("a.ts", "a") + section("generated.json", "g".repeat(500)) + section("b.ts", "b")
+
+    const overview = diffOverview(diff, { base: "abc123", fullDiffPath: "/run/diffs/scope.pre.diff", maxInlineBytes: 200 })
+
+    expect(overview).toContain("- generated.json (")
+    expect(overview).not.toContain("- a.ts")
+    expect(overview).not.toContain("g".repeat(500))
+    expect(overview.indexOf("+++ b/a.ts")).toBeLessThan(overview.indexOf("+++ b/b.ts"))
+    expect(overview).toContain("git diff abc123 -- <path>")
+  })
+
+  test("fences the inlined diffs past any backtick run they contain", () => {
+    const overview = diffOverview(section("README.md", "```ts"), { base: "main", fullDiffPath: "/d", maxInlineBytes: 1024 })
+
+    expect(overview).toContain("````diff\n")
   })
 })

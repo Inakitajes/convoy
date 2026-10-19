@@ -301,24 +301,116 @@ export async function addWorktree(dir: string, branch: string, baseRef: string, 
   await execFile("git", ["worktree", "add", "-b", branch, "--", dir, baseRef], { cwd })
 }
 
-export async function writeDiff(path: string, baseRef: string, cwd: string) {
-  let diff = await execFile("git", ["diff", baseRef], { cwd, allowFailure: true })
+/**
+ * Where the branch forked from `baseRef`, the point its changes are measured
+ * from. A plain `git diff <baseRef>` also counts everything the base gained
+ * after the fork, reversed, as if the branch had undone it. Falls back to
+ * `baseRef` itself when there is no merge base (unrelated history, unborn HEAD).
+ */
+async function diffBase(baseRef: string, cwd: string): Promise<string> {
+  const mergeBase = await execFile("git", ["merge-base", baseRef, "HEAD"], { cwd, allowFailure: true })
+  const commit = mergeBase.stdout.trim()
+  return mergeBase.exitCode === 0 && commit ? commit : baseRef
+}
+
+/**
+ * The largest diff attached whole. OpenCode rejects a larger attachment with a
+ * 500 (its Base64 schema check stops matching past a few MB under Bun), and no
+ * model context holds one anyway; past this, the phase gets an overview.
+ */
+export const maxInlineDiffBytes = 1024 * 1024
+
+/**
+ * Writes the working-tree diff against `baseRef`'s merge base to `path` and
+ * returns the file to attach: `path` itself, or, when the diff exceeds
+ * `maxInlineBytes`, an overview beside it that inlines the files that fit and
+ * lists the rest for the agent to read from the full diff.
+ */
+export async function writeDiff(path: string, baseRef: string, cwd: string, maxInlineBytes = maxInlineDiffBytes): Promise<string> {
+  let base = await diffBase(baseRef, cwd)
+  let diff = await execFile("git", ["diff", base], { cwd, allowFailure: true })
   if (diff.exitCode !== 0) {
     log.warn(`couldn't diff against "${baseRef}"; falling back to "git diff HEAD" (likely empty right after a commit). Pass --base <ref> to fix the phase diffs.`)
+    base = "HEAD"
     diff = await execFile("git", ["diff", "HEAD"], { cwd, allowFailure: true })
   }
 
   await mkdir(dirname(path), { recursive: true })
   await writeFile(path, diff.stdout)
+  if (Buffer.byteLength(diff.stdout) <= maxInlineBytes) return path
+
+  const overviewPath = path.replace(/\.diff$/, "") + ".overview.md"
+  await writeFile(overviewPath, diffOverview(diff.stdout, { base, fullDiffPath: path, maxInlineBytes }))
+  return overviewPath
 }
 
 /**
- * The file paths changed in the working-tree diff against `baseRef`. Used by
- * OpenSpec's compose rule (active-change selection when multiple changes exist
- * and no branch matches). Best-effort: a failed diff resolves to an empty list.
+ * The attachable stand-in for a diff too large to attach whole. Inlines the
+ * per-file diffs that fit in `maxInlineBytes`, smallest first so one generated
+ * file cannot crowd out the hand-written ones, kept in the diff's own order,
+ * and lists every omitted file with its size.
+ */
+export function diffOverview(diff: string, options: { base: string; fullDiffPath: string; maxInlineBytes: number }): string {
+  const sections = splitDiffByFile(diff)
+  const bySize = [...sections].sort((a, b) => a.bytes - b.bytes)
+  const inlined = new Set<DiffSection>()
+  let budget = options.maxInlineBytes
+  for (const section of bySize) {
+    if (section.bytes > budget) break
+    inlined.add(section)
+    budget -= section.bytes
+  }
+  const omitted = sections.filter((section) => !inlined.has(section))
+  const body = sections.filter((section) => inlined.has(section)).map((section) => section.text).join("")
+  const fence = "`".repeat(Math.max(3, ...[...body.matchAll(/`+/g)].map((run) => run[0].length + 1)))
+
+  return [
+    "# Diff overview",
+    "",
+    `The diff against \`${options.base}\` is ${formatBytes(Buffer.byteLength(diff))} across ${sections.length} files, too large to attach whole.`,
+    `It inlines ${inlined.size} of them below; the ${omitted.length} omitted are listed first. The full diff is at \`${options.fullDiffPath}\`:`,
+    `read an omitted file's changes from it in sections, or run \`git diff ${options.base} -- <path>\`.`,
+    "",
+    "## Omitted files",
+    "",
+    ...omitted.map((section) => `- ${section.file} (${formatBytes(section.bytes)})`),
+    "",
+    "## Inlined diffs",
+    "",
+    `${fence}diff`,
+    body.trimEnd(),
+    fence,
+    "",
+  ].join("\n")
+}
+
+type DiffSection = { file: string; text: string; bytes: number }
+
+function splitDiffByFile(diff: string): DiffSection[] {
+  return diff
+    .split(/^(?=diff --git )/m)
+    .filter((text) => text.startsWith("diff --git "))
+    .map((text) => {
+      const header = text.slice(0, text.indexOf("\n") === -1 ? undefined : text.indexOf("\n"))
+      const file = header.match(/^diff --git a\/.+ b\/(.+)$/)?.[1] ?? header.slice("diff --git ".length)
+      return { file, text, bytes: Buffer.byteLength(text) }
+    })
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+/**
+ * The file paths changed in the working-tree diff against `baseRef`'s merge
+ * base. Used by OpenSpec's compose rule (active-change selection when multiple
+ * changes exist and no branch matches). Best-effort: a failed diff resolves to
+ * an empty list.
  */
 export async function listChangedFiles(baseRef: string, cwd: string): Promise<string[]> {
-  const names = await execFile("git", ["diff", "--name-only", baseRef], { cwd, allowFailure: true })
+  const names = await execFile("git", ["diff", "--name-only", await diffBase(baseRef, cwd)], { cwd, allowFailure: true })
   if (names.exitCode !== 0) return []
   return names.stdout
     .split("\n")
