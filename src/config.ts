@@ -295,7 +295,12 @@ export function mergeConvoyConfigs(global: ConvoyConfig | undefined, project: Co
   }
 }
 
-/** Per runner, the project's settings win key by key over the global ones. */
+/**
+ * Per runner, the project's settings win key by key over the global ones. An
+ * `auth` block is one key: its mode, credential and billing policy only make
+ * sense together, so a project block replaces the global one whole (a block
+ * with only `billingPolicy` selects subscription, its documented default).
+ */
 function mergeRunnerSettings(global: RunnerSettingsMap, project: RunnerSettingsMap): RunnerSettingsMap {
   const merged: RunnerSettingsMap = { ...global }
   for (const [id, settings] of Object.entries(project) as [StepRunnerId, RunnerSettings][]) merged[id] = { ...merged[id], ...settings }
@@ -655,13 +660,34 @@ function validateRunners(v: Validator, raw: unknown): RunnerSettingsMap {
  */
 function validateRouteAuthModes(v: Validator, config: ConvoyConfig): void {
   const auth = runnerAuthOf(config)
-  const check = (path: string, runner: StepRunnerId | undefined, mode: AuthenticationMode | undefined) => {
-    if (mode !== "api-key") return
-    const id = runner ?? config.defaults.runner ?? "claude-code"
-    if (!auth[id]?.credentialRef) v.fail(path, `api-key needs runners.${id}.auth.credentialRef naming the key's environment variable`)
+  const check = (path: string, runner: StepRunnerId, mode: AuthenticationMode | undefined) => {
+    if (mode !== "api-key" || !runnerDescriptor(runner).authenticates) return
+    if (!auth[runner]?.credentialRef) v.fail(path, `api-key needs runners.${runner}.auth.credentialRef naming the key's environment variable`)
   }
-  check("defaults.advisorRoute.authMode", config.defaults.advisorRoute?.runner, config.defaults.advisorRoute?.authMode)
-  check("defaults.authoring.authMode", config.defaults.authoring?.runner, config.defaults.authoring?.authMode)
+  check("defaults.advisorRoute.authMode", advisorRouteRunnerOf(config.defaults), config.defaults.advisorRoute?.authMode)
+  check("defaults.authoring.authMode", authoringHarnessOf(config), config.defaults.authoring?.authMode)
+}
+
+/**
+ * The runner `advisorRoute.authMode` is for: the route's runner, else the
+ * runner its advisor model is qualified for, else Claude (the advisor runner
+ * the setting has always meant). `defaults.runner` never moves it: a plain
+ * default advisor stays an OpenCode model whatever the steps run on.
+ */
+function advisorRouteRunnerOf(defaults: ConvoyDefaults | undefined): StepRunnerId {
+  const route = defaults?.advisorRoute
+  const model = route?.model ?? defaults?.advisor
+  return route?.runner ?? (model ? qualifiedRunnerOf(model) : undefined) ?? "claude-code"
+}
+
+/**
+ * The harness authoring conversations open: `defaults.authoring.runner`,
+ * else the run-wide `defaults.runner` when it can host a conversation, else
+ * OpenCode.
+ */
+export function authoringHarnessOf(config: Pick<ConvoyConfig, "defaults"> | undefined): StepRunnerId {
+  const configured = config?.defaults?.authoring?.runner ?? config?.defaults?.runner ?? "opencode"
+  return runnerDescriptor(configured).conversationsUnavailable ? "opencode" : configured
 }
 
 function validateFeatures(v: Validator, raw: unknown): FeatureToggles {
@@ -881,7 +907,7 @@ export function qualifyRoute(runner: StepRunnerId, model: string): string {
 export function advisorAuthOf(config: Pick<ConvoyConfig, "defaults" | "runners"> | undefined): AdvisorAuthOverride | undefined {
   const mode = config?.defaults?.advisorRoute?.authMode
   if (!mode) return undefined
-  const runner = config?.defaults?.advisorRoute?.runner ?? config?.defaults?.runner ?? "claude-code"
+  const runner = advisorRouteRunnerOf(config?.defaults)
   const credentialRef = runnerAuthOf(config)[runner]?.credentialRef
   return { runner, selection: mode === "api-key" ? { mode, ...(credentialRef ? { credentialRef } : {}) } : { mode } }
 }

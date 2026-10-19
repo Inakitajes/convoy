@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { proposeCommitMessage } from "../src/commit-message"
-import { advisorAuthFor, advisorAuthOf, parseConvoyConfig, pipelineDefaultsOf, runnerAuthOf } from "../src/config"
+import { advisorAuthFor, advisorAuthOf, authoringHarnessOf, parseConvoyConfig, pipelineDefaultsOf, runnerAuthOf } from "../src/config"
 import {
   authoringClientArgv,
   claudeClientEnv,
@@ -107,6 +107,37 @@ defaults:
     expect(advisorAuthFor("claude-code", options)).toEqual({ mode: "subscription" })
   })
 
+  test("a runner-less advisorRoute.authMode is for the advisor model's runner, else Claude, never defaults.runner", () => {
+    const route = (runner: string, extra = "") =>
+      parseConvoyConfig(`version: 1
+defaults:
+  runner: ${runner}
+  claudeAuth:
+    authMode: api-key
+    credentialRef: CONVOY_ANTHROPIC_KEY
+  advisorRoute:
+    authMode: api-key
+${extra}`, "config.yaml", "/tmp")
+    // An OpenCode run-wide runner leaves a previously valid config loadable.
+    expect(advisorAuthOf(route("opencode"))).toEqual({ runner: "claude-code", selection: { mode: "api-key", credentialRef: "CONVOY_ANTHROPIC_KEY" } })
+    // A Codex run-wide runner does not move the override off the Claude advisor.
+    expect(advisorAuthOf(route("codex"))?.runner).toBe("claude-code")
+    // A runner-qualified advisor model names the runner.
+    expect(() => route("opencode", "    model: codex/gpt-5.5\n")).toThrow("api-key needs runners.codex.auth.credentialRef")
+  })
+
+  test("authoring.authMode is checked against the harness authoring opens, which an OpenCode harness ignores", () => {
+    const config = parseConvoyConfig(`version: 1
+defaults:
+  runner: opencode
+  authoring:
+    authMode: api-key
+`, "config.yaml", "/tmp")
+    expect(config.defaults.authoring?.authMode).toBe("api-key")
+    expect(authoringHarnessOf(config)).toBe("opencode")
+    expect(() => parseConvoyConfig(`version: 1\ndefaults:\n  authoring:\n    runner: claude-code\n    authMode: api-key\n`, "config.yaml", "/tmp")).toThrow("api-key needs runners.claude-code.auth.credentialRef")
+  })
+
   test("an inherited Claude runner refuses an OpenCode model instead of guessing", () => {
     expect(() =>
       resolvePipeline({ name: "p", spec: { steps: [{ agent: "implementer", model: "openai/gpt-5.5" }] }, agents: builtInAgents, defaultRunner: "claude-code" }),
@@ -121,7 +152,7 @@ defaults:
 
   test("an api-key advisor or authoring route needs the Claude credential reference", () => {
     expect(() => parseConvoyConfig(`version: 1\ndefaults:\n  advisorRoute:\n    authMode: api-key\n`, "config.yaml", "/tmp")).toThrow(/credentialRef/)
-    expect(() => parseConvoyConfig(`version: 1\ndefaults:\n  authoring:\n    authMode: api-key\n`, "config.yaml", "/tmp")).toThrow(/credentialRef/)
+    expect(() => parseConvoyConfig(`version: 1\ndefaults:\n  runner: claude-code\n  authoring:\n    authMode: api-key\n`, "config.yaml", "/tmp")).toThrow(/credentialRef/)
   })
 })
 

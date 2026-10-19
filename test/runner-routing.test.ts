@@ -110,6 +110,12 @@ defaults:
     expect(runnerAuthOf(mergeConvoyConfigs(global, project))).toEqual({ "claude-code": { mode: "subscription", billingPolicy: "account-policy" }, codex: { mode: "api-key", credentialRef: "K" } })
   })
 
+  test("a project's auth block replaces the global one as a unit: billingPolicy alone selects subscription", () => {
+    const global = parse(`runners:\n  codex:\n    auth:\n      authMode: api-key\n      credentialRef: K\n`)
+    const project = parse(`runners:\n  codex:\n    auth:\n      billingPolicy: account-policy\n`)
+    expect(runnerAuthOf(mergeConvoyConfigs(global, project))).toEqual({ codex: { mode: "subscription", billingPolicy: "account-policy" } })
+  })
+
   test("an unknown runner, OpenCode auth, a secret-shaped reference and Codex authoring are refused", () => {
     expect(() => parse(`runners:\n  gemini: {}\n`)).toThrow('runners.gemini is not a runner; expected "opencode", "claude-code", or "codex"')
     expect(() => parse(`runners:\n  opencode:\n    auth:\n      authMode: subscription\n`)).toThrow("opencode authenticates through its own provider configuration")

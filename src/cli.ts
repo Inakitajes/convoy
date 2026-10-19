@@ -1,7 +1,7 @@
 import { readFile, stat } from "node:fs/promises"
 import { dirname, join, resolve } from "node:path"
 
-import { advisorAuthOf, runnerAuthOf, buildAgentRegistry, ejectAgentPrompt, emptyHooksConfig, featuresOf, globalConfigPath, loadMergedConvoyConfig, pipelineDefaultsOf, selectPipelineSpec, writeDefaultGlobalConfig, writeDefaultProjectConfig, type ConvoyDefaults } from "./config"
+import { advisorAuthOf, authoringHarnessOf, runnerAuthOf, buildAgentRegistry, ejectAgentPrompt, emptyHooksConfig, featuresOf, globalConfigPath, loadMergedConvoyConfig, pipelineDefaultsOf, selectPipelineSpec, writeDefaultGlobalConfig, writeDefaultProjectConfig, type ConvoyDefaults } from "./config"
 import { readControlFile } from "./control-client"
 import { detectBaseRef, currentBranch, listChangedFiles, worktreeDefaultFor } from "./git"
 import { openRouterKeySources } from "./limits"
@@ -1862,8 +1862,7 @@ async function authoringRouteFor(launchDir: string): Promise<import("./conversat
   const { runnerDescriptor } = await import("./runners/descriptors")
   const config = await loadMergedConvoyConfig(launchDir).catch(() => undefined)
   const defaults = config?.defaults
-  const configured = defaults?.authoring?.runner ?? defaults?.runner ?? "opencode"
-  const harness = runnerDescriptor(configured).conversationsUnavailable ? "opencode" : configured
+  const harness = authoringHarnessOf(config)
   if (!runnerDescriptor(harness).authenticates) return { harness: harness as import("./conversations").AuthoringHarness }
   const configuredAuth = runnerAuthOf(config)[harness]
   const mode = defaults?.authoring?.authMode
