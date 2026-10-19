@@ -27,7 +27,7 @@ See `proposal.md` and `evidence/`. This builds on `generalize-runner-routes`: Co
 
 - **Process.** Convoy starts `codex app-server --disable hooks --disable apps --disable browser_use --disable browser_use_external --disable computer_use` per attempt as its own child. It never attaches to the operator's shared daemon.
 - **Protocol types.** The protocol is labeled experimental, so the adapter speaks a small hand-typed subset (`protocol.ts`) and reads every field defensively. Generated bindings for the whole surface were rejected, because they would churn with every Codex release.
-- **Version gate.** Preflight reads the release from `initialize`'s user agent (`<originator>/<version>`) and refuses one older than 0.160 with an update hint; the declaration restricts every capability on the same check.
+- **Version gate.** Preflight, every attempt and every helper read the release from their app-server's `initialize` user agent (`<originator>/<version>`). They refuse a release older than 0.160 with an update hint, and a release they cannot read is refused rather than taken as current.
 
 `dynamicTools` would remove the MCP process and the bridge, but it is experimental. MCP is used instead (D4).
 
@@ -70,7 +70,7 @@ The first-write checkpoint works as follows:
 
 1. The first file change of an advised phase is held while the advisor is consulted.
 2. The advice is steered into the turn and the change is declined, so the agent re-applies it with the advice in hand.
-3. Later writes proceed. A failed consultation releases the hold. If the checkpoint is unreachable, the write stays declined.
+3. Later writes proceed. A failed consultation releases the hold. If the checkpoint is unreachable, the write stays declined. Advice that could not be steered into the turn is kept, and every write is declined until it is delivered.
 
 ### D5. Authentication and billing
 

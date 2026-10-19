@@ -66,6 +66,10 @@ Settings for a runner that authenticates SHALL be configured under `runners.<id>
 - **WHEN** `advisorRoute` selects Codex with an API key and a step's own advisor runs on Claude
 - **THEN** the Claude advisor consults under Claude's authentication, never the Codex route's key
 
+#### Scenario: An advisor route's authentication with no runner
+- **WHEN** `advisorRoute.authMode` is set without `advisorRoute.runner`
+- **THEN** it applies to the runner the advisor model is qualified for, else Claude, whatever `defaults.runner` is
+
 #### Scenario: A runner that authenticates through its own configuration
 - **WHEN** a config sets `runners.opencode.auth`
 - **THEN** validation fails, because OpenCode authenticates through its own provider configuration

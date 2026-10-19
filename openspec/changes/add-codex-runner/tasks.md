@@ -43,3 +43,6 @@ Depends on `generalize-runner-routes`.
 - [x] 6.3 Gate preflight on the minimum Codex release read from `initialize`; verify an old and a current release.
 - [x] 6.4 Refuse to reopen a thread Codex no longer holds (API-key threads); verify against a scripted Codex home.
 - [x] 6.5 Run the shared runner conformance suite against the Codex adapter.
+- [x] 6.6 Refuse an unreadable Codex release, and check the release in attempts and helpers too; verify a drifted user agent and an old release in each.
+- [x] 6.7 Keep undelivered first-write advice and decline writes until it reaches the turn; verify a failing then recovering steer.
+- [x] 6.8 Reopen a phase's Codex session from the gate under the phase's auth; treat inspections that read a list of paths from a file as execution.

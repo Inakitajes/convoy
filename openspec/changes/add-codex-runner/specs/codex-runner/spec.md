@@ -10,7 +10,7 @@ Run pipeline steps, advisors, helpers and human iterations on Codex under Convoy
 
 Convoy SHALL register a `codex` runner that executes `openai/*` models and maps a model's `#variant` to Codex reasoning effort. Preflight SHALL verify the following before any checkout change:
 
-- the `codex` CLI is installed, at the minimum supported release or later;
+- the `codex` CLI is installed, at the minimum supported release or later; a release Codex does not report readably SHALL be refused, and attempts and helpers SHALL check the release again before any thread starts;
 - every Codex model and effort the plan names is offered to the effective account.
 
 A plan in which nothing runs on another runner SHALL NOT require OpenCode or Claude.
@@ -79,11 +79,15 @@ Pipeline attempts and helpers SHALL start Codex with the operator's hooks, apps,
 
 ### Requirement: Codex reports, scores and advisors use Convoy's services
 
-Codex attempts SHALL submit reports, scores and commit descriptions through Convoy's `write_report` tool, validated like the other runners. The final agent message SHALL be the fallback report. An advised Codex phase SHALL hold its first file change for one consultation, deliver the advice to the running turn, and decline that change. A failed consultation SHALL release the hold. An unreachable checkpoint SHALL keep the write declined.
+Codex attempts SHALL submit reports, scores and commit descriptions through Convoy's `write_report` tool, validated like the other runners. The final agent message SHALL be the fallback report. An advised Codex phase SHALL hold its first file change for one consultation, deliver the advice to the running turn, and decline that change. A failed consultation SHALL release the hold. An unreachable checkpoint SHALL keep the write declined. Advice that cannot be delivered to the turn SHALL keep every write declined until it is delivered.
 
 #### Scenario: First write under an advisor
 - **WHEN** an advised Codex step proposes its first file change
 - **THEN** the change is declined, the advisor's advice is steered into the turn, and the agent's next change proceeds
+
+#### Scenario: Advice that cannot reach the turn
+- **WHEN** the consultation succeeds but its advice cannot be steered into the running turn
+- **THEN** the change is declined, and later changes stay declined until the advice is delivered
 
 ### Requirement: Codex authentication and billing are explicit and verified
 

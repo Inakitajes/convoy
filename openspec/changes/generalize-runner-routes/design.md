@@ -82,7 +82,7 @@ This keeps the plan's types (strings) and every frozen plan unchanged, while the
 
 ### D5. Runner settings live under `runners.<id>`
 
-`runners.<id>.auth` (`authMode`, `credentialRef`, `billingPolicy`) configures each runner that authenticates. Global and project settings merge per runner. `defaults.claudeAuth` is read as `runners.claude-code.auth` when that is unset. A route's `authMode` override (`advisorRoute`, `authoring`) reuses its own runner's credential reference. `RunOptions.runnerAuth` and `RunPlan.runnerAuth` carry one reviewed auth and billing decision per authenticated runner the plan uses.
+`runners.<id>.auth` (`authMode`, `credentialRef`, `billingPolicy`) configures each runner that authenticates. Global and project settings merge per runner. `defaults.claudeAuth` is read as `runners.claude-code.auth` when that is unset. A route's `authMode` override (`advisorRoute`, `authoring`) reuses its own runner's credential reference. A runner-less `advisorRoute` is for its advisor model's qualified runner, else Claude, never `defaults.runner`; `authoring` is for the harness authoring opens. An `auth` block merges as a unit: a project block replaces the global one whole. `RunOptions.runnerAuth` and `RunPlan.runnerAuth` carry one reviewed auth and billing decision per authenticated runner the plan uses.
 
 ### D6. The run-wide override is scoped by the shorthand
 

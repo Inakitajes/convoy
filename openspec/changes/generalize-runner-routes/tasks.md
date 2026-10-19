@@ -19,6 +19,7 @@
 - [x] 3.3 Add `runners.<id>.auth`, merged per runner, with `defaults.claudeAuth` as its legacy reading, and route auth-mode overrides that reuse their runner's credential reference; verify validation and merging.
 - [x] 3.4 Carry one reviewed auth and billing decision per authenticating runner in the plan (`RunPlan.runnerAuth`) and run options (`RunOptions.runnerAuth`); verify review, preflight and step auth previews.
 - [x] 3.5 Keep legacy spellings and frozen plans resolving as before; verify with the existing route, config and resume tests.
+- [x] 3.6 Resolve a runner-less route auth mode against the runner the route really uses (the advisor model's runner, else Claude; the authoring harness), never `defaults.runner`; verify OpenCode and Codex run-wide runners.
 
 ## 4. CLI, review and docs
 
