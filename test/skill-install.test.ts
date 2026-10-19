@@ -3,7 +3,23 @@ import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os"
 import { join, relative } from "node:path"
 
-import { detectSkillTargets, installSkill, parseSkillArgs, runSkillCommand, skillFiles, skillFileText, skillsDirFor, uninstallSkill } from "../src/skill-install"
+import { builtInPipelines } from "../src/pipeline"
+import {
+  commandName,
+  commandsDirFor,
+  detectSkillTargets,
+  installCommands,
+  installSkill,
+  parseSkillArgs,
+  pipelineCommands,
+  pipelineCommandText,
+  runSkillCommand,
+  skillFiles,
+  skillFileText,
+  skillsDirFor,
+  uninstallCommands,
+  uninstallSkill,
+} from "../src/skill-install"
 
 async function withDir<T>(body: (dir: string) => Promise<T>): Promise<T> {
   const dir = await mkdtemp(join(tmpdir(), "convoy-skill-"))
@@ -85,6 +101,84 @@ describe("installSkill", () => {
       await mkdir(join(skillsDir, "other"))
       expect((await uninstallSkill("opencode", skillsDir)).outcome).toBe("removed")
       expect(await readdir(skillsDir)).toEqual(["other"])
+    })
+  })
+})
+
+describe("pipeline commands", () => {
+  test("each command names a built-in pipeline and launches it with -p", () => {
+    for (const command of pipelineCommands) {
+      expect(builtInPipelines[command.pipeline]).toBeDefined()
+      const text = pipelineCommandText("claude", command)
+      expect(text).toContain(`convoy -p ${command.pipeline}`)
+      expect(text).toContain("$ARGUMENTS")
+      expect(text).not.toMatch(/\{\{\w+\}\}/)
+    }
+  })
+
+  test("Claude Code and Codex get user-invoked skills, OpenCode a command with the marker after its frontmatter", () => {
+    const review = pipelineCommands.find((command) => command.pipeline === "review")!
+    expect(pipelineCommandText("codex", review)).toMatch(/^---\nname: convoy-review\ndescription: ".+"\nargument-hint: .+\ndisable-model-invocation: true\n---\n<!-- convoy:command -->\n/)
+    expect(pipelineCommandText("opencode", review)).toMatch(/^---\ndescription: ".+"\n---\n<!-- convoy:command -->\n/)
+    expect(commandsDirFor("claude", "/c/skills")).toBe("/c/skills")
+    expect(commandsDirFor("opencode", "/x/opencode/skills")).toBe("/x/opencode/commands")
+  })
+
+  test("installs every command, reports current, and prunes a retired one", async () => {
+    await withDir(async (root) => {
+      const skillsDir = join(root, "skills")
+      const names = pipelineCommands.map(commandName)
+      const first = await installCommands("claude", skillsDir)
+      expect(first.written).toEqual(names)
+      expect(await readFile(join(skillsDir, "convoy-review", "SKILL.md"), "utf8")).toBe(pipelineCommandText("claude", pipelineCommands[0]!))
+
+      await mkdir(join(skillsDir, "convoy-retired"))
+      await writeFile(join(skillsDir, "convoy-retired", "SKILL.md"), "---\nname: convoy-retired\n---\n<!-- convoy:command -->\n")
+      const again = await installCommands("claude", skillsDir)
+      expect(again).toMatchObject({ written: [], current: names, removed: ["convoy-retired"] })
+    })
+  })
+
+  test("OpenCode commands go beside the skills directory and leave other commands alone", async () => {
+    await withDir(async (root) => {
+      const skillsDir = join(root, "opencode", "skills")
+      const commandsDir = join(root, "opencode", "commands")
+      await mkdir(commandsDir, { recursive: true })
+      await writeFile(join(commandsDir, "convoy-spin.md"), "<!-- convoy:spin v2 -->\nspin")
+      await writeFile(join(commandsDir, "convoy-ship.md"), "my own ship")
+      const result = await installCommands("opencode", skillsDir)
+      expect(result.dir).toBe(commandsDir)
+      expect(result.skipped).toEqual(["convoy-ship"])
+      expect(await readFile(join(commandsDir, "convoy-ship.md"), "utf8")).toBe("my own ship")
+      expect(await readFile(join(commandsDir, "convoy-review.md"), "utf8")).toContain("<!-- convoy:command -->")
+
+      const removed = await uninstallCommands("opencode", skillsDir)
+      expect(removed.removed).toEqual(pipelineCommands.map(commandName).filter((name) => name !== "convoy-ship").sort())
+      expect((await readdir(commandsDir)).sort()).toEqual(["convoy-ship.md", "convoy-spin.md"])
+    })
+  })
+
+  test("install and uninstall carry the commands, and a foreign command fails the install", async () => {
+    await withDir(async (root) => {
+      const env = { ...process.env }
+      process.env.CODEX_HOME = root
+      try {
+        const output: string[] = []
+        expect(await runSkillCommand("install", ["codex"], (text) => output.push(text))).toBe(0)
+        expect(output.join("")).toContain("Codex: pipeline commands /convoy-review, /convoy-implement")
+        expect(output.join("")).toContain("or type a command: /convoy-review")
+
+        await rm(join(root, "skills", "convoy-hunter"), { recursive: true })
+        await mkdir(join(root, "skills", "convoy-hunter"))
+        await writeFile(join(root, "skills", "convoy-hunter", "SKILL.md"), "mine")
+        expect(await runSkillCommand("install", ["codex"], () => {})).toBe(1)
+
+        expect(await runSkillCommand("uninstall", ["codex"], () => {})).toBe(0)
+        expect(await readdir(join(root, "skills"))).toEqual(["convoy-hunter"])
+      } finally {
+        process.env.CODEX_HOME = env.CODEX_HOME
+        if (env.CODEX_HOME === undefined) delete process.env.CODEX_HOME
+      }
     })
   })
 })

@@ -17,13 +17,13 @@ openspec/
   specs/<capability>/  spec.md
 ```
 
-The active change is resolved:
+Selection is explicit: a run's change comes from `--change <id>` (repeatable, in review order) or from a change picked in the launcher, never from discovery. Nothing auto-attaches the only active change, a change named like the branch, or the changes the diff touches. In a repository with an `openspec/` directory, a headless launch must therefore say which it is:
 
-1. an explicit `--change <id>` (or a spec picked in the launcher);
-2. exactly one non-archived change under `openspec/changes/`;
-3. multiple, and the branch name matches a change id (`feat/add-foo` ↔ `add-foo`);
-4. multiple, no branch match: compose the changes whose touched files appear in the diff;
-5. none: review falls back to today's behavior (default prompt + diff inference), and `implement` refuses with "no change; run /opsx:propose".
+- `--change <id>` (one or more): the changes are the contract; every id must name an active change, or the launch refuses naming it.
+- `--manual`: an explicit no-change run, driven by the prompt (or the pipeline's default prompt).
+- neither: the launch refuses with "no change is selected: pass --change <id> … or --manual" (or, with no active change at all, "run /opsx:propose first, or pass --manual").
+
+A resumed run keeps the changes frozen into it. With `features.specs: false` none of this applies ([Configuration](configuration.md)).
 
 When a change resolves, Convoy attaches the **spec bundle** — the current `openspec/specs/**` plus the change's proposal, design, tasks, and delta specs — to **every agent step**. The `prd` (30%) and `scope` (10%) quality dimensions are graded against the change's **Requirements/Scenarios** instead of a diff-inferred brief. Convoy never writes the `openspec/` layout: `/opsx:propose` and archiving belong to OpenSpec itself.
 
@@ -36,7 +36,10 @@ convoy
 # or pin one from the CLI — no prompt required
 convoy --change add-login -p implement
 convoy --change add-login -p review
+convoy --manual -p review          # explicitly without a change
 ```
+
+From an agent session, the [Convoy skill](agents.md) lists the active changes and asks you which one to run against (or none) before it launches; naming the change in your request, `/convoy-implement add-login`, skips the question.
 
 ### The specs reader (`convoy specs`)
 

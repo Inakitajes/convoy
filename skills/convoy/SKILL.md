@@ -29,7 +29,7 @@ convoy pipelines show <name>      # one pipeline's steps: agent, model, runner, 
 convoy --help                     # every launch flag
 ```
 
-Add `--json` to `convoy pipelines` for machine-readable output. Run these in the repository the work is about (or pass `--dir <path>`): project pipelines and config live there.
+Add `--json` to `convoy pipelines` for machine-readable output. `convoy skill install` also installs one command per built-in pipeline (`/convoy-review`, `/convoy-implement`, `/convoy-full-cycle`, `/convoy-ship`, `/convoy-fixer`, `/convoy-hunter`); a user who types one has already picked the pipeline. Run these in the repository the work is about (or pass `--dir <path>`): project pipelines and config live there.
 
 ## 2. Pick or compose a pipeline
 
@@ -53,14 +53,29 @@ When nothing fits — a different runner or model mix, a narrower audit, a custo
 convoy pipelines show --pipeline-file /tmp/payments-audit.yaml   # schema errors, resolved steps
 ```
 
-## 3. Write the prompt
+## 3. Choose the contract (OpenSpec)
 
-Every step receives the prompt. Write it to a file: the goal, the scope (paths, modules), constraints, and what "done" means. For a review or audit, say what to look at and what matters most. A pipeline with a `defaultPrompt` (`review`, `ship`, `hunter`) can run without one.
+In a repository that uses [OpenSpec](https://openspec.dev/), a run can take an OpenSpec **change** as its contract: Convoy attaches the change's proposal, design, tasks, and delta specs plus `openspec/specs/**` to every step, and grades scope and requirements against them. Selection is explicit only. Nothing is picked for you, and a headless launch refuses until you pass `--change <id>` (repeatable, in review order) or `--manual` (no change; the prompt is the brief).
 
-## 4. Check the plan, then launch detached
+```bash
+ls openspec/changes 2>/dev/null | grep -vx archive   # the active changes; nothing printed = no OpenSpec contract to pick
+```
+
+- The user named a change, or more than one: pass each with `--change <id>`, in their order.
+- Active changes exist and the user named none: list them with their proposal titles (the first heading of `openspec/changes/<id>/proposal.md`), say which one fits (the one named like the current branch, `feat/add-login` ↔ `add-login`, or the only one), and ask whether to run against it, against others, or with no change (`--manual`). Don't choose silently, and don't fall back to `--manual` without asking.
+- No active changes, no `openspec/` directory, or `features.specs: false` in the Convoy config: pass `--manual` (`--change` refuses when specs are off).
+
+With a change selected, the spec is the contract and the prompt is optional: `convoy -p implement --change add-login` needs nothing else.
+
+## 4. Write the prompt
+
+Every step receives the prompt. Write it to a file: the goal, the scope (paths, modules), constraints, and what "done" means. For a review or audit, say what to look at and what matters most. A pipeline with a `defaultPrompt` (`review`, `ship`, `hunter`) can run without one, and so can any pipeline with a change selected.
+
+## 5. Check the plan, then launch detached
 
 ```bash
 convoy --pipeline review --prompt-file /tmp/task.md --manual --smart --plan < /dev/null
+# against an OpenSpec change: convoy --pipeline implement --change add-login --smart --plan < /dev/null
 ```
 
 `--plan` prints the fully resolved plan (models after routing, permissions, target checkout, attachments) and starts nothing. Summarize it for the user. Then launch the same command with `--detach` instead of `--plan`:
@@ -72,13 +87,13 @@ convoy --pipeline review --prompt-file /tmp/task.md --manual --smart --detach < 
 
 It prints `run <run-id> started (coordinator <pid>, detached)` and returns; the run keeps going in the background. Keep the run id.
 
-- `--manual` or `--change <id>`: in a repo using OpenSpec, a headless launch must say whether it implements an OpenSpec change (`--change <id>`, repeatable) or runs without one (`--manual`). Harmless elsewhere.
+- `--change <id>` or `--manual`: the contract from step 3. The plan's `OpenSpec change:` line names the attached changes; check it. `--manual` is harmless outside OpenSpec repos.
 - Where it runs: on a trunk branch (`main`, …) a run isolates itself in a new worktree and branch; on any other branch it runs in place. Force it with `--worktree` / `--no-worktree`, and name the branch with `--branch feat/…`.
 - A run in place refuses a dirty working tree unless you pass `--include-dirty`, which folds the uncommitted changes into the run's first commit. Ask the user before using it; a fresh worktree is always clean.
 - Other useful flags: `--file <path>` (attach files to every step), `--only`/`--skip <steps>`, `--model <provider/model>` (force every OpenCode step), `--base <ref>`, `--dir <repo>`.
 - Without `--detach` the launch blocks, streams the run's log, and exits with the run's code. Avoid that from an agent session: runs outlive shell tool timeouts.
 
-## 5. Monitor
+## 6. Monitor
 
 ```bash
 convoy runs <run-id> --wait --timeout 5m     # blocks until the run ends, stops at a gate, or the timeout passes
@@ -89,16 +104,16 @@ convoy runs <run-id> --json                  # full snapshot: state, phases, cos
 
 | Exit | Meaning | Next |
 |---|---|---|
-| 0 | completed | Go to step 7 |
+| 0 | completed | Go to step 8 |
 | 1 | ended without success (failed, aborted, interrupted) | Read the reports and log; offer `convoy --resume <run-id>` |
 | 2 | still running, the wait timed out | Give the user a one-line progress update (phase, cost), then wait again |
-| 3 | waiting for an answer | Go to step 6 |
+| 3 | waiting for an answer | Go to step 7 |
 
 Keep each `--wait` shorter than your shell tool's timeout: in Claude Code, `--timeout 9m` with a 10-minute Bash timeout, or run it in the background and get notified when it exits. Elsewhere, stay under the tool's limit (`--timeout 4m` is a safe default). Long runs take many waits; between them, don't re-read everything, just report the delta.
 
 `convoy runs <run-id> --json` fields: `state` (`running`, `waiting`, `completed`, `failed`, `incomplete`, `unknown`), `phases[]` (`name`, `status`, `model`, `cost`), `cost`, `waiting` (the pending request), `goal` (`target`, `score`, `trajectory`, `outcome`), `summaryPath`, `reports[]`, `logPath` (the coordinator's log while the run is live; `tail -n 50` it to see what a step is doing), and `targetDir` (the checkout the run works in). `convoy runs --json` lists every run.
 
-## 6. Answer a waiting run
+## 7. Answer a waiting run
 
 A run waits when a tool call needs approval (`waiting.kind: "permission"`, with `permission`, `command`, `patterns`, `description`) or at a human gate (`waiting.kind: "review"`). Show the user exactly what is being asked, then:
 
@@ -111,7 +126,7 @@ convoy runs <run-id> abort                           # stop the run; resumable l
 
 The request id is `waiting.requestId` from `--json`, also printed by `--wait`. Human gates are off in detached runs unless you pass `--human-step`; if one is waiting, the user answers it in a terminal with `convoy runs <run-id>`, or you abort. Answers refuse while a dashboard is attached to the run: the user is answering there.
 
-## 7. Report the results
+## 8. Report the results
 
 When the run completes:
 
@@ -124,7 +139,8 @@ When the run completes:
 
 | Message | Fix |
 |---|---|
-| `no change is selected: pass --change <id> … or --manual` | Add `--manual` (or the change the user means) |
+| `no change is selected: pass --change <id> … or --manual` | The repo has active OpenSpec changes: ask the user which one (step 3), or `--manual` if they want none |
+| `--change "<id>" matched no active change` | A typo or an archived change: list `openspec/changes/` again |
 | `permissions: interactive — requests wait for an answer` | You forgot `--smart`; requests will wait for `approve`/`deny` |
 | `working tree is not clean` (the run fails right after starting) | Commit or stash first, run in a worktree (`--worktree`), or, if the user agrees, `--include-dirty` |
 | `<Claude/Codex> billing: an unattended launch must state its billing decision` | The pipeline has `claude-code` or `codex` steps; ask the user to set `runners.<runner-id>.auth.billingPolicy: account-policy` in their Convoy config (it acknowledges that subscription usage may bill). Don't set it yourself |
