@@ -19,7 +19,7 @@ import { readFile } from "node:fs/promises"
 
 import { advisorToolDescription, advisorFeedbackToolDescription } from "../advisor-bridge"
 import { writeReportInputJsonSchema, writeReportToolDescription } from "../report-bridge"
-import { approvalBridgeProvider, attemptToolsClient, bridgeFileEnv, type CheckpointOutcome } from "./claude/approval-bridge"
+import { approvalBridgeProvider, attemptToolsClient, bridgeFileEnv, type CheckpointOutcome } from "./attempt-bridge"
 import { decideToolCall, isConvoyMcpTool, preToolUseOutput, toActionRequest, type PreToolUseInput } from "./claude/hook"
 import type { McpToolHost } from "./claude/mcp-permission-server"
 import { serveMcpPermissionStdio } from "./claude/mcp-stdio"
@@ -150,8 +150,40 @@ export function convoyToolHost(env: NodeJS.ProcessEnv = process.env): McpToolHos
   }
 }
 
-/** `convoy mcp`: runs the stdio permission host. */
-export async function runMcpCommand(): Promise<void> {
+/**
+ * The host environment named by `--bridge-file <path>`: an owner-only file the
+ * adapter staged with the attempt bridge's address and token, for a runner
+ * (Codex) whose MCP server configuration the agent could read. Undefined
+ * without the flag; an unreadable file serves no tools.
+ */
+export async function bridgeFileEnvironment(args: readonly string[]): Promise<NodeJS.ProcessEnv | undefined> {
+  const index = args.indexOf("--bridge-file")
+  if (index === -1) return undefined
+  const path = args[index + 1]
+  if (!path) return {}
+  try {
+    const parsed = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>
+    return Object.fromEntries(Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === "string"))
+  } catch {
+    return {}
+  }
+}
+
+/**
+ * `convoy mcp`: runs the stdio MCP host. With `--bridge-file` it serves only
+ * Convoy's tools, for a runner that asks for approvals in-band; otherwise it
+ * is Claude's permission host plus those tools.
+ */
+export async function runMcpCommand(args: readonly string[] = []): Promise<void> {
+  const fromFile = await bridgeFileEnvironment(args)
+  if (fromFile) {
+    const tools = convoyToolHost(fromFile)
+    await serveMcpPermissionStdio(
+      { permissionTool: false, ...(tools ? { tools } : {}), resolve: async () => ({ decision: "deny", reason: "this host serves no permission tool" }) },
+      { input: Bun.stdin.stream(), write: (line) => process.stdout.write(`${line}\n`) },
+    )
+    return
+  }
   const policy = policyFromEnv()
   const requestApproval = approvalBridgeProvider()
   const tools = convoyToolHost()

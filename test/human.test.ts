@@ -94,7 +94,7 @@ describe("runHumanReviewGate", () => {
     const { calls, progress } = progressWithActions(["iterate", "continue"])
     await runHumanReviewGate(
       workspace,
-      { ...options, claudeAuth: { mode: "subscription" } },
+      { ...options, runnerAuth: { "claude-code": { mode: "subscription" } } },
       undefined,
       progress,
       undefined,

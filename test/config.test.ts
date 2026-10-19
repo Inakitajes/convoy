@@ -1327,8 +1327,8 @@ describe("runner field on steps", () => {
   })
 
   test("rejects unknown runner values", () => {
-    expect(() => parse("pipelines:\n  p:\n    steps:\n      - agent: bug-auditor\n        runner: codex")).toThrow(
-      'pipelines.p.steps[0].runner must be "opencode" or "claude-code"',
+    expect(() => parse("pipelines:\n  p:\n    steps:\n      - agent: bug-auditor\n        runner: gemini")).toThrow(
+      'pipelines.p.steps[0].runner must be "opencode", "claude-code", or "codex"',
     )
   })
 

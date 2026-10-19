@@ -28,29 +28,33 @@ To use different providers, authenticate them in OpenCode and select models as `
 
 **OpenCode** requires a supported OpenCode V2 on `PATH`; Convoy never installs,
 updates, or replaces it. **Claude** uses the operator's authenticated `claude`
-CLI. Authentication and billing are **separate**: subscription login does not
-guarantee included-only usage, and Convoy never changes account spending
-settings. See [Runners](runners.md) for execution modes, reports, advisors,
-dashboards, and recovery.
+CLI, and **Codex** the operator's authenticated `codex` CLI. Authentication and
+billing are **separate**: subscription login does not guarantee included-only
+usage, and Convoy never changes account spending settings. See
+[Runners](runners.md) for execution modes, reports, advisors, dashboards, and
+recovery, and for [writing one model for any runner](runners.md#models-one-spelling-any-runner).
 
 ### Subscription setup
 
-Sign in once with the CLI's own supported login flow (`claude`, then `/login`);
-Convoy never reads credential stores, extracts tokens, or automates login.
-Claude defaults to `subscription`; state the billing decision explicitly so
-unattended launches can run too:
+Sign in once with each CLI's own supported login flow (`claude`, then
+`/login`; `codex login`); Convoy never reads credential stores, extracts
+tokens, or automates login. A CLI runner defaults to `subscription`; state the
+billing decision explicitly so unattended launches can run too:
 
 ```yaml
 version: 1
-defaults:
-  claudeAuth:
-    authMode: subscription
-    billingPolicy: account-policy   # usage credits or paid features may apply
+runners:
+  claude-code:
+    auth:
+      billingPolicy: account-policy   # usage credits or paid features may apply
+  codex:
+    auth:
+      billingPolicy: account-policy
 ```
 
 A subscription-only configuration requires no API key and no OpenCode
-installation. The Claude CLI exposes no control that enforces included-only
-usage, so `billingPolicy: included-only` is refused at preflight rather than
+installation. Neither CLI exposes a control that enforces included-only usage,
+so `billingPolicy: included-only` is refused at preflight rather than
 promised. Without a `billingPolicy`, the launch review discloses the account
 policy and confirming it is the consent; an unattended launch must configure
 it. Convoy never enables extra usage, buys credits, or raises provider-side
@@ -63,35 +67,45 @@ variable by name; never put the key itself in the file:
 
 ```yaml
 version: 1
-defaults:
-  claudeAuth:
-    authMode: api-key
-    credentialRef: CONVOY_ANTHROPIC_KEY   # the variable that holds the key
+runners:
+  claude-code:
+    auth:
+      authMode: api-key
+      credentialRef: CONVOY_ANTHROPIC_KEY   # the variable that holds the key
+  codex:
+    auth:
+      authMode: api-key
+      credentialRef: CONVOY_OPENAI_KEY
 ```
 
 ```bash
 export CONVOY_ANTHROPIC_KEY=sk-ant-...
+export CONVOY_OPENAI_KEY=sk-...
 ```
 
-Convoy sets the key only for the child and removes ambient OAuth/subscription
-tokens for it, so the selected key is the effective billing source. Run metadata
-records the mode and the variable name, never the value.
+Convoy uses the key only for the child, so the selected key is the effective
+billing source: Claude gets it in its environment with ambient
+OAuth/subscription tokens removed; Codex logs it in to a private, per-use Codex
+home that is discarded afterwards, leaving the operator's own Codex login
+untouched. Run metadata records the mode and the variable name, never the
+value.
 
 ### Legacy configuration migration
 
-Older configurations declare `runner: claude-code` steps with no
-`defaults.claudeAuth`. They run as `subscription`, and preflight verifies that
-claim with `claude auth status --json` under the child's overlay before any
-work starts: when Claude would actually bill an API key, a key helper, or a
-third-party provider, the launch is refused with guidance to set
-`defaults.claudeAuth` explicitly. Convoy never infers permission to use API
+Older configurations declare `runner: claude-code` steps with no runner auth.
+They run as `subscription`, and preflight verifies that claim with
+`claude auth status --json` under the child's overlay before any work starts:
+when Claude would actually bill an API key, a key helper, or a third-party
+provider, the launch is refused with guidance to set `runners.claude-code.auth`
+explicitly. `defaults.claudeAuth`, the older spelling, still reads when
+`runners.claude-code.auth` is unset. Convoy never infers permission to use API
 billing, and existing runner IDs and model strings stay compatible.
 
 ### Cost labels
 
 Subscription and API-key figures are labeled differently and never conflated:
 
-| | OpenCode / API key | Claude subscription |
+| | OpenCode / API key | Claude or Codex subscription |
 |---|---|---|
 | Monetary value | estimate of provider charges | **estimate only**, not a cash charge |
 | Quota | provider-side; not tracked as a guarantee | not a remaining-balance report |
@@ -113,7 +127,7 @@ convoy "Implement the feature" --gateway vercel
 convoy "Implement the feature" --gateway configured
 ```
 
-`configured` (the default) preserves model IDs literally. `direct` uses the model owner's provider; `openrouter` and `vercel` wrap the logical provider/model. Claude Code steps are never rerouted. A `--model` selects the logical model first, then the gateway is applied.
+`configured` (the default) preserves model IDs literally. `direct` uses the model owner's provider; `openrouter` and `vercel` wrap the logical provider/model. Gateways apply to OpenCode only: Claude Code and Codex steps are never rerouted. A `--model` selects the logical model first, then the gateway is applied.
 
 `nitro` is OpenRouter asked to sort providers by **throughput** instead of price — what OpenRouter markets as `:nitro`. The wrap is identical to `openrouter` (same aliases and safety rules, same credential), so the physical IDs look like `openrouter/z-ai/glm-5.2`; the throughput preference itself is expressed the way OpenCode natively supports it: for the duration of the run, Convoy injects `provider.sort: "throughput"` on every OpenRouter model the run uses (executors, advisors, and the smart-mode judge) into that run's OpenCode config. Your global OpenCode config is never touched, so models run with their default routing everywhere else. Nitro often costs more than default OpenRouter routing because it does not load-balance to the cheapest provider; it is meant for long phases where speed matters more than a few cents. The routing preference never becomes part of a model's logical identity, so overrides, vercel/direct conversion, and preflight keep working on the plain ID.
 

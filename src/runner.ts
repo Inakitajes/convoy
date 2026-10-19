@@ -16,7 +16,9 @@ import { aggregateAdvisorEvents, createAdvisorEventJournal, readAdvisorEvents, t
 import { opencodeConfig, loadAgentPrompt } from "./agents"
 import { fileParts } from "./attachments"
 import { Caffeinate } from "./caffeinate"
-import { claudeReadableDirectories, ensureClaudeAvailable, openClaudeSessionWindow, writeClaudeSessionDirectories } from "./claude-code"
+import { advisorAuthFor } from "./config"
+import { claudeReadableDirectories, openClaudeSessionWindow, writeClaudeSessionDirectories } from "./claude-code"
+import { ensureRunnersAvailable } from "./runner-installation"
 import { baseAgentName } from "./runners/agent-source"
 import { attemptCompositionFor, releaseAttemptCompositions } from "./runners/attempt-composition"
 import { resolveAttempt, type AttemptContext } from "./runners/attempt"
@@ -67,7 +69,10 @@ import { createReportRuntime, type ReportPhaseHandle, type ReportRuntime } from 
 import { stepCommitMessageFactory } from "./step-commit"
 import { pipelineRunners, throughputRoutedModels } from "./run-plan"
 import { runnerExecutionRecord } from "./runners/provenance"
-import { isClaudeJudge } from "./safety-judge"
+import { isCliJudge } from "./safety-judge"
+import { isCliAdvisor } from "./advisor"
+import { openCodexSessionWindow } from "./codex-cli"
+import { qualifiedRunnerOf, runnerDescriptor } from "./runners/descriptors"
 import { promoteScoreReport, runGoalCycle, type GoalCycleOutcome } from "./goal-scheduler"
 import { formatTerminalTitle, projectName, RunStatusTracker, trackRunStatus } from "./run-status"
 import { popTerminalTitle, pushTerminalTitle, writeTerminalTitle } from "./terminal-title"
@@ -90,7 +95,7 @@ import {
   type RunOutcome,
 } from "./progress"
 import { discoverProjectContextFiles } from "./project-context"
-import { createStepRunnerImpl, stepRunnerFor, stepRunnerModel, type StepRunnerId, type StepRunnerImpl } from "./step-runners"
+import { runnerOfModelReference, stepRunnerFor, stepRunnerModel, type StepRunnerId } from "./step-runners"
 import { createTerminalInput, type TerminalInput } from "./terminal-input"
 import type { AgentSpec, AgentStep, DeliverableContract, HookSet, HookSpec, PermissionAdditions, Pipeline, ResolvedGoalPlan, RunOptions, Step } from "./types"
 import { bashPolicy, noAdditions } from "./bash-policy"
@@ -418,10 +423,23 @@ function processIsAlive(pid: number): boolean {
  * judges, reports, the dashboard journal — works without one.
  */
 export function runNeedsOpencodeServer(pipeline: Pipeline, smartJudge?: { providerID: string }): boolean {
-  if (pipelineRunners(pipeline).has("opencode")) return true
+  if ([...pipelineRunners(pipeline)].some((runner) => !stepRunnerFor(runner).qualifiedModels)) return true
   const steps = [...pipeline.steps, ...(pipeline.goalPlan ? [...pipeline.goalPlan.improve.steps, ...pipeline.goalPlan.measure.steps] : [])]
-  if (steps.some((step) => step.type === "agent" && step.resolvedAdvisor !== undefined && step.resolvedAdvisor.providerID !== "claude-code")) return true
-  return smartJudge !== undefined && !isClaudeJudge(smartJudge)
+  if (steps.some((step) => step.type === "agent" && step.resolvedAdvisor !== undefined && !isCliAdvisor(step.resolvedAdvisor))) return true
+  return smartJudge !== undefined && !isCliJudge(smartJudge)
+}
+
+/** The authentication the run's smart judge runs under: its runner's configured auth. */
+function judgeAuthOf(options: Pick<RunOptions, "smartJudgeModel" | "runnerAuth">): AuthenticationSelection | undefined {
+  if (!options.smartJudgeModel) return undefined
+  return options.runnerAuth?.[runnerOfModelReference(options.smartJudgeModel)]
+}
+
+/** The judge model selection from its frozen route (a CLI runner's route keeps its variant as effort). */
+function judgeModelOf(route: string): { providerID: string; modelID: string; variant?: string } {
+  const split = splitModelVariant(route)
+  const model = parseModel(split.model)
+  return qualifiedRunnerOf(route) && split.variant ? { ...model, variant: split.variant } : model
 }
 
 export function planBatches(steps: readonly Step[]): Step[][] {
@@ -587,7 +605,7 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
     options.modelOverride = ""
     if (options.plan.smartJudge) options.smartJudgeModel = options.plan.smartJudge.model.target
   }
-  if (options.plan) ensureClaudeAvailable(options.plan.pipeline)
+  if (options.plan) ensureRunnersAvailable(options.plan.pipeline)
   await ensureRepoReady(options.targetDir, {
     includeDirty: options.includeDirty,
     baseRef: options.baseRef,
@@ -709,9 +727,9 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
     // "<agent>__verify". Register those variants alongside the catalogue.
     const agents = agentsForPipeline(pipeline, options.agents)
     ensureAgentsAvailable(pipeline, agents)
-    // Claude Code is an optional dependency: only a pipeline that actually
-    // contains a claude-code step needs the CLI, checked before anything runs.
-    ensureClaudeAvailable(pipeline)
+    // A CLI runner is an optional dependency: only a pipeline that actually
+    // runs a step on it needs its CLI, checked before anything runs.
+    ensureRunnersAvailable(pipeline)
     // A run interrupted before its phase commit leaves the tree dirty; on resume
     // offer to commit that work as the interrupted phase and continue. Runs here,
     // before the TUI grabs the terminal, so the readline prompt stays visible.
@@ -931,8 +949,9 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
 
     advisors = createAdvisorRuntime({
       ...(opencode ? { client: opencode.client } : {}),
-      // A Claude advising model consults under its reviewed route's auth.
-      ...((options.advisorAuth ?? options.claudeAuth) ? { claudeAuth: (options.advisorAuth ?? options.claudeAuth)! } : {}),
+      // A CLI-routed advising model consults under its reviewed route's auth:
+      // the advisor route's override, else its runner's configured auth.
+      advisorAuth: (runner) => advisorAuthFor(runner, options),
       directory: options.targetDir,
       signal: shutdown.signal,
       auditPolicy: options.advisorAuditPolicy ?? "summary",
@@ -960,7 +979,7 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
         directory: options.targetDir,
         autoAccept,
         judgeModel,
-        ...(options.claudeAuth ? { judgeAuth: options.claudeAuth } : {}),
+        ...(judgeAuthOf(options) ? { judgeAuth: judgeAuthOf(options)! } : {}),
         terminalInput,
         serverUrl: opencode.url,
         ...(opencode.password ? { serverPassword: opencode.password } : {}),
@@ -1106,10 +1125,12 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
             ...(identity.branch ? { branch: identity.branch } : {}),
             // The reviewed feature link survives workspace cleanup (task 5.1).
             ...(options.plan?.feature ? { feature: options.plan.feature } : {}),
-            // The commit writer follows its configured route; a Claude route
-            // runs under the run's Claude auth, never OpenCode.
+            // The commit writer follows its configured route; a CLI runner's
+            // route runs under that runner's auth, never OpenCode.
             ...(options.commitMessageModel ? { commitMessageModel: options.commitMessageModel } : {}),
-            ...(options.claudeAuth ? { commitMessageAuth: options.claudeAuth } : {}),
+            ...(options.commitMessageModel && options.runnerAuth?.[runnerOfModelReference(options.commitMessageModel)]
+              ? { commitMessageAuth: options.runnerAuth[runnerOfModelReference(options.commitMessageModel)]! }
+              : {}),
             signal: shutdown.signal,
             // The commit writer's helper runs under this coordinator, so its
             // bounded stop draws from the coordinator's remaining shutdown
@@ -1746,10 +1767,12 @@ type PreparedPhaseRun = {
   permissions?: PermissionAdditions
   /** The run's live auto-accept reference; read when each attempt starts. */
   autoAccept?: AutoAccept
-  /** The configured Claude authentication; absent means subscription. */
-  claudeAuth?: AuthenticationSelection
+  /** The configured authentication of the phase's runner; absent means subscription. */
+  auth?: AuthenticationSelection
+  /** The authentication a CLI-routed smart judge runs under. */
+  judgeAuth?: AuthenticationSelection
   /** The smart auto-accept judge, for a runner whose asks the engine decides. */
-  judgeModel?: { providerID: string; modelID: string }
+  judgeModel?: { providerID: string; modelID: string; variant?: string }
   /** No human decides this run (human steps off): failure and budget gates fail the step instead of holding. */
   unattended?: boolean
 }
@@ -1789,8 +1812,9 @@ export async function preparePhaseRun(
     loopGuard: resolveLoopGuard(options.loopGuard),
     permissions: options.permissions,
     autoAccept: options.autoAccept ?? options.progress?.autoAccept ?? { mode: options.yolo ? "all" : options.smart ? "smart" : "off" },
-    ...(options.claudeAuth ? { claudeAuth: options.claudeAuth } : {}),
-    ...(options.smartJudgeModel ? { judgeModel: parseModel(splitModelVariant(options.smartJudgeModel).model) } : {}),
+    ...(options.runnerAuth?.[stepRunnerFor(phase.runner).id] ? { auth: options.runnerAuth[stepRunnerFor(phase.runner).id]! } : {}),
+    ...(judgeAuthOf(options) ? { judgeAuth: judgeAuthOf(options)! } : {}),
+    ...(options.smartJudgeModel ? { judgeModel: judgeModelOf(options.smartJudgeModel) } : {}),
     ...(options.humanReview ? {} : { unattended: true }),
   }
 }
@@ -1958,6 +1982,7 @@ export async function runPhaseUntilResolved(
                 },
                 runner: phase.runner,
                 runDir: workspace.dir,
+                ...(run.auth ? { auth: run.auth } : {}),
               })
               // "unavailable": nobody can take over, so the automatic policy below applies.
               if (outcome !== "continue") break
@@ -2006,6 +2031,7 @@ export async function runPhaseUntilResolved(
               },
               runner: phase.runner,
               runDir: workspace.dir,
+              ...(run.auth ? { auth: run.auth } : {}),
             })
             // A gate that cannot be asked (no TUI, no controller) must not spin
             // on re-resolution: keep the already-validated candidate, exactly
@@ -2033,6 +2059,7 @@ export async function runPhaseUntilResolved(
             },
             runner: phase.runner,
             runDir: workspace.dir,
+            ...(run.auth ? { auth: run.auth } : {}),
           })
           // A noninteractive budget gate cannot choose reset, so preserve the
           // original hard-limit failure instead of allowing a silent continuation.
@@ -2086,6 +2113,7 @@ export async function runPhaseUntilResolved(
             },
             runner: phase.runner,
             runDir: workspace.dir,
+            ...(run.auth ? { auth: run.auth } : {}),
           })
           if (outcome === "continue") {
             // The failed attempt's chat text is gone; the rescued deliverable can
@@ -2142,6 +2170,8 @@ type PhaseGateOptions = {
   onAbort?: () => void
   /** Which runner's session the gate reopens; resolved through the opener table. */
   runner?: StepRunnerId
+  /** The reviewed authentication the phase's session ran under, which reopening it needs. */
+  auth?: AuthenticationSelection
   runDir?: string
   /**
    * The run has no human decisions (human steps off, the default off a TTY):
@@ -2152,7 +2182,7 @@ type PhaseGateOptions = {
   unattended?: boolean
 }
 
-type SessionWindowInput = { targetDir: string; sessionID: string; runDir: string; url?: string; password?: string }
+type SessionWindowInput = { targetDir: string; sessionID: string; runDir: string; url?: string; password?: string; auth?: AuthenticationSelection }
 
 type PhaseGateDeps = {
   /** Legacy test seam: the OpenCode session-window opener. */
@@ -2176,7 +2206,17 @@ function sessionWindowOpeners(deps: PhaseGateDeps): Partial<Record<StepRunnerId,
     "opencode": (input) =>
       opencode({ url: input.url ?? "", ...(input.password ? { password: input.password } : {}), targetDir: input.targetDir, sessionID: input.sessionID }),
     "claude-code": (input) => claude({ targetDir: input.targetDir, sessionID: input.sessionID, runDir: input.runDir }),
+    codex: (input) => openCodexSessionWindow({ targetDir: input.targetDir, sessionID: input.sessionID, ...(input.auth ? { auth: input.auth } : {}) }),
   }
+}
+
+/**
+ * What a process-owned session records when it starts, so `[o]` can reopen
+ * it later, by runner id: a Claude session remembers the directories it
+ * could read. A runner absent here records nothing.
+ */
+const sessionRecorders: Partial<Record<StepRunnerId, (runDir: string, sessionID: string, attachments: FilePartInput[], targetDir: string) => Promise<void>>> = {
+  "claude-code": (runDir, sessionID, attachments, targetDir) => writeClaudeSessionDirectories(runDir, sessionID, claudeReadableDirectories(attachments, targetDir, runDir)),
 }
 
 const defaultPhaseGateDeps: PhaseGateDeps = {}
@@ -2286,6 +2326,7 @@ export async function waitForPhaseGate(
           targetDir,
           sessionID,
           runDir: options.runDir ?? "",
+          ...(options.auth ? { auth: options.auth } : {}),
           ...(takeover?.serverUrl ? { url: takeover.serverUrl } : {}),
           ...(takeover?.serverPassword ? { password: takeover.serverPassword } : {}),
         })
@@ -2369,7 +2410,7 @@ async function runPhaseAttempt(
     {
       approvals: createOperatorApprovalService({
         ...(client ? { client } : {}),
-        ...(prepared.claudeAuth ? { claudeAuth: prepared.claudeAuth } : {}),
+        ...(prepared.judgeAuth ? { judgeAuth: prepared.judgeAuth } : {}),
         progress,
         directory: targetDir,
         ...(prepared.autoAccept ? { autoAccept: prepared.autoAccept } : {}),
@@ -2453,12 +2494,10 @@ async function runPhaseAttempt(
       // here for whoever follows the coordinator's log, such as a CLI agent.
       if (!serverSession && event.type === "session" && event.session.sessionId !== activeSessionID) {
         log.info(`[${phase.name}] session: ${event.session.sessionId}`)
-        // [o] reopens a finished Claude session with the directories it could read.
-        if (runnerId === "claude-code") {
-          void writeClaudeSessionDirectories(workspace.dir, event.session.sessionId, claudeReadableDirectories(prepared.attachments, targetDir, workspace.dir)).catch((error: unknown) =>
-            log.warn(`[${phase.name}] couldn't record the session's readable directories: ${error instanceof Error ? error.message : String(error)}`),
-          )
-        }
+        // [o] reopens a finished session with what it needs (Claude: the directories it could read).
+        void sessionRecorders[runnerId]?.(workspace.dir, event.session.sessionId, prepared.attachments, targetDir).catch((error: unknown) =>
+          log.warn(`[${phase.name}] couldn't record the session's readable directories: ${error instanceof Error ? error.message : String(error)}`),
+        )
       }
       if (!serverSession && event.type === "usage") log.info(`[${phase.name}] usage: ${formatUsageForLog(toProgressUsage(event.usage))}`)
       if (event.type === "session" && event.session.sessionId !== activeSessionID) {
@@ -2477,8 +2516,9 @@ async function runPhaseAttempt(
     attempt,
     services,
     policy,
-    ...(prepared.claudeAuth ? { auth: prepared.claudeAuth } : {}),
-    ...(runnerId === "claude-code" ? { streamLogPath: join(workspace.dir, "logs", `${phase.name}.${attempt}.claude.jsonl`) } : {}),
+    ...(prepared.auth ? { auth: prepared.auth } : {}),
+    // A process-owned session tees its raw stream (`logs/<step>.<attempt>.<runner>.jsonl`).
+    ...(!serverSession ? { streamLogPath: join(workspace.dir, "logs", `${phase.name}.${attempt}.${stepRunnerFor(phase.runner).sessionName}.jsonl`) } : {}),
     env: process.env,
     client,
   }
@@ -2495,8 +2535,8 @@ async function runPhaseAttempt(
       phase.name,
       runnerExecutionRecord({
         runner: runnerId,
-        // Only Claude selects an authentication; OpenCode uses its provider credentials.
-        ...(runnerId === "claude-code" ? { auth: { mode: context.auth?.mode ?? "subscription", ...(context.auth?.credentialRef ? { credentialRef: context.auth.credentialRef } : {}) } } : {}),
+        // Only a runner that authenticates selects one; OpenCode uses its provider credentials.
+        ...(runnerDescriptor(runnerId).authenticates ? { auth: { mode: context.auth?.mode ?? "subscription", ...(context.auth?.credentialRef ? { credentialRef: context.auth.credentialRef } : {}) } } : {}),
         checkout: targetDir,
         model: { modelId: prepared.model.modelID, ...(prepared.model.variant ? { variant: prepared.model.variant } : {}) },
         ...(activeSessionID ? { sessionId: activeSessionID } : {}),
@@ -2742,9 +2782,9 @@ export function withAttachmentsByPath(prompt: string, attachments: readonly File
 }
 
 function buildPhasePrompt(workspace: Workspace, phase: AgentStep) {
-  // Both runners submit through Convoy's write_report tool: OpenCode's plugin,
-  // Claude's MCP tool (which Claude lists under its server-qualified name).
-  const tool = phase.runner === "claude-code" ? "`write_report` (`mcp__convoy__write_report`)" : "`write_report`"
+  // Every runner submits through Convoy's write_report tool: OpenCode's plugin,
+  // the CLI runners' MCP tool, named the way each runner lists it.
+  const tool = runnerDescriptor(stepRunnerFor(phase.runner).id).reportTool
   return [
     `# Pipeline phase: ${phase.name}`,
     "",
@@ -2968,7 +3008,7 @@ export function modelOverrideNotice(pipeline: Pipeline, override: string): strin
     .filter((step): step is AgentStep => step.type === "agent" && !stepRunnerFor(step.runner).capabilities.globalModelOverride)
     .map((step) => step.name)
   if (unaffected.length === 0) return undefined
-  return `--model applies to OpenCode steps only; Claude Code steps keep their configured model: ${unaffected.join(", ")}`
+  return `--model applies to OpenCode steps only (scope it with <runner>/<model> for a CLI runner); these steps keep their configured model: ${unaffected.join(", ")}`
 }
 
 class LoggedAttemptError extends Error {

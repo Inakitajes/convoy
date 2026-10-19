@@ -17,7 +17,7 @@
   <a href="https://github.com/Inakitajes/convoy/releases">Releases</a>
 </p>
 
-One agent session runs out of context on a big task, then grades its own work. Convoy carries the task across many fresh sessions, checkpointed and resumable, then has independent models score the branch and fix the gaps until it reaches **90/100**. On OpenCode, Claude Code, or both.
+One agent session runs out of context on a big task, then grades its own work. Convoy carries the task across many fresh sessions, checkpointed and resumable, then has independent models score the branch and fix the gaps until it reaches **90/100**. On OpenCode, Claude Code, Codex, or any mix.
 
 <p align="center">
   <img src="assets/screenshot.jpeg" alt="Convoy's dashboard running a pipeline with six parallel agents" width="920">
@@ -27,13 +27,16 @@ One agent session runs out of context on a big task, then grades its own work. C
 
 - **Goes the distance.** A big task runs as phases. Each one starts with a fresh context and ends in a commit, so a run can detach, resume, and keep going for hours. [Running Convoy →](docs/running.md)
 - **Proves the result.** Two independent scorers grade the branch against a fixed rubric, and fix rounds target only the gaps they found until it reaches 90/100. [Quality and goals →](docs/quality-and-goals.md)
-- **Bring your harness.** Every step runs on [OpenCode](https://opencode.ai) or [Claude Code](https://code.claude.com), mixed per step, with advisors from either one. [Runners →](docs/runners.md)
+- **Bring your harness.** Every step runs on [OpenCode](https://opencode.ai), [Claude Code](https://code.claude.com), or [Codex](https://developers.openai.com/codex) (experimental), mixed per step, with advisors from any of them. A model is spelled the same everywhere; the step's `runner` picks the harness. [Runners →](docs/runners.md)
 - **Same rules for every agent.** Per-step policies (read-only, verify, write) apply to every tool call. Agents can't commit or push. [Safety →](docs/safety.md)
 - **Everything stays local.** Logs, transcripts, reports, and costs live next to your Git history. Worktrees and OpenSpec changes keep each piece of work isolated. [Worktrees →](docs/worktrees.md) · [OpenSpec →](docs/openspec.md)
 
 ## Get started
 
-Requires macOS or Linux, Git, and an installed, authenticated [OpenCode](https://opencode.ai) or [Claude Code](https://code.claude.com), or both. Bun is bundled in the release binary.
+Requires macOS or Linux, Git, and at least one installed, authenticated runner: [OpenCode](https://opencode.ai), [Claude Code](https://code.claude.com), or [Codex](https://developers.openai.com/codex). Bun is bundled in the release binary.
+
+> [!WARNING]
+> **Codex support is experimental.** It runs on Codex's app-server protocol, which OpenAI itself labels experimental, and it has had less real-world use than OpenCode and Claude Code. Expect rough edges and breaking changes between releases, and check the branch before you merge it. Please [report issues](https://github.com/Inakitajes/convoy/issues). [Codex in Convoy →](docs/runners.md#how-convoy-integrates-with-codex)
 
 ```sh
 curl -fsSL https://github.com/Inakitajes/convoy/releases/latest/download/install.sh | sh
@@ -70,7 +73,7 @@ Every pipeline is YAML you can copy and change. [Models, steps, and stopping rul
 |---|---|
 | [Getting started](docs/getting-started.md) | Requirements, installation, and upgrades |
 | [Pipelines](docs/pipelines.md) | Built-ins, models, and migration from earlier variants |
-| [Runners](docs/runners.md) | OpenCode and Claude Code, auth, billing, and parity |
+| [Runners](docs/runners.md) | OpenCode, Claude Code, and Codex: models, routes, auth, billing, and parity |
 | [Quality and goals](docs/quality-and-goals.md) | Scoring rubric and improve/measure loops |
 | [Worktrees](docs/worktrees.md) | Home, isolation, spin, and close |
 | [OpenSpec](docs/openspec.md) | Spec-driven runs and the artifact reader |

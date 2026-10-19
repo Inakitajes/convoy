@@ -566,7 +566,7 @@ describe("planned step model preview", () => {
       permissions: { allow: [], deny: [] },
       hooks: { pre: [], post: [], pipelines: {} },
     }
-    const plan = buildRunPlan({ ...options, claudeAuthMode: "api-key" })
+    const plan = buildRunPlan({ ...options, runnerAuth: { "claude-code": { mode: "api-key", credentialRef: "CONVOY_ANTHROPIC_KEY" } } })
     const step = plan.pipeline.steps[0]
     if (step?.type !== "agent") throw new Error("expected an agent step")
     expect(plannedStepAuthMode(step)).toBe("api-key")

@@ -13,10 +13,10 @@ Install Convoy, check the requirements, and update your binary.
 ### Release binary
 
 - macOS (Apple Silicon or Intel), or Linux (ARM64 or x64)
-- `opencode` installed and authenticated (`opencode auth login`)
+- At least one runner installed and authenticated: `opencode` (`opencode auth login`), `claude` (`claude`, then `/login`), or `codex` 0.160+ (`codex login`) — only the runners a pipeline uses are required
 - `git`
 
-Bun is included in the release binary; it is **not** a user requirement. See [provider setup](models.md#authentication-and-providers) to authenticate the models used by your pipeline.
+Bun is included in the release binary; it is **not** a user requirement. See [provider setup](models.md#authentication-and-providers) to authenticate the models used by your pipeline, and [Runners](runners.md) to choose and mix runners.
 
 ### Development
 

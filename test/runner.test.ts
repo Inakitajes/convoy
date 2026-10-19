@@ -253,7 +253,7 @@ describe("runner helpers", () => {
     const pipeline: Pipeline = { name: "review", steps: [agentStep("security-gpt"), claude] }
 
     expect(modelOverrideNotice(pipeline, "openai/gpt-5.6#xhigh")).toBe(
-      "--model applies to OpenCode steps only; Claude Code steps keep their configured model: security-claude",
+      "--model applies to OpenCode steps only (scope it with <runner>/<model> for a CLI runner); these steps keep their configured model: security-claude",
     )
     expect(modelOverrideNotice(pipeline, "")).toBeUndefined()
     expect(modelOverrideNotice({ name: "review", steps: [agentStep("security-gpt")] }, "openai/gpt-5.6")).toBeUndefined()
@@ -2317,6 +2317,12 @@ describe("waitForPhaseGate", () => {
     })
 
     expect(opened).toEqual([{ url: "http://127.0.0.1:1", password: "s3cret", targetDir: "/repo", sessionID: "ses_1" }])
+  })
+
+  test("reopening a Codex session goes under the phase's reviewed auth, so an API-key thread is refused with its reason", async () => {
+    const { calls, progress } = gateProgress(["iterate", "continue"])
+    await waitForPhaseGate("implementer", "/repo", "thr_1", undefined, progress, { kind: "interactive", canRetry: false, runner: "codex", auth: { mode: "api-key", credentialRef: "CONVOY_OPENAI_KEY" } })
+    expect(calls.activities).toContain("couldn't reopen the session window: Codex thread thr_1 ran under API-key mode, in a private Codex home Convoy discards after use, so it cannot be reopened")
   })
 
   test("a failed window reopen keeps the gate waiting instead of crashing", async () => {

@@ -1,7 +1,7 @@
 import { readFile, stat } from "node:fs/promises"
 import { dirname, join, resolve } from "node:path"
 
-import { advisorAuthOf, buildAgentRegistry, ejectAgentPrompt, emptyHooksConfig, featuresOf, globalConfigPath, loadMergedConvoyConfig, pipelineDefaultsOf, selectPipelineSpec, writeDefaultGlobalConfig, writeDefaultProjectConfig, type ConvoyDefaults } from "./config"
+import { advisorAuthOf, authoringHarnessOf, runnerAuthOf, buildAgentRegistry, ejectAgentPrompt, emptyHooksConfig, featuresOf, globalConfigPath, loadMergedConvoyConfig, pipelineDefaultsOf, selectPipelineSpec, writeDefaultGlobalConfig, writeDefaultProjectConfig, type ConvoyDefaults } from "./config"
 import { readControlFile } from "./control-client"
 import { detectBaseRef, currentBranch, listChangedFiles, worktreeDefaultFor } from "./git"
 import { openRouterKeySources } from "./limits"
@@ -9,7 +9,7 @@ import { log } from "./log"
 import { builtInAgents, defaultGptModel, defaultGptVariant, defaultPipeline, defaultPipelineName, hasWritableStep, resolvePipeline, splitModelVariant, validateStepFilters } from "./pipeline"
 import { consensusStep } from "./quality-score"
 import { defaultMaxConcurrentAgents, parseModel } from "./runner"
-import { buildRunPlan, isClaudeOnlyPipeline, type BuildRunPlanInput } from "./run-plan"
+import { buildRunPlan, defaultHelperRoute, soleCliRunner, type BuildRunPlanInput } from "./run-plan"
 import { parseModelOverride } from "./step-runners"
 import { helperModel } from "./helper-routes"
 import { defaultCommitMessageModel } from "./commit-message"
@@ -110,7 +110,7 @@ export type CliCommand =
   | { type: "update"; checkOnly: boolean }
   | { type: "coordinate"; launchPath: string }
   | { type: "hook" }
-  | { type: "mcp" }
+  | { type: "mcp"; args: string[] }
 
 export async function parseAndRun(argv: string[]) {
   if (shouldLaunchHome(argv, process.stdin.isTTY, process.stdout.isTTY)) {
@@ -169,7 +169,7 @@ export async function parseAndRun(argv: string[]) {
   }
   if (command.type === "mcp") {
     const { runMcpCommand } = await import("./runners/commands")
-    await runMcpCommand()
+    await runMcpCommand(command.args)
     return
   }
   if (command.type === "close") {
@@ -1323,10 +1323,10 @@ export async function prepareInteractiveRun(targetDir: string, selection: Launch
 /** Asks the configured naming model for a branch name for the launcher's branch step. */
 async function proposeInteractiveBranchName(targetDir: string, input: { prompt: string; guidance?: string }): Promise<LaunchBranchProposal> {
   const { defaultBranchNameModel, proposeBranchName } = await import("./worktree")
-  const { helperClaudeAuth } = await import("./helper-routes")
+  const { helperAuth } = await import("./helper-routes")
   const config = await loadMergedConvoyConfig(targetDir)
   const model = helperModel("branchName", config?.defaults, defaultBranchNameModel)
-  const proposal = await proposeBranchName({ ...input, targetDir, model, claudeAuth: helperClaudeAuth(config?.defaults) })
+  const proposal = await proposeBranchName({ ...input, targetDir, model, auth: helperAuth(config, model) })
   return { ...proposal, model }
 }
 
@@ -1853,18 +1853,21 @@ async function proposeInCheckoutWithClaude(
 
 /**
  * The harness authoring flows open (`defaults.authoring.runner`, else the
- * run-wide `defaults.runner`, else OpenCode) and, for Claude, the reviewed
- * authentication: `defaults.authoring.authMode` with the Claude credential
- * reference, else the configured Claude auth.
+ * run-wide `defaults.runner` when it can host a conversation, else OpenCode)
+ * and, for a runner that authenticates, the reviewed authentication:
+ * `defaults.authoring.authMode` with that runner's credential reference,
+ * else its configured auth.
  */
 async function authoringRouteFor(launchDir: string): Promise<import("./conversations").AuthoringRoute> {
-  const { helperClaudeAuth } = await import("./helper-routes")
-  const defaults = (await loadMergedConvoyConfig(launchDir).catch(() => undefined))?.defaults
-  const harness = defaults?.authoring?.runner ?? defaults?.runner ?? "opencode"
-  if (harness !== "claude-code") return { harness: "opencode" }
+  const { runnerDescriptor } = await import("./runners/descriptors")
+  const config = await loadMergedConvoyConfig(launchDir).catch(() => undefined)
+  const defaults = config?.defaults
+  const harness = authoringHarnessOf(config)
+  if (!runnerDescriptor(harness).authenticates) return { harness: harness as import("./conversations").AuthoringHarness }
+  const configuredAuth = runnerAuthOf(config)[harness]
   const mode = defaults?.authoring?.authMode
-  const auth = mode === "api-key" ? { mode, ...(defaults?.claudeAuth?.credentialRef ? { credentialRef: defaults.claudeAuth.credentialRef } : {}) } : mode ? { mode } : helperClaudeAuth(defaults)
-  return { harness, auth }
+  const auth = mode === "api-key" ? { mode, ...(configuredAuth?.credentialRef ? { credentialRef: configuredAuth.credentialRef } : {}) } : mode ? { mode } : (configuredAuth ?? { mode: "subscription" as const })
+  return { harness: harness as import("./conversations").AuthoringHarness, auth }
 }
 
 /** Reports an unavailable handoff without launching anything. */
@@ -2189,7 +2192,7 @@ export async function parseCommand(argv: string[]): Promise<CliCommand> {
   }
 
   if (argv[0] === "hook") return { type: "hook" }
-  if (argv[0] === "mcp") return { type: "mcp" }
+  if (argv[0] === "mcp") return { type: "mcp", args: argv.slice(1) }
 
   const parsed = parseArgs(argv)
   if (parsed.help) return { type: "help", text: help() }
@@ -2441,12 +2444,16 @@ export async function resolveRunOptions(parsed: ParsedArgs): Promise<Omit<RunOpt
   // chain here so the runner can stay oblivious to config and built-in defaults.
   // A Claude-only plan inherits its own runner for the judge (a Claude-scoped
   // --model, else Haiku) instead of an OpenCode model it could not run.
-  const claudeOverride = parseModelOverride(parsed.modelOverride)
+  // A plan on one CLI runner inherits that runner for the judge (a
+  // runner-scoped --model, else the runner's helper model) instead of an
+  // OpenCode model it could not run.
+  const scopedOverride = parseModelOverride(parsed.modelOverride)
+  const soleRunner = soleCliRunner(pipeline)
   const smartJudgeModel =
     parsed.smartModel ||
     defaults.autoAcceptJudgeModel ||
-    (isClaudeOnlyPipeline(pipeline)
-      ? `claude-code/${claudeOverride.scope === "claude-code" && claudeOverride.model ? claudeOverride.model : "haiku"}`
+    (soleRunner
+      ? defaultHelperRoute(soleRunner, scopedOverride.scope === soleRunner && scopedOverride.model ? scopedOverride.model : undefined)
       : parsed.modelOverride || defaults.model || `${defaultGptModel}#${defaultGptVariant}`)
 
   // Goal execution is enabled exclusively by the pipeline's own terminal goal
@@ -2482,17 +2489,9 @@ export async function resolveRunOptions(parsed: ParsedArgs): Promise<Omit<RunOpt
     yolo: parsed.yolo ?? false,
     smart: parsed.smart ?? false,
     smartJudgeModel,
-    commitMessageModel: helperModel("commitMessage", defaults, defaultCommitMessageModel, isClaudeOnlyPipeline(pipeline) ? "claude-code" : undefined),
-    ...(advisorAuthOf(defaults) ? { advisorAuth: advisorAuthOf(defaults)! } : {}),
-    ...(defaults.claudeAuth
-      ? {
-          claudeAuth: {
-            mode: defaults.claudeAuth.authMode,
-            ...(defaults.claudeAuth.credentialRef ? { credentialRef: defaults.claudeAuth.credentialRef } : {}),
-            ...(defaults.claudeAuth.billingPolicy ? { billingPolicy: defaults.claudeAuth.billingPolicy } : {}),
-          },
-        }
-      : {}),
+    commitMessageModel: helperModel("commitMessage", defaults, defaultCommitMessageModel, soleRunner),
+    ...(advisorAuthOf(config) ? { advisorAuth: advisorAuthOf(config)! } : {}),
+    ...(Object.keys(runnerAuthOf(config)).length > 0 ? { runnerAuth: runnerAuthOf(config) } : {}),
     gateway: parsed.gateway ?? config?.modelRouting?.gateway ?? "configured",
     gatewayExplicit: parsed.gateway !== undefined,
     modelRoutingOverrides: config?.modelRouting?.overrides ?? {},
@@ -2789,7 +2788,7 @@ export function retiredFeatureDiagnostic(args: string[]): string {
 function help() {
   return `convoy [prompt]
 
-Sequential agent pipeline for implementing features, on OpenCode or Claude Code.
+Sequential agent pipeline for implementing features, on OpenCode, Claude Code, or Codex.
 
 Usage:
   convoy
@@ -2866,7 +2865,7 @@ Flags:
   --smart                  Smart auto-accept: an AI judge auto-allows safe ask-level requests and escalates risky ones (shift+tab cycles)
   --smart-model <provider/model[#variant]> Model for the smart auto-accept judge (default: defaults.autoAcceptJudgeModel, else the run's model)
   --include-dirty          Include existing changes in the first commit
-  --model <provider/model[#variant]> Force a model for OpenCode steps (Claude Code steps keep their CLI model)
+  --model <provider/model[#variant]> Force a model for OpenCode steps; <runner>/<model> (codex/gpt-5.5, claude-code/opus) forces one runner's steps
   --advisor <provider/model[#variant]> Force an advising model on every OpenCode step: a stronger model
                            consulted at decision points (before the first write, before declaring done,
                            and on demand) that reads the step's transcript but never runs tools
@@ -2922,8 +2921,9 @@ Config files:
 Config keys:
   defaults:                model, baseRef, pipeline, worktree, worktreeLocation, prdHistory,
                            autoAcceptJudgeModel, branchNameModel, commitMessageModel,
-                           runner, claudeAuth, advisorRoute, helperRoutes, authoring
-  modelRouting:            gateway and explicit per-logical-model overrides
+                           runner, advisorRoute, helperRoutes, authoring (claudeAuth: legacy)
+  runners:                 per-runner settings: runners.<claude-code|codex>.auth
+  modelRouting:            gateway and explicit per-logical-model overrides (OpenCode)
   agents:                  project agents or built-in overrides; prompts live at agents/<name>.md
   pipelines:               named step lists mixing agents and human gates
   permissions:             allow/deny additions to the bash policy (deny always wins)

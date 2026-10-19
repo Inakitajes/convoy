@@ -26,7 +26,7 @@ describe("runner composition", () => {
       cwd: dir,
       enforcement: buildEnforcementPlan({ hookCommand: "convoy hook", permissionCommand: "convoy-mcp" }),
     })
-    expect(composition.registry.list()).toEqual(["opencode", "claude-code"])
+    expect(composition.registry.list()).toEqual(["opencode", "claude-code", "codex"])
     await composition.close()
   })
 })

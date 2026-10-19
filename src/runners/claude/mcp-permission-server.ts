@@ -27,6 +27,8 @@ export type McpPermissionDeps = {
   authorize?(request: McpRequest): boolean
   /** The attempt's Convoy tools, when its bridge serves any. */
   tools?: McpToolHost
+  /** False for a host that serves only Convoy's tools (a runner that asks for approvals in-band). */
+  permissionTool?: boolean
 }
 
 export type McpRequest = {
@@ -101,11 +103,11 @@ export async function handleMcpPermissionRequest(
     case "ping":
       return ok(id, {})
     case "tools/list":
-      return ok(id, { tools: [permissionTool, ...(deps.tools?.definitions ?? [])] })
+      return ok(id, { tools: [...(deps.permissionTool === false ? [] : [permissionTool]), ...(deps.tools?.definitions ?? [])] })
     case "tools/call": {
       const params = asRecord(request.params)
       const name = params && typeof params.name === "string" ? params.name : ""
-      if (name !== permissionToolName) {
+      if (name !== permissionToolName || deps.permissionTool === false) {
         if (!deps.tools?.definitions.some((tool) => tool.name === name)) return fail(id, -32602, `unknown tool: ${name}`)
         const result = await deps.tools.call(name, params ? asRecord(params.arguments) ?? {} : {})
         return ok(id, { content: [{ type: "text", text: result.text }], isError: result.isError })

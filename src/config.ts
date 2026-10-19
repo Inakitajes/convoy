@@ -26,11 +26,12 @@ import {
   type ResolvePipelineInput,
   type StepSpec,
 } from "./pipeline"
-import { isStepRunnerId, normalizeStepRunnerModel, stepRunnerCapabilityReason, stepRunnerFor, type StepRunnerId } from "./step-runners"
+import { isStepRunnerId, normalizeStepRunnerModel, stepRunnerCapabilityReason, stepRunnerChoices, stepRunnerFor, stepRunnerIds, type StepRunnerId } from "./step-runners"
+import { qualifiedRunnerOf, runnerDescriptor } from "./runners/descriptors"
 import type { AuthenticationMode, AuthenticationSelection, BillingPolicy } from "./runners/contracts"
 import type { NotificationSettings } from "./notifications"
 import type { AdvisorAuditPolicy } from "./advisor-events"
-import type { AgentSpec, HookSet, HookSpec, HooksConfig, HookWhen, PermissionAdditions } from "./types"
+import type { AgentSpec, HookSet, HookSpec, HooksConfig, HookWhen, PermissionAdditions, AdvisorAuthOverride, RunnerAuthSelections } from "./types"
 import { isModelGateway, logicalModel, modelGatewayChoices, modelGateways, type ModelRoutingConfig, type ModelRoutingOverrides } from "./model-routing"
 import { convoyHome, convoyRoot, globalConfigPath } from "./workspace"
 
@@ -57,6 +58,35 @@ export type ConvoyConfig = {
   ui?: UiConfig
   /** Optional product areas; an unset switch keeps the area on. */
   features?: FeatureToggles
+  /** Per-runner settings (`runners.<id>.auth`); the project wins per runner. */
+  runners?: RunnerSettingsMap
+}
+
+/** One runner's authentication as configured: the mode, a credential reference (never a key), and the billing decision. */
+export type RunnerAuthConfig = { authMode: AuthenticationMode; credentialRef?: string; billingPolicy?: BillingPolicy }
+
+export type RunnerSettings = { auth?: RunnerAuthConfig }
+
+export type RunnerSettingsMap = Partial<Record<StepRunnerId, RunnerSettings>>
+
+function selectionOf(auth: RunnerAuthConfig): AuthenticationSelection {
+  return { mode: auth.authMode, ...(auth.credentialRef ? { credentialRef: auth.credentialRef } : {}), ...(auth.billingPolicy ? { billingPolicy: auth.billingPolicy } : {}) }
+}
+
+/**
+ * The configured authentication per runner: `runners.<id>.auth`, with the
+ * legacy `defaults.claudeAuth` read for Claude when `runners.claude-code.auth`
+ * is unset. A runner absent here runs on its subscription login.
+ */
+export function runnerAuthOf(config: Pick<ConvoyConfig, "defaults" | "runners"> | undefined): Partial<Record<StepRunnerId, AuthenticationSelection>> {
+  const out: Partial<Record<StepRunnerId, AuthenticationSelection>> = {}
+  // Legacy per-runner keys still read when the runner's own block is unset.
+  const legacy: Partial<Record<StepRunnerId, RunnerAuthConfig>> = config?.defaults?.claudeAuth ? { "claude-code": config.defaults.claudeAuth } : {}
+  for (const id of stepRunnerIds) {
+    const auth = config?.runners?.[id]?.auth ?? legacy[id]
+    if (auth) out[id] = selectionOf(auth)
+  }
+  return out
 }
 
 /**
@@ -123,7 +153,8 @@ export type ConvoyDefaults = {
   /** Default runner for steps that do not set their own. */
   runner?: StepRunnerId
   /** Default Claude authentication mode; api-key requires the env var holding the key. */
-  claudeAuth?: { authMode: AuthenticationMode; credentialRef?: string; billingPolicy?: BillingPolicy }
+  /** Legacy spelling of `runners.claude-code.auth`, still read when that is unset. */
+  claudeAuth?: RunnerAuthConfig
   /** Explicit helper-inference routes; unspecified roles inherit the run's route. */
   helperRoutes?: {
     branchName?: { runner?: StepRunnerId; model?: string }
@@ -260,7 +291,20 @@ export function mergeConvoyConfigs(global: ConvoyConfig | undefined, project: Co
     ...(global.loopGuard || project.loopGuard ? { loopGuard: { ...global.loopGuard, ...project.loopGuard } } : {}),
     ...(global.ui || project.ui ? { ui: { ...global.ui, ...project.ui } } : {}),
     ...(global.features || project.features ? { features: { ...global.features, ...project.features } } : {}),
+    ...(global.runners || project.runners ? { runners: mergeRunnerSettings(global.runners ?? {}, project.runners ?? {}) } : {}),
   }
+}
+
+/**
+ * Per runner, the project's settings win key by key over the global ones. An
+ * `auth` block is one key: its mode, credential and billing policy only make
+ * sense together, so a project block replaces the global one whole (a block
+ * with only `billingPolicy` selects subscription, its documented default).
+ */
+function mergeRunnerSettings(global: RunnerSettingsMap, project: RunnerSettingsMap): RunnerSettingsMap {
+  const merged: RunnerSettingsMap = { ...global }
+  for (const [id, settings] of Object.entries(project) as [StepRunnerId, RunnerSettings][]) merged[id] = { ...merged[id], ...settings }
+  return merged
 }
 
 /** The effective config for a run: global merged under the project config. */
@@ -566,7 +610,7 @@ export function parseConvoyConfig(body: string, source: string, targetDir: strin
   const root = v.record(raw, "")
   // Unknown keys warn instead of failing so configs written for a newer
   // convoy still load; typos surface in the warning either way.
-  v.knownKeys(root, "", ["version", "defaults", "agents", "pipelines", "permissions", "hooks", "attachments", "notifications", "modelRouting", "loopGuard", "ui", "features"])
+  v.knownKeys(root, "", ["version", "defaults", "agents", "pipelines", "permissions", "hooks", "attachments", "notifications", "modelRouting", "loopGuard", "ui", "features", "runners"])
 
   if (root.version !== undefined && root.version !== 1) v.fail("version", `unsupported value ${JSON.stringify(root.version)}; this convoy reads version 1`)
 
@@ -586,8 +630,64 @@ export function parseConvoyConfig(body: string, source: string, targetDir: strin
   if (root.loopGuard !== undefined) config.loopGuard = validateLoopGuard(v, root.loopGuard)
   if (root.ui !== undefined) config.ui = validateUi(v, root.ui)
   if (root.features !== undefined) config.features = validateFeatures(v, root.features)
+  if (root.runners !== undefined) config.runners = validateRunners(v, root.runners)
+  validateRouteAuthModes(v, config)
 
   return config
+}
+
+function validateRunners(v: Validator, raw: unknown): RunnerSettingsMap {
+  const record = v.record(raw, "runners")
+  const runners: RunnerSettingsMap = {}
+  for (const [id, value] of Object.entries(record)) {
+    if (!isStepRunnerId(id)) v.fail(`runners.${id}`, `is not a runner; expected ${stepRunnerChoices()}`)
+    const entry = v.record(value, `runners.${id}`)
+    v.knownKeys(entry, `runners.${id}`, ["auth"])
+    const settings: RunnerSettings = {}
+    if (entry.auth !== undefined) {
+      if (!runnerDescriptor(id as StepRunnerId).authenticates) v.fail(`runners.${id}.auth`, `${id} authenticates through its own provider configuration; Convoy selects no billing source for it`)
+      settings.auth = validateClaudeAuth(v, entry.auth, `runners.${id}.auth`)
+    }
+    runners[id as StepRunnerId] = settings
+  }
+  return runners
+}
+
+/**
+ * A route that selects api-key mode (`advisorRoute.authMode`,
+ * `authoring.authMode`) reuses its runner's configured credential reference,
+ * so that runner must name one.
+ */
+function validateRouteAuthModes(v: Validator, config: ConvoyConfig): void {
+  const auth = runnerAuthOf(config)
+  const check = (path: string, runner: StepRunnerId, mode: AuthenticationMode | undefined) => {
+    if (mode !== "api-key" || !runnerDescriptor(runner).authenticates) return
+    if (!auth[runner]?.credentialRef) v.fail(path, `api-key needs runners.${runner}.auth.credentialRef naming the key's environment variable`)
+  }
+  check("defaults.advisorRoute.authMode", advisorRouteRunnerOf(config.defaults), config.defaults.advisorRoute?.authMode)
+  check("defaults.authoring.authMode", authoringHarnessOf(config), config.defaults.authoring?.authMode)
+}
+
+/**
+ * The runner `advisorRoute.authMode` is for: the route's runner, else the
+ * runner its advisor model is qualified for, else Claude (the advisor runner
+ * the setting has always meant). `defaults.runner` never moves it: a plain
+ * default advisor stays an OpenCode model whatever the steps run on.
+ */
+function advisorRouteRunnerOf(defaults: ConvoyDefaults | undefined): StepRunnerId {
+  const route = defaults?.advisorRoute
+  const model = route?.model ?? defaults?.advisor
+  return route?.runner ?? (model ? qualifiedRunnerOf(model) : undefined) ?? "claude-code"
+}
+
+/**
+ * The harness authoring conversations open: `defaults.authoring.runner`,
+ * else the run-wide `defaults.runner` when it can host a conversation, else
+ * OpenCode.
+ */
+export function authoringHarnessOf(config: Pick<ConvoyConfig, "defaults"> | undefined): StepRunnerId {
+  const configured = config?.defaults?.authoring?.runner ?? config?.defaults?.runner ?? "opencode"
+  return runnerDescriptor(configured).conversationsUnavailable ? "opencode" : configured
 }
 
 function validateFeatures(v: Validator, raw: unknown): FeatureToggles {
@@ -747,13 +847,13 @@ function validateDefaults(v: Validator, raw: unknown): ConvoyDefaults {
   if (record.maxConcurrentAgents !== undefined) defaults.maxConcurrentAgents = v.positiveInt(record.maxConcurrentAgents, "defaults.maxConcurrentAgents")
   if (record.baseRef !== undefined) defaults.baseRef = v.nonEmptyString(record.baseRef, "defaults.baseRef")
   if (record.pipeline !== undefined) defaults.pipeline = v.nonEmptyString(record.pipeline, "defaults.pipeline")
-  if (record.autoAcceptJudgeModel !== undefined) defaults.autoAcceptJudgeModel = v.model(record.autoAcceptJudgeModel, "defaults.autoAcceptJudgeModel")
+  if (record.autoAcceptJudgeModel !== undefined) defaults.autoAcceptJudgeModel = validateModelRoute(v, record.autoAcceptJudgeModel, "defaults.autoAcceptJudgeModel")
   if (record.branchNameModel !== undefined) defaults.branchNameModel = v.model(record.branchNameModel, "defaults.branchNameModel")
   if (record.commitMessageModel !== undefined) defaults.commitMessageModel = v.model(record.commitMessageModel, "defaults.commitMessageModel")
   if (record.worktree !== undefined) defaults.worktree = v.boolean(record.worktree, "defaults.worktree")
   if (record.worktreeLocation !== undefined) defaults.worktreeLocation = v.nonEmptyString(record.worktreeLocation, "defaults.worktreeLocation")
   if (record.prdHistory !== undefined) defaults.prdHistory = v.boolean(record.prdHistory, "defaults.prdHistory")
-  if (record.advisor !== undefined) defaults.advisor = v.model(record.advisor, "defaults.advisor")
+  if (record.advisor !== undefined) defaults.advisor = validateModelRoute(v, record.advisor, "defaults.advisor")
   if (record.advisorMaxCalls !== undefined) defaults.advisorMaxCalls = v.positiveInt(record.advisorMaxCalls, "defaults.advisorMaxCalls")
   if (record.advisorAuditPolicy !== undefined) {
     const policy = v.nonEmptyString(record.advisorAuditPolicy, "defaults.advisorAuditPolicy")
@@ -763,33 +863,23 @@ function validateDefaults(v: Validator, raw: unknown): ConvoyDefaults {
   if (record.runner !== undefined) defaults.runner = validateRunnerId(v, record.runner, "defaults.runner")
   if (record.claudeAuth !== undefined) defaults.claudeAuth = validateClaudeAuth(v, record.claudeAuth, "defaults.claudeAuth")
   if (record.helperRoutes !== undefined) defaults.helperRoutes = validateHelperRoutes(v, record.helperRoutes)
-  if (record.advisorRoute !== undefined) {
-    defaults.advisorRoute = validateAdvisorRoute(v, record.advisorRoute)
-    // The key lives with the Claude auth; the route only selects the mode.
-    if (defaults.advisorRoute.authMode === "api-key" && !defaults.claudeAuth?.credentialRef) {
-      v.fail("defaults.advisorRoute.authMode", "api-key needs defaults.claudeAuth.credentialRef naming the key's environment variable")
-    }
-  }
-  if (record.authoring !== undefined) {
-    defaults.authoring = validateAuthoringRoute(v, record.authoring)
-    if (defaults.authoring.authMode === "api-key" && !defaults.claudeAuth?.credentialRef) {
-      v.fail("defaults.authoring.authMode", "api-key needs defaults.claudeAuth.credentialRef naming the key's environment variable")
-    }
-  }
+  // The key lives with the runner's auth; a route only selects the mode,
+  // checked once the whole config (and its runners) is read.
+  if (record.advisorRoute !== undefined) defaults.advisorRoute = validateAdvisorRoute(v, record.advisorRoute)
+  if (record.authoring !== undefined) defaults.authoring = validateAuthoringRoute(v, record.authoring)
   return defaults
 }
 
 /**
  * The pipeline-resolution defaults a config contributes. `advisorRoute`
- * qualifies the default advisor with its runner (`claude-code/<model>` for a
- * Claude advisor) and may name its model, and `runner` is the runner of every
- * step that names none.
+ * qualifies the default advisor with its runner (`claude-code/<model>`,
+ * `codex/<model>` for a CLI runner's advisor) and may name its model, and
+ * `runner` is the runner of every step that names none.
  */
 export function pipelineDefaultsOf(defaults: ConvoyDefaults | undefined): Pick<ResolvePipelineInput, "defaultModel" | "defaultAdvisor" | "defaultAdvisorMaxCalls" | "defaultRunner"> {
   const route = defaults?.advisorRoute
   const advisorModel = route?.model ?? defaults?.advisor
-  const defaultAdvisor =
-    advisorModel && route?.runner === "claude-code" && !advisorModel.startsWith("claude-code/") ? `claude-code/${advisorModel}` : advisorModel
+  const defaultAdvisor = advisorModel && route?.runner ? qualifyRoute(route.runner, advisorModel) : advisorModel
   return {
     ...(defaults?.model !== undefined ? { defaultModel: defaults.model } : {}),
     ...(defaultAdvisor !== undefined ? { defaultAdvisor } : {}),
@@ -798,19 +888,64 @@ export function pipelineDefaultsOf(defaults: ConvoyDefaults | undefined): Pick<R
   }
 }
 
-/** The authentication a Claude advisor consults under when `advisorRoute.authMode` selects one. */
-export function advisorAuthOf(defaults: ConvoyDefaults | undefined): AuthenticationSelection | undefined {
-  const mode = defaults?.advisorRoute?.authMode
+/**
+ * A model spelled for one runner, in the one form the plan reads: a CLI
+ * runner's model becomes `<runner>/<native>[#variant]`, a provider-qualified
+ * runner's stays `provider/model[#variant]`. An already runner-qualified
+ * model is kept.
+ */
+export function qualifyRoute(runner: StepRunnerId, model: string): string {
+  if (qualifiedRunnerOf(model)) return model
+  if (!stepRunnerFor(runner).qualifiedModels) return model
+  return `${runner}/${normalizeStepRunnerModel(runner, model)}`
+}
+
+/**
+ * The authentication `advisorRoute.authMode` selects, and the runner it is
+ * for: the advisor route's runner, which is the only runner it applies to.
+ */
+export function advisorAuthOf(config: Pick<ConvoyConfig, "defaults" | "runners"> | undefined): AdvisorAuthOverride | undefined {
+  const mode = config?.defaults?.advisorRoute?.authMode
   if (!mode) return undefined
-  return mode === "api-key" ? { mode, ...(defaults?.claudeAuth?.credentialRef ? { credentialRef: defaults.claudeAuth.credentialRef } : {}) } : { mode }
+  const runner = advisorRouteRunnerOf(config?.defaults)
+  const credentialRef = runnerAuthOf(config)[runner]?.credentialRef
+  return { runner, selection: mode === "api-key" ? { mode, ...(credentialRef ? { credentialRef } : {}) } : { mode } }
+}
+
+/**
+ * The authentication an advisor on `runner` consults under: the advisor
+ * route's override when it is for that runner, else the runner's own. A
+ * step's advisor on another runner never borrows the route's credential.
+ */
+export function advisorAuthFor(runner: StepRunnerId, options: { advisorAuth?: AdvisorAuthOverride; runnerAuth?: RunnerAuthSelections }): AuthenticationSelection | undefined {
+  return (options.advisorAuth?.runner === runner ? options.advisorAuth.selection : undefined) ?? options.runnerAuth?.[runner]
 }
 
 const envVarNamePattern = /^[A-Za-z_][A-Za-z0-9_]*$/
 const secretShapedPattern = /^(sk-|ghp_|xox[baprs]-|AKIA)/i
 
 function validateRunnerId(v: Validator, value: unknown, path: string): StepRunnerId {
-  if (!isStepRunnerId(value)) v.fail(path, 'must be "opencode" or "claude-code"')
+  if (!isStepRunnerId(value)) v.fail(path, `must be ${stepRunnerChoices()}`)
   return value as StepRunnerId
+}
+
+/**
+ * A model-bearing setting: a model string (`provider/model[#variant]`, or a
+ * runner-qualified `<runner>/<model>`) or a route `{ runner, model }`. The
+ * route is stored in the one form the plan reads (see `qualifyRoute`), so the
+ * model keeps one spelling whichever runner executes it.
+ */
+function validateModelRoute(v: Validator, raw: unknown, path: string): string {
+  if (typeof raw === "string") return v.model(raw, path)
+  const record = v.record(raw, path)
+  v.knownKeys(record, path, ["runner", "model"])
+  const runner = validateRunnerId(v, record.runner, `${path}.runner`)
+  const model = v.nonEmptyString(record.model, `${path}.model`)
+  try {
+    return qualifyRoute(runner, model)
+  } catch (error) {
+    return v.fail(`${path}.model`, error instanceof Error ? error.message : String(error))
+  }
 }
 
 function validateAuthMode(v: Validator, value: unknown, path: string): AuthenticationMode {
@@ -875,7 +1010,11 @@ function validateAuthoringRoute(v: Validator, raw: unknown): NonNullable<ConvoyD
   const record = v.record(raw, "defaults.authoring")
   v.knownKeys(record, "defaults.authoring", ["runner", "authMode"])
   const route: NonNullable<ConvoyDefaults["authoring"]> = {}
-  if (record.runner !== undefined) route.runner = validateRunnerId(v, record.runner, "defaults.authoring.runner")
+  if (record.runner !== undefined) {
+    route.runner = validateRunnerId(v, record.runner, "defaults.authoring.runner")
+    const unavailable = runnerDescriptor(route.runner).conversationsUnavailable
+    if (unavailable) v.fail("defaults.authoring.runner", `${route.runner} cannot host authoring conversations: ${unavailable}`)
+  }
   if (record.authMode !== undefined) route.authMode = validateAuthMode(v, record.authMode, "defaults.authoring.authMode")
   return route
 }
@@ -900,7 +1039,7 @@ function validateAgents(v: Validator, raw: unknown, targetDir: string): Record<s
     if (entry.model !== undefined) agent.model = v.model(entry.model, `${path}.model`)
     if (entry.temperature !== undefined) agent.temperature = v.temperature(entry.temperature, `${path}.temperature`)
     if (entry.readOnly !== undefined) agent.readOnly = v.boolean(entry.readOnly, `${path}.readOnly`)
-    if (entry.advisor !== undefined) agent.advisor = v.model(entry.advisor, `${path}.advisor`)
+    if (entry.advisor !== undefined) agent.advisor = validateModelRoute(v, entry.advisor, `${path}.advisor`)
 
     // Project agents bring their own prompt; built-in overrides keep theirs
     // (optionally replaced via the same path). Fail at load, not mid-run.
@@ -1111,7 +1250,14 @@ function validateStep(v: Validator, raw: unknown, path: string, context: StepCon
   if (context.insideParallel && agent === humanReviewStep) v.fail(path, `"${humanReviewStep}" can't run inside a parallel block`)
   if (record.model !== undefined && record.models !== undefined) v.fail(path, `set either "model" or "models", not both`)
 
-  const runner = record.runner !== undefined ? validateRunner(v, record.runner, `${path}.runner`) : undefined
+  // A `model: { runner, model }` route names the step's runner: the same as
+  // setting `runner:` beside a plain model, and refused when the two disagree.
+  const modelRoute = record.model !== null && typeof record.model === "object" ? v.record(record.model, `${path}.model`) : undefined
+  if (modelRoute) v.knownKeys(modelRoute, `${path}.model`, ["runner", "model"])
+  const routeRunner = modelRoute ? validateRunnerId(v, modelRoute.runner, `${path}.model.runner`) : undefined
+  const ownRunner = record.runner !== undefined ? validateRunner(v, record.runner, `${path}.runner`) : undefined
+  if (ownRunner !== undefined && routeRunner !== undefined && ownRunner !== routeRunner) v.fail(`${path}.model.runner`, `is ${routeRunner}, but the step sets runner: ${ownRunner}; set the runner in one place`)
+  const runner = ownRunner ?? routeRunner
   if (!stepRunnerFor(runner).capabilities.modelFanout && record.models !== undefined) {
     v.fail(path, `can't combine runner: ${runner} with "models" (${stepRunnerCapabilityReason(runner ?? "opencode", "model-fanout")}); give the step a single model (or none for the CLI default)`)
   }
@@ -1126,18 +1272,29 @@ function validateStep(v: Validator, raw: unknown, path: string, context: StepCon
 
   let models: string[] | undefined
   if (record.models !== undefined) {
-    const rawModels = v.stringArray(record.models, `${path}.models`)
+    if (!Array.isArray(record.models)) v.fail(`${path}.models`, "must be a list of models or { runner, model } routes")
+    const rawModels = record.models as unknown[]
     if (rawModels.length < 2) v.fail(`${path}.models`, `must have at least 2 entries; use "model" for a single model`)
-    // Each entry is validated (and normalized) in the step runner's own model
-    // namespace, so a Claude fan-out of CLI aliases is accepted and an
-    // OpenCode model on a Claude step fails here rather than mid-run.
-    models = rawModels.map((model, index) => validateStepRunnerModel(v, runner ?? "opencode", model, `${path}.models[${index}]`))
+    // Each entry is validated (and normalized) in its runner's own model
+    // namespace: the step's runner for a plain model, so a Claude fan-out of
+    // CLI aliases is accepted and an OpenCode model on a Claude step fails
+    // here rather than mid-run; its own runner for a `{ runner, model }`
+    // route, which fans the step out across runners.
+    models = rawModels.map((model, index) => {
+      const entryPath = `${path}.models[${index}]`
+      if (typeof model === "string" || model === null || model === undefined) return validateStepRunnerModel(v, runner ?? "opencode", model, entryPath)
+      // A fan-out entry names its runner explicitly, so it never inherits the
+      // step's: a provider-qualified runner keeps `<runner>/<provider>/<model>`.
+      const route = v.record(model, entryPath)
+      const routed = validateModelRoute(v, model, entryPath)
+      return isStepRunnerId(route.runner) && !stepRunnerFor(route.runner).qualifiedModels ? `${route.runner}/${routed}` : routed
+    })
   }
 
   const model =
     record.model === undefined
       ? undefined
-      : validateStepRunnerModel(v, runner ?? "opencode", record.model, `${path}.model`)
+      : validateStepRunnerModel(v, runner ?? "opencode", modelRoute ? modelRoute.model : record.model, modelRoute ? `${path}.model.model` : `${path}.model`)
 
   if (record.maxAttempts !== undefined) warnIgnoredMaxAttempts()
 
@@ -1171,19 +1328,20 @@ function validateStepName(v: Validator, raw: unknown, path: string): string {
 
 function validateRunner(v: Validator, raw: unknown, path: string): StepRunnerId {
   if (isStepRunnerId(raw)) return raw
-  return v.fail(path, `must be "opencode" or "claude-code"`)
+  return v.fail(path, `must be ${stepRunnerChoices()}`)
 }
 
 /**
- * A step's advisor is either a model or the literal `false`, which opts the step
- * out of an advisor inherited from its agent or from defaults. Unlike `model`,
- * the advisor always names an OpenCode model: it is consulted through the
- * OpenCode session API regardless of which engine runs the step.
+ * A step's advisor is a model route or the literal `false`, which opts the
+ * step out of an advisor inherited from its agent or from defaults. A plain
+ * model consults through OpenCode whichever engine runs the step; a route
+ * (`{ runner: claude-code, model: anthropic/opus }`) consults through that
+ * runner's CLI.
  */
 function validateStepAdvisor(v: Validator, raw: unknown, path: string): string | false {
   if (raw === false) return false
   if (raw === true) v.fail(path, `must be a model like "anthropic/claude-opus-5", or false to disable; true is not a model`)
-  return v.model(raw, path)
+  return validateModelRoute(v, raw, path)
 }
 
 function validateStepRunnerModel(v: Validator, runner: StepRunnerId, raw: unknown, path: string): string {
@@ -1335,6 +1493,7 @@ export function serializeConvoyConfig(config: ConvoyConfig): string {
   if (config.loopGuard && Object.keys(config.loopGuard).length > 0) out.loopGuard = config.loopGuard
   if (config.ui && Object.keys(config.ui).length > 0) out.ui = config.ui
   if (config.features && Object.keys(config.features).length > 0) out.features = config.features
+  if (config.runners && Object.keys(config.runners).length > 0) out.runners = config.runners
   return Bun.YAML.stringify(out, null, 2)
 }
 

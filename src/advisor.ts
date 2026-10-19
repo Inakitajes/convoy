@@ -4,7 +4,8 @@ import { builtInPrompts } from "./built-in-prompts"
 import { log } from "./log"
 import { writeReportToolName } from "./report"
 import type { AuthenticationSelection, Usage } from "./runners/contracts"
-import { claudeInference, type ClaudeInferenceDeps } from "./runners/claude/inference"
+import { helperInferenceFor, type HelperInferenceSeams } from "./runners/helper-inference"
+import { isStepRunnerId, runnerOfModelReference, stepRunnerFor } from "./step-runners"
 
 /**
  * The advisor←executor pattern, emulated over OpenCode's own APIs.
@@ -95,19 +96,19 @@ export type ConsultAdvisorInput = {
   /**
    * The run's OpenCode server: reads an OpenCode executor's transcript and
    * hosts an OpenCode advising model's throwaway session. Not needed when the
-   * transcript is supplied and the advising model runs on Claude.
+   * transcript is supplied and the advising model runs on a CLI runner.
    */
   client?: OpencodeClient
   /**
    * The executor's transcript, already rendered, for an executor whose session
-   * does not live on the OpenCode server (Claude): recorded by Convoy from the
+   * does not live on the OpenCode server (Claude, Codex): recorded by Convoy from the
    * attempt's normalized events.
    */
   transcript?: string
-  /** The reviewed authentication a Claude advising model (`claude-code/<model>`) consults under. */
-  claudeAuth?: AuthenticationSelection
-  /** Test seam for the Claude CLI. */
-  claudeDeps?: Partial<ClaudeInferenceDeps>
+  /** The reviewed authentication a CLI-routed advising model (`claude-code/<model>`, `codex/<model>`) consults under. */
+  auth?: AuthenticationSelection
+  /** Test seams for the CLI runners. */
+  inferenceSeams?: HelperInferenceSeams
   /** The executor session whose transcript the advisor reads. */
   sessionID: string
   directory: string
@@ -147,27 +148,26 @@ export async function consultAdvisor(input: ConsultAdvisorInput): Promise<Adviso
         : await readTranscript(requireClient(client, "read the executor's transcript"), input.sessionID, input.directory, controller.signal)
     input.onTranscript?.(transcript)
 
-    if (isClaudeAdvisor(input.model)) {
+    const infer = helperInferenceFor(runnerOfModelReference(input.model), input.inferenceSeams)
+    if (infer) {
       // Same contract as the OpenCode path: one stateless, tool-less answer
       // over the transcript, reasoning never re-entering the executor.
-      const answer = await claudeInference(
-        {
-          prompt: buildAdvisorPrompt(transcript, input),
-          system: builtInPrompts["advisor-system"],
-          model: input.model.modelID,
-          auth: input.claudeAuth ?? { mode: "subscription" },
-          cwd: input.directory,
-          tools: "none",
-          timeoutMs,
-          signal: controller.signal,
-        },
-        input.claudeDeps,
-      ).catch((error: unknown) => {
+      const answer = await infer({
+        prompt: buildAdvisorPrompt(transcript, input),
+        system: builtInPrompts["advisor-system"],
+        model: input.model.modelID,
+        ...(input.model.variant ? { variant: input.model.variant } : {}),
+        auth: input.auth ?? { mode: "subscription" },
+        cwd: input.directory,
+        tools: "none",
+        timeoutMs,
+        signal: controller.signal,
+      }).catch((error: unknown) => {
         const message = error instanceof Error ? error.message : String(error)
         throw new Error(message.endsWith("timed out") ? "advisor timed out" : message)
       })
       if (!answer.text) throw new Error("advisor returned an empty answer")
-      return { kind: "advice", text: clampEnd(answer.text, maxAdviceChars), usage: claudeUsageOf(answer.usage, input.model.modelID) }
+      return { kind: "advice", text: clampEnd(answer.text, maxAdviceChars), usage: cliUsageOf(answer.usage, input.model) }
     }
 
     const server = requireClient(client, "host the advising model")
@@ -218,9 +218,9 @@ export async function consultAdvisor(input: ConsultAdvisorInput): Promise<Adviso
   }
 }
 
-/** True when the advising model runs on the Claude CLI (a `claude-code/<model>` route). */
-export function isClaudeAdvisor(model: { providerID: string }): boolean {
-  return model.providerID === "claude-code"
+/** True when the advising model runs on a CLI runner (a `claude-code/<model>` or `codex/<model>` route). */
+export function isCliAdvisor(model: { providerID: string }): boolean {
+  return helperInferenceFor(runnerOfModelReference(model)) !== undefined
 }
 
 function requireClient(client: OpencodeClient | undefined, purpose: string): OpencodeClient {
@@ -229,17 +229,17 @@ function requireClient(client: OpencodeClient | undefined, purpose: string): Ope
 }
 
 /**
- * Claude's CLI takes no output cap, so the advice is bounded here instead: the
+ * The CLI runners take no output cap, so the advice is bounded here instead: the
  * brevity request keeps it short, and this keeps a runaway answer from flooding
  * the executor's context.
  */
 const maxAdviceChars = 8_000
 
-function claudeUsageOf(usage: Usage | undefined, modelID: string): AdvisorUsage {
+function cliUsageOf(usage: Usage | undefined, model: ModelSelection): AdvisorUsage {
   return {
     cost: usage?.costEstimate ?? 0,
     tokens: { input: usage?.input ?? 0, output: usage?.output ?? 0, reasoning: usage?.reasoning ?? 0, cacheRead: usage?.cacheRead ?? 0, cacheWrite: usage?.cacheWrite ?? 0 },
-    model: `claude-code/${modelID}`,
+    model: stepRunnerFor(runnerOfModelReference(model)).modelLabel(model.modelID, model.variant),
   }
 }
 
@@ -436,11 +436,11 @@ export function advisorNeedsOf(steps: readonly { type: string; agentName?: strin
   for (const step of steps) {
     if (step.type !== "agent" || !step.resolvedAdvisor || !step.agentName) continue
     // Only an OpenCode executor carries the advisor tool in OpenCode's agent
-    // config; a Claude executor reaches its advisor through Convoy's MCP tool.
-    if (step.runner !== "claude-code") agents.add(step.agentName)
+    // config; a CLI executor reaches its advisor through Convoy's MCP tool.
+    if (!stepRunnerFor(isStepRunnerId(step.runner) ? step.runner : undefined).qualifiedModels) agents.add(step.agentName)
     const { providerID, modelID } = step.resolvedAdvisor
     // Only an OpenCode advising model needs a capped alias in the run config.
-    if (!isClaudeAdvisor(step.resolvedAdvisor)) models.set(`${providerID}/${modelID}`, { providerID, modelID })
+    if (!isCliAdvisor(step.resolvedAdvisor)) models.set(`${providerID}/${modelID}`, { providerID, modelID })
   }
   return { agents, models: [...models.values()] }
 }
@@ -449,8 +449,8 @@ export function advisorNeedsOf(steps: readonly { type: string; agentName?: strin
 export function advisorSelectionFor(step: { resolvedAdvisor?: { providerID: string; modelID: string; variant?: string } }): ModelSelection | undefined {
   if (!step.resolvedAdvisor) return undefined
   const { providerID, modelID, variant } = step.resolvedAdvisor
-  // The capped alias exists only in the run's OpenCode config; a Claude model is consulted as itself.
-  if (isClaudeAdvisor(step.resolvedAdvisor)) return { providerID, modelID }
+  // The capped alias exists only in the run's OpenCode config; a CLI runner's model is consulted as itself.
+  if (isCliAdvisor(step.resolvedAdvisor)) return { providerID, modelID, ...(variant ? { variant } : {}) }
   return { providerID, modelID: advisorModelID(modelID), ...(variant ? { variant } : {}) }
 }
 

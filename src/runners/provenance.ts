@@ -7,6 +7,7 @@
  * for an unqualified session id or reinterprets the historical coordinator PID.
  */
 
+import { isRegisteredRunnerId } from "./descriptors"
 import type { AuthenticationMode, RunnerId, RunnerSessionRef } from "./contracts"
 
 export const runnerExecutionVersion = 1
@@ -47,7 +48,7 @@ export function runnerExecutionRecord(input: {
 }
 
 function isRunnerId(value: unknown): value is RunnerId {
-  return value === "opencode" || value === "claude-code"
+  return isRegisteredRunnerId(value)
 }
 
 function isAuthMode(value: unknown): value is AuthenticationMode {

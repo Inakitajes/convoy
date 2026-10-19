@@ -1,10 +1,22 @@
 import { capabilityAvailable, resolveRunnerCapabilities, type CapabilityInput } from "./runners/capabilities"
 import type { CapabilityId, RunnerCapabilities } from "./runners/contracts"
+import {
+  isRegisteredRunnerId,
+  normalizeQualifiedModel,
+  qualifiedRunnerOf,
+  runnerDescriptor,
+  runnerIdChoices,
+  runnerIds,
+  type RegisteredRunnerId,
+} from "./runners/descriptors"
 
-/** Canonical IDs for engines that execute pipeline agent steps. */
-export type StepRunnerId = "opencode" | "claude-code"
+/** Canonical IDs for engines that execute pipeline agent steps, from the runner descriptors. */
+export type StepRunnerId = RegisteredRunnerId
 
-export const stepRunnerIds: readonly StepRunnerId[] = ["opencode", "claude-code"]
+export const stepRunnerIds: readonly StepRunnerId[] = runnerIds
+
+/** The runner a step without its own (and without a run-wide default) runs on. */
+export const defaultStepRunnerId = "opencode" satisfies StepRunnerId
 
 /**
  * The static view of a runner's effective capabilities (design D4).
@@ -23,11 +35,12 @@ export type StepRunnerCapabilities = {
   /** Whether a read-only step can still be given bash to run tests and checks. */
   verifySteps: boolean
   modelFanout: boolean
+  /** Whether an unqualified `--model` override applies (runners whose models are provider-qualified). */
   globalModelOverride: boolean
   /**
-   * Whether the engine can host an advisor at the step's decision points:
-   * OpenCode through its permission gate and plugin tools, Claude through
-   * Convoy's hook checkpoint and MCP tools. Derived from the runner's
+   * Whether the engine can host an advisor at the step's decision points
+   * (OpenCode through its permission gate and plugin tools, the CLI runners
+   * through Convoy's checkpoint and MCP tools). Derived from the runner's
    * `advisor-bridge` capability, so a runner whose bridge is unavailable
    * rejects an advisor instead of silently dropping it.
    */
@@ -39,11 +52,9 @@ export type StepRunnerDefinition = {
   displayName: string
   sessionName: string
   capabilities: StepRunnerCapabilities
+  /** True when the runner's model references are runner-qualified (`<runner>/<model>`). */
+  qualifiedModels: boolean
   modelLabel(model: string, variant?: string): string
-}
-
-export interface StepRunnerImpl<Input, Result> extends StepRunnerDefinition {
-  executeAttempt(input: Input): Promise<Result>
 }
 
 export type StepRunnerModel = {
@@ -52,11 +63,6 @@ export type StepRunnerModel = {
   variant?: string
   label: string
 }
-
-export const claudeCodeModelAliases = ["opus", "sonnet", "haiku"] as const
-
-const claudeModelError =
-  "runner claude-code executes Anthropic models: use a CLI alias (opus, sonnet, haiku), a claude-* ID, or anthropic/<id>"
 
 /** The described capabilities for a runner, resolved from runtime, auth, and enforcement health (design D4). */
 export function stepRunnerCapabilities(id: StepRunnerId, input: CapabilityInput = {}): RunnerCapabilities {
@@ -76,9 +82,9 @@ export function resolveStepRunnerCapabilities(id: StepRunnerId, input: Capabilit
     writeSteps: capabilityAvailable(caps, "write"),
     verifySteps: capabilityAvailable(caps, "verify"),
     modelFanout: capabilityAvailable(caps, "model-fanout"),
-    // An unqualified --model override keeps OpenCode-only interpretation; a
-    // Claude override is runner-qualified (task 8.5, handled in run-plan.ts).
-    globalModelOverride: id === "opencode",
+    // An unqualified --model override keeps provider-qualified interpretation;
+    // a runner-qualified one (`codex/<model>`) scopes it to that runner.
+    globalModelOverride: !runnerDescriptor(id).models.qualified,
     advisor: capabilityAvailable(caps, "advisor-bridge"),
   }
 }
@@ -90,57 +96,60 @@ export function stepRunnerCapabilityReason(id: StepRunnerId, capabilityId: Capab
   return `${entry.availability}: ${entry.reason}`
 }
 
-const definitions: Record<StepRunnerId, StepRunnerDefinition> = {
-  opencode: {
-    id: "opencode",
-    displayName: "OpenCode",
-    sessionName: "opencode",
-    capabilities: resolveStepRunnerCapabilities("opencode"),
-    modelLabel: (model, variant) => `${model}${variant ? `#${variant}` : ""}`,
-  },
-  "claude-code": {
-    id: "claude-code",
-    displayName: "Claude Code",
-    sessionName: "claude",
-    capabilities: resolveStepRunnerCapabilities("claude-code"),
-    modelLabel: (model) => `claude-code/${model || "default"}`,
-  },
+function definitionOf(id: StepRunnerId): StepRunnerDefinition {
+  const descriptor = runnerDescriptor(id)
+  const qualified = descriptor.models.qualified
+  return {
+    id,
+    displayName: descriptor.displayName,
+    sessionName: descriptor.sessionName,
+    capabilities: resolveStepRunnerCapabilities(id),
+    qualifiedModels: qualified,
+    modelLabel: qualified
+      ? (model, variant) => `${id}/${model || "default"}${variant ? `#${variant}` : ""}`
+      : (model, variant) => `${model}${variant ? `#${variant}` : ""}`,
+  }
 }
+
+const definitions = Object.fromEntries(runnerIds.map((id) => [id, definitionOf(id)])) as Record<StepRunnerId, StepRunnerDefinition>
 
 export function stepRunnerFor(id?: StepRunnerId): StepRunnerDefinition {
-  return definitions[id ?? "opencode"]
-}
-
-export function createStepRunnerImpl<Input, Result>(id: StepRunnerId, executeAttempt: (input: Input) => Promise<Result>): StepRunnerImpl<Input, Result> {
-  return { ...stepRunnerFor(id), executeAttempt }
+  return definitions[id ?? defaultStepRunnerId]
 }
 
 export function isStepRunnerId(value: unknown): value is StepRunnerId {
-  return value === "opencode" || value === "claude-code"
+  return isRegisteredRunnerId(value)
 }
 
-export function normalizeStepRunnerModel(id: StepRunnerId, raw: string): string {
-  const value = raw.trim()
-  if (id === "opencode") {
-    parseOpenCodeModel(value)
-    return value
-  }
-
-  // Claude's CLI selects a model by alias or full ID; a `#variant` is an
-  // OpenCode concept and is rejected rather than silently dropped.
-  if (value.includes("#")) throw new Error(`${claudeModelError}; Claude models do not take a #variant`)
-  const normalized = value.startsWith("anthropic/") ? value.slice("anthropic/".length) : value
-  if (claudeCodeModelAliases.includes(normalized as (typeof claudeCodeModelAliases)[number]) || /^claude-[^/#]+(?:-[^/#]+)*$/.test(normalized)) {
-    return normalized
-  }
-  throw new Error(claudeModelError)
+/** The registered runner IDs, quoted for an error message (`"opencode", "claude-code", or "codex"`). */
+export function stepRunnerChoices(): string {
+  return runnerIdChoices()
 }
 
 /**
- * A parsed run-wide model override. An unqualified value keeps OpenCode-only
- * interpretation (design D5): only `<runner>/<model>` scopes it to a runner, so
- * `claude-code/opus` selects a Claude CLI model while `anthropic/claude-opus-5`
- * stays an OpenCode target.
+ * The model reference a runner executes, in the form the plan stores: a
+ * provider-qualified runner keeps `provider/model[#variant]`; a
+ * runner-qualified one maps the canonical `provider/model` (or a bare ID or
+ * alias) to its native model and keeps a supported `#variant`.
+ */
+export function normalizeStepRunnerModel(id: StepRunnerId, raw: string): string {
+  const value = raw.trim()
+  if (!runnerDescriptor(id).models.qualified) {
+    parseProviderModel(value)
+    return value
+  }
+  const normalized = normalizeQualifiedModel(id, value)
+  if (!normalized.model) throw new Error(`runner ${id} needs a model, got "${value}"`)
+  return `${normalized.model}${normalized.variant ? `#${normalized.variant}` : ""}`
+}
+
+/**
+ * A parsed run-wide model override. An unqualified value keeps
+ * provider-qualified interpretation (design D5): only `<runner>/<model>` scopes
+ * it to a runner whose models are runner-qualified, so `claude-code/opus`
+ * selects a Claude CLI model while `anthropic/claude-opus-5` stays an OpenCode
+ * target. `opencode/<provider>/<model>` scopes to OpenCode explicitly, since
+ * `opencode/<id>` alone is an OpenCode Zen model.
  */
 export type ModelOverride = {
   scope?: StepRunnerId
@@ -150,43 +159,39 @@ export type ModelOverride = {
 export function parseModelOverride(raw: string | undefined): ModelOverride {
   const value = raw?.trim() ?? ""
   if (!value) return { model: "" }
-  for (const runner of stepRunnerIds) {
-    if (value === runner) return { scope: runner, model: "" }
-    if (!value.startsWith(`${runner}/`)) continue
-    const model = value.slice(runner.length + 1)
-    // `opencode` is also a provider: `opencode/<id>` is an OpenCode Zen model,
-    // and only `opencode/<provider>/<model>` names the runner scope.
-    if (runner === "opencode" && !model.includes("/")) return { model: value }
-    return { scope: runner, model }
+  if (isStepRunnerId(value)) return { scope: value, model: "" }
+  const qualified = qualifiedRunnerOf(value)
+  if (qualified) return { scope: qualified, model: value.slice(qualified.length + 1) }
+  const head = value.split("/", 1)[0]
+  if (isStepRunnerId(head)) {
+    const model = value.slice(head.length + 1)
+    if (model.includes("/")) return { scope: head, model }
   }
   return { model: value }
 }
 
-/** True when a parsed override names this runner (an unqualified override is OpenCode-only). */
+/** True when a parsed override names this runner (an unqualified override reaches provider-qualified runners). */
 export function modelOverrideTargetsRunner(override: ModelOverride, id: StepRunnerId): boolean {
   if (!override.model) return false
-  return override.scope === undefined ? id === "opencode" : override.scope === id
+  return override.scope === undefined ? !runnerDescriptor(id).models.qualified : override.scope === id
 }
 
 export function stepRunnerModel(id: StepRunnerId | undefined, model: string, variant?: string, globalOverride?: string): StepRunnerModel {
   const runner = stepRunnerFor(id)
   const override = parseModelOverride(globalOverride)
-  if (modelOverrideTargetsRunner(override, runner.id)) {
-    if (runner.id === "claude-code") {
-      const normalized = normalizeStepRunnerModel("claude-code", override.model)
-      return { providerID: runner.id, modelID: normalized, label: runner.modelLabel(normalized) }
-    }
-    const selected = parseOpenCodeModel(override.model)
-    return { ...selected, label: runner.modelLabel(`${selected.providerID}/${selected.modelID}`, selected.variant) }
+  if (runner.qualifiedModels) {
+    const selected = modelOverrideTargetsRunner(override, runner.id)
+      ? normalizeQualifiedModel(runner.id, override.model)
+      : { model: model || "", ...(variant ? { variant } : {}) }
+    const modelID = selected.model || "default"
+    return { providerID: runner.id, modelID, ...(selected.variant ? { variant: selected.variant } : {}), label: runner.modelLabel(selected.model, selected.variant) }
   }
-  if (runner.id === "claude-code") {
-    return { providerID: runner.id, modelID: model || "default", label: runner.modelLabel(model) }
-  }
-  const selected = parseOpenCodeModel(`${model}${variant ? `#${variant}` : ""}`)
+  const configured = modelOverrideTargetsRunner(override, runner.id) ? override.model : `${model}${variant ? `#${variant}` : ""}`
+  const selected = parseProviderModel(configured)
   return { ...selected, label: runner.modelLabel(`${selected.providerID}/${selected.modelID}`, selected.variant) }
 }
 
-function parseOpenCodeModel(value: string): { providerID: string; modelID: string; variant?: string } {
+function parseProviderModel(value: string): { providerID: string; modelID: string; variant?: string } {
   const variantIndex = value.indexOf("#")
   const model = variantIndex === -1 ? value : value.slice(0, variantIndex)
   const variant = variantIndex === -1 ? undefined : value.slice(variantIndex + 1)
@@ -194,4 +199,37 @@ function parseOpenCodeModel(value: string): { providerID: string; modelID: strin
   const modelID = rest.join("/")
   if (!providerID || !modelID || (variantIndex !== -1 && !variant)) throw new Error(`model must look like provider/model[#variant], got "${value}"`)
   return { providerID, modelID, ...(variant ? { variant } : {}) }
+}
+
+/**
+ * A runner-qualified reference (`claude-code/opus`, `codex/gpt-5.5#high`)
+ * split into its runner and native model, or undefined for a
+ * provider-qualified one. This is the one spelling the plan uses for a helper,
+ * judge or advisor route on a runner-qualified runner.
+ */
+export function qualifiedModelRoute(reference: string): { runner: StepRunnerId; model: string; variant?: string } | undefined {
+  const runner = qualifiedRunnerOf(reference)
+  if (!runner) return undefined
+  const rest = reference.slice(runner.length + 1)
+  const hash = rest.indexOf("#")
+  return { runner, model: hash === -1 ? rest : rest.slice(0, hash), ...(hash === -1 ? {} : { variant: rest.slice(hash + 1) }) }
+}
+
+/**
+ * The runner a reference names explicitly: a runner-qualified one
+ * (`codex/gpt-5.5`), or a provider-qualified runner's id before a
+ * provider-qualified model (`opencode/openai/gpt-5.5`; `opencode/<id>` alone
+ * stays an OpenCode Zen model). Undefined when the reference names none.
+ */
+export function explicitRunnerOf(reference: string): StepRunnerId | undefined {
+  const qualified = qualifiedRunnerOf(reference)
+  if (qualified) return qualified
+  const head = reference.split("/", 1)[0]
+  return isStepRunnerId(head) && reference.slice(head.length + 1).includes("/") ? head : undefined
+}
+
+/** The runner a resolved model reference runs on: its qualifying runner, else the provider-qualified default. */
+export function runnerOfModelReference(reference: { providerID: string } | string): StepRunnerId {
+  const head = typeof reference === "string" ? reference : `${reference.providerID}/`
+  return qualifiedRunnerOf(head) ?? defaultStepRunnerId
 }

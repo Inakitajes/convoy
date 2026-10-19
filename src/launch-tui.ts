@@ -624,7 +624,7 @@ function goalPreview(plan: ResolvedGoalPlan): GoalPreview {
 
 export function launcherStepModelLabel(step: Pick<AgentStep, "model" | "variant" | "runner">): string {
   const runner = stepRunnerFor(step.runner)
-  return runner.id === "opencode" ? shortModelLabel(step.model, step.variant) : runner.modelLabel(step.model)
+  return runner.qualifiedModels ? runner.modelLabel(step.model, step.variant) : shortModelLabel(step.model, step.variant)
 }
 
 /** Drops the provider path from a model id so the tree shows "claude-opus-5", not "anthropic/claude-opus-5#…". */

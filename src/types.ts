@@ -29,6 +29,14 @@ import type { BillingResolution } from "./runners/billing"
 import type { AuthenticationSelection } from "./runners/contracts"
 import type { ModelGateway, ModelRoutingOverrides, ResolvedModel } from "./model-routing"
 
+/** The configured authentication per CLI runner. */
+export type RunnerAuthSelections = Partial<Record<StepRunnerId, AuthenticationSelection>>
+/** `advisorRoute.authMode`'s selection, which applies only to advisors on its runner. */
+export type AdvisorAuthOverride = { runner: StepRunnerId; selection: AuthenticationSelection }
+
+/** One CLI runner's reviewed authentication and the billing decision it implies. */
+export type ReviewedRunnerAuth = { auth: AuthenticationSelection; billing: BillingResolution }
+
 export type RunOptions = {
   prompt: string
   /** Whether this run persists and attaches the project's git-ignored PRD history. */
@@ -38,14 +46,15 @@ export type RunOptions = {
   /** The explicit no-change run mode (`--manual`); zero selected changes is valid only through it. */
   manual?: boolean
   /**
-   * The configured Claude authentication (`defaults.claudeAuth`). Absent means
-   * subscription, which each attempt verifies before it runs. Only a
+   * The configured authentication per CLI runner (`runners.<id>.auth`, and
+   * the legacy `defaults.claudeAuth`). A runner absent here runs on its
+   * subscription login, which each attempt verifies before it runs. Only a
    * non-secret credential reference is carried, never a key.
    */
-  claudeAuth?: AuthenticationSelection
-  /** The reviewed authentication a Claude advisor (`claude-code/<model>`) consults under; defaults to `claudeAuth`. */
-  advisorAuth?: AuthenticationSelection
-  /** The commit writer's route for automatic run compaction (`helperRoutes.commitMessage`), runner-qualified for Claude. */
+  runnerAuth?: RunnerAuthSelections
+  /** The reviewed authentication a CLI-routed advisor (`claude-code/<model>`, `codex/<model>`) on the advisor route's runner consults under; other advisors use their runner's. */
+  advisorAuth?: AdvisorAuthOverride
+  /** The commit writer's route for automatic run compaction (`helperRoutes.commitMessage`), runner-qualified for a CLI runner. */
   commitMessageModel?: string
   files: string[]
   onlySteps: string[]
@@ -190,10 +199,9 @@ export type AgentSpec = {
 }
 
 /**
- * Which engine executes an agent step. The default (absent) is the OpenCode
- * SDK; "claude-code" spawns the user's local `claude` CLI instead — read-only
- * audit steps only, authenticated by whatever that install already uses
- * (subscription login or API key).
+ * Which engine executes an agent step when it is not the default (absent):
+ * the OpenCode SDK is the default; "claude-code" and "codex" spawn the user's
+ * local CLI under the reviewed authentication.
  */
 export type StepRunner = Exclude<StepRunnerId, "opencode">
 
@@ -213,10 +221,10 @@ export type AgentStep = {
   name: string
   agentName: string
   description: string
-  /** Empty string on claude-code steps that defer to the CLI's default model. */
+  /** The runner's native model; empty on a CLI-runner step that defers to the CLI's default model. */
   model: string
   variant?: string
-  /** Frozen logical and physical OpenCode model. Absent only on legacy metadata and Claude Code steps. */
+  /** Frozen logical and physical OpenCode model. Absent only on legacy metadata and CLI-runner steps. */
   resolvedModel?: ResolvedModel
   /**
    * Configured advising model (`provider/model[#variant]`) consulted at this
@@ -348,18 +356,18 @@ export type RunPlan = {
   pipeline: Pipeline
   modelRouting: { gateway: ModelGateway }
   /**
-   * The smart auto-accept judge route. `runner` absent means OpenCode; a
-   * `claude-code` judge runs through the Claude CLI under the run's Claude
-   * authentication, so a Claude-only plan needs no OpenCode to judge.
+   * The smart auto-accept judge route. `runner` absent means OpenCode; a CLI
+   * runner's judge (`claude-code`, `codex`) runs through its CLI under that
+   * runner's authentication, so a plan on one CLI runner needs no OpenCode.
    */
-  smartJudge?: { model: ResolvedModel; runner?: "claude-code" }
+  smartJudge?: { model: ResolvedModel; runner?: StepRunnerId }
   /**
-   * The reviewed Claude route when anything in the plan runs on Claude (a
-   * step, an advisor, the judge, or the commit writer): its non-secret
-   * authentication and the billing decision it implies, shown in review and
-   * enforced at preflight before any work starts.
+   * The reviewed route of every CLI runner the plan uses (a step, an advisor,
+   * the judge, or the commit writer): its non-secret authentication and the
+   * billing decision it implies, shown in review and enforced at preflight
+   * before any work starts.
    */
-  claude?: { auth: AuthenticationSelection; billing: BillingResolution }
+  runnerAuth?: Partial<Record<StepRunnerId, ReviewedRunnerAuth>>
   /** The commit writer's frozen route for automatic compaction, when configured. */
   commitMessageModel?: string
   hooks: HookSet

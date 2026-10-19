@@ -18,6 +18,7 @@ import {
 } from "./advisor-events"
 import type { AdvisorCheckpoint, AdvisorGateDecision } from "./permissions"
 import type { AuthenticationSelection, RunnerEvent } from "./runners/contracts"
+import { runnerOfModelReference, type StepRunnerId } from "./step-runners"
 import type { AgentStep } from "./types"
 
 /**
@@ -64,12 +65,12 @@ export type AdvisorRuntimeOptions = {
   onEvent?: (event: AdvisorEvent) => void | Promise<void>
   /**
    * The rendered transcript of an executor session that does not live on the
-   * OpenCode server (Claude), recorded from its normalized events; undefined
-   * for an OpenCode session, whose transcript the server holds.
+   * OpenCode server (Claude, Codex), recorded from its normalized events;
+   * undefined for an OpenCode session, whose transcript the server holds.
    */
   transcriptFor?: (sessionID: string) => string | undefined
-  /** The reviewed authentication a Claude advising model consults under. */
-  claudeAuth?: AuthenticationSelection
+  /** The reviewed authentication a CLI-routed advising model consults under, by its runner. */
+  advisorAuth?: (runner: StepRunnerId) => AuthenticationSelection | undefined
 }
 
 export type AdvisorRuntime = {
@@ -151,10 +152,11 @@ export function createAdvisorRuntime(options: AdvisorRuntimeOptions): AdvisorRun
     const startedAt = performance.now()
     let transcript: string | undefined
     const recorded = recordings.get(sessionID)?.render() ?? options.transcriptFor?.(sessionID)
+    const auth = options.advisorAuth?.(runnerOfModelReference(model))
     const result = await consultFn({
       ...(options.client ? { client: options.client } : {}),
       ...(recorded !== undefined ? { transcript: recorded } : {}),
-      ...(options.claudeAuth ? { claudeAuth: options.claudeAuth } : {}),
+      ...(auth ? { auth } : {}),
       sessionID,
       directory: options.directory,
       model,
