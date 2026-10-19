@@ -29,7 +29,7 @@ run-wide `defaults.runner`, else OpenCode.
 |---|---|---|
 | OpenCode | `opencode` (default) | A supported OpenCode **V2** on `PATH`. Convoy never installs, updates, or replaces it. |
 | Claude | `claude-code` | The locally installed `claude` CLI and its own login (subscription), or an explicitly selected API key. |
-| Codex | `codex` | The locally installed `codex` CLI (0.160 or later) and its own ChatGPT login (subscription), or an explicitly selected API key. |
+| Codex (experimental) | `codex` | The locally installed `codex` CLI (0.160 or later) and its own ChatGPT login (subscription), or an explicitly selected API key. |
 
 Every runner is independently usable. A plan in which nothing runs on
 OpenCode — no step, no advisor, no smart judge — never boots, authenticates, or
@@ -195,6 +195,15 @@ are denied the run's private directory and `~/.convoy/private/` in every shell
 spelling, as well as recursive searches of their ancestors.
 
 ## How Convoy integrates with Codex
+
+> [!WARNING]
+> **Codex support is experimental.** Convoy drives Codex through its
+> app-server protocol, which OpenAI labels experimental and may change between
+> Codex releases. Convoy refuses Codex releases older than 0.160, and releases
+> whose version it cannot read. API-key mode has not been exercised end to end
+> with a live key, and an API-key thread cannot be reopened after its attempt.
+> Expect rough edges, check the branch before you merge it, and please report
+> issues.
 
 Each Codex attempt runs on its own `codex app-server` child, driven over
 stdio — never the operator's shared daemon. Enforcement is in-band:

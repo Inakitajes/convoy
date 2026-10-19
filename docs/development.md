@@ -92,7 +92,7 @@ Runtime requirements and the current gate:
   every field defensively; regenerate the reference schema with
   `codex app-server generate-json-schema --experimental --out <dir>` when moving
   the minimum version. Evidence for each enforcement claim is in
-  `openspec/changes/add-codex-runner/evidence/`.
+  `openspec/changes/archive/2026-10-19-add-codex-runner/evidence/`.
 
 Release gate: the parity matrix in
 `openspec/changes/runner-parity-opencode-v2/design.md` (decision D4) ships when
