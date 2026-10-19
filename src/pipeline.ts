@@ -20,9 +20,15 @@ const kimiModel = "openrouter/moonshotai/kimi-k3"
 const deepseekModel = "openrouter/deepseek/deepseek-v4.1-flash"
 /** DeepSeek V4.1 Flash on OpenRouter with reasoning raised: used for writing, flash audits and run recaps. */
 const deepseekHighModel = `${deepseekModel}#high`
+/** DeepSeek V4.1 Flash 1017 (the October 17 refresh): review's scoping, audit, and report leg. */
+const deepseek1017Model = "openrouter/deepseek/deepseek-v4.1-flash-1017"
+const deepseek1017HighModel = `${deepseek1017Model}#high`
 /** GPT 5.6 Sol: the hunter pipeline's consensus reporter at xhigh. */
 const solModel = "openai/gpt-5.6-sol"
 const solXhighModel = `${solModel}#xhigh`
+/** GPT 6.1 Sol: near-Astra quality at a fifth of the price; review's OpenAI audit and scorer legs. */
+const sol61HighModel = "openai/gpt-6.1-sol#high"
+const sol61XhighModel = "openai/gpt-6.1-sol#xhigh"
 /** GLM 5.3 Flash with reasoning raised: the security and design model for the implementation pipelines. */
 const glm53FlashHighModel = "openrouter/z-ai/glm-5.3-flash#high"
 /** GPT 6 Astra at extra high: the advisor the goal pipelines and the fixer consult where Grok or Sol used to advise. */
@@ -522,25 +528,26 @@ export const builtInPipelines: Record<string, PipelineSpec> = {
       },
     ],
   },
-  // Report-only audits on two flash models, followed by independent scoring.
+  // Report-only audits: one cheap DeepSeek leg and one strong OpenAI leg per
+  // track, then independent scoring across OpenAI and GLM.
   review: {
     description:
-      "Report-only PR review on ultra-cheap models: scope, parallel audits (DeepSeek V4.1 Flash + GLM 5.3 Flash) and report on flash models; the scoring uses GLM 5.3 high + Kimi K3 and the score consensus stays on GLM 5.3 high. Makes no changes.",
+      "Report-only PR review: scope, parallel audits (DeepSeek V4.1 Flash 1017 + GPT-6.1 Sol) and report on DeepSeek 1017; the scoring uses GPT-6.1 Sol xhigh + GLM 5.3 high and the score consensus stays on GLM 5.3 high. Makes no changes.",
     defaultPrompt: "Review the current branch against its base and report prioritized findings with a verified quality score.",
     suggestedPrompts: ["Review the open PR for this branch", "Review only the last commit's diff"],
     steps: [
-      { agent: "review-scope", name: "scope", model: deepseekHighModel, reports: "none", diff: true, verify: true, prdHistory: true },
+      { agent: "review-scope", name: "scope", model: deepseek1017HighModel, reports: "none", diff: true, verify: true, prdHistory: true },
       {
         parallel: [
-          { agent: "clean-code-auditor", name: "clean-code", models: [deepseekHighModel, glm53FlashHighModel], reports: ["scope"] },
-          { agent: "security-reviewer", name: "security", models: [deepseekHighModel, glm53FlashHighModel], reports: ["scope"] },
-          { agent: "bug-auditor", name: "bugs", models: [deepseekHighModel, glm53FlashHighModel], reports: ["scope"] },
+          { agent: "clean-code-auditor", name: "clean-code", models: [deepseek1017HighModel, sol61HighModel], reports: ["scope"] },
+          { agent: "security-reviewer", name: "security", models: [deepseek1017HighModel, sol61HighModel], reports: ["scope"] },
+          { agent: "bug-auditor", name: "bugs", models: [deepseek1017HighModel, sol61HighModel], reports: ["scope"] },
         ],
       },
-      { agent: "review-report", name: "report", model: deepseekHighModel, reports: "all" },
+      { agent: "review-report", name: "report", model: deepseek1017HighModel, reports: "all" },
       {
         parallel: [
-          { agent: "quality-scorer", name: "score", models: [glm53HighModel, kimiModel], reports: "all", prdHistory: true },
+          { agent: "quality-scorer", name: "score", models: [sol61XhighModel, glm53HighModel], reports: "all", prdHistory: true },
         ],
       },
       { agent: "quality-score-report", name: "score-report", model: glm53HighModel, reports: "all", verify: true, prdHistory: true },

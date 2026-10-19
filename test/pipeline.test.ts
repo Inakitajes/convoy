@@ -413,18 +413,18 @@ describe("built-in review pipeline", () => {
     expect(scope?.agentName.endsWith("__ro")).toBe(false)
   })
 
-  test("scopes, runs the three audits fanned across two models, synthesizes a findings report, then scores", () => {
+  test("scopes, runs the three audits fanned across DeepSeek 1017 and Sol, synthesizes a findings report, then scores", () => {
     expect(stepNames(scored())).toEqual([
       "scope",
-      "clean-code__openrouter-deepseek-deepseek-v4-1-flash-high",
-      "clean-code__openrouter-z-ai-glm-5-3-flash-high",
-      "security__openrouter-deepseek-deepseek-v4-1-flash-high",
-      "security__openrouter-z-ai-glm-5-3-flash-high",
-      "bugs__openrouter-deepseek-deepseek-v4-1-flash-high",
-      "bugs__openrouter-z-ai-glm-5-3-flash-high",
+      "clean-code__openrouter-deepseek-deepseek-v4-1-flash-1017-high",
+      "clean-code__openai-gpt-6-1-sol-high",
+      "security__openrouter-deepseek-deepseek-v4-1-flash-1017-high",
+      "security__openai-gpt-6-1-sol-high",
+      "bugs__openrouter-deepseek-deepseek-v4-1-flash-1017-high",
+      "bugs__openai-gpt-6-1-sol-high",
       "report",
+      "score__openai-gpt-6-1-sol-xhigh",
       "score__openrouter-z-ai-glm-5-3-high",
-      "score__openrouter-moonshotai-kimi-k3",
       "score-report",
     ])
   })
@@ -435,12 +435,12 @@ describe("built-in review pipeline", () => {
     expect(findings?.inputFiles).toEqual([
       "prd.md",
       "reports/scope.md",
-      "reports/clean-code__openrouter-deepseek-deepseek-v4-1-flash-high.md",
-      "reports/clean-code__openrouter-z-ai-glm-5-3-flash-high.md",
-      "reports/security__openrouter-deepseek-deepseek-v4-1-flash-high.md",
-      "reports/security__openrouter-z-ai-glm-5-3-flash-high.md",
-      "reports/bugs__openrouter-deepseek-deepseek-v4-1-flash-high.md",
-      "reports/bugs__openrouter-z-ai-glm-5-3-flash-high.md",
+      "reports/clean-code__openrouter-deepseek-deepseek-v4-1-flash-1017-high.md",
+      "reports/clean-code__openai-gpt-6-1-sol-high.md",
+      "reports/security__openrouter-deepseek-deepseek-v4-1-flash-1017-high.md",
+      "reports/security__openai-gpt-6-1-sol-high.md",
+      "reports/bugs__openrouter-deepseek-deepseek-v4-1-flash-1017-high.md",
+      "reports/bugs__openai-gpt-6-1-sol-high.md",
     ])
 
     const report = scored().steps.find((step): step is AgentStep => step.type === "agent" && step.name === "score-report")
@@ -449,15 +449,15 @@ describe("built-in review pipeline", () => {
     expect(report?.inputFiles).toEqual([
       "prd.md",
       "reports/scope.md",
-      "reports/clean-code__openrouter-deepseek-deepseek-v4-1-flash-high.md",
-      "reports/clean-code__openrouter-z-ai-glm-5-3-flash-high.md",
-      "reports/security__openrouter-deepseek-deepseek-v4-1-flash-high.md",
-      "reports/security__openrouter-z-ai-glm-5-3-flash-high.md",
-      "reports/bugs__openrouter-deepseek-deepseek-v4-1-flash-high.md",
-      "reports/bugs__openrouter-z-ai-glm-5-3-flash-high.md",
+      "reports/clean-code__openrouter-deepseek-deepseek-v4-1-flash-1017-high.md",
+      "reports/clean-code__openai-gpt-6-1-sol-high.md",
+      "reports/security__openrouter-deepseek-deepseek-v4-1-flash-1017-high.md",
+      "reports/security__openai-gpt-6-1-sol-high.md",
+      "reports/bugs__openrouter-deepseek-deepseek-v4-1-flash-1017-high.md",
+      "reports/bugs__openai-gpt-6-1-sol-high.md",
       "reports/report.md",
+      "reports/score__openai-gpt-6-1-sol-xhigh.md",
       "reports/score__openrouter-z-ai-glm-5-3-high.md",
-      "reports/score__openrouter-moonshotai-kimi-k3.md",
     ])
   })
 })
@@ -526,36 +526,36 @@ describe("review model choices", () => {
     expect(scope).toMatchObject({ agentName: "review-scope", readOnly: true, verify: true })
   })
 
-  test("runs entirely on low-cost models: DeepSeek V4.1 Flash scopes, audits, and reports, and the scoring stays on GLM 5.3 + Kimi K3", () => {
+  test("scopes, audits, and reports on DeepSeek 1017, and the scoring stays on GPT-6.1 Sol + GLM 5.3", () => {
     const pipeline = review()
     expect(stepNames(pipeline)).toEqual([
       "scope",
-      "clean-code__openrouter-deepseek-deepseek-v4-1-flash-high",
-      "clean-code__openrouter-z-ai-glm-5-3-flash-high",
-      "security__openrouter-deepseek-deepseek-v4-1-flash-high",
-      "security__openrouter-z-ai-glm-5-3-flash-high",
-      "bugs__openrouter-deepseek-deepseek-v4-1-flash-high",
-      "bugs__openrouter-z-ai-glm-5-3-flash-high",
+      "clean-code__openrouter-deepseek-deepseek-v4-1-flash-1017-high",
+      "clean-code__openai-gpt-6-1-sol-high",
+      "security__openrouter-deepseek-deepseek-v4-1-flash-1017-high",
+      "security__openai-gpt-6-1-sol-high",
+      "bugs__openrouter-deepseek-deepseek-v4-1-flash-1017-high",
+      "bugs__openai-gpt-6-1-sol-high",
       "report",
+      "score__openai-gpt-6-1-sol-xhigh",
       "score__openrouter-z-ai-glm-5-3-high",
-      "score__openrouter-moonshotai-kimi-k3",
       "score-report",
     ])
 
     const byName = Object.fromEntries(
       pipeline.steps.filter((step): step is AgentStep => step.type === "agent").map((step) => [step.name, step]),
     )
-    expect(byName.scope?.model).toBe("openrouter/deepseek/deepseek-v4.1-flash")
-    expect(byName.report?.model).toBe("openrouter/deepseek/deepseek-v4.1-flash")
+    expect(byName.scope?.model).toBe("openrouter/deepseek/deepseek-v4.1-flash-1017")
+    expect(byName.report?.model).toBe("openrouter/deepseek/deepseek-v4.1-flash-1017")
     expect(byName.report?.inputFiles).toEqual([
       "prd.md",
       "reports/scope.md",
-      "reports/clean-code__openrouter-deepseek-deepseek-v4-1-flash-high.md",
-      "reports/clean-code__openrouter-z-ai-glm-5-3-flash-high.md",
-      "reports/security__openrouter-deepseek-deepseek-v4-1-flash-high.md",
-      "reports/security__openrouter-z-ai-glm-5-3-flash-high.md",
-      "reports/bugs__openrouter-deepseek-deepseek-v4-1-flash-high.md",
-      "reports/bugs__openrouter-z-ai-glm-5-3-flash-high.md",
+      "reports/clean-code__openrouter-deepseek-deepseek-v4-1-flash-1017-high.md",
+      "reports/clean-code__openai-gpt-6-1-sol-high.md",
+      "reports/security__openrouter-deepseek-deepseek-v4-1-flash-1017-high.md",
+      "reports/security__openai-gpt-6-1-sol-high.md",
+      "reports/bugs__openrouter-deepseek-deepseek-v4-1-flash-1017-high.md",
+      "reports/bugs__openai-gpt-6-1-sol-high.md",
     ])
   })
 
