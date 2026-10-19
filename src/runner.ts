@@ -1982,6 +1982,7 @@ export async function runPhaseUntilResolved(
                 },
                 runner: phase.runner,
                 runDir: workspace.dir,
+                ...(run.auth ? { auth: run.auth } : {}),
               })
               // "unavailable": nobody can take over, so the automatic policy below applies.
               if (outcome !== "continue") break
@@ -2030,6 +2031,7 @@ export async function runPhaseUntilResolved(
               },
               runner: phase.runner,
               runDir: workspace.dir,
+              ...(run.auth ? { auth: run.auth } : {}),
             })
             // A gate that cannot be asked (no TUI, no controller) must not spin
             // on re-resolution: keep the already-validated candidate, exactly
@@ -2057,6 +2059,7 @@ export async function runPhaseUntilResolved(
             },
             runner: phase.runner,
             runDir: workspace.dir,
+            ...(run.auth ? { auth: run.auth } : {}),
           })
           // A noninteractive budget gate cannot choose reset, so preserve the
           // original hard-limit failure instead of allowing a silent continuation.
@@ -2110,6 +2113,7 @@ export async function runPhaseUntilResolved(
             },
             runner: phase.runner,
             runDir: workspace.dir,
+            ...(run.auth ? { auth: run.auth } : {}),
           })
           if (outcome === "continue") {
             // The failed attempt's chat text is gone; the rescued deliverable can
@@ -2166,6 +2170,8 @@ type PhaseGateOptions = {
   onAbort?: () => void
   /** Which runner's session the gate reopens; resolved through the opener table. */
   runner?: StepRunnerId
+  /** The reviewed authentication the phase's session ran under, which reopening it needs. */
+  auth?: AuthenticationSelection
   runDir?: string
   /**
    * The run has no human decisions (human steps off, the default off a TTY):
@@ -2176,7 +2182,7 @@ type PhaseGateOptions = {
   unattended?: boolean
 }
 
-type SessionWindowInput = { targetDir: string; sessionID: string; runDir: string; url?: string; password?: string }
+type SessionWindowInput = { targetDir: string; sessionID: string; runDir: string; url?: string; password?: string; auth?: AuthenticationSelection }
 
 type PhaseGateDeps = {
   /** Legacy test seam: the OpenCode session-window opener. */
@@ -2200,7 +2206,7 @@ function sessionWindowOpeners(deps: PhaseGateDeps): Partial<Record<StepRunnerId,
     "opencode": (input) =>
       opencode({ url: input.url ?? "", ...(input.password ? { password: input.password } : {}), targetDir: input.targetDir, sessionID: input.sessionID }),
     "claude-code": (input) => claude({ targetDir: input.targetDir, sessionID: input.sessionID, runDir: input.runDir }),
-    codex: (input) => openCodexSessionWindow({ targetDir: input.targetDir, sessionID: input.sessionID }),
+    codex: (input) => openCodexSessionWindow({ targetDir: input.targetDir, sessionID: input.sessionID, ...(input.auth ? { auth: input.auth } : {}) }),
   }
 }
 
@@ -2320,6 +2326,7 @@ export async function waitForPhaseGate(
           targetDir,
           sessionID,
           runDir: options.runDir ?? "",
+          ...(options.auth ? { auth: options.auth } : {}),
           ...(takeover?.serverUrl ? { url: takeover.serverUrl } : {}),
           ...(takeover?.serverPassword ? { password: takeover.serverPassword } : {}),
         })
