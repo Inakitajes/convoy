@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test"
 import { existsSync } from "node:fs"
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -16,6 +16,7 @@ import { builtInAgents } from "../src/pipeline"
 import { prdHistoryDir, readPrdHistoryIndex, writePrdHistory } from "../src/prd-history"
 import { loadOpenSpecBundle } from "../src/openspec"
 import { prepareWorktreeForRun } from "../src/cli"
+import { maxInlineDiffBytes } from "../src/git"
 import { HerdrReporter } from "../src/herdr"
 
 // The runner's run() spawns a real opencode server. Inject the fake through
@@ -705,6 +706,38 @@ describe("run() with a hosted progress", () => {
       await rm(join(prdHistoryDir(repo), "index.jsonl"))
       await mkdir(join(prdHistoryDir(repo), "index.jsonl"))
       expect((await preparePhaseRun({ dir: workspace, runID: "current" }, phase, makeOptions(repo), [], [])).attachments).toEqual([])
+    } finally {
+      await rm(workspace, { recursive: true, force: true })
+      await rm(repo, { recursive: true, force: true })
+    }
+  })
+
+  test("attaches the phase diff whole, or its overview once the diff is over the inline limit", async () => {
+    const repo = await cleanRepo()
+    const workspace = await mkdtemp(join(tmpdir(), "convoy-diff-phase-"))
+    const phase = {
+      type: "agent" as const,
+      name: "scope",
+      stepName: "scope",
+      groupId: "g1",
+      agentName: "review-scope",
+      description: "scope",
+      model: "openai/gpt-5.6-terra",
+      inputFiles: [],
+      inputDiff: true,
+      reportPath: "reports/scope.md",
+      readOnly: true,
+    }
+    try {
+      await Bun.write(join(repo, "keep.txt"), "base\nsmall change\n")
+      const small = await preparePhaseRun({ dir: workspace, runID: "current" }, phase, makeOptions(repo), [], [])
+      expect(small.attachments.map((part) => part.filename)).toEqual(["scope.pre.diff"])
+
+      await Bun.write(join(repo, "keep.txt"), `${"x".repeat(maxInlineDiffBytes)}\n`)
+      const large = await preparePhaseRun({ dir: workspace, runID: "current" }, phase, makeOptions(repo), [], [])
+      expect(large.attachments.map((part) => part.filename)).toEqual(["scope.pre.overview.md"])
+      expect((await stat(join(workspace, "diffs", "scope.pre.diff"))).size).toBeGreaterThan(maxInlineDiffBytes)
+      expect((await stat(join(workspace, "diffs", "scope.pre.overview.md"))).size).toBeLessThanOrEqual(maxInlineDiffBytes)
     } finally {
       await rm(workspace, { recursive: true, force: true })
       await rm(repo, { recursive: true, force: true })
