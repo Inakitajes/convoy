@@ -71,10 +71,10 @@ steps:
   - parallel:
       - agent: bug-auditor
         name: bugs
-        models: [openrouter/deepseek/deepseek-v4.1-flash#high, openrouter/z-ai/glm-5.3-flash#high]
+        models: [openrouter/deepseek/deepseek-v4.1-flash-1017#high, openai/gpt-6.1-sol#high]
       - agent: security-reviewer
         name: security
-        models: [openrouter/deepseek/deepseek-v4.1-flash#high, openrouter/z-ai/glm-5.3-flash#high]
+        models: [openrouter/deepseek/deepseek-v4.1-flash-1017#high, openai/gpt-6.1-sol#high]
   - agent: review-report
     name: report
     reports: all

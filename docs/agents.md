@@ -2,7 +2,7 @@
 
 [Documentation](README.md) · [Convoy](../README.md)
 
-Ask Claude Code, OpenCode, or Codex to run a pipeline for you, from the session you are already in.
+Ask Claude Code, OpenCode, or Codex to run a pipeline for you, from the session you are already in. The pipeline's own steps can run on any of the three runners, whichever harness launched it.
 
 - [Install the skill](#install-the-skill)
 - [What the agent does](#what-the-agent-does)
@@ -54,10 +54,10 @@ steps:
   - parallel:
       - agent: security-reviewer
         name: security
-        models: [openrouter/deepseek/deepseek-v4.1-flash#high, openrouter/z-ai/glm-5.3-flash#high]
+        models: [openrouter/deepseek/deepseek-v4.1-flash-1017#high, openai/gpt-6.1-sol#high]
       - agent: hunter-reliability
         name: reliability
-        models: [openrouter/deepseek/deepseek-v4.1-flash#high, openrouter/z-ai/glm-5.3-flash#high]
+        models: [openrouter/deepseek/deepseek-v4.1-flash-1017#high, openai/gpt-6.1-sol#high]
   - agent: review-report
     name: report
     reports: all
@@ -78,7 +78,7 @@ The skill keeps you in the loop where it matters:
 - It never answers a permission request or publishes a pull request on its own.
 - It doesn't edit `.convoy/config.yaml` or `~/.convoy/config.yaml` to run something once.
 
-Everything else is Convoy's usual [permission policy](safety.md): the hard denylist, read-only enforcement, and the commit guards apply to every step, whoever launched the run. Runs on Claude Code steps need `defaults.claudeAuth.billingPolicy` set before an unattended launch ([Runners](runners.md)); the agent will ask you to set it rather than doing it itself.
+Everything else is Convoy's usual [permission policy](safety.md): the hard denylist, read-only enforcement, and the commit guards apply to every step, whoever launched the run. Runs with Claude Code or Codex steps need `runners.<id>.auth.billingPolicy: account-policy` set before an unattended launch ([Runners](runners.md#authentication-and-billing)); the agent will ask you to set it rather than doing it itself.
 
 ---
 

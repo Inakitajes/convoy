@@ -2,6 +2,7 @@ import { resolve } from "node:path"
 
 import { buildAgentRegistry, loadConvoyConfig, loadGlobalConvoyConfig, loadPipelineFile, mergeConvoyConfigs, normalizePipelineName, pipelineDefaultsOf, type ConvoyConfig } from "./config"
 import { builtInPipelines, defaultPipelineName, resolvePipeline, type PipelineSpec } from "./pipeline"
+import { defaultStepRunnerId, type StepRunnerId } from "./step-runners"
 import type { AgentStep, Pipeline } from "./types"
 
 /**
@@ -28,7 +29,7 @@ export type PipelineStepView = {
   name: string
   agent: string
   model: string
-  runner: "opencode" | "claude-code"
+  runner: StepRunnerId
   advisor?: string
   readOnly: boolean
   verify?: boolean
@@ -43,7 +44,7 @@ export type PipelineView = {
   description?: string
   defaultPrompt?: string
   writesCode: boolean
-  runners: ("opencode" | "claude-code")[]
+  runners: StepRunnerId[]
   steps: PipelineStepView[]
   goal?: {
     target: number
@@ -79,7 +80,7 @@ function resolveWith(catalog: Catalog, name: string, spec: PipelineSpec): Pipeli
 }
 
 function stepView(step: AgentStep): PipelineStepView {
-  const runner = step.runner === "claude-code" ? "claude-code" : "opencode"
+  const runner: StepRunnerId = step.runner ?? defaultStepRunnerId
   const model = step.model ? `${step.model}${step.variant ? `#${step.variant}` : ""}` : "(CLI default)"
   return {
     name: step.name,
@@ -147,7 +148,7 @@ export async function showPipelineView(targetDir: string, selector: { name?: str
 }
 
 function stepLine(step: PipelineStepView): string {
-  const traits = [step.runner === "claude-code" ? "claude-code" : undefined, step.readOnly ? (step.verify ? "read-only + verify" : "read-only") : "writes", step.advisor ? `advisor ${step.advisor}` : undefined].filter(Boolean)
+  const traits = [step.runner !== defaultStepRunnerId ? step.runner : undefined, step.readOnly ? (step.verify ? "read-only + verify" : "read-only") : "writes", step.advisor ? `advisor ${step.advisor}` : undefined].filter(Boolean)
   return `${step.name} · ${step.agent} · ${step.model} · ${traits.join(" · ")}`
 }
 
@@ -181,11 +182,18 @@ export function renderPipelineView(view: PipelineView): string {
   return `${lines.join("\n")}\n`
 }
 
+/** Names the runners a pipeline needs beyond the default one. */
+function runnerTag(runners: StepRunnerId[]): string | undefined {
+  const others = runners.filter((runner) => runner !== defaultStepRunnerId)
+  if (others.length === 0) return undefined
+  return others.length === runners.length && others.length === 1 ? `${others[0]} only` : `uses ${others.join(" + ")}`
+}
+
 export function renderPipelineList(pipelines: PipelineView[], agents: AgentView[]): string {
   const width = Math.max(...pipelines.map((view) => view.name.length))
   const lines = ["pipelines:"]
   for (const view of pipelines) {
-    const tags = [view.source, view.writesCode ? "writes code" : "read-only", view.goal ? `goal ${view.goal.target}` : undefined, view.runners.includes("claude-code") ? (view.runners.length === 1 ? "claude-code only" : "uses claude-code") : undefined, view.default ? "default" : undefined].filter(Boolean)
+    const tags = [view.source, view.writesCode ? "writes code" : "read-only", view.goal ? `goal ${view.goal.target}` : undefined, runnerTag(view.runners), view.default ? "default" : undefined].filter(Boolean)
     lines.push(`  ${view.name.padEnd(width)}  ${tags.join(" · ")}`)
     if (view.description) lines.push(`  ${" ".repeat(width)}  ${view.description}`)
   }

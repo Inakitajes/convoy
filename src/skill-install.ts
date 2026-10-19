@@ -36,10 +36,14 @@ export const skillTargets: readonly SkillTarget[] = ["claude", "opencode", "code
 const targetLabels: Record<SkillTarget, string> = { claude: "Claude Code", opencode: "OpenCode", codex: "Codex" }
 
 /** Each harness's global skills directory; the environment overrides match the harnesses' own. */
+const skillDirResolvers: Record<SkillTarget, (env: NodeJS.ProcessEnv) => string> = {
+  claude: (env) => join(env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"), "skills"),
+  opencode: (env) => join(env.XDG_CONFIG_HOME || join(homedir(), ".config"), "opencode", "skills"),
+  codex: (env) => join(env.CODEX_HOME || join(homedir(), ".codex"), "skills"),
+}
+
 export function skillsDirFor(target: SkillTarget, env: NodeJS.ProcessEnv = process.env): string {
-  if (target === "claude") return join(env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"), "skills")
-  if (target === "opencode") return join(env.XDG_CONFIG_HOME || join(homedir(), ".config"), "opencode", "skills")
-  return join(env.CODEX_HOME || join(homedir(), ".codex"), "skills")
+  return skillDirResolvers[target](env)
 }
 
 /** The harness's config root: present means the harness has been used on this machine. */

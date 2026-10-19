@@ -90,6 +90,19 @@ describe("pipeline catalog", () => {
     })
   })
 
+  test("a fan-out across runners keeps each member's runner", async () => {
+    await withRepo(undefined, async (dir) => {
+      const file = join(dir, "cross.yaml")
+      await writeFile(file, "steps:\n  - agent: bug-auditor\n    runner: codex\n    models:\n      - openai/gpt-5.5#high\n      - { runner: claude-code, model: anthropic/sonnet }\n      - { runner: opencode, model: openai/gpt-5.5 }\n")
+      const view = await showPipelineView(dir, { pipelineFile: file })
+      expect(view.steps.map((step) => step.runner)).toEqual(["codex", "claude-code", "opencode"])
+      expect(view.runners).toEqual(["claude-code", "codex", "opencode"])
+      expect(renderPipelineView(view)).toContain("· read-only · claude-code + codex + opencode")
+      const { agents } = await listPipelineViews(dir)
+      expect(renderPipelineList([{ ...view, default: false }], agents)).toMatch(/cross\s+file · read-only · uses claude-code \+ codex/)
+    })
+  })
+
   test("the list text names every pipeline and the agents to compose with", async () => {
     await withRepo(undefined, async (dir) => {
       const { pipelines, agents } = await listPipelineViews(dir)

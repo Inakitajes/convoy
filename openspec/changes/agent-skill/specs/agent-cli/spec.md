@@ -36,7 +36,7 @@
 - **THEN** the run executes the file's steps and no config file changes
 
 ### Requirement: The pipeline catalog is listable
-`convoy pipelines` SHALL list every runnable pipeline with its source (built-in, global, or project; project shadowing global shadowing built-in), whether it writes code, its runners, its goal target, and which is the default, followed by the agent registry. `convoy pipelines show <name>` and `show --pipeline-file <path>` SHALL print the resolved steps (agent, model, runner, advisor, read-only, verify, parallel group) and the goal loop. Both SHALL accept `--json`.
+`convoy pipelines` SHALL list every runnable pipeline with its source (built-in, global, or project; project shadowing global shadowing built-in), whether it writes code, its runners (any registered runner, including mixed fan-outs), its goal target, and which is the default, followed by the agent registry. `convoy pipelines show <name>` and `show --pipeline-file <path>` SHALL print the resolved steps (agent, model, runner, advisor, read-only, verify, parallel group) and the goal loop. Both SHALL accept `--json`.
 
 #### Scenario: Validating a pipeline file
 - **WHEN** `convoy pipelines show --pipeline-file p.yaml` names a file with a nested parallel block

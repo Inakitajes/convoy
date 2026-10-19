@@ -28,10 +28,10 @@ Every step names an **agent**: a built-in one, or a project agent the user confi
 ```yaml
 - agent: bug-auditor          # required
   name: bugs                  # step name: report file (reports/bugs.md), --only/--skip, reports: [bugs]. Default: the agent name
-  model: openrouter/deepseek/deepseek-v4.1-flash#high   # provider/model[#variant] for OpenCode; opus | sonnet | haiku | claude-* for claude-code
+  runner: codex               # who executes it: opencode (default), claude-code, or codex
+  model: openai/gpt-5.5#high  # provider/model[#variant], executed by the step's runner (see "Runners and models")
   models: [model-a, model-b]  # instead of model: run the step once per model (forced read-only), reports bugs__<model-slug>.md
-  runner: claude-code         # run on the local claude CLI instead of OpenCode (default: opencode)
-  advisor: openai/gpt-6-astra#xhigh   # a stronger model consulted at decision points; claude-code/opus consults Claude; false opts out of a default
+  advisor: openai/gpt-6-astra#xhigh   # a stronger model consulted at decision points; false opts out of a default
   reports: previous           # which earlier reports to attach: previous (default) | all | none | [step, ...]
   diff: true                  # attach the cumulative diff against the base (default: every step but the first)
   verify: true                # read-only step may still run tests/lint/typecheck through bash
@@ -41,6 +41,18 @@ Every step names an **agent**: a built-in one, or a project agent the user confi
 
 Model precedence: step `model` > the agent's configured model > `defaults.model` > the agent's built-in preference. Omit `model` to accept that chain; `convoy pipelines show` shows what each step resolves to.
 
+## Runners and models
+
+A model is always spelled `provider/model[#variant]`; the step's `runner` decides who executes it, and a step without one runs on `defaults.runner`, else OpenCode.
+
+| Runner | Executes | `#variant` | Needs |
+|---|---|---|---|
+| `opencode` | any provider OpenCode has credentials for (`openrouter/…`, `openai/…`, …) | the provider's variant | OpenCode V2 |
+| `claude-code` | `anthropic/*`: `anthropic/opus`, `anthropic/sonnet`, `anthropic/haiku`, or a `claude-*` id (bare `opus` works too) | none | the `claude` CLI, logged in |
+| `codex` (experimental) | `openai/*` (a bare Codex model id works too) | effort: `minimal`, `low`, `medium`, `high`, `xhigh` | the `codex` CLI 0.160+, logged in |
+
+A runner never translates a model it can't execute: an `anthropic/*` model on a Codex step fails validation. Anywhere a model goes (`model`, each `models:` entry, `advisor`) you can write a route instead, `{ runner: claude-code, model: anthropic/sonnet }`, so one fan-out can mix runners. A plain-model `advisor` consults through OpenCode; give it a route (or the shorthand `claude-code/opus`, `codex/gpt-5.5`) to consult a CLI runner. A pipeline that never uses OpenCode doesn't need it installed.
+
 **A parallel block** runs its steps concurrently; every member is forced read-only, so use it for audits and scoring, never for writing:
 
 ```yaml
@@ -49,7 +61,7 @@ Model precedence: step `model` > the agent's configured model > `defaults.model`
       name: security
     - agent: bug-auditor
       name: bugs
-      models: [openrouter/deepseek/deepseek-v4.1-flash#high, openrouter/z-ai/glm-5.3-flash#high]
+      models: [openrouter/deepseek/deepseek-v4.1-flash-1017#high, openai/gpt-6.1-sol#high]
 ```
 
 `reports: previous` on the step after a parallel block attaches every member's report. Parallel blocks can't nest.
@@ -75,7 +87,7 @@ Model precedence: step `model` > the agent's configured model > `defaults.model`
         - parallel:
             - agent: quality-scorer
               name: score
-              models: [openrouter/x-ai/grok-4.6#high, openrouter/z-ai/glm-5.3#high]
+              models: [openai/gpt-6.1-sol#xhigh, openrouter/z-ai/glm-5.3#high]
               reports: none
               diff: true
         - agent: quality-score-report
@@ -93,7 +105,7 @@ The prompt, the cumulative diff against the base branch (except the first step, 
 
 ## Choosing models
 
-Use models the user already runs: the ones in `convoy pipelines show <built-in>` are configured and authenticated. OpenCode models are `provider/model[#variant]` (`#high`, `#xhigh` select reasoning effort). Claude Code steps take `opus`, `sonnet`, `haiku`, or a `claude-*` id, and need no OpenCode at all. Spread audits across model families (they catch different things), keep the writer on one strong model, and add an advisor to a writer rather than a second writer.
+Use models and runners the user already runs: the ones in `convoy pipelines show <built-in>` are configured and authenticated, and a user on a Claude or ChatGPT subscription may prefer `claude-code` or `codex` steps. Spread audits across model families (they catch different things), keep the writer on one strong model, and add an advisor to a writer rather than a second writer. Unattended launches with `claude-code` or `codex` steps need the user's `runners.<id>.auth.billingPolicy: account-policy` (see SKILL.md, troubleshooting).
 
 ## Examples
 
@@ -111,11 +123,11 @@ steps:
   - parallel:
       - agent: security-reviewer
         name: security
-        models: [openrouter/deepseek/deepseek-v4.1-flash#high, openrouter/z-ai/glm-5.3-flash#high]
+        models: [openrouter/deepseek/deepseek-v4.1-flash-1017#high, openai/gpt-6.1-sol#high]
         reports: [scope]
       - agent: hunter-reliability
         name: reliability
-        models: [openrouter/deepseek/deepseek-v4.1-flash#high, openrouter/z-ai/glm-5.3-flash#high]
+        models: [openrouter/deepseek/deepseek-v4.1-flash-1017#high, openai/gpt-6.1-sol#high]
         reports: [scope]
   - agent: review-report
     name: report
@@ -147,7 +159,7 @@ steps:
         steps:
           - agent: quality-scorer
             name: score
-            models: [openrouter/x-ai/grok-4.6#high, openrouter/z-ai/glm-5.3#high]
+            models: [openai/gpt-6.1-sol#xhigh, openrouter/z-ai/glm-5.3#high]
             reports: none
             diff: true
           - agent: quality-score-report
@@ -157,7 +169,7 @@ steps:
             diff: true
 ```
 
-### Claude Code only
+### Claude Code only (no OpenCode needed)
 
 ```yaml
 name: claude-audit
@@ -165,19 +177,38 @@ steps:
   - agent: review-scope
     name: scope
     runner: claude-code
-    model: sonnet
+    model: anthropic/sonnet
     reports: none
     diff: true
     verify: true
   - agent: bug-auditor
     name: bugs
     runner: claude-code
-    models: [opus, sonnet]
+    models: [anthropic/opus, anthropic/sonnet]
     reports: [scope]
   - agent: review-report
     name: report
     runner: claude-code
-    model: opus
+    model: anthropic/opus
+    reports: all
+```
+
+### One audit across three harnesses
+
+```yaml
+name: cross-harness-bugs
+steps:
+  - agent: bug-auditor
+    name: bugs
+    runner: codex
+    models:
+      - openai/gpt-5.5#high                                # the step's runner: Codex
+      - { runner: claude-code, model: anthropic/sonnet }
+      - { runner: opencode, model: openrouter/z-ai/glm-5.3#high }
+  - agent: review-report
+    name: report
+    runner: claude-code
+    model: anthropic/opus
     reports: all
 ```
 

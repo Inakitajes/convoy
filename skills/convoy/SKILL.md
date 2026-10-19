@@ -1,12 +1,12 @@
 ---
 name: convoy
-description: Run, compose, and monitor Convoy pipelines from this session. Convoy carries a big coding task across many fresh agent sessions (implement, audit, test, then score and fix until the branch reaches a quality bar), or runs multi-model reviews and audits, on OpenCode and/or Claude Code. Use when the user asks to run Convoy or a Convoy pipeline, hand a large task off to a pipeline, run a multi-model review or audit, build an ad hoc pipeline for a use case, or check on, answer, or abort a Convoy run.
+description: Run, compose, and monitor Convoy pipelines from this session. Convoy carries a big coding task across many fresh agent sessions (implement, audit, test, then score and fix until the branch reaches a quality bar), or runs multi-model reviews and audits, on OpenCode, Claude Code, and Codex. Use when the user asks to run Convoy or a Convoy pipeline, hand a large task off to a pipeline, run a multi-model review or audit, build an ad hoc pipeline for a use case, or check on, answer, or abort a Convoy run.
 ---
 <!-- convoy:skill -->
 
 # Convoy
 
-Convoy is a CLI that runs a **pipeline**: an ordered list of agent steps, each in a fresh session, each ending in a report (and a commit when the step writes code). Pipelines can fan steps out across models, run them in parallel, consult an advisor model, and end in a **goal loop** that scores the branch and fixes gaps until it reaches a target (90/100 in the built-ins). Runs are checkpointed, resumable, and keep their reports, transcripts, and costs under `~/.convoy/runs/<run-id>/`.
+Convoy is a CLI that runs a **pipeline**: an ordered list of agent steps, each in a fresh session on OpenCode, Claude Code, or Codex (chosen per step), each ending in a report (and a commit when the step writes code). Pipelines can fan steps out across models, run them in parallel, consult an advisor model, and end in a **goal loop** that scores the branch and fixes gaps until it reaches a target (90/100 in the built-ins). Runs are checkpointed, resumable, and keep their reports, transcripts, and costs under `~/.convoy/runs/<run-id>/`.
 
 From an agent session you drive it headless: compose or pick a pipeline, launch it **detached**, poll it with `convoy runs <id> --wait`, answer what it asks, and report the results.
 
@@ -45,7 +45,9 @@ Built-ins (check `convoy pipelines` for the current list and descriptions):
 | `hunter` | no | Maximum-coverage repo audit: six tracks across five models |
 | `claude-full-cycle` / `claude-review` | yes / no | The same on Claude Code alone (no OpenCode needed) |
 
-When nothing fits — a different model mix, a narrower audit, a custom sequence — **write a pipeline file**: one YAML mapping with `steps`, built from the agents `convoy pipelines` lists. Read [references/pipeline-files.md](references/pipeline-files.md) (or `convoy skill show references/pipeline-files.md`) for the schema, the rules, and worked examples. Put it in a scratch location unless the user wants to keep it, then validate it:
+Each step runs on a **runner**: `opencode` (the default; any provider OpenCode has keys for), `claude-code` (the user's `claude` CLI, Anthropic models), or `codex` (experimental: the user's `codex` CLI, OpenAI models). Steps can mix runners, even inside one fan-out. A user who works on a Claude or ChatGPT subscription may want their pipeline on those runners.
+
+When nothing fits — a different runner or model mix, a narrower audit, a custom sequence — **write a pipeline file**: one YAML mapping with `steps`, built from the agents `convoy pipelines` lists. Read [references/pipeline-files.md](references/pipeline-files.md) (or `convoy skill show references/pipeline-files.md`) for the schema, the rules, and worked examples. Put it in a scratch location unless the user wants to keep it, then validate it:
 
 ```bash
 convoy pipelines show --pipeline-file /tmp/payments-audit.yaml   # schema errors, resolved steps
@@ -125,8 +127,9 @@ When the run completes:
 | `no change is selected: pass --change <id> … or --manual` | Add `--manual` (or the change the user means) |
 | `permissions: interactive — requests wait for an answer` | You forgot `--smart`; requests will wait for `approve`/`deny` |
 | `working tree is not clean` (the run fails right after starting) | Commit or stash first, run in a worktree (`--worktree`), or, if the user agrees, `--include-dirty` |
-| `Claude billing: an unattended launch must state its billing decision` | The pipeline uses Claude Code; ask the user to set `defaults.claudeAuth.billingPolicy: account-policy` in their Convoy config (it acknowledges that subscription usage may bill) |
+| `<Claude/Codex> billing: an unattended launch must state its billing decision` | The pipeline has `claude-code` or `codex` steps; ask the user to set `runners.<runner-id>.auth.billingPolicy: account-policy` in their Convoy config (it acknowledges that subscription usage may bill). Don't set it yourself |
 | `another managed writer owns <checkout>` | Another run is writing there; wait for it, or run in a new worktree (`--worktree`) |
+| `runner codex executes OpenAI models…` / `runner claude-code executes Anthropic models…` | The step's model doesn't belong to its runner; see "Runners and models" in the reference |
 | `unknown pipeline "<name>"` | Check `convoy pipelines`; for a file, use `--pipeline-file` |
 | `agent "<name>" has no prompt` / `needs agent "<name>"` | The pipeline names an agent that doesn't exist; pick one from `convoy pipelines` |
 | A step loops or burns money | `convoy runs <run-id> abort`; Convoy's loop guard also stops a phase over its step or cost budget |
