@@ -45,7 +45,7 @@ type Reader = {
   pattern?: boolean
   /** Whether each path is read as a tree. */
   tree?: boolean | ((parsed: ParsedOptions) => boolean)
-  /** Options that make the program write, run another program, or follow links out of the tree. */
+  /** Options that make the program write, run another program, follow links out of the tree, or read a list of paths from a file. */
   unsafe?: readonly string[]
 }
 
@@ -56,13 +56,13 @@ const readers: Readonly<Record<string, Reader>> = {
   cat: {},
   head: { options: { "-n": number, "-c": number, "--lines": number, "--bytes": number } },
   tail: { options: { "-n": number, "-c": number, "--lines": number, "--bytes": number } },
-  wc: { options: { "--files0-from": "path" } },
+  wc: { unsafe: ["--files0-from"] },
   nl: { options: Object.fromEntries([..."bdfhilnsvw"].map((letter) => [`-${letter}`, text])) },
   ls: { tree: (parsed) => parsed.options.has("-R") || parsed.options.has("--recursive") },
-  file: { options: { "-f": "path", "-m": "path", "--files-from": "path", "--magic-file": "path" } },
+  file: { options: { "-m": "path", "--magic-file": "path" }, unsafe: ["-f", "--files-from"] },
   stat: {},
   pwd: {},
-  du: { options: { "-d": number, "-B": number, "-t": number, "--max-depth": number, "-X": "path", "--exclude-from": "path" }, tree: true },
+  du: { options: { "-d": number, "-B": number, "-t": number, "--max-depth": number, "-X": "path", "--exclude-from": "path" }, tree: true, unsafe: ["--files0-from"] },
   grep: {
     options: {
       "-A": number, "-B": number, "-C": number, "-m": number, "--max-count": number, "--context": number, "--after-context": number, "--before-context": number,

@@ -180,6 +180,12 @@ describe("codex approvals", () => {
       `cat ${dir}/.priv*/token`,
       `rg -n x ${dir}/.*`,
       `RIPGREP_CONFIG_PATH=${dir}/rc rg foo`,
+      // A file of file names reads paths the classifier never sees.
+      `file -f ${dir}/list`,
+      `file --files-from=${dir}/list`,
+      `wc --files0-from=${dir}/list`,
+      `wc --files0-from ${dir}/list`,
+      `du --files0-from=${dir}/list`,
     ]) {
       expect({ command, verdict: await decideCommand(ctx, command, dir) }).toMatchObject({ command, verdict: { accept: false } })
     }
