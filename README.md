@@ -50,7 +50,13 @@ convoy -p review                  # report-only review of the current branch
 convoy -p claude-full-cycle       # the full cycle on Claude Code alone
 ```
 
-Convoy also runs headless, so a script or another agent can supervise it: the CLI streams the run's log and exits with the run's own code. See [installation and updates](docs/getting-started.md), [provider setup](docs/models.md), and [driving Convoy from a script or agent](docs/running.md#driving-convoy-from-a-script-or-agent).
+Convoy also runs headless, so a script or another agent can supervise it. `convoy skill install` teaches Claude Code, OpenCode, and Codex sessions to compose a pipeline for a task, launch it detached, and follow it with `convoy runs <id> --wait`:
+
+```sh
+convoy skill install              # then ask your agent: "run a Convoy review of this branch"
+```
+
+See [installation and updates](docs/getting-started.md), [provider setup](docs/models.md), [driving Convoy from a script or agent](docs/running.md#driving-convoy-from-a-script-or-agent), and [agent sessions](docs/agents.md).
 
 ## Pick a pipeline
 
@@ -65,7 +71,7 @@ Convoy also runs headless, so a script or another agent can supervise it: the CL
 | `claude-full-cycle` | The full cycle on Claude Code alone, scored by Opus and Sonnet. |
 | `claude-review` | A report-only Claude Code review, synthesized by Opus. |
 
-Every pipeline is YAML you can copy and change. [Models, steps, and stopping rules →](docs/pipelines.md)
+Every pipeline is YAML you can copy and change, or write in a file of its own and run with `--pipeline-file`. `convoy pipelines` lists what can run. [Models, steps, and stopping rules →](docs/pipelines.md)
 
 ## Documentation
 
@@ -78,6 +84,7 @@ Every pipeline is YAML you can copy and change. [Models, steps, and stopping rul
 | [Worktrees](docs/worktrees.md) | Home, isolation, spin, and close |
 | [OpenSpec](docs/openspec.md) | Spec-driven runs and the artifact reader |
 | [Running Convoy](docs/running.md) | CLI, TUI, headless runs, history, and resume |
+| [Agent sessions](docs/agents.md) | The Convoy skill for Claude Code, OpenCode, and Codex |
 | [Configuration](docs/configuration.md) | Agents, advisors, prompts, hooks, and attachments |
 | [Permissions and safety](docs/safety.md) | Approval policies, commits, compaction, and publication |
 | [Models and providers](docs/models.md) | Authentication and model gateways |

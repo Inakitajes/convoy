@@ -175,16 +175,38 @@ The target repo only sees commits with prefix `convoy(<phase>): ...`, made on th
 
 ## Driving Convoy from a script or agent
 
-Off a terminal, a launch is a blocking command an agent can supervise:
+Off a terminal, a launch is a command a script or agent can supervise. It either blocks until the run ends, or with `--detach` returns as soon as the run is up:
 
 ```bash
+# blocking: stream the run's log and exit with its code
 convoy --pipeline review --manual --no-confirm --smart "Audit the payment flow" < /dev/null
+
+# detached: start, print the run id, return; then poll
+convoy --pipeline review --manual --smart --detach "Audit the payment flow" < /dev/null
+convoy runs <run-id> --wait --timeout 5m
 ```
 
-- It prints the compact plan, then `coordinator <pid> running run <id>; logs: <path>`, streams the run's log (`[step] attempt …`, `[step] session: …`, `[step] usage: $…`, permission decisions) for OpenCode and Claude steps alike, and **exits with the run's own code**: 0 on success, non-zero on a failed step, 130 on abort.
-- Pass `--change <id>` or `--manual`, and `--smart` or `--yolo`. With interactive permissions a request is never auto-rejected: it holds until someone answers it from `convoy runs`, logged as `[permission] waiting for an answer: …`, and the launch warns about this before it starts.
+- A blocking launch prints the compact plan, then `coordinator <pid> running run <id>; logs: <path>`, streams the run's log (`[step] attempt …`, `[step] session: …`, `[step] usage: $…`, permission decisions) for OpenCode and Claude steps alike, and **exits with the run's own code**: 0 on success, non-zero on a failed step, 130 on abort.
+- `--detach` prints the plan, then `run <id> started (coordinator <pid>, detached)` with the log path, and exits 0 while the run keeps going in the background. It implies `--no-tui`, `--no-confirm`, and no human steps. Use it from agent sessions, whose shell tools time out long before a run ends.
+- Pass `--change <id>` or `--manual`, and `--smart` or `--yolo`. With interactive permissions a request is never auto-rejected: it holds until someone answers it, logged as `[permission] waiting for an answer: …`, and the launch warns about this before it starts.
 - Human steps are off by default without a TTY (`--no-human-step`), and so are the decisions after a failure: a failed step fails the run instead of waiting at its failure gate. Resume it later with `--resume <id>`.
-- `convoy runs <id>` prints the run's status (`running`, `running · waiting for a permission`, `completed`, `failed …`), its phases with model and cost, and its summary, for polling from another process.
+- `--pipeline-file <path>` runs a pipeline defined in its own YAML file, so a script or agent can compose one without editing your config (see [Pipeline files](pipelines.md#pipeline-files)). `convoy pipelines` lists what can run.
+
+### Following a run
+
+| Command | What it does |
+|---|---|
+| `convoy runs <id>` | Off a terminal: the run's status line (`running`, `running · waiting for a permission`, `completed`, `failed …`), its phases with model and cost, and its summary |
+| `convoy runs <id> --json` | The same as data: `state` (`running`, `waiting`, `completed`, `failed`, `incomplete`, `unknown`), `phases`, `cost`, `waiting` (the pending request), `goal`, `summaryPath`, `reports`, `logPath`, `targetDir` |
+| `convoy runs --json` | The run history as data |
+| `convoy runs <id> --wait [--timeout 5m]` | Blocks until the run ends, stops at a gate, or the timeout passes, printing phase changes as they happen (`--json` prints one snapshot at the end instead) |
+| `convoy runs <id> approve <request> [--always]` | Allows the pending permission request once, or for the rest of the run |
+| `convoy runs <id> deny <request>` | Rejects it |
+| `convoy runs <id> abort` | Stops the run; it stays resumable |
+
+`--wait` exits **0** when the run completed, **1** when it ended any other way, **2** when the timeout passed with the run still going, and **3** when the run waits for an answer. Approve and deny name the request they answer (`waiting.requestId` in `--json`, also printed by `--wait`), so nothing approves a request its caller hasn't seen; they act as the run's controller for that one request and refuse while a dashboard is attached. The `logPath` is the detached coordinator's log, available while the run is live.
+
+To have a Claude Code, OpenCode, or Codex session do all of this itself, install the [agent skill](agents.md).
 
 ## Reviewing a run before starting
 

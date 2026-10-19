@@ -49,6 +49,9 @@ convoy/
 │   ├── step-commit.ts    # intermediate convoy(<step>) messages with a Convoy-Run trailer
 │   ├── workspace.ts     # run dir, ~/.convoy home (CONVOY_HOME), global config/agents paths
 │   ├── runs.ts          # interactive run-history browser (convoy runs)
+│   ├── runs-command.ts  # convoy runs --json/--wait and approve/deny/abort for scripts and agents
+│   ├── pipelines-command.ts # convoy pipelines: the catalog and one pipeline's resolved steps
+│   ├── skill-install.ts # convoy skill: installs the embedded agent skill (skills/convoy) per harness
 │   ├── runs-tui.ts      # OpenTUI run-history browser rendering
 │   ├── metadata.ts      # per-run metadata.json: frozen pipeline + --resume restore
 │   ├── config.ts        # config loader/validation, global+project merge, YAML writer
@@ -60,6 +63,7 @@ convoy/
 │   └── pipeline.ts      # built-in agents/pipeline and pipeline-spec resolution
 ├── scripts/             # build.ts: local + multi-target release binary compilation
 ├── prompts/             # built-in agent prompts and runtime safety guard rails
+├── skills/convoy/       # the agent skill (SKILL.md + references), embedded by skill-install.ts
 ├── test/                # unit tests for CLI/orchestration
 ├── .github/workflows/   # release.yml: tag-triggered build, test, and GitHub Release publish
 ├── package.json

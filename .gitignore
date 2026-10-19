@@ -1,5 +1,7 @@
 node_modules/
-convoy
+# the compiled binary (make clean also removes src/convoy)
+/convoy
+/src/convoy
 dist/
 coverage/
 .*.bun-build

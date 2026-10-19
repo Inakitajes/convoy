@@ -1,7 +1,7 @@
 import { readFile, stat } from "node:fs/promises"
 import { dirname, join, resolve } from "node:path"
 
-import { advisorAuthOf, authoringHarnessOf, runnerAuthOf, buildAgentRegistry, ejectAgentPrompt, emptyHooksConfig, featuresOf, globalConfigPath, loadMergedConvoyConfig, pipelineDefaultsOf, selectPipelineSpec, writeDefaultGlobalConfig, writeDefaultProjectConfig, type ConvoyDefaults } from "./config"
+import { advisorAuthOf, authoringHarnessOf, runnerAuthOf, buildAgentRegistry, ejectAgentPrompt, emptyHooksConfig, featuresOf, globalConfigPath, loadMergedConvoyConfig, loadPipelineFile, pipelineDefaultsOf, selectPipelineSpec, writeDefaultGlobalConfig, writeDefaultProjectConfig, type ConvoyDefaults } from "./config"
 import { readControlFile } from "./control-client"
 import { detectBaseRef, currentBranch, listChangedFiles, worktreeDefaultFor } from "./git"
 import { openRouterKeySources } from "./limits"
@@ -32,6 +32,8 @@ import type { UpdateResult } from "./update"
 import type { TuiRoute } from "./tui-session"
 import type { HomeDestination, HomeResolution, HomeWorkAction } from "./home-tui"
 import type { LocalActiveChange, ReadResult } from "./checkout-openspec"
+import type { RunsCommand } from "./runs-command"
+import type { SkillTarget } from "./skill-install"
 
 /**
  * Flags as written: every scalar stays undefined until the user sets it, so
@@ -43,6 +45,8 @@ export type ParsedArgs = {
   promptFile?: string
   help?: boolean
   pipeline?: string
+  /** --pipeline-file: run a pipeline defined in its own YAML file instead of a named one. */
+  pipelineFile?: string
   files: string[]
   onlySteps: string[]
   skipSteps: string[]
@@ -77,6 +81,8 @@ export type ParsedArgs = {
   gateway?: ModelGateway
   planOnly?: boolean
   noConfirm?: boolean
+  /** --detach: return once the coordinator is up instead of streaming the run to its end. */
+  detach?: boolean
   /** --change: explicit OpenSpec change ids, in review order (repeatable); selection is explicit only. */
   changes: string[]
   /** --manual: the explicit no-change run mode (valid with zero selected changes). */
@@ -94,6 +100,10 @@ export type CliCommand =
   | { type: "help"; text: string }
   | { type: "run"; options: RunOptions }
   | { type: "runs"; runID?: string }
+  | { type: "runs-query"; command: Exclude<RunsCommand, { kind: "browse" }> }
+  | { type: "pipelines"; targetDir: string; json: boolean; name?: string; pipelineFile?: string }
+  | { type: "skill"; action: "install" | "uninstall"; targets: SkillTarget[] }
+  | { type: "skill-show"; file?: string }
   | { type: "specs"; targetDir: string }
   | { type: "spin"; options: SpinOptions }
   | { type: "opencode-install" }
@@ -143,6 +153,29 @@ export async function parseAndRun(argv: string[]) {
   }
   if (command.type === "runs") {
     await openRunsBrowser(command.runID)
+    return
+  }
+  if (command.type === "runs-query") {
+    const { printRunsJson, runAction, waitForRun } = await import("./runs-command")
+    const query = command.command
+    if (query.kind === "json") await printRunsJson(query.runID)
+    else if (query.kind === "wait") process.exitCode = await waitForRun(query.runID, { timeoutMs: query.timeoutMs, json: query.json })
+    else await runAction(query.runID, query.action)
+    return
+  }
+  if (command.type === "pipelines") {
+    const { runPipelinesCommand } = await import("./pipelines-command")
+    await runPipelinesCommand(command)
+    return
+  }
+  if (command.type === "skill") {
+    const { runSkillCommand } = await import("./skill-install")
+    process.exitCode = await runSkillCommand(command.action, command.targets)
+    return
+  }
+  if (command.type === "skill-show") {
+    const { skillFileText } = await import("./skill-install")
+    process.stdout.write(skillFileText(command.file))
     return
   }
   if (command.type === "specs") {
@@ -272,7 +305,7 @@ export async function parseAndRun(argv: string[]) {
   // it holds until someone opens the run. Say so before an agent or script
   // starts a run that would otherwise go quiet at its first ask.
   if (plan.permissions === "interactive" && !(command.options.tui && process.stdout.isTTY)) {
-    log.warn("permissions: interactive — requests wait for a controller (`convoy runs`); pass --smart or --yolo for an unattended run")
+    log.warn("permissions: interactive — requests wait for an answer (`convoy runs <id> approve|deny <request>`, or the `convoy runs` dashboard); pass --smart or --yolo for an unattended run")
   }
   await preflightRunPlan(plan, undefined, { reviewed: interactive && !command.options.noConfirm })
   // Nothing has touched the repo yet; the worktree is the first effect, and only
@@ -1087,6 +1120,14 @@ async function spawnAndAttachRun(options: RunOptions, plan: RunPlan, route?: Tui
       await rmPendingLaunch(pending.dir)
       return
     }
+    // --detach: the coordinator already survives this process, so hand the
+    // run back to the caller (an agent session, a script) and let it poll.
+    // The pending dir stays: it holds the log the coordinator is writing, and
+    // the sweep only removes it once that coordinator is gone.
+    if (options.detach) {
+      process.stdout.write(detachedRunMessage(ready.runID, child.pid, pending.logPath))
+      return
+    }
     // --no-tui / CI: don't attach; stream the coordinator's log to the
     // terminal, wait for its exit, and forward the exit code.
     process.stdout.write(`coordinator ${child.pid} running run ${ready.runID}; logs: ${pending.logPath}\n`)
@@ -1117,6 +1158,17 @@ async function spawnAndAttachRun(options: RunOptions, plan: RunPlan, route?: Tui
       throw error
     }
   }
+}
+
+/** What `--detach` prints: a stable `run <id> started` first line, then where to look and how to follow. */
+export function detachedRunMessage(runID: string, pid: number, logPath: string): string {
+  return [
+    `run ${runID} started (coordinator ${pid}, detached)`,
+    `log: ${logPath}`,
+    `follow: convoy runs ${runID} --wait`,
+    `status: convoy runs ${runID} --json`,
+    "",
+  ].join("\n")
 }
 
 /** Surfaces the coordinator's last words on a failed TTY run: its stderr went to the pending log, not this terminal. */
@@ -2097,9 +2149,21 @@ export async function parseCommand(argv: string[]): Promise<CliCommand> {
   }
   if (argv[0] === "runs") {
     const rest = argv.slice(1)
-    if (rest.length > 1) throw new Error("usage: convoy runs [run-id]")
-    if (rest[0] !== undefined && !isValidRunID(rest[0])) throw new Error(`invalid run id: ${rest[0]}`)
-    return { type: "runs", runID: rest[0] }
+    const { parseRunsArgs, runsHelp } = await import("./runs-command")
+    if (rest.some((arg) => arg === "--help" || arg === "-h")) return { type: "help", text: runsHelp() }
+    const parsed = parseRunsArgs(rest)
+    // The bare and run-id forms keep the browser (plain text off a terminal);
+    // --json, --wait, and the answers are the scripted surface.
+    if (parsed.kind === "browse") return { type: "runs", runID: parsed.runID }
+    return { type: "runs-query", command: parsed }
+  }
+  if (argv[0] === "pipelines") {
+    const { parsePipelinesArgs } = await import("./pipelines-command")
+    return parsePipelinesArgs(argv.slice(1))
+  }
+  if (argv[0] === "skill") {
+    const { parseSkillArgs } = await import("./skill-install")
+    return parseSkillArgs(argv.slice(1))
   }
   if (argv[0] === "specs") {
     // No positionals or flags yet — the viewer reads the whole OpenSpec state.
@@ -2415,15 +2479,19 @@ export async function resolveRunOptions(parsed: ParsedArgs): Promise<Omit<RunOpt
   const config = await loadMergedConvoyConfig(parsed.targetDir)
   const defaults = config?.defaults ?? {}
 
-  const humanReview = parsed.humanReview ?? Boolean(process.stdin.isTTY && process.stdout.isTTY)
+  // A detached run has nobody at its gates, whatever the terminal says.
+  const humanReview = parsed.humanReview ?? (!parsed.detach && Boolean(process.stdin.isTTY && process.stdout.isTTY))
 
   const agents = buildAgentRegistry(config)
-  const pipelineName = parsed.pipeline ?? defaults.pipeline ?? defaultPipelineName
+  // A pipeline file is read before the try below: unlike a config that broke
+  // since a resume's run started, a bad file is always the caller's error.
+  const pipelineFile = parsed.pipelineFile ? await loadPipelineFile(resolve(process.cwd(), parsed.pipelineFile)) : undefined
+  const pipelineName = pipelineFile?.name ?? parsed.pipeline ?? defaults.pipeline ?? defaultPipelineName
   let pipeline: Pipeline
   try {
     pipeline = resolvePipeline({
       name: pipelineName,
-      spec: selectPipelineSpec(config, pipelineName),
+      spec: pipelineFile?.spec ?? selectPipelineSpec(config, pipelineName),
       agents,
       ...pipelineDefaultsOf(defaults),
     })
@@ -2473,7 +2541,7 @@ export async function resolveRunOptions(parsed: ParsedArgs): Promise<Omit<RunOpt
     advisorOverride: parsed.advisorOverride ?? "",
     advisorDisabled: parsed.advisorDisabled ?? false,
     advisorAuditPolicy: defaults.advisorAuditPolicy ?? "summary",
-    tui: parsed.tui ?? Boolean(process.stdout.isTTY && process.stderr.isTTY),
+    tui: parsed.detach ? false : (parsed.tui ?? Boolean(process.stdout.isTTY && process.stderr.isTTY)),
     notify: parsed.notify,
     notifications: config?.notifications ?? {},
     humanReview,
@@ -2496,7 +2564,9 @@ export async function resolveRunOptions(parsed: ParsedArgs): Promise<Omit<RunOpt
     gatewayExplicit: parsed.gateway !== undefined,
     modelRoutingOverrides: config?.modelRouting?.overrides ?? {},
     planOnly: parsed.planOnly ?? false,
-    noConfirm: parsed.noConfirm ?? false,
+    // Detaching is a decision to start now: there is no review screen to return to.
+    noConfirm: Boolean(parsed.noConfirm || parsed.detach),
+    ...(parsed.detach ? { detach: true } : {}),
     pipeline,
     agents,
     permissions: config?.permissions ?? { allow: [], deny: [] },
@@ -2584,6 +2654,9 @@ export function parseArgs(argv: string[]): ParsedArgs {
       case "-p":
         parsed.pipeline = takeValue()
         break
+      case "--pipeline-file":
+        parsed.pipelineFile = takeValue()
+        break
       case "--only":
         parsed.onlySteps.push(...listValue(takeValue()))
         break
@@ -2636,6 +2709,10 @@ export function parseArgs(argv: string[]): ParsedArgs {
       case "--no-confirm":
         if (value !== undefined) throw new Error("--no-confirm does not take a value")
         parsed.noConfirm = true
+        break
+      case "--detach":
+        if (value !== undefined) throw new Error("--detach does not take a value")
+        parsed.detach = true
         break
       case "--tui":
         parsed.tui = true
@@ -2714,6 +2791,12 @@ export function parseArgs(argv: string[]): ParsedArgs {
   }
 
   if (positional.length > 0) parsed.prompt = positional.join(" ")
+  if (parsed.pipeline !== undefined && parsed.pipelineFile !== undefined) throw new Error("use either --pipeline or --pipeline-file, not both")
+  if (parsed.resumeRunID !== undefined && parsed.pipelineFile !== undefined) {
+    throw new Error("--resume replays the pipeline the run started with; it can't take --pipeline-file")
+  }
+  if (parsed.detach && parsed.tui) throw new Error("--detach runs without a dashboard; drop --tui")
+  if (parsed.detach && parsed.planOnly) throw new Error("--plan never starts a run; drop --detach")
   return parsed
 }
 
@@ -2795,10 +2878,14 @@ Usage:
   convoy "Add onboarding"
   convoy --prompt-file prd.md --file lib/onboarding --file test/onboarding_test.dart
   convoy --pipeline bug-fix --prompt-file bug.md
+  convoy --pipeline-file audit.yaml --prompt-file task.md --manual --smart --detach
   convoy init
   convoy agents eject <agent>
   convoy update [--check]
-  convoy runs [run-id]
+  convoy runs [run-id] [--json] [--wait]
+  convoy runs <run-id> approve|deny <request-id> | abort
+  convoy pipelines [show <name>] [--json]
+  convoy skill install
   convoy specs
   convoy worktrees [--help]
   convoy publish [--yes] [--dry-run]
@@ -2820,7 +2907,16 @@ Commands:
   runs [run-id]            Browse run history: resume a run, read its summary/reports,
                            or open a subshell in its run dir (under ~/.convoy/runs).
                            Off a terminal it prints plain text: the history, or for a
-                           run id its "run <id>: <status>" line, phases, and summary
+                           run id its "run <id>: <status>" line, phases, and summary.
+                           --json prints it as data, --wait blocks until the run ends or
+                           needs an answer, and approve/deny/abort answer a detached run
+                           ("convoy runs --help" for the full surface)
+  pipelines                List the runnable pipelines (built-in, global, project) and the agents
+                           to compose with; "show <name>" prints one pipeline's resolved steps,
+                           "show --pipeline-file <path>" validates a pipeline file
+  skill install            Install the Convoy agent skill for Claude Code, OpenCode, and Codex, so
+                           a session can compose, launch, and monitor pipelines itself
+                           ("convoy skill --help"; "convoy skill show" prints it)
   worktrees                The worktree control center: every registered checkout with
                            its independent Git/OpenSpec facts, plus guarded fetch, sync,
                            push, archive, remove, delete-branch, and recover actions
@@ -2855,6 +2951,9 @@ Flags:
    --pipeline, -p <name>    Pipeline to run (default: "full-cycle"), which writes,
                             audits, then measures and iterates on a terminal goal
                             step until the score clears 90
+  --pipeline-file <path>   Run a pipeline defined in its own YAML file: the mapping a
+                           pipelines.<name> entry takes, plus an optional name
+                           (default: the file name). Nothing in your config changes
   --only <steps>           Run only these pipeline steps
   --skip <steps>           Skip these pipeline steps
   --resume <id>            Resume a previous run by its ID (steps with an existing report are
@@ -2873,6 +2972,9 @@ Flags:
   --gateway <${modelGateways.join("|")}> Route all OpenCode models through the selected gateway
   --plan                   Print the complete resolved plan without creating or running anything
   --no-confirm             Show a compact plan and start without the interactive confirmation
+  --detach                 Start the run in the background and return once it is up, printing
+                           "run <id> started"; follow it with convoy runs <id> --wait.
+                           Implies --no-tui, --no-confirm, and no human steps
   --tui                    Show visual phase progress (default in interactive terminals)
   --no-tui                 Disable visual phase progress
   --notify                 Enable desktop notifications for this run, overriding notifications.enabled in config
@@ -2902,10 +3004,13 @@ Flags:
 Headless (scripts, CI, agents):
   Off a terminal, a launch prints the plan, then "coordinator <pid> running run <id>",
   streams the run's log, and exits with the run's own code (0 only on success).
-  Pass --change or --manual (not needed with features.specs: false), plus --smart
-  or --yolo: with interactive permissions a request waits (logged as "[permission]
-  waiting for an answer") until someone answers it from "convoy runs".
-  "convoy runs <id>" prints that run's status.
+  With --detach it returns as soon as the run is up instead. Pass --change or
+  --manual (not needed with features.specs: false), plus --smart or --yolo: with
+  interactive permissions a request waits (logged as "[permission] waiting for an
+  answer") until someone answers it with "convoy runs <id> approve|deny <request>"
+  or from the "convoy runs" dashboard. "convoy runs <id> --json" prints that run's
+  status, and "convoy runs <id> --wait" blocks until it ends or needs an answer.
+  "convoy skill install" teaches agent sessions this workflow.
 
 Goal mode:
   Pipelines enter goal execution exclusively by declaring one terminal goal
