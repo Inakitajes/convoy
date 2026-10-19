@@ -53,7 +53,7 @@ convoy -p claude-full-cycle       # the full cycle on Claude Code alone
 Convoy also runs headless, so a script or another agent can supervise it. `convoy skill install` teaches Claude Code, OpenCode, and Codex sessions to compose a pipeline for a task, launch it detached, and follow it with `convoy runs <id> --wait`:
 
 ```sh
-convoy skill install              # then ask your agent: "run a Convoy review of this branch"
+convoy skill install              # then ask your agent: "run a Convoy review of this branch", or type /convoy-review
 ```
 
 See [installation and updates](docs/getting-started.md), [provider setup](docs/models.md), [driving Convoy from a script or agent](docs/running.md#driving-convoy-from-a-script-or-agent), and [agent sessions](docs/agents.md).

@@ -1,7 +1,8 @@
-import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
+import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 
+import pipelineCommandTemplate from "../skills/commands/pipeline.md" with { type: "text" }
 import pipelineFilesReference from "../skills/convoy/references/pipeline-files.md" with { type: "text" }
 import skillBody from "../skills/convoy/SKILL.md" with { type: "text" }
 
@@ -13,9 +14,15 @@ import skillBody from "../skills/convoy/SKILL.md" with { type: "text" }
  * installed skill always describes the CLI that installed it; re-running the
  * install after `convoy update` refreshes it.
  *
+ * Alongside it go the pipeline commands: `/convoy-review`, `/convoy-implement`,
+ * and the rest of `pipelineCommands`, each a shortcut that runs one built-in
+ * pipeline through the skill. Claude Code and Codex take them as user-invoked
+ * skills (`disable-model-invocation`), OpenCode as global commands.
+ *
  * Ownership follows `convoy opencode install`: a skill directory is Convoy's
- * when its SKILL.md carries the `convoy:skill` marker. Only such a directory is
- * ever refreshed or removed; a `convoy` skill someone else wrote is left alone.
+ * when its SKILL.md carries the `convoy:skill` marker, a command when it carries
+ * `convoy:command`. Only such a file is ever refreshed or removed; a `convoy`
+ * skill or `convoy-review` command someone else wrote is left alone.
  */
 
 export const skillName = "convoy"
@@ -147,6 +154,191 @@ export function describeSkillResult(result: SkillInstallResult): string {
   }
 }
 
+/** The marker every Convoy-written pipeline command carries. */
+const commandMarker = "<!-- convoy:command -->"
+
+const commandPrefix = "convoy-"
+
+export type PipelineCommand = {
+  pipeline: string
+  /** What the pipeline does, for the command's description and first line. */
+  summary: string
+  /** How the command gets its prompt. */
+  prompt: string
+  /** Whether the user confirms the plan before the launch. */
+  launch: string
+}
+
+const launchReadOnly =
+  "This pipeline only reads the repository and the user asked for it by name: launch without another round-trip, unless the plan shows something they wouldn't expect (a model, a cost, a checkout)."
+const launchWrites =
+  "This pipeline changes code. Confirm with the user first: the plan summary, where it runs (the current branch or a new worktree), and that it bills their providers."
+const promptDefault =
+  "The pipeline has a default prompt. Pass the request as `--prompt-file` (written to a scratch file) only when it adds focus or scope; with a change selected, the spec is the contract."
+const promptTask =
+  "With a change selected, the spec is the contract and the request, if any, is extra guidance. Without one, the request is the task: if it is empty, ask the user what to build before going on. Write the prompt to a scratch file for `--prompt-file`."
+
+/** The built-in pipelines that get a `/convoy-<pipeline>` command. */
+export const pipelineCommands: readonly PipelineCommand[] = [
+  { pipeline: "review", summary: "findings plus a verified quality score for the current branch; it doesn't change code.", prompt: promptDefault, launch: launchReadOnly },
+  { pipeline: "implement", summary: "implement a task or an OpenSpec change, then audit it, with a one-page recap.", prompt: promptTask, launch: launchWrites },
+  { pipeline: "full-cycle", summary: "implement, audit, and test a task or an OpenSpec change, then score and fix it to 90/100.", prompt: promptTask, launch: launchWrites },
+  { pipeline: "ship", summary: "sync the branch with its base, review it, fix the accepted findings, and reach 90/100.", prompt: promptDefault, launch: launchWrites },
+  {
+    pipeline: "fixer",
+    summary: "prove supplied findings with regression tests, fix them, and verify.",
+    prompt:
+      "The prompt is the findings to fix: from the request, the files it names (attach them with `--file`), or the reports of a run the user points to. If there is nothing to fix, ask. Write the prompt to a scratch file for `--prompt-file`.",
+    launch: launchWrites,
+  },
+  { pipeline: "hunter", summary: "a maximum-coverage audit of the branch across six tracks and five models; it doesn't change code.", prompt: promptDefault, launch: launchReadOnly },
+]
+
+export function commandName(command: PipelineCommand): string {
+  return `${commandPrefix}${command.pipeline}`
+}
+
+/**
+ * How a harness keeps its commands: Claude Code and Codex read user-invoked
+ * skills from the skills directory, OpenCode reads `commands/` beside it.
+ */
+type CommandLayout = {
+  dir: (skillsDir: string) => string
+  /** The entry, relative to the commands directory, that holds one command. */
+  entry: (name: string) => string
+  /** The command file inside that entry. */
+  file: (name: string) => string
+  /** The command a directory entry holds, if it can hold one. */
+  nameOf: (entry: string) => string | undefined
+  frontmatter: (name: string, description: string) => string[]
+}
+
+const skillCommandLayout: CommandLayout = {
+  dir: (skillsDir) => skillsDir,
+  entry: (name) => name,
+  file: (name) => join(name, "SKILL.md"),
+  nameOf: (entry) => entry,
+  frontmatter: (name, description) => [
+    `name: ${name}`,
+    `description: ${JSON.stringify(description)}`,
+    `argument-hint: "[focus, task, or OpenSpec change id]"`,
+    "disable-model-invocation: true",
+  ],
+}
+
+const commandLayouts: Record<SkillTarget, CommandLayout> = {
+  claude: skillCommandLayout,
+  codex: skillCommandLayout,
+  opencode: {
+    dir: (skillsDir) => join(dirname(skillsDir), "commands"),
+    entry: (name) => `${name}.md`,
+    file: (name) => `${name}.md`,
+    nameOf: (entry) => (entry.endsWith(".md") ? entry.slice(0, -".md".length) : undefined),
+    frontmatter: (_name, description) => [`description: ${JSON.stringify(description)}`],
+  },
+}
+
+export function commandsDirFor(target: SkillTarget, skillsDir: string): string {
+  return commandLayouts[target].dir(skillsDir)
+}
+
+/** One command's file for one harness: its frontmatter, the marker, then the shared body. */
+export function pipelineCommandText(target: SkillTarget, command: PipelineCommand): string {
+  const description = `Run the Convoy ${command.pipeline} pipeline headless from this session: ${command.summary}`
+  const frontmatter = commandLayouts[target].frontmatter(commandName(command), description)
+  const body = pipelineCommandTemplate
+    .replaceAll("{{pipeline}}", command.pipeline)
+    .replaceAll("{{summary}}", command.summary)
+    .replaceAll("{{prompt}}", command.prompt)
+    .replaceAll("{{launch}}", command.launch)
+  return `---\n${frontmatter.join("\n")}\n---\n${commandMarker}\n\n${body}`
+}
+
+export type CommandInstallResult = {
+  target: SkillTarget
+  dir: string
+  /** Command names, by what happened to each. */
+  written: string[]
+  current: string[]
+  skipped: string[]
+  removed: string[]
+}
+
+/** The Convoy-owned commands in a directory, by name, whatever pipelines they name. */
+async function ownedCommands(layout: CommandLayout, dir: string): Promise<string[]> {
+  let entries: string[]
+  try {
+    entries = await readdir(dir)
+  } catch {
+    return []
+  }
+  const owned: string[] = []
+  for (const entry of entries) {
+    const name = entry.startsWith(commandPrefix) ? layout.nameOf(entry) : undefined
+    if (name !== undefined && (await readIfExists(join(dir, layout.file(name))))?.includes(commandMarker)) owned.push(name)
+  }
+  return owned.sort()
+}
+
+/**
+ * Installs or refreshes every pipeline command for one harness, and removes
+ * Convoy-owned commands for pipelines the list no longer carries.
+ */
+export async function installCommands(target: SkillTarget, skillsDir = skillsDirFor(target)): Promise<CommandInstallResult> {
+  const layout = commandLayouts[target]
+  const dir = layout.dir(skillsDir)
+  const result: CommandInstallResult = { target, dir, written: [], current: [], skipped: [], removed: [] }
+  const names = new Set<string>()
+  for (const command of pipelineCommands) {
+    const name = commandName(command)
+    names.add(name)
+    const path = join(dir, layout.file(name))
+    const text = pipelineCommandText(target, command)
+    const existing = await readIfExists(path)
+    if (existing !== undefined && !existing.includes(commandMarker)) result.skipped.push(name)
+    else if (existing === text) result.current.push(name)
+    else {
+      await mkdir(dirname(path), { recursive: true })
+      await writeFile(path, text, "utf8")
+      result.written.push(name)
+    }
+  }
+  for (const name of await ownedCommands(layout, dir)) {
+    if (names.has(name)) continue
+    await rm(join(dir, layout.entry(name)), { recursive: true, force: true })
+    result.removed.push(name)
+  }
+  return result
+}
+
+/** Removes every Convoy-owned pipeline command for one harness. */
+export async function uninstallCommands(target: SkillTarget, skillsDir = skillsDirFor(target)): Promise<CommandInstallResult> {
+  const layout = commandLayouts[target]
+  const dir = layout.dir(skillsDir)
+  const result: CommandInstallResult = { target, dir, written: [], current: [], skipped: [], removed: [] }
+  for (const name of await ownedCommands(layout, dir)) {
+    await rm(join(dir, layout.entry(name)), { recursive: true, force: true })
+    result.removed.push(name)
+  }
+  return result
+}
+
+export function describeCommandResult(result: CommandInstallResult): string[] {
+  const label = targetLabels[result.target]
+  const slash = (names: string[]) => names.map((name) => `/${name}`).join(", ")
+  const lines: string[] = []
+  const installed = [...result.written, ...result.current]
+  if (installed.length > 0) {
+    if (result.written.length === 0) lines.push(`${label}: the pipeline commands are already current at ${result.dir}`)
+    else lines.push(`${label}: pipeline commands ${slash(installed)} → ${result.dir}`)
+  }
+  if (result.removed.length > 0) lines.push(`${label}: removed the commands ${slash(result.removed)} from ${result.dir}`)
+  if (result.skipped.length > 0) {
+    lines.push(`${label}: skipped ${slash(result.skipped)} — ${result.dir} holds commands of that name Convoy didn't write, so they were left untouched`)
+  }
+  return lines
+}
+
 /**
  * The `convoy skill install|uninstall` body. With no explicit targets,
  * install picks the harnesses found on this machine and uninstall cleans
@@ -172,8 +364,15 @@ export async function runSkillCommand(
     const result = action === "install" ? await installSkill(target) : await uninstallSkill(target)
     if (result.outcome === "skipped") code = 1
     write(`${describeSkillResult(result)}\n`)
+    const commands = action === "install" ? await installCommands(target) : await uninstallCommands(target)
+    if (commands.skipped.length > 0) code = 1
+    for (const line of describeCommandResult(commands)) write(`${line}\n`)
   }
-  if (action === "install" && code === 0) write("Start a new agent session and ask it to run a Convoy pipeline; it loads the skill on demand.\n")
+  if (action === "install" && code === 0) {
+    write(
+      `Start a new agent session and ask it to run a Convoy pipeline (it loads the skill on demand), or type a command: ${pipelineCommands.map((command) => `/${commandName(command)}`).join(", ")}.\n`,
+    )
+  }
   return code
 }
 
@@ -196,15 +395,19 @@ discover pipelines, compose one for a task, launch it detached, and monitor it.
                   Claude Code  ~/.claude/skills/convoy        ($CLAUDE_CONFIG_DIR)
                   OpenCode     ~/.config/opencode/skills/convoy ($XDG_CONFIG_HOME)
                   Codex        ~/.codex/skills/convoy         ($CODEX_HOME)
+                and the pipeline commands beside it, one per built-in pipeline
+                (${pipelineCommands.map((command) => `/${commandName(command)}`).join(", ")}):
+                  Claude Code, Codex  user-invoked skills in the same directory
+                  OpenCode            ~/.config/opencode/commands/convoy-<pipeline>.md
                 Without flags, every harness found on this machine. Re-run it after
                 convoy update to refresh the skill; it is idempotent.
-  uninstall     Remove the skill (without flags: from every harness).
+  uninstall     Remove the skill and the commands (without flags: from every harness).
   show [file]   Print the skill (SKILL.md, or ${Object.keys(skillFiles)
     .filter((file) => file !== "SKILL.md")
     .join(", ")}).
 
-Convoy only refreshes or removes a skill directory it wrote; a convoy skill you
-wrote yourself is left untouched.
+Convoy only refreshes or removes a skill or command it wrote; a convoy skill or
+convoy-<pipeline> command you wrote yourself is left untouched.
 `
 }
 
