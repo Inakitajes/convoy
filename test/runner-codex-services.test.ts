@@ -14,6 +14,7 @@ import { codexInference, isReadOnlyHelperCommand } from "../src/runners/codex/in
 import { missingCodexModel, offeredCodexModels, preflightCodex } from "../src/runners/codex/preflight"
 import type { ExecutionRequest } from "../src/runners/contracts"
 import { convoySecretsDir } from "../src/workspace"
+import { codexVersionProblem } from "../src/runners/declarations"
 import { completeTurn, defaultCodexHandlers, fakeCodex } from "./helpers/fake-codex"
 
 const dirs: string[] = []
@@ -201,6 +202,12 @@ describe("Codex helper inference", () => {
     expect(codex.requests("thread/start")).toHaveLength(0)
   })
 
+  test("helper inference refuses a Codex with no readable or supported release before any thread", async () => {
+    const codex = fakeCodex(defaultCodexHandlers({ initialize: () => ({ userAgent: "convoy/0.150.2", codexHome: "/home/.codex" }) }))
+    await expect(codexInference({ prompt: "p", system: "s", auth: { mode: "subscription" }, cwd: "/tmp", tools: "none", timeoutMs: 500 }, { spawn: codex.spawn })).rejects.toThrow("predates the supported app-server protocol")
+    expect(codex.requests("thread/start")).toHaveLength(0)
+  })
+
   test("only plain inspection commands count as read-only", () => {
     for (const command of ["ls -la", "cat a.ts | head -5", "git diff --stat", "rg foo src", "/bin/zsh -lc 'git status'", "find . -name '*.ts'"]) expect(isReadOnlyHelperCommand(command)).toBe(true)
     for (const command of ["git push", "rm a", "cat a > b", "echo $(id)", "find . -delete", "npm test", "ls; curl x"]) expect(isReadOnlyHelperCommand(command)).toBe(false)
@@ -238,5 +245,15 @@ describe("Codex preflight", () => {
     expect(await preflightCodex({ selection: { mode: "subscription" }, models: [], cwd: "/tmp", spawn: old.spawn })).toContain("Codex 0.150.2 predates the supported app-server protocol (0.160.0 or later)")
     const current = fakeCodex(defaultCodexHandlers({ initialize: () => ({ userAgent: "convoy/0.163.0 (Mac OS 27.0.1; arm64) herdr/0.9.5 (convoy; 0.0.0)", codexHome: "/home/.codex" }) }))
     expect(await preflightCodex({ selection: { mode: "subscription" }, models: [], cwd: "/tmp", spawn: current.spawn })).toBeUndefined()
+  })
+
+  test("refuses a Codex whose release cannot be read: an unreadable version is never taken as current", async () => {
+    for (const userAgent of ["codex_cli_rs 0.99.0", "convoy/dev", undefined]) {
+      const drifted = fakeCodex(defaultCodexHandlers({ initialize: () => ({ ...(userAgent ? { userAgent } : {}), codexHome: "/home/.codex" }) }))
+      expect(await preflightCodex({ selection: { mode: "subscription" }, models: [], cwd: "/tmp", spawn: drifted.spawn })).toContain("did not report a readable release")
+    }
+    expect(codexVersionProblem("x.y")).toContain("did not report a readable release")
+    expect(codexVersionProblem(undefined)).toContain("did not report a readable release")
+    expect(codexVersionProblem("0.160.0")).toBeUndefined()
   })
 })

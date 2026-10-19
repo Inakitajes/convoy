@@ -263,6 +263,39 @@ describe("codex approvals", () => {
     expect(await decideFileChange({ policy, services: { advisor: failing }, advised: true, steer: async () => true }, [join(dir, "a.ts")], dir)).toMatchObject({ accept: true })
     expect(await decideFileChange({ policy, advised: true, steer: async () => true }, [join(dir, "a.ts")], dir)).toMatchObject({ accept: false, reason: "no advisor checkpoint is reachable for this attempt" })
   })
+
+  test("advice that cannot be steered into the turn keeps the first write blocked", async () => {
+    const dir = await checkout()
+    let satisfied = false
+    const delivered: string[] = []
+    const advisor: AdvisorService = {
+      firstWriteGate: "hold",
+      satisfied: () => satisfied,
+      async consult() {
+        satisfied = true
+        return { ok: true, text: "Edit b.ts instead.", callId: "c1" }
+      },
+      async delivered(_callId, how) {
+        delivered.push(how)
+      },
+    }
+    let reachable = false
+    const steered: string[] = []
+    const ctx: ApprovalContext = {
+      policy: writePolicy(dir, { requireAdvisorBeforeWrite: true }),
+      services: { advisor },
+      advised: true,
+      steer: async (text) => (reachable && steered.push(text), reachable),
+    }
+    expect(await decideFileChange(ctx, [join(dir, "a.ts")], dir)).toMatchObject({ accept: false })
+    expect(await decideFileChange(ctx, [join(dir, "a.ts")], dir)).toMatchObject({ accept: false })
+    expect(delivered).toEqual([])
+    reachable = true
+    expect(await decideFileChange(ctx, [join(dir, "a.ts")], dir)).toMatchObject({ accept: false })
+    expect(steered).toEqual([expect.stringContaining("Edit b.ts instead.")])
+    expect(delivered).toEqual(["follow-up"])
+    expect(await decideFileChange(ctx, [join(dir, "a.ts")], dir)).toMatchObject({ accept: true })
+  })
 })
 
 describe("codex attempt", () => {
@@ -328,6 +361,17 @@ describe("codex attempt", () => {
     expect(outcome).toMatchObject({ status: "failed" })
     expect(outcome.error).toContain("reviewed as a subscription")
     expect(codex.requests("thread/start")).toEqual([])
+  })
+
+  test("a Codex older than the supported protocol, or with no readable release, refuses the attempt before any thread starts", async () => {
+    const dir = await checkout()
+    for (const userAgent of ["convoy/0.150.2 (Mac OS 27.0.1; arm64)", "codex_cli_rs 0.99.0"]) {
+      const codex = fakeCodex(defaultCodexHandlers({ initialize: () => ({ userAgent, codexHome: "/home/.codex" }) }))
+      const outcome = await createCodexRunner({ cwd: dir, deps: { spawn: codex.spawn } }).executeAttempt(request(dir), () => {})
+      expect(outcome).toMatchObject({ status: "failed" })
+      expect(outcome.error).toContain("update Codex with `codex update`")
+      expect(codex.requests("thread/start")).toEqual([])
+    }
   })
 
   test("ambient OpenAI keys never reach a subscription child", async () => {

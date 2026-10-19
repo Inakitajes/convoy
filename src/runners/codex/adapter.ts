@@ -28,10 +28,10 @@ import { convoyToolHandlers } from "../attempt-tools"
 import { firstWriteMessage } from "../../advisor-runtime"
 import { resolveEffectiveCapabilities } from "../capabilities"
 import type { AttemptOutcome, ExecutionAdapter, ExecutionRequest, ExecutionServices, LoopDecision, RunnerEvent, Usage } from "../contracts"
-import { codexDeclaration } from "../declarations"
+import { codexDeclaration, codexVersionProblem } from "../declarations"
 import { commandHardDenied, evaluateAction, unwrapShellScript, type PolicyConfig, type PolicyDecision } from "../policy"
 import { redactSecrets } from "../redaction"
-import { startCodexAppServer, type CodexAppServer, type CodexSpawn } from "./app-server"
+import { codexVersionOf, startCodexAppServer, type CodexAppServer, type CodexSpawn } from "./app-server"
 import { codexAccountMismatch, prepareCodexAuth, type CodexAuthEnvironment, type CodexLogin } from "./auth"
 import { inspectionReads } from "./inspection"
 import { asRecord, stringField, type CodexItem, type CodexReasoningEffort, type CodexSandboxMode, type TokenUsageBreakdown } from "./protocol"
@@ -123,6 +123,7 @@ export type ApprovalVerdict = { accept: boolean; reason: string }
 
 /** Why the first advised write was declined: its advice was steered into the turn instead. */
 export const heldForAdvisor = "held for the advisor's first-write consultation"
+const adviceUndelivered = "the advisor's first-write advice could not be delivered into the turn yet"
 
 export type ApprovalContext = {
   policy: PolicyConfig
@@ -131,6 +132,8 @@ export type ApprovalContext = {
   advised: boolean
   /** Delivers advice into the running turn; resolves false when it could not be delivered. */
   steer(text: string): Promise<boolean>
+  /** First-write advice consulted but not yet delivered into the turn. */
+  undelivered?: { text: string; callId?: string }
 }
 
 function decisionToVerdict(decision: PolicyDecision): ApprovalVerdict | undefined {
@@ -184,8 +187,9 @@ export function codexModeInstructions(mode: ExecutionRequest["mode"]): string {
  * policy as a write. When the phase requires the advisor before its first
  * write, the first such change is held for one consultation: the advice is
  * steered into the turn and the change declined, so the agent re-applies it
- * with the advice in hand; a failed consultation releases the hold. A change
- * whose paths are unknown is declined.
+ * with the advice in hand; a failed consultation releases the hold. Advice
+ * that cannot be steered into the turn keeps every write declined until it is
+ * delivered. A change whose paths are unknown is declined.
  */
 export async function decideFileChange(context: ApprovalContext, paths: readonly string[], cwd: string | undefined): Promise<ApprovalVerdict> {
   if (paths.length === 0) return { accept: false, reason: "the file change names no path Convoy can check" }
@@ -196,15 +200,16 @@ export async function decideFileChange(context: ApprovalContext, paths: readonly
   if (context.policy.requireAdvisorBeforeWrite) {
     const advisor = context.advised ? context.services?.advisor : undefined
     if (!advisor) return { accept: false, reason: "no advisor checkpoint is reachable for this attempt" }
-    if (!advisor.satisfied()) {
+    if (!context.undelivered && !advisor.satisfied()) {
       const advice = await advisor.consult({ trigger: "first-write", question: "" }).catch(() => undefined)
-      if (advice?.ok) {
-        const delivered = await context.steer(firstWriteMessage(advice.text))
-        if (delivered) {
-          await advisor.delivered?.(advice.callId, "follow-up")
-          return { accept: false, reason: heldForAdvisor }
-        }
-      }
+      if (advice?.ok) context.undelivered = { text: advice.text, ...(advice.callId ? { callId: advice.callId } : {}) }
+    }
+    const pending = context.undelivered
+    if (pending) {
+      if (!(await context.steer(firstWriteMessage(pending.text)))) return { accept: false, reason: adviceUndelivered }
+      context.undelivered = undefined
+      await advisor.delivered?.(pending.callId, "follow-up")
+      return { accept: false, reason: heldForAdvisor }
     }
   }
 
@@ -484,6 +489,9 @@ export function createCodexRunner(options: CodexRunnerOptions): CodexRunner {
         onServerRequest,
         ...(rawLog ? { onRawLine: (line: string) => void rawLog.append(line) } : {}),
       })
+
+      const outdated = codexVersionProblem(codexVersionOf(server.info))
+      if (outdated) return { status: "failed", error: `${outdated}; update Codex with \`codex update\`` }
 
       // The overlay is only an intent: the billing source is the account
       // Codex resolved under this exact environment.

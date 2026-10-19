@@ -79,6 +79,15 @@ export type CodexAppServer = {
   close(): Promise<void>
 }
 
+/**
+ * The Codex release an app-server reports at `initialize`: its user agent
+ * leads with `<originator>/<version>`.
+ */
+export function codexVersionOf(info: Record<string, unknown>): string | undefined {
+  const agent = typeof info.userAgent === "string" ? info.userAgent : ""
+  return /^[^/\s]+\/(\d+\.\d+\.\d+)/.exec(agent)?.[1] ?? (agent || undefined)
+}
+
 const defaultStopGraceMs = 5_000
 const stderrTailLines = 3
 

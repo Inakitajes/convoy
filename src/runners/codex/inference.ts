@@ -15,11 +15,12 @@
 
 import type { AuthenticationSelection, Usage } from "../contracts"
 import { convoySecretsDir } from "../../workspace"
+import { codexVersionProblem } from "../declarations"
 import { evaluateAction, type PolicyConfig } from "../policy"
 import { inspectionReads } from "./inspection"
 import { redactSecrets } from "../redaction"
 import { codexAppServerArgs, codexEffort, codexThreadConfig, configuredMcpServers, unreadableMcpServers, usageFromCodexTokens } from "./adapter"
-import { startCodexAppServer, type CodexAppServer, type CodexSpawn } from "./app-server"
+import { codexVersionOf, startCodexAppServer, type CodexAppServer, type CodexSpawn } from "./app-server"
 import { codexAccountMismatch, prepareCodexAuth, type CodexLogin } from "./auth"
 import { asRecord, stringField, type TokenUsageBreakdown } from "./protocol"
 
@@ -145,6 +146,8 @@ export async function codexInference(input: CodexInferenceInput, deps: CodexInfe
       },
     })
 
+    const outdated = codexVersionProblem(codexVersionOf(server.info))
+    if (outdated) throw new CodexInferenceError(`${outdated}; update Codex with \`codex update\``)
     const mismatch = codexAccountMismatch(auth.mode, await server.request("account/read", {}))
     if (mismatch) throw new CodexInferenceError(mismatch)
     const operatorServers = configuredMcpServers(await server.request("config/read", {}).catch(() => undefined))

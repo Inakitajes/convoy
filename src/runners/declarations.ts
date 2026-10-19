@@ -116,17 +116,21 @@ export const claudeDeclaration: CapabilityDeclaration = {
 /** The oldest Codex release whose app-server protocol the Codex adapter is tested against. */
 export const minimumCodexVersion = "0.160.0"
 
-/** Why a Codex release cannot run Convoy's attempts, or undefined when it can. */
-export function codexVersionProblem(version: string): string | undefined {
-  return olderThan(version, minimumCodexVersion) ? `Codex ${version} predates the supported app-server protocol (${minimumCodexVersion} or later)` : undefined
-}
-
-function olderThan(version: string, minimum: string): boolean {
-  const parse = (value: string) => value.split(/[.-]/).slice(0, 3).map(Number)
-  const [a, b] = [parse(version), parse(minimum)]
-  if (a.some((part) => !Number.isInteger(part))) return false
-  for (let i = 0; i < 3; i++) if ((a[i] ?? 0) !== (b[i] ?? 0)) return (a[i] ?? 0) < (b[i] ?? 0)
-  return false
+/**
+ * Why a Codex release cannot run Convoy's attempts, or undefined when it can.
+ * A release Codex did not report readably is refused: an unknown protocol is
+ * never taken as a supported one.
+ */
+export function codexVersionProblem(version: string | undefined): string | undefined {
+  const parts = version?.split(/[.-]/).slice(0, 3).map(Number)
+  if (!parts || parts.length < 3 || parts.some((part) => !Number.isInteger(part))) {
+    return `Codex did not report a readable release${version ? ` ("${version}")` : ""}; Convoy needs ${minimumCodexVersion} or later`
+  }
+  const minimum = minimumCodexVersion.split(".").map(Number)
+  for (let i = 0; i < 3; i++) {
+    if (parts[i] !== minimum[i]) return parts[i]! < minimum[i]! ? `Codex ${version} predates the supported app-server protocol (${minimumCodexVersion} or later)` : undefined
+  }
+  return undefined
 }
 
 const codexCapabilities = [

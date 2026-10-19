@@ -11,7 +11,7 @@ import type { RunPlan } from "../../types"
 import type { AuthenticationSelection } from "../contracts"
 import { codexVersionProblem } from "../declarations"
 import { codexAppServerArgs } from "./adapter"
-import { startCodexAppServer, type CodexSpawn } from "./app-server"
+import { codexVersionOf, startCodexAppServer, type CodexSpawn } from "./app-server"
 import { codexAccountMismatch, prepareCodexAuth, type CodexLogin } from "./auth"
 import { asRecord, stringField } from "./protocol"
 
@@ -59,15 +59,6 @@ export function missingCodexModel(requirements: readonly CodexModelRequirement[]
   return undefined
 }
 
-/**
- * The Codex release an app-server reports at `initialize`: its user agent
- * leads with `<originator>/<version>`.
- */
-export function codexVersionOf(info: Record<string, unknown>): string | undefined {
-  const agent = typeof info.userAgent === "string" ? info.userAgent : ""
-  return /^[^/\s]+\/(\d+\.\d+\.\d+)/.exec(agent)?.[1]
-}
-
 /** Verifies the Codex release, the effective account and the plan's models; resolves to an error message, or undefined when ready. */
 export async function preflightCodex(input: CodexPreflightInput): Promise<string | undefined> {
   const binary = input.binary ?? "codex"
@@ -75,8 +66,7 @@ export async function preflightCodex(input: CodexPreflightInput): Promise<string
   try {
     const server = await startCodexAppServer({ binary, args: codexAppServerArgs(), cwd: input.cwd, env: auth.env, ...(input.spawn ? { spawn: input.spawn } : {}) })
     try {
-      const version = codexVersionOf(server.info)
-      const outdated = version ? codexVersionProblem(version) : undefined
+      const outdated = codexVersionProblem(codexVersionOf(server.info))
       if (outdated) return `${outdated}; update Codex with \`codex update\``
       const mismatch = codexAccountMismatch(auth.mode, await server.request("account/read", {}))
       if (mismatch) return mismatch
