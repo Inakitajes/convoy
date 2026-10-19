@@ -17,7 +17,7 @@ PRD → implementer → patterns → security → design → tests → measure
                                                            └ fix┘
 ```
 
-All model IDs below are public provider IDs. The former local NAN models use their OpenRouter equivalents: `openrouter/deepseek/deepseek-v4.1-flash#high` and `openrouter/z-ai/glm-5.3-flash#high`.
+All model IDs below are public provider IDs. The former local NAN models use their OpenRouter equivalents: `openrouter/deepseek/deepseek-v4.1-flash#high` and `openrouter/z-ai/glm-5.3-flash#high`. `review` pins the newer `openrouter/deepseek/deepseek-v4.1-flash-1017#high` snapshot and `openai/gpt-6.1-sol#high` for its audits.
 
 | Step | Model | Advisor |
 |---|---|---|
@@ -43,7 +43,7 @@ Select one with `-p/--pipeline`; no project config is needed. `full-cycle` is th
 | `full-cycle` | yes | Implement, audit, polish and test with the models above, then independently score and fix gaps up to five times to reach 90/100. |
 | `implement` | yes | DeepSeek V4.1 Flash implements with Astra xhigh advice. Patterns and tests use DeepSeek; security and design use GLM Flash. Those later steps run unadvised. Closes with a read-only DeepSeek recap at `reports/run-report.md`; no scoring loop. |
 | `ship` | yes | Sync with the base; scope and review the diff across DeepSeek and GLM Flash; report, adversarially triage and fix accepted findings with Astra advice; recap; then score with Grok and GLM, reconcile on GLM and fix gaps up to five times to reach 90/100. |
-| `review` | no | The report-only review: DeepSeek scopes and reports; clean-code, security and bug audits each run on DeepSeek and GLM Flash. GLM 5.3 and Kimi K3 score independently, then GLM verifies the consensus. Produces findings and a quality score. |
+| `review` | no | The report-only review: DeepSeek V4.1 Flash 1017 scopes and reports; clean-code, security and bug audits each run on DeepSeek 1017 and GPT-6.1 Sol. GPT-6.1 Sol xhigh and GLM 5.3 high score independently, then GLM verifies the consensus. Produces findings and a quality score. |
 | `claude-review` | no | Claude-only report: Sonnet scopes the diff, clean-code/security/bug audits fan out across Opus and Sonnet, and Opus synthesizes one prioritized findings report. Needs no OpenCode. |
 | `claude-full-cycle` | yes | Claude-only full cycle: Sonnet implements and fixes advised by Opus; audits and tests run on Sonnet; Opus and Sonnet score with a verified Opus consensus, fixing gaps up to five times to reach 90/100. Needs no OpenCode. |
 | `fixer` | yes | Prove supplied findings with regression tests, apply targeted fixes, then independently rerun the checks. Terra xhigh handles all three phases; Astra xhigh advises reproduction and fixes. |
