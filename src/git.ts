@@ -1,4 +1,4 @@
-import { mkdir, realpath, writeFile } from "node:fs/promises"
+import { mkdir, realpath, rm, writeFile } from "node:fs/promises"
 import { dirname, resolve } from "node:path"
 
 import { log } from "./log"
@@ -305,12 +305,14 @@ export async function addWorktree(dir: string, branch: string, baseRef: string, 
  * Where the branch forked from `baseRef`, the point its changes are measured
  * from. A plain `git diff <baseRef>` also counts everything the base gained
  * after the fork, reversed, as if the branch had undone it. Falls back to
- * `baseRef` itself when there is no merge base (unrelated history, unborn HEAD).
+ * `baseRef` itself, with a warning, when there is no merge base (unrelated
+ * history, a shallow clone missing the fork point, an unborn HEAD).
  */
 async function diffBase(baseRef: string, cwd: string): Promise<string> {
-  const mergeBase = await execFile("git", ["merge-base", baseRef, "HEAD"], { cwd, allowFailure: true })
-  const commit = mergeBase.stdout.trim()
-  return mergeBase.exitCode === 0 && commit ? commit : baseRef
+  const fork = await mergeBase(baseRef, "HEAD", cwd)
+  if (fork) return fork
+  log.warn(`no merge base between "${baseRef}" and HEAD (unrelated history or a shallow clone); phase diffs compare against "${baseRef}" itself and may include its later commits, reversed.`)
+  return baseRef
 }
 
 /**
@@ -337,64 +339,128 @@ export async function writeDiff(path: string, baseRef: string, cwd: string, maxI
 
   await mkdir(dirname(path), { recursive: true })
   await writeFile(path, diff.stdout)
-  if (Buffer.byteLength(diff.stdout) <= maxInlineBytes) return path
-
   const overviewPath = path.replace(/\.diff$/, "") + ".overview.md"
-  await writeFile(overviewPath, diffOverview(diff.stdout, { base, fullDiffPath: path, maxInlineBytes }))
+  if (Buffer.byteLength(diff.stdout) <= maxInlineBytes) {
+    // A retried attempt can shrink the diff; never leave a stale overview beside it.
+    await rm(overviewPath, { force: true })
+    return path
+  }
+
+  // Git's own NUL-delimited names, unquoted and rename-aware, label the sections.
+  const names = await execFile("git", ["diff", "--name-only", "-z", base], { cwd, allowFailure: true })
+  const files = names.exitCode === 0 ? names.stdout.split("\0").filter(Boolean) : undefined
+  await writeFile(overviewPath, diffOverview(diff.stdout, { base, fullDiffPath: path, maxInlineBytes, files }))
   return overviewPath
 }
 
 /**
- * The attachable stand-in for a diff too large to attach whole. Inlines the
- * per-file diffs that fit in `maxInlineBytes`, smallest first so one generated
- * file cannot crowd out the hand-written ones, kept in the diff's own order,
- * and lists every omitted file with its size.
+ * The attachable stand-in for a diff too large to attach whole, itself at most
+ * `maxInlineBytes` (for any limit above its few hundred bytes of framing).
+ * Inlines the per-file diffs that fit, smallest first so one generated file
+ * cannot crowd out the hand-written ones, kept in the diff's own order, then
+ * lists as many omitted files as the remaining room holds. `files` names the
+ * sections in diff order; without it, or when it disagrees with the sections,
+ * the names come from the `diff --git` headers.
  */
-export function diffOverview(diff: string, options: { base: string; fullDiffPath: string; maxInlineBytes: number }): string {
-  const sections = splitDiffByFile(diff)
-  const bySize = [...sections].sort((a, b) => a.bytes - b.bytes)
+export function diffOverview(diff: string, options: { base: string; fullDiffPath: string; maxInlineBytes: number; files?: readonly string[] }): string {
+  const sections = splitDiffByFile(diff, options.files)
+  const limit = options.maxInlineBytes
+  const render = (inlined: ReadonlySet<DiffSection>, listed: number) => renderDiffOverview(sections, inlined, listed, Buffer.byteLength(diff), options)
+
+  // Reserve room for the omitted list up front, then let the smallest diffs take the rest.
+  const framing = Buffer.byteLength(render(new Set(), 0))
+  const listReserve = Math.min(64 * 1024, Math.floor(limit / 8))
+  let budget = limit - framing - listReserve
   const inlined = new Set<DiffSection>()
-  let budget = options.maxInlineBytes
-  for (const section of bySize) {
+  for (const section of [...sections].sort((a, b) => a.bytes - b.bytes)) {
     if (section.bytes > budget) break
     inlined.add(section)
     budget -= section.bytes
   }
+
+  const overview = render(inlined, listableOmitted(sections, inlined, limit - Buffer.byteLength(render(inlined, 0))))
+  if (Buffer.byteLength(overview) <= limit) return overview
+  // A long fence can outgrow the reserve; the list alone always fits.
+  return render(new Set(), listableOmitted(sections, new Set(), limit - framing))
+}
+
+/** How many omitted-file lines fit in `room` bytes, leaving slack for the "… and N more" count to change width. */
+function listableOmitted(sections: readonly DiffSection[], inlined: ReadonlySet<DiffSection>, room: number): number {
+  let left = room - 16
+  let listed = 0
+  for (const section of sections) {
+    if (inlined.has(section)) continue
+    left -= Buffer.byteLength(omittedLine(section)) + 1
+    if (left < 0) break
+    listed++
+  }
+  return listed
+}
+
+function renderDiffOverview(
+  sections: readonly DiffSection[],
+  inlined: ReadonlySet<DiffSection>,
+  listed: number,
+  diffBytes: number,
+  options: { base: string; fullDiffPath: string },
+): string {
   const omitted = sections.filter((section) => !inlined.has(section))
   const body = sections.filter((section) => inlined.has(section)).map((section) => section.text).join("")
-  const fence = "`".repeat(Math.max(3, ...[...body.matchAll(/`+/g)].map((run) => run[0].length + 1)))
+  const fence = "`".repeat(Math.max(3, longestBacktickRun(body) + 1))
+  const unlisted = omitted.length - listed
 
   return [
     "# Diff overview",
     "",
-    `The diff against \`${options.base}\` is ${formatBytes(Buffer.byteLength(diff))} across ${sections.length} files, too large to attach whole.`,
+    `The diff against \`${options.base}\` is ${formatBytes(diffBytes)} across ${sections.length} files, too large to attach whole.`,
     `It inlines ${inlined.size} of them below; the ${omitted.length} omitted are listed first. The full diff is at \`${options.fullDiffPath}\`:`,
     `read an omitted file's changes from it in sections, or run \`git diff ${options.base} -- <path>\`.`,
     "",
     "## Omitted files",
     "",
-    ...omitted.map((section) => `- ${section.file} (${formatBytes(section.bytes)})`),
+    ...omitted.slice(0, listed).map(omittedLine),
+    ...(unlisted > 0 ? [`- … and ${unlisted} more; list them all with \`git diff --stat ${options.base}\``] : []),
     "",
     "## Inlined diffs",
     "",
-    `${fence}diff`,
-    body.trimEnd(),
-    fence,
+    ...(body ? [`${fence}diff`, body.trimEnd(), fence] : ["None fit."]),
     "",
   ].join("\n")
 }
 
+function omittedLine(section: DiffSection): string {
+  return `- ${section.file} (${formatBytes(section.bytes)})`
+}
+
+function longestBacktickRun(text: string): number {
+  let longest = 0
+  for (const run of text.matchAll(/`+/g)) longest = Math.max(longest, run[0].length)
+  return longest
+}
+
 type DiffSection = { file: string; text: string; bytes: number }
 
-function splitDiffByFile(diff: string): DiffSection[] {
-  return diff
-    .split(/^(?=diff --git )/m)
-    .filter((text) => text.startsWith("diff --git "))
-    .map((text) => {
-      const header = text.slice(0, text.indexOf("\n") === -1 ? undefined : text.indexOf("\n"))
-      const file = header.match(/^diff --git a\/.+ b\/(.+)$/)?.[1] ?? header.slice("diff --git ".length)
-      return { file, text, bytes: Buffer.byteLength(text) }
-    })
+function splitDiffByFile(diff: string, files?: readonly string[]): DiffSection[] {
+  const texts = diff.split(/^(?=diff --git )/m).filter((text) => text.startsWith("diff --git "))
+  const named = files?.length === texts.length ? files : undefined
+  return texts.map((text, index) => {
+    const end = text.indexOf("\n")
+    return { file: named?.[index] ?? headerPath(text.slice(0, end === -1 ? undefined : end)), text, bytes: Buffer.byteLength(text) }
+  })
+}
+
+/**
+ * The path a `diff --git a/<x> b/<y>` header names: exact when both sides
+ * match, even for a path containing " b/"; otherwise the post-image side, or
+ * git's raw (possibly quoted) form.
+ */
+function headerPath(header: string): string {
+  const paths = header.slice("diff --git ".length)
+  const middle = (paths.length - 1) / 2
+  if (Number.isInteger(middle) && paths.startsWith("a/") && paths.startsWith(" b/", middle) && paths.slice(2, middle) === paths.slice(middle + 3)) {
+    return paths.slice(2, middle)
+  }
+  return paths.match(/^a\/.+ b\/(.+)$/)?.[1] ?? paths
 }
 
 function formatBytes(bytes: number): string {

@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -520,20 +520,87 @@ describe("writeDiff", () => {
     expect(await listChangedFiles("main", repo)).toEqual(["README.md", "search.ts"])
   })
 
-  test("attaches an overview instead of a diff over the inline limit, keeping the full diff beside it", async () => {
+  test("falls back to the base itself when the histories share no merge base", async () => {
     const repo = await forkedRepo()
-    await commitFile(repo, "catalog.json", `${"x".repeat(4096)}\n`)
+    await git(["checkout", "-q", "--orphan", "unrelated"], repo)
+    await git(["rm", "-rq", "--cached", "."], repo)
+    await writeFile(join(repo, "unrelated.txt"), "elsewhere\n")
+    await git(["add", "unrelated.txt"], repo)
+    await git(["commit", "-q", "-m", "unrelated"], repo)
+    await git(["checkout", "-q", "-f", "feat/search"], repo)
     const path = join(repo, ".run", "scope.pre.diff")
 
-    const attached = await writeDiff(path, "main", repo, 2048)
+    expect(await writeDiff(path, "unrelated", repo)).toBe(path)
+
+    const diff = await readFile(path, "utf8")
+    expect(diff).toContain("--- a/unrelated.txt")
+    expect(diff).toContain("+++ b/search.ts")
+  })
+
+  test("falls back to the working tree against HEAD when the base does not resolve", async () => {
+    const repo = await forkedRepo()
+    await writeFile(join(repo, "README.md"), "base\nuncommitted\n")
+    const path = join(repo, ".run", "scope.pre.diff")
+
+    expect(await writeDiff(path, "no-such-ref", repo)).toBe(path)
+
+    const diff = await readFile(path, "utf8")
+    expect(diff).toContain("+uncommitted")
+    expect(diff).not.toContain("search.ts")
+  })
+
+  test("attaches the diff whole up to exactly the limit and an overview one byte past it", async () => {
+    const repo = await forkedRepo()
+    const path = join(repo, ".run", "scope.pre.diff")
+    await writeDiff(path, "main", repo)
+    const bytes = Buffer.byteLength(await readFile(path, "utf8"))
+
+    expect(await writeDiff(path, "main", repo, bytes)).toBe(path)
+    expect(await writeDiff(path, "main", repo, bytes - 1)).toBe(join(repo, ".run", "scope.pre.overview.md"))
+  })
+
+  test("attaches an overview instead of a diff over the inline limit, keeping the full diff beside it", async () => {
+    const repo = await forkedRepo()
+    await commitFile(repo, "catalog.json", `${"x".repeat(8192)}\n`)
+    const path = join(repo, ".run", "scope.pre.diff")
+
+    const attached = await writeDiff(path, "main", repo, 4096)
 
     expect(attached).toBe(join(repo, ".run", "scope.pre.overview.md"))
-    expect(await readFile(path, "utf8")).toContain("x".repeat(4096))
+    expect(await readFile(path, "utf8")).toContain("x".repeat(8192))
     const overview = await readFile(attached, "utf8")
+    expect(Buffer.byteLength(overview)).toBeLessThanOrEqual(4096)
     expect(overview).toContain("- catalog.json (")
-    expect(overview).not.toContain("x".repeat(4096))
+    expect(overview).not.toContain("x".repeat(8192))
     expect(overview).toContain("+export const search = true")
     expect(overview).toContain(path)
+  })
+
+  test("names omitted files by git's own paths: spaces with \" b/\", non-ASCII, and renames", async () => {
+    const repo = await forkedRepo()
+    const big = `${"x".repeat(8192)}\n`
+    await git(["mv", "README.md", "GUIDE.md"], repo)
+    await writeFile(join(repo, "GUIDE.md"), big)
+    await mkdir(join(repo, "src", "foo b"), { recursive: true })
+    await writeFile(join(repo, "src", "foo b", "bar.ts"), big)
+    await writeFile(join(repo, "café.ts"), big)
+    await git(["add", "-A"], repo)
+    await git(["commit", "-q", "-m", "paths"], repo)
+
+    const overview = await readFile(await writeDiff(join(repo, ".run", "scope.pre.diff"), "main", repo, 4096), "utf8")
+
+    expect(overview).toContain("- src/foo b/bar.ts (")
+    expect(overview).toContain("- café.ts (")
+    expect(overview).toContain("- GUIDE.md (")
+  })
+
+  test("removes a stale overview once the diff fits again", async () => {
+    const repo = await forkedRepo()
+    const path = join(repo, ".run", "scope.pre.diff")
+    const overviewPath = await writeDiff(path, "main", repo, 1)
+
+    expect(await writeDiff(path, "main", repo)).toBe(path)
+    expect(await Bun.file(overviewPath).exists()).toBe(false)
   })
 })
 
@@ -541,9 +608,9 @@ describe("diffOverview", () => {
   const section = (file: string, body: string) => `diff --git a/${file} b/${file}\n--- a/${file}\n+++ b/${file}\n@@ -0,0 +1 @@\n+${body}\n`
 
   test("inlines the smallest files that fit, in diff order, and lists the rest with sizes", () => {
-    const diff = section("a.ts", "a") + section("generated.json", "g".repeat(500)) + section("b.ts", "b")
+    const diff = section("a.ts", "a") + section("generated.json", "g".repeat(20_000)) + section("b.ts", "b")
 
-    const overview = diffOverview(diff, { base: "abc123", fullDiffPath: "/run/diffs/scope.pre.diff", maxInlineBytes: 200 })
+    const overview = diffOverview(diff, { base: "abc123", fullDiffPath: "/run/diffs/scope.pre.diff", maxInlineBytes: 4096 })
 
     expect(overview).toContain("- generated.json (")
     expect(overview).not.toContain("- a.ts")
@@ -552,9 +619,35 @@ describe("diffOverview", () => {
     expect(overview).toContain("git diff abc123 -- <path>")
   })
 
+  test("stays within the limit on a many-file diff, counting the omitted files it cannot list", () => {
+    const diff = Array.from({ length: 20_000 }, (_, index) => section(`apps/catalog/generated/locale-${index}/exercises.json`, "x".repeat(600))).join("")
+
+    const overview = diffOverview(diff, { base: "abc123", fullDiffPath: "/run/diffs/scope.pre.diff", maxInlineBytes: 1024 * 1024 })
+
+    expect(Buffer.byteLength(overview)).toBeLessThanOrEqual(1024 * 1024)
+    expect(overview).toMatch(/- … and \d+ more; list them all with `git diff --stat abc123`/)
+  })
+
+  test("prefers the supplied file names, falling back to the headers when the count disagrees", () => {
+    const diff = section("a.ts", "a".repeat(5000)) + section("src/foo b/bar.ts", "b".repeat(5000))
+    const options = { base: "main", fullDiffPath: "/d", maxInlineBytes: 4096 }
+
+    expect(diffOverview(diff, { ...options, files: ["first.ts", "second.ts"] })).toContain("- second.ts (")
+    expect(diffOverview(diff, { ...options, files: ["only-one.ts"] })).toContain("- src/foo b/bar.ts (")
+  })
+
   test("fences the inlined diffs past any backtick run they contain", () => {
-    const overview = diffOverview(section("README.md", "```ts"), { base: "main", fullDiffPath: "/d", maxInlineBytes: 1024 })
+    const overview = diffOverview(section("README.md", "```ts"), { base: "main", fullDiffPath: "/d", maxInlineBytes: 4096 })
 
     expect(overview).toContain("````diff\n")
+  })
+
+  test("survives an inlined body with more backtick runs than a call takes arguments", () => {
+    const diff = section("ticks.md", "` ".repeat(700_000)) + section("big.json", "x".repeat(8 * 1024 * 1024))
+
+    const overview = diffOverview(diff, { base: "main", fullDiffPath: "/d", maxInlineBytes: 4 * 1024 * 1024 })
+
+    expect(overview).toContain("+++ b/ticks.md")
+    expect(overview).toContain("- big.json (")
   })
 })

@@ -2809,7 +2809,7 @@ function buildPhasePrompt(workspace: Workspace, phase: AgentStep) {
         : `This phase may edit the target repository when the phase-specific instructions call for it. Call ${tool} to persist the final report rather than writing a report file directly.`,
     "",
     "## Attachments",
-    "You will receive as file attachments: project context files when present, the original PRD, the OpenSpec spec bundle (proposal, design, tasks, and delta specs) when an active change is attached, the project's historical PRD for this branch when present, previous phase reports, the cumulative diff against the base branch, and any `--file` passed by the user. Read them before acting. When an OpenSpec change is attached, those spec files are the contract — implement and grade against them, not a reconstructed brief.",
+    "You will receive as file attachments: project context files when present, the original PRD, the OpenSpec spec bundle (proposal, design, tasks, and delta specs) when an active change is attached, the project's historical PRD for this branch when present, previous phase reports, the cumulative diff against the base branch (or, when it is too large to attach, an overview that inlines what fits and points to the full diff; read the omitted files from it), and any `--file` passed by the user. Read them before acting. When an OpenSpec change is attached, those spec files are the contract — implement and grade against them, not a reconstructed brief.",
     "",
     "## Project context",
     "Convoy automatically attaches these target-repo files when they exist: `.convoy/rules.md`, `AGENTS.md`, and `CLAUDE.md`.",
