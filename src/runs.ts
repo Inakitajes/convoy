@@ -1,5 +1,5 @@
 import { connect } from "node:net"
-import { readdir, readFile } from "node:fs/promises"
+import { readdir, readFile, stat } from "node:fs/promises"
 import { join } from "node:path"
 import { stdin, stdout } from "node:process"
 
@@ -250,6 +250,22 @@ export async function listRuns(root = runsRoot()): Promise<RunEntry[]> {
   return mergeRunRecords(workspaceRuns, indexRecords, root)
 }
 
+/**
+ * One run by id, without loading the whole history: its workspace when it
+ * still exists, else its cleanup-surviving index record. Cheap enough to poll.
+ */
+export async function loadRun(runID: string, root = runsRoot()): Promise<RunEntry | undefined> {
+  if (!isValidRunID(runID)) return undefined
+  const hasWorkspace = await stat(join(root, runID)).then(
+    (info) => info.isDirectory(),
+    () => false,
+  )
+  if (hasWorkspace) return loadRunEntry(root, runID)
+  // No workspace: the index record may still know the run.
+  const record = await readRunIndexEntry(runID)
+  return record ? runEntryFromIndexRecord(record, root) : undefined
+}
+
 /** The runs that still have workspace metadata on disk. */
 async function listWorkspaceRuns(root: string): Promise<RunEntry[]> {
   let names: string[]
@@ -481,6 +497,14 @@ function goalInfo(goal: GoalRunState): RunEntryGoal {
 
 /** What a live run is parked on, for the runs browser's "waiting" details line. */
 export async function probeRunWaiting(runID: string, root = runsRoot()): Promise<"permission" | "review" | undefined> {
+  const snapshot = await probeRunPending(runID, root)
+  if (snapshot?.permission) return "permission"
+  if (snapshot?.human) return "review"
+  return undefined
+}
+
+/** The live run's pending gates as its control server reports them; undefined when it can't be asked. */
+export async function probeRunPending(runID: string, root = runsRoot()): Promise<PendingSnapshot | undefined> {
   const control = await readControlFile(runID, root)
   if (!control) return undefined
   try {
@@ -490,10 +514,7 @@ export async function probeRunWaiting(runID: string, root = runsRoot()): Promise
       signal: AbortSignal.timeout(500),
     })
     if (!response.ok) return undefined
-    const snapshot = (await response.json()) as PendingSnapshot
-    if (snapshot.permission) return "permission"
-    if (snapshot.human) return "review"
-    return undefined
+    return (await response.json()) as PendingSnapshot
   } catch {
     return undefined
   }
@@ -615,7 +636,7 @@ function phaseInfos(metadata: RunMetadata | undefined): RunPhaseInfo[] {
   }))
 }
 
-function runStatusText(run: RunEntry): string {
+export function runStatusText(run: RunEntry): string {
   const base = run.live ? (run.waiting ? `running · waiting for a ${run.waiting === "permission" ? "permission" : "review"}` : "running") : run.status
   // Surface the compaction outcome next to the pipeline status: a blocked or
   // failed compaction must never read as an unqualified clean finish.

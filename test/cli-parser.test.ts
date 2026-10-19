@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test"
+import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 
-import { parseArgs, parseCommand, resolveRunOptions } from "../src/cli"
+import { detachedRunMessage, parseArgs, parseCommand, resolveRunOptions } from "../src/cli"
 
 describe("resolveRunOptions", () => {
   test("returns options with defaults applied", async () => {
@@ -168,5 +171,61 @@ describe("convoy publish parsing", () => {
     const command = await parseCommand(["publish", "--help"])
     expect(command.type).toBe("help")
     if (command.type === "help") expect(command.text).toContain("convoy publish")
+  })
+})
+
+describe("agent-facing launch flags", () => {
+  test("--pipeline-file and --detach parse", () => {
+    expect(parseArgs(["--pipeline-file", "audit.yaml", "--detach"])).toMatchObject({ pipelineFile: "audit.yaml", detach: true })
+  })
+
+  test("refuse combinations that can't mean anything", () => {
+    expect(() => parseArgs(["--pipeline-file", "a.yaml", "-p", "review"])).toThrow("either --pipeline or --pipeline-file")
+    expect(() => parseArgs(["--pipeline-file", "a.yaml", "--resume", "20261019-120000-abcd"])).toThrow("--resume replays the pipeline")
+    expect(() => parseArgs(["--detach", "--tui"])).toThrow("--detach runs without a dashboard")
+    expect(() => parseArgs(["--detach", "--plan"])).toThrow("--plan never starts a run")
+    expect(() => parseArgs(["--detach=yes"])).toThrow("--detach does not take a value")
+  })
+
+  test("a pipeline file becomes the run's pipeline, and --detach starts unattended", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "convoy-launch-"))
+    try {
+      const file = join(dir, "focused-audit.yaml")
+      await writeFile(file, "description: Two audits\nsteps:\n  - bug-auditor\n  - agent: security-reviewer\n    name: security\n")
+      const options = await resolveRunOptions(parseArgs(["--pipeline-file", file, "--detach", "--no-worktree", "--dir", dir]))
+      expect(options.pipeline.name).toBe("focused-audit")
+      expect(options.pipeline.description).toBe("Two audits")
+      expect(options.pipeline.steps.map((step) => step.name)).toEqual(["bug-auditor", "security"])
+      expect(options).toMatchObject({ detach: true, noConfirm: true, tui: false, humanReview: false })
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("a broken pipeline file fails the launch with its path", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "convoy-launch-"))
+    try {
+      const file = join(dir, "bad.yaml")
+      await writeFile(file, "steps: []\n")
+      await expect(resolveRunOptions(parseArgs(["--pipeline-file", file, "--no-worktree", "--dir", dir]))).rejects.toThrow(`${file}: pipelines.bad.steps must be a non-empty list`)
+      await expect(resolveRunOptions(parseArgs(["--pipeline-file", join(dir, "missing.yaml"), "--no-worktree", "--dir", dir]))).rejects.toThrow("can't read pipeline file")
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("--detach prints a stable first line and how to follow the run", () => {
+    expect(detachedRunMessage("20261019-120000-abcd", 42, "/p/coordinator.log")).toBe(
+      "run 20261019-120000-abcd started (coordinator 42, detached)\nlog: /p/coordinator.log\nfollow: convoy runs 20261019-120000-abcd --wait\nstatus: convoy runs 20261019-120000-abcd --json\n",
+    )
+  })
+
+  test("convoy runs routes --json, --wait, and answers away from the browser", async () => {
+    expect(await parseCommand(["runs", "20261019-120000-abcd"])).toEqual({ type: "runs", runID: "20261019-120000-abcd" })
+    expect(await parseCommand(["runs", "--json"])).toEqual({ type: "runs-query", command: { kind: "json" } })
+    expect(await parseCommand(["runs", "20261019-120000-abcd", "abort"])).toEqual({ type: "runs-query", command: { kind: "action", runID: "20261019-120000-abcd", action: { kind: "abort" } } })
+    expect(await parseCommand(["runs", "--help"])).toMatchObject({ type: "help" })
+    expect(await parseCommand(["pipelines", "show", "review"])).toMatchObject({ type: "pipelines", name: "review" })
+    expect(await parseCommand(["skill", "install", "--claude"])).toEqual({ type: "skill", action: "install", targets: ["claude"] })
   })
 })

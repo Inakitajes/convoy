@@ -75,6 +75,8 @@ export type RunOptions = {
   plan?: RunPlan
   planOnly?: boolean
   noConfirm?: boolean
+  /** --detach: start the coordinator, print the run id, and return without waiting for the run. */
+  detach?: boolean
   tui: boolean
   /** Explicit CLI override for desktop notifications; unset preserves the configured value. */
   notify?: boolean

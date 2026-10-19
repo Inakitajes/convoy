@@ -1,6 +1,6 @@
 import { statSync } from "node:fs"
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises"
-import { dirname, join } from "node:path"
+import { basename, dirname, join } from "node:path"
 
 import { projectAgentPromptPath } from "./agents"
 import { builtInPrompts } from "./built-in-prompts"
@@ -1463,6 +1463,46 @@ export function selectPipelineSpec(config: ConvoyConfig | undefined, name: strin
   if (spec) return spec
   const available = [...new Set([...Object.keys(builtInPipelines), ...Object.keys(config?.pipelines ?? {})])].sort()
   throw new ConfigError(`unknown pipeline "${name}" (available: ${available.join(", ")})`)
+}
+
+/** A pipeline loaded from its own YAML file (`--pipeline-file`), outside any config. */
+export type PipelineFile = {
+  name: string
+  spec: PipelineSpec
+}
+
+/**
+ * Parses a standalone pipeline file: the same mapping a `pipelines.<name>`
+ * entry takes, plus an optional `name` (default: the file's basename). It is
+ * validated exactly like a config pipeline, so an agent can compose one
+ * without editing the operator's config files.
+ */
+export function parsePipelineFile(body: string, source: string, fallbackName: string): PipelineFile {
+  let raw: unknown
+  try {
+    raw = Bun.YAML.parse(body)
+  } catch (error) {
+    throw new ConfigError(`${source}: invalid YAML: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  const v = new Validator(source)
+  const { name: rawName, ...rest } = v.record(raw, "")
+  const name = normalizePipelineName(rawName === undefined ? fallbackName : v.nonEmptyString(rawName, "name"))
+  if (!isSafeStepName(name)) v.fail("name", `"${name}" must be a filesystem-safe identifier using letters, numbers, hyphens, or underscores`)
+  if (name === "goal-fix") v.fail("name", `"goal-fix" is reserved; declare goal steps inside a pipeline's terminal goal step`)
+  rejectLegacyGoalConfig(source, { pipelines: { [name]: rest } })
+  const spec = validatePipelines(v, { [name]: rest })[name]!
+  return { name, spec }
+}
+
+/** Reads and validates a pipeline file; its basename (without extension) names it unless the file sets `name`. */
+export async function loadPipelineFile(path: string): Promise<PipelineFile> {
+  let body: string
+  try {
+    body = await readFile(path, "utf8")
+  } catch (error) {
+    throw new ConfigError(`can't read pipeline file ${path}: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  return parsePipelineFile(body, path, basename(path).replace(/\.ya?ml$/i, ""))
 }
 
 /** True when a string is a valid `provider/model` or `provider/model#variant`. */

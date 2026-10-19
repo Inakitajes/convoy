@@ -55,6 +55,38 @@ Select one with `-p/--pipeline`; no project config is needed. `full-cycle` is th
 
 The catalog consolidates the former variants: `review-lite` is now `review`, `astra` is now `full-cycle`, and `hunter-max` is now `hunter`; `review-cc`, the previous `review`, `implement-lite`, and the previous `full-cycle` and `hunter` definitions are removed. Existing global or project pipeline overrides still take precedence: rename or remove those entries to use the new built-ins. Frozen pipelines in saved runs remain available to `--resume`.
 
+
+## Listing pipelines
+
+`convoy pipelines` lists every pipeline the repository can run, built-in, global, and project, with what each changes and which runners it needs, plus the agents a pipeline can use. `convoy pipelines show <name>` prints one pipeline's resolved steps: agent, model, runner, advisor, read-only, parallel groups, and its goal loop. Both take `--json` and `--dir <repo>`. For a concrete run, `--plan` remains the full picture, with models routed through the run's gateway.
+
+## Pipeline files
+
+A pipeline doesn't have to live in your config. `--pipeline-file <path>` runs one defined in its own YAML file: the mapping a `pipelines.<name>` entry takes (`steps`, `description`, `defaultPrompt`, `maxConcurrentAgents`, …), plus an optional `name` that defaults to the file name.
+
+```yaml
+# focused-audit.yaml
+description: Bugs and security in two model families, one report
+steps:
+  - parallel:
+      - agent: bug-auditor
+        name: bugs
+        models: [openrouter/deepseek/deepseek-v4.1-flash-1017#high, openai/gpt-6.1-sol#high]
+      - agent: security-reviewer
+        name: security
+        models: [openrouter/deepseek/deepseek-v4.1-flash-1017#high, openai/gpt-6.1-sol#high]
+  - agent: review-report
+    name: report
+    reports: all
+```
+
+```bash
+convoy pipelines show --pipeline-file focused-audit.yaml   # validate and print the resolved steps
+convoy --pipeline-file focused-audit.yaml --manual "Audit src/payments"
+```
+
+The file is validated exactly like a config pipeline (the [configuration rules](configuration.md#project-configuration-convoyconfigyaml) apply), uses the agents your config defines, and is frozen into the run, so `--resume` and retry replay it. `hooks.pipelines.<name>` entries apply under the file's name. It can't be combined with `--pipeline`. This is how an [agent session](agents.md) composes a pipeline for a task without touching your config.
+
 ---
 
 [Back to documentation](README.md)
