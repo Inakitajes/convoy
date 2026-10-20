@@ -43,7 +43,7 @@ The installed skill describes the binary that installed it, so run `convoy skill
 | `/convoy-fixer` | `convoy -p fixer` | yes |
 | `/convoy-hunter` | `convoy -p hunter` | no |
 
-Whatever follows the command is the request: a focus for a review (`/convoy-review the payments module`), the task to implement, the findings to fix, or an OpenSpec change id (`/convoy-implement add-login`). The agent then runs the usual loop below with the pipeline already chosen: plan, launch detached in the background, monitor, relay questions, report. A read-only pipeline launches straight after the plan; one that changes code waits for your go-ahead. A project pipeline with the same name replaces the built-in, as it does for `convoy -p`.
+Whatever follows the command is the request: a focus for a review (`/convoy-review the payments module`), the task to implement, the findings to fix, or an OpenSpec change id (`/convoy-implement add-login`). The agent then runs the usual loop below with the pipeline already chosen: plan, launch detached in the background, monitor, relay questions, report. A read-only pipeline launches straight after the plan, with `--yolo`; one that changes code waits for your go-ahead and runs with `--smart`. A project pipeline with the same name replaces the built-in, as it does for `convoy -p`.
 
 Claude Code and Codex get them as user-invoked skills (`disable-model-invocation: true`) in the skills directory above, `~/.claude/skills/convoy-review/SKILL.md`; OpenCode as global commands, `~/.config/opencode/commands/convoy-review.md`. The `convoy-` prefix keeps them clear of the harnesses' own `/review` and of commands you wrote; a `convoy-<pipeline>` command without Convoy's marker is left untouched, and the install exits 1 to say so.
 
@@ -55,8 +55,8 @@ The skill teaches a fixed loop on top of the [headless CLI](running.md#driving-c
 2. **Choose or compose.** A built-in, a project pipeline, or a new [pipeline file](pipelines.md#pipeline-files) for the task, validated with `convoy pipelines show --pipeline-file <path>`.
 3. **Pick the contract.** In an OpenSpec repository, the change to run against, or none ([below](#openspec-changes)).
 4. **Plan.** It writes the prompt to a file, prints the resolved plan with `--plan`, and summarizes it for you before anything starts.
-5. **Launch detached.** `convoy … --manual --smart --detach < /dev/null` returns `run <id> started` while the run continues in the background.
-6. **Monitor.** `convoy runs <id> --wait --timeout <n>` in a loop, sized to the harness's shell timeout, with a progress line per wait. The exit code tells it whether the run completed (0), ended otherwise (1), is still going (2), or needs an answer (3).
+5. **Launch detached.** `convoy … --manual --yolo --detach < /dev/null` (`--smart` for a pipeline that writes code) returns `run <id> started` while the run continues in the background. The agent tells you the run id and roughly how long it takes, and the session stays yours.
+6. **Monitor.** `convoy runs <id> --wait --timeout <n>`: in the background where the harness notifies the agent when a command exits (Claude Code), otherwise in short waits under the shell timeout, spaced to the run, with a progress line per wait. The exit code tells it whether the run completed (0), ended otherwise (1), is still going (2), or needs an answer (3).
 7. **Relay questions.** A permission request the smart judge escalated is shown to you; the agent answers it with `convoy runs <id> approve|deny <request>` only after you decide.
 8. **Report.** It reads `SUMMARY.md` and the reports, and tells you the outcome, score trajectory, cost, and where the work landed, with next steps (review the diff, `convoy publish --dry-run`, or `convoy --resume <id>` after a failure).
 
@@ -94,7 +94,7 @@ steps:
 ```
 
 ```bash
-convoy --pipeline-file payments-audit.yaml --prompt-file task.md --manual --smart --detach < /dev/null
+convoy --pipeline-file payments-audit.yaml --prompt-file task.md --manual --yolo --detach < /dev/null
 ```
 
 The file is validated exactly like a config pipeline and frozen into the run like any other, so `--resume` replays it. Your config files are never edited. A pipeline file can only use agents that already exist; adding a project agent stays your decision.
@@ -104,7 +104,7 @@ The file is validated exactly like a config pipeline and frozen into the run lik
 The skill keeps you in the loop where it matters:
 
 - It confirms the pipeline, what it will change, and that it bills your providers before launching. A read-only review you asked for by name needs no extra confirmation.
-- It launches with `--smart`, never `--yolo` unless you ask for it.
+- It picks the permission mode from what the pipeline does. A read-only pipeline (`convoy pipelines show` says `read-only`) runs with `--yolo`: its steps can't edit the repository, the hard denylist still applies, and a step that changes the repository fails. A pipeline that writes code runs with `--smart`, never `--yolo` unless you ask for it. A mode you ask for wins.
 - It never answers a permission request or publishes a pull request on its own.
 - It doesn't edit `.convoy/config.yaml` or `~/.convoy/config.yaml` to run something once.
 

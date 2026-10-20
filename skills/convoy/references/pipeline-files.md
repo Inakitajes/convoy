@@ -4,7 +4,7 @@ A pipeline file is one YAML mapping: the same shape as a `pipelines.<name>` entr
 
 ```bash
 convoy pipelines show --pipeline-file <path>          # schema errors, or the resolved steps
-convoy --pipeline-file <path> --prompt-file <task> --manual --smart --plan < /dev/null   # the full plan, models routed
+convoy --pipeline-file <path> --prompt-file <task> --manual --yolo --plan < /dev/null    # the full plan, models routed (--smart if it writes code)
 ```
 
 ## Top-level keys
