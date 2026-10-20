@@ -880,12 +880,14 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
       // Every custom tool must exist before the server spawns: the run config
       // names each plugin package and the server loads them at startup. Every
       // OpenCode phase owns a report, so this path is deliberately independent
-      // of whether any phase has an advisor.
+      // of whether any phase has an advisor. The run's agents scope each
+      // phase's write_report schema (no commit when read-only, scores only
+      // for scorers).
       // Per-run plugin directory: each package embeds this run's bridge URL and
       // token, and V2 watches plugin sources, so a shared location would let a
       // concurrent run rewrite a live run's tools.
       const pluginDir = runPrivateDir(workspace.dir)
-      const pluginEntries = [await installWriteReportTool({ url: reportBridge.url, token: reportBridge.token, dir: pluginDir })]
+      const pluginEntries = [await installWriteReportTool({ url: reportBridge.url, token: reportBridge.token, dir: pluginDir, agents })]
       // The advisor bridge serves a runtime created only after the SDK returns a
       // client, so it uses the same deferred lookup pattern.
       if (advisorNeeds.agents.size > 0) {

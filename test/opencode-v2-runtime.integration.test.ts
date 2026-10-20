@@ -14,6 +14,7 @@ import {
   answersToolResult,
   bootRuntime,
   createIsolatedRuntime,
+  offeredTool,
   offeredTools,
   opencodeAvailable,
   scriptedProviderConfig,
@@ -40,7 +41,7 @@ type Fixture = { runtime: IsolatedRuntime; provider: ScriptedProvider; booted: B
 
 // A run configures only its pipeline's agents. All built-ins together exceed
 // Linux's 128 KiB limit on a single environment variable (E2BIG at spawn).
-const fixtureAgents = builtInAgents.filter((agent) => agent.name === "implementer" || agent.name === "bug-auditor")
+const fixtureAgents = builtInAgents.filter((agent) => agent.name === "implementer" || agent.name === "bug-auditor" || agent.name === "quality-scorer")
 
 async function boot(reply: Parameters<typeof startScriptedProvider>[0], withPlugin = false): Promise<Fixture> {
   const provider = startScriptedProvider(reply)
@@ -49,7 +50,7 @@ async function boot(reply: Parameters<typeof startScriptedProvider>[0], withPlug
   cleanups.push(() => runtime.cleanup())
   const runDir = join(runtime.root, "run")
   await mkdir(runDir, { recursive: true })
-  const plugins = withPlugin ? [dirname(await installWriteReportTool({ url: "http://127.0.0.1:1/report", token: "t", dir: join(runtime.root, "convoy-opencode") }))] : []
+  const plugins = withPlugin ? [dirname(await installWriteReportTool({ url: "http://127.0.0.1:1/report", token: "t", dir: join(runtime.root, "convoy-opencode"), agents: fixtureAgents }))] : []
   const booted = await bootRuntime(runtime, opencodeConfig(runDir, runtime.checkout, fixtureAgents, undefined, { plugins }))
   cleanups.push(() => booted.server.stop())
   return { runtime, provider, booted, runDir }
@@ -175,6 +176,24 @@ describe.if(opencodeAvailable)("Convoy run config on the real V2 runtime", () =>
     const turn = fixture.provider.requests.find((body) => offeredTools(body).length > 0)
     expect(offeredTools(turn)).toContain("write_report")
   }, 40_000)
+
+  test("each agent is offered the write_report schema of its own phase scope", async () => {
+    const fixture = await boot(() => ({ text: "done" }), true)
+    const schemas: Record<string, { properties: Record<string, unknown>; required: string[] } | undefined> = {}
+    for (const agent of ["implementer", "bug-auditor", "quality-scorer"]) {
+      const before = fixture.provider.requests.length
+      const sessionID = await prompt(fixture, { agent })
+      await settled(fixture, sessionID)
+      const turn = fixture.provider.requests.slice(before).find((body) => offeredTools(body).length > 0)
+      schemas[agent] = offeredTool(turn, writeReportToolName)
+    }
+    expect(Object.keys(schemas.implementer!.properties).sort()).toEqual(["commit", "markdown"])
+    expect(Object.keys(schemas["bug-auditor"]!.properties)).toEqual(["markdown"])
+    const scorer = schemas["quality-scorer"]!
+    expect(scorer.properties.commit).toBeUndefined()
+    expect(scorer.required).toEqual(["markdown", "dimensions"])
+    expect(scorer.properties.dimensions).toMatchObject({ required: ["prd", "tests", "security", "maintainability", "operational", "scope"], properties: { prd: { type: "number", minimum: 0, maximum: 100 } } })
+  }, 60_000)
 
   test("the operator's global provider config still loads alongside the run config", async () => {
     const fixture = await boot(() => ({ text: "done" }), true)

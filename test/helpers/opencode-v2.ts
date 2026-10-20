@@ -31,6 +31,12 @@ export function offeredTools(body: Record<string, unknown> | undefined): string[
   return tools.map((tool) => tool.function?.name ?? "")
 }
 
+/** The parameters schema of one tool offered to the model in one request. */
+export function offeredTool<Schema = { properties: Record<string, unknown>; required: string[] }>(body: Record<string, unknown> | undefined, name: string): Schema | undefined {
+  const tools = (body?.tools ?? []) as Array<{ function?: { name?: string; parameters?: Schema } }>
+  return tools.find((tool) => tool.function?.name === name)?.function?.parameters
+}
+
 /** Whether the request answers a tool result (the model's previous turn called a tool). */
 export function answersToolResult(body: Record<string, unknown>): boolean {
   const messages = (body.messages ?? []) as Array<{ role?: string }>

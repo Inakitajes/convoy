@@ -51,6 +51,18 @@ export function isScoringAgent(agentName: string): boolean {
 }
 
 /**
+ * What one phase's write_report call may carry: commit metadata only when the
+ * phase is writable (it creates a step commit), scoring fields only when its
+ * agent scores. The offered tool schema follows it, and
+ * validateWriteReportPayload enforces the same rules.
+ */
+export type WriteReportScope = { writable: boolean; scoring: boolean }
+
+export function writeReportScope(agentName: string, readOnly: boolean | undefined): WriteReportScope {
+  return { writable: !readOnly, scoring: isScoringAgent(agentName) }
+}
+
+/**
  * Validates data crossing the OpenCode/Convoy bridge. This is intentionally
  * stricter than the report parser: malformed tool arguments should fail the
  * call while the agent still has the same turn available to correct them.
@@ -109,22 +121,41 @@ function parseDimensions(value: unknown): QualityDimensionScores | undefined {
   const dimensions = {} as QualityDimensionScores
   for (const dimension of qualityDimensions) {
     const score = value[dimension]
-    if (typeof score !== "number" || !Number.isFinite(score) || score < 0 || score > 100) return undefined
+    if (!isScore(score)) return undefined
     dimensions[dimension] = Math.round(score)
   }
   return dimensions
 }
 
+/**
+ * Names every problem at once, with what was received, so the agent can fix
+ * the whole call in its next attempt instead of one dimension per rejection.
+ */
 function dimensionsError(value: unknown): string {
-  if (isRecord(value)) {
-    for (const dimension of qualityDimensions) {
-      const score = value[dimension]
-      if (typeof score !== "number" || !Number.isFinite(score) || score < 0 || score > 100) {
-        return `dimensions.${dimension} must be 0–100`
-      }
-    }
+  const expected = `an object scoring every quality dimension (${qualityDimensions.join(", ")}) from 0–100`
+  if (value === undefined) return `dimensions is required: ${expected}`
+  if (!isRecord(value)) return `dimensions must be ${expected} (received: ${received(value)})`
+  const missing = qualityDimensions.filter((dimension) => value[dimension] === undefined)
+  const problems: string[] = []
+  if (missing.length > 0) {
+    const keys = Object.keys(value)
+    problems.push(`dimensions is missing ${missing.join(", ")} (received: ${keys.length > 0 ? keys.join(", ") : "no keys"})`)
   }
-  return "dimensions must include every quality dimension with a score from 0–100"
+  for (const dimension of qualityDimensions) {
+    const score = value[dimension]
+    if (score !== undefined && !isScore(score)) problems.push(`dimensions.${dimension} must be a number from 0–100 (received: ${received(score)})`)
+  }
+  return problems.join("; ")
+}
+
+function isScore(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 100
+}
+
+/** A short rendering of a rejected value for an error message. */
+function received(value: unknown): string {
+  const text = typeof value === "number" ? String(value) : (JSON.stringify(value) ?? String(value))
+  return text.length > 80 ? `${text.slice(0, 77)}...` : text
 }
 
 function parseMustFix(value: unknown): string[] | undefined {

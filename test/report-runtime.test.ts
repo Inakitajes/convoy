@@ -5,7 +5,7 @@ import { join } from "node:path"
 import { afterAll, describe, expect, test } from "bun:test"
 
 import { createReportRuntime } from "../src/report-runtime"
-import { isScoringAgent, maxReportMarkdownChars } from "../src/report"
+import { isScoringAgent, maxReportMarkdownChars, validateWriteReportPayload, writeReportScope } from "../src/report"
 import { loadCommitSidecar, sidecarPathFor } from "../src/step-commit"
 import { qualityDimensionWeights } from "../src/quality-score"
 import type { AgentStep, DeliverableContract } from "../src/types"
@@ -112,7 +112,7 @@ describe("report runtime", () => {
       qualityDimensionWeights,
     )
 
-    expect(await handle.write({ markdown: "score", dimensions: { ...dimensions, tests: 101 } })).toEqual({ error: "dimensions.tests must be 0–100" })
+    expect(await handle.write({ markdown: "score", dimensions: { ...dimensions, tests: 101 } })).toEqual({ error: "dimensions.tests must be a number from 0–100 (received: 101)" })
     const result = await handle.write({ markdown: "# Score", dimensions, mustFix: ["SC-1: nit (minor)"], confidence: "high" })
     expect("markdown" in result && result.markdown).toContain("\"score\": 87")
     expect("markdown" in result && result.markdown).toContain("\"verdict\": \"ready-with-caveats\"")
@@ -195,6 +195,42 @@ describe("report runtime commit metadata", () => {
     await handle.write({ markdown: "# Findings", commit: { subject: "s" } })
     const entries = await readdir(join(dir, "reports"))
     expect(entries.sort()).toEqual(["review.md", "review.md.commit.json"])
+  })
+})
+
+describe("write_report dimensions errors", () => {
+  const error = (value: unknown) => validateWriteReportPayload({ markdown: "score", dimensions: value }, true, false)
+
+  test("names the missing dimensions and what was received", () => {
+    expect(error({ maintainability: 86.0166 })).toEqual({ error: "dimensions is missing prd, tests, security, operational, scope (received: maintainability)" })
+    expect(error({})).toEqual({ error: "dimensions is missing prd, tests, security, maintainability, operational, scope (received: no keys)" })
+  })
+
+  test("names a wrong-typed or out-of-range score with its value", () => {
+    expect(error({ ...dimensions, prd: "85" })).toEqual({ error: 'dimensions.prd must be a number from 0–100 (received: "85")' })
+    expect(error({ ...dimensions, security: -1 })).toEqual({ error: "dimensions.security must be a number from 0–100 (received: -1)" })
+  })
+
+  test("reports missing and invalid dimensions together", () => {
+    expect(error({ prd: 90, tests: 101, security: null, maintainability: 80 })).toEqual({
+      error: "dimensions is missing operational, scope (received: prd, tests, security, maintainability); dimensions.tests must be a number from 0–100 (received: 101); dimensions.security must be a number from 0–100 (received: null)",
+    })
+  })
+
+  test("explains a missing or non-object dimensions", () => {
+    const expected = "an object scoring every quality dimension (prd, tests, security, maintainability, operational, scope) from 0–100"
+    expect(validateWriteReportPayload({ markdown: "score" }, true, false)).toEqual({ error: `dimensions is required: ${expected}` })
+    expect(error("85")).toEqual({ error: `dimensions must be ${expected} (received: "85")` })
+    expect(error([90, 80])).toEqual({ error: `dimensions must be ${expected} (received: [90,80])` })
+    expect(error(null)).toEqual({ error: `dimensions must be ${expected} (received: null)` })
+  })
+})
+
+describe("writeReportScope", () => {
+  test("follows the phase: writable unless read-only, scoring for the scorer agents", () => {
+    expect(writeReportScope("implementer", undefined)).toEqual({ writable: true, scoring: false })
+    expect(writeReportScope("bug-auditor", true)).toEqual({ writable: false, scoring: false })
+    expect(writeReportScope("quality-scorer__ro", true)).toEqual({ writable: false, scoring: true })
   })
 })
 

@@ -66,6 +66,8 @@ describe("Convoy's tools reach a Codex attempt through a private bridge file", (
     expect(bridgeFile.startsWith(convoySecretsDir())).toBe(true)
     expect(mode).toBe(0o600)
     expect(contents.CONVOY_TOOLS).toBe("report")
+    // The host's write_report schema follows the attempt's phase: writable, not scoring.
+    expect(contents.CONVOY_REPORT_SCOPE).toBe("writable")
     expect(contents.CONVOY_TOOLS_URL).toStartWith("http://127.0.0.1:")
     expect(contents.CONVOY_APPROVAL_TOKEN).toMatch(/^[0-9a-f]{64}$/)
     // Neither the token nor the address is on the app-server's argv or environment.
@@ -86,6 +88,19 @@ describe("Convoy's tools reach a Codex attempt through a private bridge file", (
     expect((listed as { result: { tools: { name: string }[] } }).result.tools.map((tool) => tool.name)).toEqual(["write_report", "advisor", "advisor_feedback"])
     const permission = await handleMcpPermissionRequest({ id: 2, method: "tools/call", params: { name: "permission", arguments: {} } }, { permissionTool: false, tools, resolve: async () => ({ decision: "allow" }) })
     expect(permission).toMatchObject({ error: { code: -32602 } })
+  })
+
+  test("the host offers write_report scoped to the attempt's phase", () => {
+    const schemaFor = (scope?: string) => {
+      const tools = convoyToolHost({ CONVOY_TOOLS_URL: "http://127.0.0.1:1", CONVOY_APPROVAL_TOKEN: "t", CONVOY_TOOLS: "report", ...(scope !== undefined ? { CONVOY_REPORT_SCOPE: scope } : {}) })!
+      return tools.definitions[0]!.inputSchema as { properties: Record<string, unknown>; required: string[] }
+    }
+    expect(Object.keys(schemaFor("").properties)).toEqual(["markdown"])
+    expect(Object.keys(schemaFor("writable").properties)).toEqual(["markdown", "commit"])
+    expect(schemaFor("scoring").required).toEqual(["markdown", "dimensions"])
+    expect(schemaFor("scoring").properties.commit).toBeUndefined()
+    // A host without a scope (an unscoped bridge) offers every field.
+    expect(Object.keys(schemaFor().properties)).toEqual(["markdown", "dimensions", "mustFix", "gaps", "confidence", "commit"])
   })
 })
 

@@ -21,6 +21,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 
 import { registerSecret } from "./redaction"
+import type { WriteReportScope } from "../report"
 import { convoySecretsDir } from "../workspace"
 
 export type PermissionAsk = {
@@ -64,6 +65,8 @@ export type ConvoyToolName = "report" | "advisor"
 /** The base URL of an attempt's tool routes, and which tools it serves. */
 export const toolsUrlEnv = "CONVOY_TOOLS_URL"
 export const toolsEnv = "CONVOY_TOOLS"
+/** The phase scope the host's write_report schema follows (`writable`, `scoring` flags). */
+export const reportScopeEnv = "CONVOY_REPORT_SCOPE"
 /** The private file the PreToolUse hook reads the bridge address and token from. */
 export const bridgeFileEnv = "CONVOY_BRIDGE_FILE"
 
@@ -80,6 +83,8 @@ export type ClaudeAttemptHandlers = {
   approve?: ApprovalProvider
   /** A `write_report` submission, validated by the attempt's deliverable service. */
   report?: (payload: unknown) => Promise<ToolOutcome>
+  /** The attempt's phase scope, which the host's write_report schema follows. */
+  reportScope?: WriteReportScope
   advisor?: {
     consult(question?: string): Promise<ToolOutcome & { callId?: string }>
     feedback(callId: string | undefined, outcome: string, note?: string): Promise<ToolOutcome>
@@ -149,6 +154,7 @@ export async function startClaudeAttemptBridge(handlers: ClaudeAttemptHandlers):
       [approvalTokenEnv]: token,
       [toolsUrlEnv]: url,
       [toolsEnv]: tools.join(","),
+      ...(handlers.report && handlers.reportScope ? { [reportScopeEnv]: reportScopeFlags(handlers.reportScope) } : {}),
     },
     async close() {
       await server.stop(true)
@@ -161,14 +167,30 @@ export const startAttemptBridge = startClaudeAttemptBridge
 export type AttemptHandlers = ClaudeAttemptHandlers
 export type AttemptBridge = ClaudeAttemptBridge
 
+function reportScopeFlags(scope: WriteReportScope): string {
+  return [...(scope.writable ? ["writable"] : []), ...(scope.scoring ? ["scoring"] : [])].join(",")
+}
+
+/** The scope named in `env`; absent (an older or unscoped host) offers every field. */
+function reportScopeFrom(env: NodeJS.ProcessEnv): WriteReportScope | undefined {
+  const raw = env[reportScopeEnv]
+  if (raw === undefined) return undefined
+  const flags = raw.split(",")
+  return { writable: flags.includes("writable"), scoring: flags.includes("scoring") }
+}
+
 /** Calls one of the attempt's tool routes; any failure is a tool error, never a success. */
-export function attemptToolsClient(env: NodeJS.ProcessEnv = process.env): { tools: ConvoyToolName[]; call(route: string, body: unknown): Promise<Record<string, unknown>> } | undefined {
+export function attemptToolsClient(
+  env: NodeJS.ProcessEnv = process.env,
+): { tools: ConvoyToolName[]; reportScope?: WriteReportScope; call(route: string, body: unknown): Promise<Record<string, unknown>> } | undefined {
   const url = env[toolsUrlEnv]
   const token = env[approvalTokenEnv]
   if (!url || !token) return undefined
   const tools = (env[toolsEnv] ?? "").split(",").filter((tool): tool is ConvoyToolName => tool === "report" || tool === "advisor")
+  const reportScope = reportScopeFrom(env)
   return {
     tools,
+    ...(reportScope ? { reportScope } : {}),
     async call(route, body) {
       try {
         const response = await fetch(`${url}${route}`, {
