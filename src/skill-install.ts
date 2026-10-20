@@ -165,10 +165,18 @@ export type PipelineCommand = {
   summary: string
   /** How the command gets its prompt. */
   prompt: string
+  /** The permission mode the launch uses. */
+  permissions: string
   /** Whether the user confirms the plan before the launch. */
   launch: string
 }
 
+// A read-only pipeline has nothing worth escalating, so it runs unattended; a
+// pipeline that writes code keeps the smart judge between it and the user.
+const permissionsReadOnly =
+  "Pass `--yolo`: the pipeline only reads the repository, so nothing it asks is worth stopping the user for. If the show output says `writes code` (a project pipeline replaced the built-in), pass `--smart` and confirm before launching instead; a mode the user asked for wins."
+const permissionsWrites =
+  "Pass `--smart`: a judge auto-allows safe requests and escalates risky ones. Use `--yolo` only when the user asks for it."
 const launchReadOnly =
   "This pipeline only reads the repository and the user asked for it by name: launch without another round-trip, unless the plan shows something they wouldn't expect (a model, a cost, a checkout)."
 const launchWrites =
@@ -180,18 +188,19 @@ const promptTask =
 
 /** The built-in pipelines that get a `/convoy-<pipeline>` command. */
 export const pipelineCommands: readonly PipelineCommand[] = [
-  { pipeline: "review", summary: "findings plus a verified quality score for the current branch; it doesn't change code.", prompt: promptDefault, launch: launchReadOnly },
-  { pipeline: "implement", summary: "implement a task or an OpenSpec change, then audit it, with a one-page recap.", prompt: promptTask, launch: launchWrites },
-  { pipeline: "full-cycle", summary: "implement, audit, and test a task or an OpenSpec change, then score and fix it to 90/100.", prompt: promptTask, launch: launchWrites },
-  { pipeline: "ship", summary: "sync the branch with its base, review it, fix the accepted findings, and reach 90/100.", prompt: promptDefault, launch: launchWrites },
+  { pipeline: "review", summary: "findings plus a verified quality score for the current branch; it doesn't change code.", prompt: promptDefault, permissions: permissionsReadOnly, launch: launchReadOnly },
+  { pipeline: "implement", summary: "implement a task or an OpenSpec change, then audit it, with a one-page recap.", prompt: promptTask, permissions: permissionsWrites, launch: launchWrites },
+  { pipeline: "full-cycle", summary: "implement, audit, and test a task or an OpenSpec change, then score and fix it to 90/100.", prompt: promptTask, permissions: permissionsWrites, launch: launchWrites },
+  { pipeline: "ship", summary: "sync the branch with its base, review it, fix the accepted findings, and reach 90/100.", prompt: promptDefault, permissions: permissionsWrites, launch: launchWrites },
   {
     pipeline: "fixer",
     summary: "prove supplied findings with regression tests, fix them, and verify.",
     prompt:
       "The prompt is the findings to fix: from the request, the files it names (attach them with `--file`), or the reports of a run the user points to. If there is nothing to fix, ask. Write the prompt to a scratch file for `--prompt-file`.",
+    permissions: permissionsWrites,
     launch: launchWrites,
   },
-  { pipeline: "hunter", summary: "a maximum-coverage audit of the branch across six tracks and five models; it doesn't change code.", prompt: promptDefault, launch: launchReadOnly },
+  { pipeline: "hunter", summary: "a maximum-coverage audit of the branch across six tracks and five models; it doesn't change code.", prompt: promptDefault, permissions: permissionsReadOnly, launch: launchReadOnly },
 ]
 
 export function commandName(command: PipelineCommand): string {
@@ -250,6 +259,7 @@ export function pipelineCommandText(target: SkillTarget, command: PipelineComman
     .replaceAll("{{pipeline}}", command.pipeline)
     .replaceAll("{{summary}}", command.summary)
     .replaceAll("{{prompt}}", command.prompt)
+    .replaceAll("{{permissions}}", command.permissions)
     .replaceAll("{{launch}}", command.launch)
   return `---\n${frontmatter.join("\n")}\n---\n${commandMarker}\n\n${body}`
 }

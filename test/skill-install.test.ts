@@ -116,6 +116,15 @@ describe("pipeline commands", () => {
     }
   })
 
+  test("read-only pipelines launch with --yolo, the ones that write code with --smart", () => {
+    const readOnly = new Set(["review", "hunter"])
+    for (const command of pipelineCommands) {
+      const text = pipelineCommandText("claude", command)
+      expect(text).toContain(readOnly.has(command.pipeline) ? "Pass `--yolo`" : "Pass `--smart`")
+      expect(text).toContain("`--detach` in place of `--plan` (never without it)")
+    }
+  })
+
   test("Claude Code and Codex get user-invoked skills, OpenCode a command with the marker after its frontmatter", () => {
     const review = pipelineCommands.find((command) => command.pipeline === "review")!
     expect(pipelineCommandText("codex", review)).toMatch(/^---\nname: convoy-review\ndescription: ".+"\nargument-hint: .+\ndisable-model-invocation: true\n---\n<!-- convoy:command -->\n/)
