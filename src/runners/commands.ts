@@ -18,7 +18,7 @@
 import { readFile } from "node:fs/promises"
 
 import { advisorToolDescription, advisorFeedbackToolDescription } from "../advisor-bridge"
-import { writeReportInputJsonSchema, writeReportToolDescription } from "../report-bridge"
+import { writeReportInputJsonSchemaFor, writeReportToolDescriptionFor } from "../report-bridge"
 import { approvalBridgeProvider, attemptToolsClient, bridgeFileEnv, type CheckpointOutcome } from "./attempt-bridge"
 import { decideToolCall, isConvoyMcpTool, preToolUseOutput, toActionRequest, type PreToolUseInput } from "./claude/hook"
 import type { McpToolHost } from "./claude/mcp-permission-server"
@@ -126,7 +126,9 @@ export function convoyToolHost(env: NodeJS.ProcessEnv = process.env): McpToolHos
   const client = attemptToolsClient(env)
   if (!client || client.tools.length === 0) return undefined
   const definitions: McpToolHost["definitions"] = [
-    ...(client.tools.includes("report") ? [{ name: "write_report", description: writeReportToolDescription, inputSchema: writeReportInputJsonSchema }] : []),
+    ...(client.tools.includes("report")
+      ? [{ name: "write_report", description: writeReportToolDescriptionFor(client.reportScope), inputSchema: writeReportInputJsonSchemaFor(client.reportScope) }]
+      : []),
     ...(client.tools.includes("advisor")
       ? [
           { name: "advisor", description: advisorToolDescription, inputSchema: { type: "object", properties: { question: { type: "string" } } } },

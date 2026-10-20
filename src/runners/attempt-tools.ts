@@ -6,6 +6,7 @@
  */
 
 import { firstWriteMessage } from "../advisor-runtime"
+import { writeReportScope } from "../report"
 import type { AttemptHandlers } from "./attempt-bridge"
 import type { DeliverableSubmission, ExecutionRequest, ExecutionServices } from "./contracts"
 
@@ -35,7 +36,7 @@ export function toolReportSubmission(payload: unknown): DeliverableSubmission {
  * advisor's on-demand consultation, feedback, and first-write checkpoint. The
  * operator gate is the adapter's own concern.
  */
-export function convoyToolHandlers(request: Pick<ExecutionRequest, "advised">, services: ExecutionServices | undefined): AttemptHandlers {
+export function convoyToolHandlers(request: Pick<ExecutionRequest, "advised" | "agent" | "mode">, services: ExecutionServices | undefined): AttemptHandlers {
   const handlers: AttemptHandlers = {}
   const deliverables = services?.deliverables
   if (deliverables) {
@@ -43,6 +44,8 @@ export function convoyToolHandlers(request: Pick<ExecutionRequest, "advised">, s
       const result = await deliverables.submit(toolReportSubmission(payload))
       return result.ok ? { ok: true, text: "Report saved." } : { ok: false, error: result.error }
     }
+    // The host offers the schema of this phase's scope, as OpenCode's plugin does.
+    handlers.reportScope = writeReportScope(request.agent.name, request.mode !== "write")
   }
   const advisor = services?.advisor
   if (advisor && request.advised) {

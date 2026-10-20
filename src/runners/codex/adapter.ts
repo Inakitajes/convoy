@@ -23,7 +23,7 @@ import { randomUUID } from "node:crypto"
 import { RawStreamLog } from "../../raw-stream-log"
 import { convoySecretsDir } from "../../workspace"
 import { withAttachmentSection } from "../agent-source"
-import { stagePrivateFile, startAttemptBridge, toolsEnv, toolsUrlEnv, approvalTokenEnv, type AttemptBridge } from "../attempt-bridge"
+import { reportScopeEnv, stagePrivateFile, startAttemptBridge, toolsEnv, toolsUrlEnv, approvalTokenEnv, type AttemptBridge } from "../attempt-bridge"
 import { convoyToolHandlers } from "../attempt-tools"
 import { firstWriteMessage } from "../../advisor-runtime"
 import { resolveEffectiveCapabilities } from "../capabilities"
@@ -471,7 +471,12 @@ export function createCodexRunner(options: CodexRunnerOptions): CodexRunner {
         bridge = await startAttemptBridge(handlers)
         const file = await stagePrivateFile(
           "bridge.json",
-          JSON.stringify({ [toolsUrlEnv]: bridge.url, [approvalTokenEnv]: bridge.token, [toolsEnv]: bridge.tools.join(",") }),
+          JSON.stringify({
+            [toolsUrlEnv]: bridge.url,
+            [approvalTokenEnv]: bridge.token,
+            [toolsEnv]: bridge.tools.join(","),
+            ...(bridge.env[reportScopeEnv] !== undefined ? { [reportScopeEnv]: bridge.env[reportScopeEnv] } : {}),
+          }),
           "codex-mcp",
         )
         staged.push(file)

@@ -4,7 +4,7 @@ import { join } from "node:path"
 
 import { afterAll, describe, expect, test } from "bun:test"
 
-import { installWriteReportTool, startReportBridge } from "../src/report-bridge"
+import { installWriteReportTool, startReportBridge, writeReportInputJsonSchemaFor, writeReportToolDescriptionFor } from "../src/report-bridge"
 import { createReportRuntime } from "../src/report-runtime"
 import { loadCommitSidecar } from "../src/step-commit"
 import { qualityDimensionWeights } from "../src/quality-score"
@@ -123,6 +123,46 @@ describe("report bridge", () => {
   })
 })
 
+type Schema = { properties: Record<string, Record<string, unknown>>; required: string[] }
+
+describe("write_report schema per phase scope", () => {
+  test("a read-only phase is never offered commit, in the schema or the description", () => {
+    const scope = { writable: false, scoring: false }
+    const schema = writeReportInputJsonSchemaFor(scope) as Schema
+    expect(Object.keys(schema.properties)).toEqual(["markdown"])
+    expect(schema.required).toEqual(["markdown"])
+    expect(writeReportToolDescriptionFor(scope)).not.toContain("commit:")
+    expect(writeReportToolDescriptionFor(scope)).toContain("read-only")
+  })
+
+  test("a writable non-scoring phase gets commit and no scoring fields", () => {
+    const scope = { writable: true, scoring: false }
+    const schema = writeReportInputJsonSchemaFor(scope) as Schema
+    expect(Object.keys(schema.properties)).toEqual(["markdown", "commit"])
+    expect(schema.properties.commit).toMatchObject({ required: ["subject"] })
+    expect(writeReportToolDescriptionFor(scope)).toContain("imperative English subject")
+    expect(writeReportToolDescriptionFor(scope)).not.toContain("dimensions")
+  })
+
+  test("a scoring phase must send every dimension as a bounded number", () => {
+    const scope = { writable: false, scoring: true }
+    const schema = writeReportInputJsonSchemaFor(scope) as Schema
+    expect(Object.keys(schema.properties)).toEqual(["markdown", "dimensions", "mustFix", "gaps", "confidence"])
+    expect(schema.required).toEqual(["markdown", "dimensions"])
+    const dimensions = schema.properties.dimensions as Schema
+    expect(dimensions.required).toEqual(["prd", "tests", "security", "maintainability", "operational", "scope"])
+    for (const key of dimensions.required) expect(dimensions.properties[key]).toEqual({ type: "number", minimum: 0, maximum: 100 })
+    expect(writeReportToolDescriptionFor(scope)).toContain("prd, tests, security, maintainability, operational, scope")
+    expect(writeReportToolDescriptionFor(scope)).not.toContain("commit:")
+  })
+
+  test("unscoped, every field is offered and only markdown is required", () => {
+    const schema = writeReportInputJsonSchemaFor() as Schema
+    expect(Object.keys(schema.properties)).toEqual(["markdown", "dimensions", "mustFix", "gaps", "confidence", "commit"])
+    expect(schema.required).toEqual(["markdown"])
+  })
+})
+
 describe("write_report tool file", () => {
   test("registers the tool with the commit argument as a V2 plugin", async () => {
     const dir = await scratch()
@@ -153,6 +193,36 @@ describe("write_report tool file", () => {
     expect(tool?.input.required).toEqual(["markdown"])
     expect(tool?.input.properties.markdown).toEqual({ type: "string" })
     expect(tool?.input.properties.commit).toBeDefined()
+  })
+
+  test("scopes each run agent's schema through the session context hook", async () => {
+    const dir = await scratch()
+    const modulePath = join(dir, "write_report.mjs")
+    const agents = [{ name: "implementer" }, { name: "bug-auditor", readOnly: true }, { name: "quality-scorer__ro", readOnly: true }]
+    const installedPath = await installWriteReportTool({ dir, url: "http://127.0.0.1:9/report", token: "tok", agents })
+    const source = (await readFile(installedPath, "utf8")).replace('"@opencode/plugin"', JSON.stringify(import.meta.resolve("@opencode/plugin")))
+    await writeFile(modulePath, source)
+    const plugin = (await import(modulePath)).default
+
+    type Offered = Record<string, { description: string; input: Schema }>
+    let context: ((request: { agent: string; tools: Offered }) => void) | undefined
+    await plugin.setup({
+      tool: { transform: async (cb: (editor: { add: (t: unknown) => void }) => void) => cb({ add: () => {} }) },
+      session: { hook: async (name: string, cb: typeof context) => { if (name === "context") context = cb } },
+    })
+    const offered = (agent: string, tools: Offered = { write_report: { description: "unscoped", input: writeReportInputJsonSchemaFor() as Schema } }) => {
+      context!({ agent, tools })
+      return tools
+    }
+    expect(Object.keys(offered("implementer").write_report!.input.properties)).toEqual(["markdown", "commit"])
+    expect(Object.keys(offered("bug-auditor").write_report!.input.properties)).toEqual(["markdown"])
+    const scorer = offered("quality-scorer__ro").write_report!
+    expect(scorer.input.required).toEqual(["markdown", "dimensions"])
+    expect(scorer.input.properties.commit).toBeUndefined()
+    // Another agent keeps the unscoped registration, and an agent whose
+    // config disables the tool is never handed it.
+    expect(offered("title").write_report!.description).toBe("unscoped")
+    expect(offered("implementer", {})).toEqual({})
   })
 
   test("has the fixed-path schema and restrictive permissions", async () => {
