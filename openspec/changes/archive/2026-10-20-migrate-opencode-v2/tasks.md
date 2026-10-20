@@ -28,7 +28,7 @@
 
 - [x] 5.1 Port `advisor` and `advisor_feedback` registration alongside `write_report` with immutable private run binding; verify unchanged inputs/results, authentication, feedback correlation/idempotency, cancellation and concurrent-run token isolation.
 - [x] 5.2 Adapt fresh consultation create/admit/settle/history/cleanup and paginated bounded transcript export; verify text/reasoning/tool/failure inputs, advisor reasoning suppression, empty-result degradation, timeout and run-abort cleanup.
-- [ ] 5.3 Preserve effective advisor model aliases, output cap, temperature and routing on the confirmed runtime; verify captured applicable model requests honor those settings without changing executor requests or enabling consultation tools.
+- [x] 5.3 Preserve effective advisor model aliases, output cap, temperature and routing on the confirmed runtime; verify captured applicable model requests honor those settings without changing executor requests or enabling consultation tools.
 - [x] 5.4 Reconnect on-demand, edit-based first-write and completion triggers to existing advisor policy; verify first-write ordering before auto-accept, failed-call budgets, privacy/usage journal, completion follow-up, `NO CHANGES` and structural error propagation without persistent/native-subagent redesign.
 
 ## 6. Migrate catalogs, helpers and provider telemetry
