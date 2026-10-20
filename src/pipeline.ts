@@ -783,7 +783,6 @@ export function resolvePipeline(input: ResolvePipelineInput): Pipeline {
   const names = new Set<string>()
   let legacyHumanCount = 0
   let genericHumanCount = 0
-  const mixedVerify = mixedVerifyAgents(input.spec.steps, input.agents)
 
   // The terminal goal node: at most one, and only ever the pipeline's final
   // entry. Everything before it is the ordinary prefix.
@@ -798,6 +797,13 @@ export function resolvePipeline(input: ResolvePipelineInput): Pipeline {
   }
   const goalSpec: GoalStepSpec | undefined = goalIndex === -1 ? undefined : (input.spec.steps[goalIndex] as GoalStepSpec)
   const ordinarySteps = goalSpec ? input.spec.steps.filter((_, index) => index !== goalIndex) : input.spec.steps
+  // OpenCode registers one agent config per name for the whole run, goal
+  // fragments included, so a mixed verifying/non-verifying use is detected
+  // across the prefix and both fragments.
+  const mixedVerify = mixedVerifyAgents(
+    [...ordinarySteps, ...(goalSpec ? [...goalSpec.goal.improve.steps, ...goalSpec.goal.measure.steps] : [])],
+    input.agents,
+  )
 
   const claimAgentName = (name: string, position: string) => {
     if (name === humanReviewStep || name.startsWith(`${humanReviewStep}-`)) {
@@ -890,7 +896,7 @@ export function resolvePipeline(input: ResolvePipelineInput): Pipeline {
     throw new Error(`pipeline "${input.name}" has no agent steps`)
   }
 
-  const goalPlan = goalSpec ? resolveGoalStep(input, goalSpec.goal) : undefined
+  const goalPlan = goalSpec ? resolveGoalStep(input, goalSpec.goal, mixedVerify) : undefined
 
   return {
     name: input.name,
@@ -909,7 +915,7 @@ export function resolvePipeline(input: ResolvePipelineInput): Pipeline {
  * never reserved agent or step names — so a custom goal pipeline needs no
  * `goal-fixer`, `score-report`, or `goal-fix` name anywhere.
  */
-function resolveGoalStep(input: ResolvePipelineInput, goal: GoalStepSpec["goal"]): ResolvedGoalPlan {
+function resolveGoalStep(input: ResolvePipelineInput, goal: GoalStepSpec["goal"], mixedVerify: ReadonlySet<string>): ResolvedGoalPlan {
   if (typeof goal.target !== "number" || !Number.isInteger(goal.target) || goal.target < 1 || goal.target > 100) {
     throw new Error(`pipeline "${input.name}": goal.target must be an integer from 1 through 100`)
   }
@@ -922,8 +928,8 @@ function resolveGoalStep(input: ResolvePipelineInput, goal: GoalStepSpec["goal"]
     throw new Error(`pipeline "${input.name}": goal.plateau must be a positive integer (got ${JSON.stringify(goal.plateau)})`)
   }
 
-  const improve = resolveFragment(input, "goal.improve", "improve", goal.improve.steps)
-  const measure = resolveFragment(input, "goal.measure", "measure", goal.measure.steps)
+  const improve = resolveFragment(input, "goal.improve", "improve", goal.improve.steps, mixedVerify)
+  const measure = resolveFragment(input, "goal.measure", "measure", goal.measure.steps, mixedVerify)
 
   if (improve.length === 0) {
     throw new Error(`pipeline "${input.name}": goal.improve.steps must be a non-empty list`)
@@ -988,6 +994,7 @@ function resolveFragment(
   label: string,
   groupIdPrefix: string,
   rawSteps: readonly StepSpec[],
+  mixedVerify: ReadonlySet<string>,
 ): AgentStep[] {
   const fragmentInput: ResolveStepInput = {
     name: input.name,
@@ -1048,7 +1055,7 @@ function resolveFragment(
           forcedReadOnly: true,
           priorSteps: steps,
           claimName,
-          mixedVerify: mixedVerifyAgents(rawSteps, input.agents),
+          mixedVerify,
         }),
       )
       steps.push(...members)
@@ -1063,7 +1070,7 @@ function resolveFragment(
       forcedReadOnly: Boolean(spec.models && spec.models.length > 0),
       priorSteps: steps,
       claimName,
-      mixedVerify: mixedVerifyAgents(rawSteps, input.agents),
+      mixedVerify,
     })
     steps.push(...members)
   }
@@ -1400,12 +1407,14 @@ export function synthesizeVerifyingAgents(pipeline: Pipeline, baseAgents: readon
 
 /**
  * Agent registry for one run: catalogue agents, with `verify` set on any
- * name a verifying step uses as-is, plus the `__ro` / `__verify` variants
- * the resolved pipeline points at.
+ * name a verifying step uses as-is (prefix or goal fragment), plus the
+ * `__ro` / `__verify` variants the resolved pipeline points at.
  */
 export function agentsForPipeline(pipeline: Pipeline, baseAgents: readonly AgentSpec[]): AgentSpec[] {
   const verifyingNames = new Set(
-    pipeline.steps.filter((step): step is AgentStep => step.type === "agent" && Boolean(step.verify)).map((step) => step.agentName),
+    [...pipeline.steps, ...goalFragmentSteps(pipeline)]
+      .filter((step): step is AgentStep => step.type === "agent" && Boolean(step.verify))
+      .map((step) => step.agentName),
   )
   return [
     ...baseAgents.map((agent) => (verifyingNames.has(agent.name) ? { ...agent, verify: true } : agent)),
