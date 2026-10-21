@@ -6,6 +6,7 @@ import { describe, expect, test } from "bun:test"
 
 import { loadAgentPrompt, opencodeConfig } from "../src/agents"
 import { builtInPrompts } from "../src/built-in-prompts"
+import { agentsForPipeline, builtInAgents, resolvePipeline } from "../src/pipeline"
 
 describe("opencode config", () => {
   test("disables total provider timeouts but keeps idle stream timeouts", () => {
@@ -178,6 +179,39 @@ describe("opencode config", () => {
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
+  })
+
+  test("a verifying goal measure step gets bash in the run config while staying unable to write", () => {
+    const pipeline = resolvePipeline({
+      name: "goal",
+      spec: {
+        steps: [
+          "implementer",
+          {
+            goal: {
+              target: 90,
+              improve: { briefStep: "fix", steps: [{ agent: "goal-fixer", name: "fix" }] },
+              measure: {
+                steps: [
+                  { agent: "quality-scorer", name: "score" },
+                  { agent: "quality-score-report", name: "score-report", reports: ["score"], verify: true },
+                ],
+              },
+            },
+          },
+        ],
+      },
+      agents: builtInAgents,
+    })
+
+    const config = opencodeConfig("/tmp/convoy-run", "/tmp/non-existent-convoy-target", agentsForPipeline(pipeline, builtInAgents))
+
+    const scoreReport = config.agent?.["quality-score-report"]
+    expect(scoreReport?.tools).toMatchObject({ bash: true, write: false, edit: false })
+    expect(scoreReport?.permission).toMatchObject({ edit: "deny" })
+    const bash = (scoreReport?.permission as { bash?: Record<string, string> } | undefined)?.bash
+    expect(bash).toMatchObject({ "bun test*": "allow", "git commit*": "deny" })
+    expect(config.agent?.["quality-scorer"]?.tools?.bash).toBe(false)
   })
 
   test("writable agents keep the full bash policy, denylist included", () => {

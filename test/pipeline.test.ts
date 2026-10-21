@@ -1091,6 +1091,49 @@ describe("step-level verify", () => {
     expect(byName["quality-score-report"]?.verify).toBe(true)
     expect(synthesizeVerifyingAgents(pipeline, builtInAgents).map((agent) => agent.name)).toEqual([`review-scope${verifyAgentSuffix}`])
   })
+
+  const goalPipeline = (prefix: PipelineSpec["steps"]) =>
+    resolvePipeline({
+      name: "test",
+      spec: {
+        steps: [
+          ...prefix,
+          {
+            goal: {
+              target: 90,
+              improve: { briefStep: "fix", steps: [{ agent: "goal-fixer", name: "fix" }] },
+              measure: {
+                steps: [
+                  { agent: "quality-scorer", name: "score" },
+                  { agent: "quality-score-report", name: "score-report", reports: ["score"], verify: true },
+                ],
+              },
+            },
+          },
+        ],
+      },
+      agents: builtInAgents,
+    })
+
+  test("agentsForPipeline honors verify on goal measure steps", () => {
+    const pipeline = goalPipeline(["implementer"])
+    const scoreReport = pipeline.goalPlan?.measure.steps.find((step) => step.name === "score-report")
+    expect(scoreReport).toMatchObject({ agentName: "quality-score-report", readOnly: true, verify: true })
+
+    const byName = Object.fromEntries(agentsForPipeline(pipeline, builtInAgents).map((agent) => [agent.name, agent]))
+    expect(byName["quality-score-report"]).toMatchObject({ readOnly: true, verify: true })
+    expect(byName["quality-scorer"]?.verify).toBeUndefined()
+  })
+
+  test("a verifying goal step sharing its agent with a non-verifying prefix step gets its own variant", () => {
+    const pipeline = goalPipeline(["implementer", { agent: "quality-score-report", name: "prefix-score" }])
+    const scoreReport = pipeline.goalPlan?.measure.steps.find((step) => step.name === "score-report")
+    expect(scoreReport?.agentName).toBe(`quality-score-report${verifyAgentSuffix}`)
+
+    const byName = Object.fromEntries(agentsForPipeline(pipeline, builtInAgents).map((agent) => [agent.name, agent]))
+    expect(byName["quality-score-report"]?.verify).toBeUndefined()
+    expect(byName[`quality-score-report${verifyAgentSuffix}`]).toMatchObject({ readOnly: true, verify: true })
+  })
 })
 
 describe("claude-code runner steps", () => {
