@@ -8,6 +8,8 @@ import {
 } from "./close-presentation"
 import type { CloseEvent, CloseLandingDecision, CloseMessageProposal } from "./close-events"
 import { stripControlBytes } from "./commit-text"
+import { loadMergedConvoyConfig } from "./config"
+import { specToolFor } from "./spec-tools"
 import {
   hintsRow,
   indentStyled,
@@ -830,9 +832,11 @@ export class CloseTui {
 }
 
 export async function openCloseTui(targetDir: string, initialState?: CloseChecklistState, route?: TuiRoute): Promise<CloseTui> {
+  const tool = specToolFor(await loadMergedConvoyConfig(targetDir))
+  const state = initialState ?? initialCloseChecklistState(Boolean(tool?.archives))
   if (route) {
     const scene = sceneForRoute(route, "convoy-close-scene")!
-    return new CloseTui(route.session.renderer, targetDir, initialState, process.stdin, scene)
+    return new CloseTui(route.session.renderer, targetDir, state, process.stdin, scene)
   }
   const renderer = await createCliRenderer({
     screenMode: "alternate-screen",
@@ -841,7 +845,7 @@ export async function openCloseTui(targetDir: string, initialState?: CloseCheckl
   })
   const mode = await renderer.waitForThemeMode(1_000).catch(() => null)
   setTheme(paletteForTerminal(mode, terminalBackgroundHex(renderer)))
-  return new CloseTui(renderer, targetDir, initialState)
+  return new CloseTui(renderer, targetDir, state)
 }
 
 /**

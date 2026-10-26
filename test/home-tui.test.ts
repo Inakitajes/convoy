@@ -114,7 +114,7 @@ const hermeticProposeBranchName = async ({ prompt }: { prompt: string }): Promis
   branch: `feat/${prompt.trim().toLowerCase().replace(/\s+/g, "-") || "work"}`,
 })
 
-async function openHome(options: { worktrees?: BoardWorktree[]; width?: number; height?: number; targetDir?: string; proposeBranchName?: (input: { prompt: string }) => Promise<{ branch: string }>; observePr?: (worktree: BoardWorktree) => Promise<PrObservation>; listRunsForWorktree?: (worktree: BoardWorktree) => Promise<DetailRun[]>; specs?: boolean } = {}) {
+async function openHome(options: { worktrees?: BoardWorktree[]; width?: number; height?: number; targetDir?: string; proposeBranchName?: (input: { prompt: string }) => Promise<{ branch: string }>; observePr?: (worktree: BoardWorktree) => Promise<PrObservation>; listRunsForWorktree?: (worktree: BoardWorktree) => Promise<DetailRun[]>; specs?: import("../src/spec-tools").SpecToolId | false } = {}) {
   const testRenderer = await createTestRenderer({ width: options.width ?? 110, height: options.height ?? 30 })
   const instance = new HomeLauncher(testRenderer.renderer, options.targetDir ?? viewDir(), {
     scene: undefined,
@@ -321,6 +321,28 @@ describe("worktrees-first home (capability home-launcher delta)", () => {
       expect(frame).not.toContain("Linked Specs")
       // Close stays, as the squash merge it still is.
       expect(frame).toContain("Close (merge)")
+    } finally {
+      await closeHome(session)
+    }
+  })
+
+  test("Spec Kit detail names its tool and keeps archive disabled with the reason", async () => {
+    const session = await openHome({ height: 48, worktrees: [worktree({ path: wtPath, branch: "feat/kit", specTool: "speckit", archiveCount: 2 })] })
+    try {
+      session.press("down")
+      await session.renderOnce()
+      expect(frameOf(session)).toContain("2 completed")
+      session.press("return")
+      await session.renderOnce()
+      const frame = frameOf(session)
+      expect(frame).toContain("Spec Kit")
+      expect(frame).toContain("Archive change")
+      expect(frame).toContain("Spec Kit has no archive")
+      expect(frame).toContain("Close (merge)")
+      expect(frame).not.toContain("OpenSpec")
+      session.press("a")
+      await session.renderOnce()
+      expect(await Promise.race([session.instance.result.then(() => "resolved"), Bun.sleep(20).then(() => "pending")])).toBe("pending")
     } finally {
       await closeHome(session)
     }

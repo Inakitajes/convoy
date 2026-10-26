@@ -263,6 +263,47 @@ describe("PR text is composed deterministically from persisted context (capabili
     return { cwd, runDir }
   }
 
+  test("uses the frozen Spec Kit selection for publication even after config switches", async () => {
+    const { cwd, runDir } = await seedFixtures()
+    await mkdir(join(cwd, "specs", "001-login"), { recursive: true })
+    await writeFile(join(cwd, "specs", "001-login", "spec.md"), '# Feature Specification: Passwordless login\n\n**Input**: User description: "Let users sign in by email link"\n')
+    await writeFile(join(runDir, "metadata.json"), JSON.stringify({ schemaVersion: 5, phases: {}, specs: { tool: "speckit", changeIds: ["001-login"], specFiles: ["specs/001-login/spec.md"] } }))
+    const seam = createPublishSeam({ cwd, runDir, run: seedingRunner([]) })
+    const result = await seam.compose({ branch: "feat/add-attach-flow", remote: "origin", base: "main" })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.title).toBe("feat: Passwordless login")
+    expect(result.text).toContain("## Why\n\nLet users sign in by email link")
+    expect(result.text).not.toContain("Run reports need")
+    await writeFile(join(cwd, "specs", "001-login", "spec.md"), "# Feature Specification: Passwordless login\n")
+    const withoutInput = await seam.compose({ branch: "feat/add-attach-flow", remote: "origin", base: "main" })
+    expect(withoutInput.ok && withoutInput.text).not.toContain("## Why")
+  })
+
+  test("a current checkout publication reads only its configured backend", async () => {
+    const { cwd } = await seedFixtures()
+    await mkdir(join(cwd, ".convoy"), { recursive: true })
+    await writeFile(join(cwd, ".convoy", "config.yaml"), "features:\n  specs: speckit\n")
+    await mkdir(join(cwd, "specs", "add-attach-flow"), { recursive: true })
+    await writeFile(join(cwd, "specs", "add-attach-flow", "spec.md"), "# Feature Specification: Selected backend\n")
+    const seam = createPublishSeam({ cwd, run: seedingRunner([]) })
+    const result = await seam.compose({ branch: "feat/add-attach-flow", remote: "origin", base: "main" })
+    expect(result.ok && result.title).toBe("feat: Selected backend")
+    expect(result.ok && result.text).not.toContain("## Why")
+  })
+
+  test("Spec Kit publication accepts feature directory ids reserved only by OpenSpec", async () => {
+    const { cwd, runDir } = await seedFixtures()
+    for (const id of ["archive", "feature.md"]) {
+      await mkdir(join(cwd, "specs", id), { recursive: true })
+      await writeFile(join(cwd, "specs", id, "spec.md"), '# Feature Specification: Export archive\n\n**Input**: User description: "Keep exports"\n')
+      await writeFile(join(runDir, "metadata.json"), JSON.stringify({ schemaVersion: 5, phases: {}, specs: { tool: "speckit", changeIds: [id], specFiles: [`specs/${id}/spec.md`] } }))
+      const result = await createPublishSeam({ cwd, runDir, run: seedingRunner([]) }).compose({ branch: "feat/other", remote: "origin", base: "main" })
+      expect(result.ok && result.title).toBe("feat: Export archive")
+      expect(result.ok && result.text).toContain("## Why\n\nKeep exports")
+    }
+  })
+
   test("a change-backed branch composes `type: proposal title`", async () => {
     const { cwd, runDir } = await seedFixtures()
     const calls: Array<{ command: string; args: string[] }> = []

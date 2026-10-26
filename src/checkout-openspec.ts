@@ -15,6 +15,10 @@ import { isOpenSpecChangeId, listChangeIds, openspecDirName, titleFromProposal }
 /** Typed read result: unreadable evidence stays unknown, never a negative fact. */
 export type ReadResult<T> = { kind: "known"; value: T } | { kind: "unknown"; reason: string }
 
+export type ReadActiveChangesOptions = {
+  taskCounts?: (checkout: string) => Promise<ReadonlyMap<string, { done: number; total: number }>>
+}
+
 export type LocalArtifactInventory = {
   /** `proposal.md` present and readable. */
   proposal: boolean
@@ -78,7 +82,7 @@ async function dirExists(path: string): Promise<boolean> {
  */
 export async function readCheckoutActiveChanges(
   checkout: string,
-  options: { taskCounts?: (checkout: string) => Promise<ReadonlyMap<string, { done: number; total: number }>> } = {},
+  options: ReadActiveChangesOptions = {},
 ): Promise<ReadResult<LocalActiveChange[]>> {
   const changesDir = join(checkout, openspecDirName, "changes")
   if (!(await dirExists(changesDir))) return { kind: "known", value: [] }
@@ -113,7 +117,7 @@ export async function readCheckoutActiveChanges(
  * the checkout, checkbox fallback otherwise), keyed by change id. "unknown"
  * when neither source can read the checkout — a failed read is never 0/0.
  */
-async function observeCheckoutTaskCounts(
+export async function observeCheckoutTaskCounts(
   checkout: string,
   read?: (checkout: string) => Promise<ReadonlyMap<string, { done: number; total: number }>>,
 ): Promise<ReadResult<ReadonlyMap<string, { done: number; total: number }>>> {

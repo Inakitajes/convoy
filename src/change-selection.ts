@@ -2,7 +2,8 @@ import { createHash } from "node:crypto"
 import { stat } from "node:fs/promises"
 import { basename, isAbsolute, join, resolve } from "node:path"
 
-import { openspecDirName } from "./openspec"
+import { loadMergedConvoyConfig } from "./config"
+import { specToolFor } from "./spec-tools"
 
 /**
  * Explicit ordered checkout-local change selection (change
@@ -43,8 +44,10 @@ export type SelectionValidation =
   | { ok: false; reason: string; changeId?: string }
 
 /** The local directory that must hold a selected change in the checkout. */
-export function expectedSourcePath(checkout: string, changeId: string): string {
-  return join(resolve(checkout), openspecDirName, "changes", changeId)
+export async function expectedSourcePath(checkout: string, changeId: string): Promise<string> {
+  const tool = specToolFor(await loadMergedConvoyConfig(checkout))
+  if (!tool) throw new Error("change selection is unavailable with features.specs: false")
+  return join(resolve(checkout), tool.changeRoot, changeId)
 }
 
 /**
@@ -77,6 +80,8 @@ export async function validateChangeSelection(checkout: string, input: ChangeSel
   }
 
   const checkoutRoot = resolve(checkout)
+  const tool = specToolFor(await loadMergedConvoyConfig(checkoutRoot))
+  if (!tool) return { ok: false, reason: "change selection is unavailable with features.specs: false" }
   for (const change of input.changes) {
     if (!change.sourcePath) {
       return { ok: false, changeId: change.changeId, reason: `change ${change.changeId} has no source path` }
@@ -88,7 +93,7 @@ export async function validateChangeSelection(checkout: string, input: ChangeSel
     if (!within(resolved, checkoutRoot)) {
       return { ok: false, changeId: change.changeId, reason: `change ${change.changeId} source ${resolved} is outside the selected checkout ${checkoutRoot}` }
     }
-    const expected = expectedSourcePath(checkoutRoot, change.changeId)
+    const expected = join(checkoutRoot, tool.changeRoot, change.changeId)
     if (resolved !== expected) {
       return {
         ok: false,
@@ -110,6 +115,14 @@ export async function validateChangeSelection(checkout: string, input: ChangeSel
     }
     if (basename(resolved) !== change.changeId) {
       return { ok: false, changeId: change.changeId, reason: `source directory ${resolved} does not name change ${change.changeId}` }
+    }
+  }
+
+  const active = await tool.readActiveChanges(checkoutRoot)
+  if (active.kind !== "known") return { ok: false, reason: `the active ${tool.changeNoun} list could not be read: ${active.reason}` }
+  for (const change of input.changes) {
+    if (!active.value.some((entry) => entry.changeId === change.changeId)) {
+      return { ok: false, changeId: change.changeId, reason: `${change.changeId} is not an active ${tool.changeNoun} in the execution checkout` }
     }
   }
 
@@ -187,13 +200,16 @@ export function acceptSingletonSuggestion(suggestion: SingletonSuggestion): Sele
  * per-change freeze failure rather than dropping that change.
  */
 export async function freezeSelectedInputs(
+  checkout: string,
   changes: readonly SelectedChangeInput[],
   read: (path: string) => Promise<string>,
 ): Promise<{ ok: true; frozen: FrozenSelectedChange[] } | { ok: false; changeId: string; reason: string }> {
+  const tool = specToolFor(await loadMergedConvoyConfig(checkout))
+  if (!tool) return { ok: false, changeId: changes[0]?.changeId ?? "", reason: "change selection is unavailable with features.specs: false" }
   const frozen: FrozenSelectedChange[] = []
   for (const change of changes) {
     try {
-      const content = await read(join(change.sourcePath, "proposal.md"))
+      const content = await read(join(change.sourcePath, tool.proposalFile))
       const contentHash = createHash("sha256").update(content).digest("hex")
       frozen.push({
         ...change,

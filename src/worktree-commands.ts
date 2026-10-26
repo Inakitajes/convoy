@@ -1,7 +1,8 @@
 import { resolveCommit, branchUpstream, execFile, commitAsUser, statusPorcelain, findWorktreeDirForBranch, currentBranch, detectBaseRef } from "./git"
 import { observeBaseDivergence, observeTreeEquality } from "./worktree-observations"
 import { listWorktrees, type WorktreeInventoryEntry } from "./worktree-inventory"
-import { readCheckoutActiveChanges, readCheckoutArchives, readCheckoutCanonicalSpecs } from "./checkout-openspec"
+import { loadMergedConvoyConfig } from "./config"
+import { specToolFor, type SpecToolDescriptor } from "./spec-tools"
 import { repoCommonDir } from "./repo-store"
 import { requireAgreeingSelectors } from "./worktree-target"
 import { reviewOperation, executeReviewed, removeRegisteredWorktree, pushCommittedRevision, assertNonForceRefspec, type ExecutionOutcome } from "./operation-handlers"
@@ -11,7 +12,6 @@ import { landViaGitHub, isHostedCloseOperation, hostedOperationInputs, reconcile
 import { readOperation, listPendingOperations, type OperationRecord } from "./operation-journal"
 import { recoverOperation, type ReconcileProbe, type RecoveryConsent } from "./operation-recovery"
 import { reconcileStepReality } from "./operation-reconcile"
-import { openspecDirName } from "./openspec"
 import { resolve, join } from "node:path"
 import { readFile, readdir, stat } from "node:fs/promises"
 import { stripControlBytes } from "./commit-text"
@@ -289,8 +289,10 @@ async function describeEntry(entry: WorktreeInventoryEntry): Promise<string> {
 }
 
 async function describeLocalArtifacts(checkout: string): Promise<string[]> {
+  const tool = specToolFor(await loadMergedConvoyConfig(checkout))
+  if (!tool) return []
   const lines: string[] = []
-  const changes = await readCheckoutActiveChanges(checkout)
+  const changes = await tool.readActiveChanges(checkout)
   if (changes.kind === "known") {
     if (changes.value.length === 0) {
       lines.push("    active changes: (none)")
@@ -306,10 +308,10 @@ async function describeLocalArtifacts(checkout: string): Promise<string[]> {
   } else {
     lines.push(`    active changes: unknown (${changes.reason})`)
   }
-  const archives = await readCheckoutArchives(checkout)
-  if (archives.kind === "known" && archives.value.length > 0) lines.push(`    archived changes: ${archives.value.length} (browsable on demand)`)
-  const specs = await readCheckoutCanonicalSpecs(checkout)
-  if (specs.kind === "known" && specs.value.length > 0) lines.push(`    canonical specs: ${specs.value.length}`)
+  const archives = await tool.readSettled(checkout)
+  if (archives.kind === "known" && archives.value.length > 0) lines.push(`    ${tool.settledLabel}: ${archives.value.length} (browsable on demand)`)
+  const specs = await tool.readCanonical(checkout)
+  if (specs.kind === "known" && specs.value.length > 0) lines.push(`    ${tool.canonicalLabel}: ${specs.value.length}`)
   return lines
 }
 
@@ -551,6 +553,14 @@ async function runPush(command: Extract<WorktreesCommand, { kind: "push" }>, cwd
 
 // ── archive ──────────────────────────────────────────────────────────────
 
+/** Capability checks precede recovery, journals, and archive effects. */
+async function requireArchiveTool(checkout: string): Promise<SpecToolDescriptor> {
+  const tool = specToolFor(await loadMergedConvoyConfig(checkout))
+  if (!tool) throw new Error("archive is unavailable with features.specs: false")
+  if (!tool.archives) throw new Error(tool.archiveDisabledReason ?? `${tool.label} has no archive`)
+  return tool
+}
+
 /**
  * Whether the installed OpenSpec CLI supports archiving a change whose tasks
  * are not all complete (task 6.1, design D7). Convoy must not invent an
@@ -558,9 +568,9 @@ async function runPush(command: Extract<WorktreesCommand, { kind: "push" }>, cwd
  * `openspec archive --help` and recognizes the documented override flags; a CLI
  * without one exposes no override and the ordinary requirement stands.
  */
-async function archiveIncompleteOverrideSupported(): Promise<boolean> {
+async function archiveIncompleteOverrideSupported(checkout: string): Promise<boolean> {
   try {
-    const help = await execFile("openspec", ["archive", "--help"], { cwd: process.cwd(), allowFailure: true })
+    const help = await execFile("openspec", ["archive", "--help"], { cwd: checkout, allowFailure: true })
     if (help.exitCode !== 0) return false
     const text = help.stdout + help.stderr
     return /--allow-incomplete|--incomplete|-[-a-z]*incomplete/i.test(text)
@@ -579,7 +589,8 @@ async function archiveIncompleteOverrideSupported(): Promise<boolean> {
  * override is refused rather than guessed around.
  */
 async function validateArchiveInputs(checkout: string, changes: string[], options: { allowIncomplete?: boolean } = {}): Promise<void> {
-  const local = await readCheckoutActiveChanges(checkout)
+  const tool = await requireArchiveTool(checkout)
+  const local = await tool.readActiveChanges(checkout)
   if (local.kind !== "known") throw new Error(`the selected checkout's active changes could not be read: ${local.reason}`)
   const byId = new Map(local.value.map((change) => [change.changeId, change]))
   for (const id of changes) {
@@ -591,7 +602,7 @@ async function validateArchiveInputs(checkout: string, changes: string[], option
     }
     if (change.tasks.done < change.tasks.total) {
       if (options.allowIncomplete) {
-        if (!(await archiveIncompleteOverrideSupported())) {
+        if (!(await archiveIncompleteOverrideSupported(checkout))) {
           throw new Error(`change "${id}" has incomplete tasks and the installed OpenSpec does not support archiving incomplete changes — complete the tasks or archive without the override`)
         }
         continue
@@ -616,6 +627,7 @@ async function archiveSelectedChanges(
   /** Releases the alternate screen around the inherited-terminal archive commit (interactive close). */
   withTerminal?: <T>(action: () => Promise<T>) => Promise<T>,
 ): Promise<{ archived: string[] }> {
+  const tool = await requireArchiveTool(checkout)
   const { createOperation, recordStepIntent, acknowledgeStep, resolveOperation } = await import("./operation-journal")
   // Intent before effect: one journaled step per selected change plus the
   // commit. A journal that cannot be persisted blocks the mutation — an
@@ -644,7 +656,7 @@ async function archiveSelectedChanges(
     }
     // Verify the effect in reality before acknowledging it: the change must
     // have left this checkout's active set.
-    const active = await readCheckoutActiveChanges(checkout)
+    const active = await tool.readActiveChanges(checkout)
     if (active.kind === "known" && active.value.some((change) => change.changeId === id)) {
       throw new Error(`openspec reported success but ${id} did not leave the active set — nothing was committed; inspect the archive output`)
     }
@@ -657,9 +669,9 @@ async function archiveSelectedChanges(
   // Inspect the actual output: only OpenSpec paths may have changed.
   const after = await statusPorcelain(checkout)
   const changed = changedPaths(before, after)
-  const outside = changed.filter((path) => !path.startsWith(`${openspecDirName}/`))
+  const outside = changed.filter((path) => !path.startsWith(tool.dirtyRoot))
   if (outside.length > 0) {
-    throw new Error(`archive touched paths outside ${openspecDirName}/ (${outside.join(", ")}) — nothing was committed; inspect and resolve before retrying`)
+    throw new Error(`archive touched paths outside ${tool.dirtyRoot} (${outside.join(", ")}) — nothing was committed; inspect and resolve before retrying`)
   }
   // Semantic proof (task 6.2): the composed output must validate with the real
   // OpenSpec CLI, not merely sit under `openspec/` by position. Gated honestly —
@@ -680,7 +692,7 @@ async function archiveSelectedChanges(
     }
   }
   // Commit only the verified archive output, under the operator's identity.
-  await execFile("git", ["add", "--", `${openspecDirName}/`], { cwd: checkout })
+  await execFile("git", ["add", "--", tool.dirtyRoot], { cwd: checkout })
   // `commitAsUser` inherits the terminal (signing, hooks), so an interactive
   // close suspends its alternate screen around it: otherwise git's summary
   // paints over the live interface and the diff renderer never repaints.
@@ -708,6 +720,7 @@ async function reconcilePendingArchiveOperations(
   /** Releases the alternate screen around the reconcile commit when one is needed (interactive close). */
   withTerminal?: <T>(action: () => Promise<T>) => Promise<T>,
 ): Promise<void> {
+  await requireArchiveTool(checkout)
   const pending = await listPendingOperations(commonDir)
   for (const operationId of pending) {
     const read = await readOperation(commonDir, operationId)
@@ -743,18 +756,19 @@ async function completeInterruptedArchiveCommit(
   /** Releases the alternate screen around the inherited-terminal reconcile commit (interactive close). */
   withTerminal?: <T>(action: () => Promise<T>) => Promise<T>,
 ): Promise<void> {
+  const tool = await requireArchiveTool(checkout)
   const { acknowledgeStep, resolveOperation, readOperation } = await import("./operation-journal")
   const read = await readOperation(commonDir, operationId)
   const intent = read.status === "found" ? (read.value.intent as { changes?: unknown } | undefined) : undefined
   const changes = Array.isArray(intent?.changes) ? intent!.changes.filter((entry): entry is string => typeof entry === "string") : []
   const status = await statusPorcelain(checkout)
   const lines = status.split("\n").filter((line) => line.trim() !== "")
-  const outside = lines.map((line) => line.slice(3).trim()).filter((path) => path !== "" && !path.startsWith(`${openspecDirName}/`))
+  const outside = lines.map((line) => line.slice(3).trim()).filter((path) => path !== "" && !path.startsWith(tool.dirtyRoot))
   if (outside.length > 0) {
-    throw new Error(`the interrupted archive left changes outside ${openspecDirName}/ (${outside.join(", ")}) — inspect before committing; see \`convoy worktrees recover --operation ${operationId}\``)
+    throw new Error(`the interrupted archive left changes outside ${tool.dirtyRoot} (${outside.join(", ")}) — inspect before committing; see \`convoy worktrees recover --operation ${operationId}\``)
   }
   if (lines.length > 0) {
-    await execFile("git", ["add", "--", `${openspecDirName}/`], { cwd: checkout })
+    await execFile("git", ["add", "--", tool.dirtyRoot], { cwd: checkout })
     const commit = () => commitAsUser(`chore: archive ${changes.join(", ")}`, checkout)
     await (withTerminal ? withTerminal(commit) : commit())
   }
@@ -766,6 +780,7 @@ async function completeInterruptedArchiveCommit(
 }
 
 async function runArchive(command: Extract<WorktreesCommand, { kind: "archive" }>, cwd?: string, route?: TuiRoute): Promise<void> {
+  await requireArchiveTool(command.worktree)
   const { commonDir } = await repoContext(cwd)
   // Recovery before fresh preflight (design D9): an interrupted archive of
   // this checkout is reconciled against reality before anything new runs —
@@ -912,6 +927,7 @@ export async function driveClose(
   review: OperationInspection,
   progress: CloseProgress = {},
 ): Promise<ExecutionOutcome<CloseOutcome>> {
+  const tool = await specToolForClose(command.worktree, command.changes)
   const emit = (event: CloseEvent) => progress.onEvent?.(event)
   return executeReviewed({
     action: "close",
@@ -962,7 +978,7 @@ export async function driveClose(
         const archived = await archiveSelectedChanges(target.checkoutPath, command.changes, commonDir, progress.withTerminal)
         steps.push(`archived ${archived.archived.join(", ")}`)
         emit({ type: "step-completed", step: "archive", detail: archived.archived.join(", ") })
-      } else {
+      } else if (tool?.archives) {
         emit({ type: "step-skipped", step: "archive", reason: "no changes selected — zero-archive close" })
       }
 
@@ -1105,6 +1121,7 @@ export async function showCloseOutcome(route: TuiRoute, tui: CloseTui, outcome: 
 }
 
 async function runClose(command: Extract<WorktreesCommand, { kind: "close" }>, cwd?: string, route?: TuiRoute): Promise<void> {
+  const tool = await specToolForClose(command.worktree, command.changes)
   const { commonDir } = await repoContext(cwd)
   const review = await reviewOperation({ action: "close", checkout: command.worktree, base: command.base, commonDir })
   if (!review.ok) return reportBlocked(review.blockers)
@@ -1153,7 +1170,7 @@ async function runClose(command: Extract<WorktreesCommand, { kind: "close" }>, c
     if (branch) {
       const pr = await probeClosePullRequest(branch, command.worktree)
       if (pr.status === "found") {
-        process.stdout.write(`close plan: review → sync (as needed) → archive ${command.changes.length > 0 ? command.changes.join(", ") : "(no changes selected)"} → hosted landing via PR #${pr.number}: push ${branch} to its remote, GitHub squash-merge with the reviewed message, fast-forward ${command.base}\n`)
+        process.stdout.write(`close plan: review → sync (as needed)${tool?.archives ? ` → archive ${command.changes.length > 0 ? command.changes.join(", ") : "(no changes selected)"}` : ""} → hosted landing via PR #${pr.number}: push ${branch} to its remote, GitHub squash-merge with the reviewed message, fast-forward ${command.base}\n`)
       }
     }
   }
@@ -1162,6 +1179,15 @@ async function runClose(command: Extract<WorktreesCommand, { kind: "close" }>, c
   const lines = closeSummaryLines(result.value)
   lines.push("push, worktree removal, and branch deletion remain separate actions (`convoy worktrees push|remove|delete-branch`).")
   process.stdout.write(`${lines.join("\n")}\n`)
+}
+
+/** Explicit archive inputs never disappear silently when a checkout changes tools. */
+async function specToolForClose(checkout: string, changes: readonly string[]): Promise<SpecToolDescriptor | undefined> {
+  const tool = specToolFor(await loadMergedConvoyConfig(checkout))
+  if (changes.length > 0 && !tool?.archives) {
+    throw new Error(tool?.archiveDisabledReason ?? "archive is unavailable with features.specs: false")
+  }
+  return tool
 }
 
 /**
@@ -1194,6 +1220,7 @@ type CloseMessageContext = {
 }
 
 async function captureCloseMessageContext(checkout: string, changes: string[], base: string): Promise<CloseMessageContext> {
+  const tool = specToolFor(await loadMergedConvoyConfig(checkout))
   const [log, diff] = await Promise.all([
     execFile("git", ["log", "--no-merges", "--format=%s", `${base}..HEAD`], { cwd: checkout, allowFailure: true }),
     execFile("git", ["diff", "--stat", `${base}...HEAD`], { cwd: checkout, allowFailure: true }),
@@ -1202,10 +1229,11 @@ async function captureCloseMessageContext(checkout: string, changes: string[], b
   const context: CloseMessageContext = { commits, scopeCandidates: [] }
   if (diff.exitCode === 0 && diff.stdout.trim()) context.diffStat = diff.stdout
   for (const id of changes) {
-    const changeDir = join(checkout, openspecDirName, "changes", id)
+    if (!tool) break
+    const changeDir = join(checkout, tool.changeRoot, id)
     if (context.proposalExcerpt === undefined) {
       try {
-        context.proposalExcerpt = await readFile(join(changeDir, "proposal.md"), "utf8")
+        context.proposalExcerpt = await readFile(join(changeDir, tool.proposalFile), "utf8")
       } catch {
         // A missing proposal costs the message its rationale, not the close.
       }
@@ -1349,7 +1377,9 @@ async function probeClosePullRequest(
  * failure, and a test stub CLI in that state must not trip the guard.
  */
 async function checkoutHasCanonicalSpecs(checkout: string): Promise<boolean> {
-  const specs = await readCheckoutCanonicalSpecs(checkout)
+  const tool = specToolFor(await loadMergedConvoyConfig(checkout))
+  if (!tool) return false
+  const specs = await tool.readCanonical(checkout)
   return specs.kind === "known" && specs.value.length > 0
 }
 
@@ -1551,6 +1581,10 @@ async function runRecover(command: Extract<WorktreesCommand, { kind: "recover" }
     )
   }
   const record: OperationRecord = read.value
+  if (record.kind === "archive") {
+    const intent = record.intent as { checkout?: unknown } | undefined
+    await requireArchiveTool(typeof intent?.checkout === "string" ? intent.checkout : context.cwd)
+  }
   // The kind-specific reality probe (task 2.4, gap CC-7): each unacknowledged
   // step is re-observed against the repository — a squash candidate already
   // contained in the reviewed base is recognized as the existing landing, a
@@ -1621,7 +1655,9 @@ async function runRecover(command: Extract<WorktreesCommand, { kind: "recover" }
  */
 export async function validateRunSelection(worktree: string, changes: string[]): Promise<void> {
   if (changes.length === 0) return
-  const local = await readCheckoutActiveChanges(worktree)
+  const tool = specToolFor(await loadMergedConvoyConfig(worktree))
+  if (!tool) throw new Error("change selection is unavailable with features.specs: false")
+  const local = await tool.readActiveChanges(worktree)
   if (local.kind !== "known") throw new Error(`the selected checkout's active changes could not be read: ${local.reason}`)
   const present = new Set(local.value.map((change) => change.changeId))
   const missing = changes.filter((id) => !present.has(id))
@@ -1786,18 +1822,6 @@ export async function runCloseCommandFromArgs(options: CloseCommandOptions, cwd?
   if (options.resume) {
     throw new Error(`--resume was removed: close recovery is operation-scoped — run \`convoy worktrees recover --operation <id>\` (pending operations are listed when the id is unknown).`)
   }
-  if (options.dryRun) {
-    const target = options.worktree ?? options.branch ?? dir
-    process.stdout.write(`close would run: review → sync (as needed) → archive ${options.changes.length > 0 ? options.changes.join(", ") : "(no changes selected)"} → ${options.localLanding ? "whole-branch squash" : "whole-branch landing (hosted via the linked PR when one is detected, otherwise a local squash)"} onto ${options.base ?? "the detected base"}\n`)
-    process.stdout.write(`target: ${target}\n`)
-    if (options.localLanding) {
-      process.stdout.write("push, worktree removal, and branch deletion stay separate actions; nothing is pushed or merged on a hosting service.\n")
-    } else {
-      process.stdout.write("without a linked open pull request nothing is pushed or merged; when one is detected, the disclosed hosted landing pushes the branch and asks GitHub to squash-merge that PR.\n")
-    }
-    return
-  }
-
   // Resolve the target: an explicit checkout path, a branch selector resolved
   // uniquely through Git's inventory, or the current process checkout —
   // validated like any other target, never guessed across checkouts.
@@ -1810,6 +1834,17 @@ export async function runCloseCommandFromArgs(options: CloseCommandOptions, cwd?
     checkout = resolved.target.checkoutPath
   }
   checkout ??= dir
+  const tool = await specToolForClose(checkout, options.changes)
+  if (options.dryRun) {
+    process.stdout.write(`close would run: review → sync (as needed)${tool?.archives ? ` → archive ${options.changes.length > 0 ? options.changes.join(", ") : "(no changes selected)"}` : ""} → ${options.localLanding ? "whole-branch squash" : "whole-branch landing (hosted via the linked PR when one is detected, otherwise a local squash)"} onto ${options.base ?? "the detected base"}\n`)
+    process.stdout.write(`target: ${checkout}\n`)
+    if (options.localLanding) {
+      process.stdout.write("push, worktree removal, and branch deletion stay separate actions; nothing is pushed or merged on a hosting service.\n")
+    } else {
+      process.stdout.write("without a linked open pull request nothing is pushed or merged; when one is detected, the disclosed hosted landing pushes the branch and asks GitHub to squash-merge that PR.\n")
+    }
+    return
+  }
 
   // The base: the explicit review input, else the repository's detected base
   // as a disclosed suggestion (design D5) — never a silent `main` assumption.

@@ -8,6 +8,7 @@ import { prdHistoryPreviewCopy } from "./prd-history"
 import { plannedStepAdvisor, plannedStepModel } from "./run-plan"
 import { sanitizeReviewInline, sanitizeReviewText, reviewedRunnerRoutes, runnerRouteSummary } from "./run-review"
 import { stepRunnerFor } from "./step-runners"
+import { specTools } from "./spec-tools"
 import { plain, raw, sectionLabel, theme, truncate } from "./tui-theme"
 
 import type { TextChunk } from "@opentui/core"
@@ -111,27 +112,28 @@ export function runReviewLines(plan: RunPlan, width: number, options: RunReviewR
 }
 
 function pushContractRows(rows: StyledText[], plan: RunPlan, value: number) {
-  const openspecWins = Boolean(plan.openspec && plan.openspec.changeIds.length > 0)
-  // One contract: an active OpenSpec change supersedes historical PRD, so the
+  const specsWin = Boolean(plan.specs && plan.specs.changeIds.length > 0)
+  // One contract: an active spec change supersedes historical PRD, so the
   // review must not claim both will attach.
-  if (openspecWins) {
-    pushOpenSpecRows(rows, plan, value)
+  if (specsWin) {
+    pushSpecRows(rows, plan, value)
     return
   }
   pushHistoryRows(rows, plan, value)
-  pushOpenSpecRows(rows, plan, value)
+  pushSpecRows(rows, plan, value)
 }
 
-function pushOpenSpecRows(rows: StyledText[], plan: RunPlan, value: number) {
-  if (!plan.openspec) return
-  if (plan.openspec.changeIds.length === 0) {
-    rows.push(sectionRow("openspec", [fg(theme.dim)(truncate("no active change · scope will infer from the diff", value))]))
+function pushSpecRows(rows: StyledText[], plan: RunPlan, value: number) {
+  if (!plan.specs) return
+  const label = specTools[plan.specs.tool].label.toLowerCase()
+  if (plan.specs.changeIds.length === 0) {
+    rows.push(sectionRow(label, [fg(theme.dim)(truncate("no active change · scope will infer from the diff", value))]))
     return
   }
-  const ids = sanitizeReviewInline(plan.openspec.changeIds.join(", "))
-  const count = plan.openspec.specFiles.length
+  const ids = sanitizeReviewInline(plan.specs.changeIds.join(", "))
+  const count = plan.specs.specFiles.length
   const headline = `${ids} · contract attached (${count} spec file${count === 1 ? "" : "s"})`
-  rows.push(sectionRow("openspec", [fg(theme.teal)(truncate(headline, value))]))
+  rows.push(sectionRow(label, [fg(theme.teal)(truncate(headline, value))]))
 }
 
 function pushHistoryRows(rows: StyledText[], plan: RunPlan, value: number) {

@@ -56,19 +56,23 @@ When nothing fits — a different runner or model mix, a narrower audit, a custo
 convoy pipelines show --pipeline-file /tmp/payments-audit.yaml   # schema errors, resolved steps
 ```
 
-## 3. Choose the contract (OpenSpec)
+## 3. Choose the contract (configured spec tool)
 
-In a repository that uses [OpenSpec](https://openspec.dev/), a run can take an OpenSpec **change** as its contract: Convoy attaches the change's proposal, design, tasks, and delta specs plus `openspec/specs/**` to every step, and grades scope and requirements against them. Selection is explicit only. Nothing is picked for you, and a headless launch refuses until you pass `--change <id>` (repeatable, in review order) or `--manual` (no change; the prompt is the brief).
+First resolve **`features.specs`**, before listing changes: read the global `~/.convoy/config.yaml` or `~/.convoy/config.yml` (under `$CONVOY_HOME/.convoy/` when set), then the target project's `.convoy/config.yaml` or `.convoy/config.yml`. At each level, use only the first readable file: `config.yaml` before `config.yml`; do not merge both filenames. The project value wins over the global value; default `openspec` when neither sets it. Accepted values are `openspec`, `speckit`, or `false`; `true` is invalid — report invalid/unreadable config and stop instead of choosing a tool or a manual run. Never auto-detect the tool from files, merge layouts, or silently edit config, and never fall back to the other layout when the configured root is absent or empty.
 
-```bash
-ls openspec/changes 2>/dev/null | grep -vx archive   # the active changes; nothing printed = no OpenSpec contract to pick
-```
+List only the configured tool's active changes, sorted by id:
+
+- **`openspec`**: real directories directly under `openspec/changes/`, excluding `archive`, hidden entries, symlinks, and stray files. Show each proposal's first heading from `proposal.md` (or its id).
+- **`speckit`**: real directories directly under `specs/` containing `specs/<id>/spec.md`, ignoring hidden entries, symlinks, and stray files. The id is the directory name verbatim; show its `# Feature Specification:` title with that prefix stripped (or its id). Inspect `tasks.md` using checkbox task lines (`/^\s*[-*+]\s+\[[ xX]\]/gm`; `[x]` and `[X]` are checked). A feature stays active when tasks are missing, empty, or unreadable, or any task is unchecked. It is completed only with at least one task and every task is checked: exclude completed features from selection. Never invoke the `specify` CLI to list or count tasks.
+- **`false`**: don't list either layout; use `--manual` (`--change` refuses when specs are off).
+
+With active changes, selection is explicit only: `--change <id>` (repeatable, in review order) attaches the contract; `--manual` means no change, with the prompt as the brief. Nothing is picked for you:
 
 - The user named a change, or more than one: pass each with `--change <id>`, in their order.
-- Active changes exist and the user named none: list them with their proposal titles (the first heading of `openspec/changes/<id>/proposal.md`), say which one fits (the one named like the current branch, `feat/add-login` ↔ `add-login`, or the only one), and ask whether to run against it, against others, or with no change (`--manual`). Don't choose silently, and don't fall back to `--manual` without asking.
-- No active changes, no `openspec/` directory, or `features.specs: false` in the Convoy config: pass `--manual` (`--change` refuses when specs are off).
+- Active changes exist and the user named none: list them with their titles, say which one fits (the one named like the current branch, `feat/001-login` ↔ `001-login`, or the only one), and ask whether to run against it, against others, or with no change (`--manual`). Wait for their answer before planning. Don't choose silently, and don't fall back to `--manual` without asking.
+- No active changes in the configured layout (including an absent root), or specs off: pass `--manual`. Unreadable discovery is unknown, not an empty list: report it and ask rather than silently using `--manual`.
 
-With a change selected, the spec is the contract and the prompt is optional: `convoy -p implement --change add-login` needs nothing else.
+Convoy attaches the selected contract to every agent step: OpenSpec's current specs plus proposal/design/tasks/delta specs, or Spec Kit's constitution (when present) plus every Markdown file in each selected feature, including nested contracts and checklists, and the text contract schemas under `contracts/`. With a change selected, the spec is the contract and the prompt is optional: `convoy -p implement --change 001-login` needs nothing else under Spec Kit.
 
 ## 4. Write the prompt
 
@@ -78,7 +82,7 @@ Every step receives the prompt. Write it to a file: the goal, the scope (paths, 
 
 ```bash
 convoy --pipeline review --prompt-file /tmp/task.md --manual --yolo --plan < /dev/null
-# against an OpenSpec change: convoy --pipeline implement --change add-login --smart --plan < /dev/null
+# against a selected change: convoy --pipeline implement --change add-login --smart --plan < /dev/null
 ```
 
 `--plan` prints the fully resolved plan (models after routing, permissions, target checkout, attachments) and starts nothing. Summarize it for the user. Then launch the same command with `--detach` instead of `--plan`:
@@ -92,7 +96,7 @@ It prints `run <run-id> started (coordinator <pid>, detached)` and returns; the 
 
 - `--yolo` or `--smart`: the permission mode from the ground rules. The plan's `permissions:` line shows the one you passed.
 
-- `--change <id>` or `--manual`: the contract from step 3. The plan's `OpenSpec change:` line names the attached changes; check it. `--manual` is harmless outside OpenSpec repos.
+- `--change <id>` or `--manual`: the contract from step 3. The plan names the attached OpenSpec change or Spec Kit feature; check it against the configured tool and the user's selection. `--manual` is harmless without specs.
 - Where it runs: on a trunk branch (`main`, …) a run isolates itself in a new worktree and branch; on any other branch it runs in place. Force it with `--worktree` / `--no-worktree`, and name the branch with `--branch feat/…`.
 - A run in place refuses a dirty working tree unless you pass `--include-dirty`, which folds the uncommitted changes into the run's first commit. Ask the user before using it; a fresh worktree is always clean.
 - Other useful flags: `--file <path>` (attach files to every step), `--only`/`--skip <steps>`, `--model <provider/model>` (force every OpenCode step), `--base <ref>`, `--dir <repo>`.
@@ -149,8 +153,8 @@ When the run completes:
 
 | Message | Fix |
 |---|---|
-| `no change is selected: pass --change <id> … or --manual` | The repo has active OpenSpec changes: ask the user which one (step 3), or `--manual` if they want none |
-| `--change "<id>" matched no active change` | A typo or an archived change: list `openspec/changes/` again |
+| `no change is selected: pass --change <id> … or --manual` | Ask the user which configured-tool change to use (step 3), or `--manual` if they want none |
+| `--change "<id>" matched no active change` | A typo, archived OpenSpec change, or completed Spec Kit feature: list only the configured tool's active changes again |
 | `permissions: interactive — requests wait for an answer` | You forgot the permission flag (`--yolo` read-only, `--smart` writes code); requests will wait for `approve`/`deny` |
 | `working tree is not clean` (the run fails right after starting) | Commit or stash first, run in a worktree (`--worktree`), or, if the user agrees, `--include-dirty` |
 | `<Claude/Codex> billing: an unattended launch must state its billing decision` | The pipeline has `claude-code` or `codex` steps; ask the user to set `runners.<runner-id>.auth.billingPolicy: account-policy` in their Convoy config (it acknowledges that subscription usage may bill). Don't set it yourself |

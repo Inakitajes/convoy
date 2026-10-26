@@ -9,6 +9,7 @@ import type { BoardWorktree } from "./control-board"
 import type { PrObservation } from "./pr-observations"
 import { parseMarkdown, renderMarkdownDoc, type MarkdownDoc } from "./markdown-render"
 import { stripYamlFrontmatter } from "./openspec"
+import { specToolOf } from "./spec-tools"
 import { groupChangeArtifacts, loadSpecsView, specGroupSource, worktreeDisplayName, type SpecGroup, type SpecsChangeEntry, type SpecsResolution, type SpecsView } from "./specs"
 import {
   chunksLength,
@@ -131,7 +132,7 @@ export class SpecsBrowser {
    * emitted until the operator confirms (close confirmation, capability
    * specs-viewer) — a stray `x` can no longer start the close sequence.
    */
-  private pendingClose?: { resolution: SpecsResolution; worktree: string; branch: string; base: string; archiveSet: string }
+  private pendingClose?: { resolution: SpecsResolution; worktree: string; branch: string; base: string; archiveSet?: string }
   /** Scroll position for the fullscreen reader's title bar (`top` / `end` / `%` / `all`). */
   private readerPosition = ""
   /** Artifact markdown read lazily, keyed by absolute file; failures become placeholders. */
@@ -459,7 +460,6 @@ export class SpecsBrowser {
         const worktree = this.selectedChange() ? this.worktreeFor(this.selectedChange()!) : undefined
         if (worktree?.branch) {
           const change = this.selectedChange()
-          const archiveSet = change && change.checkout === worktree.path ? change.id : "(none — whole branch only)"
           this.openCloseConfirm(
             {
               type: "close-change",
@@ -603,11 +603,13 @@ export class SpecsBrowser {
     const items: MenuItem[] = []
     const selectedChange = this.level === "root" ? this.selectedChange() : this.subject?.kind === "change" ? this.subject.change : undefined
     const archiveId = selectedChange && selectedChange.checkout === worktree.path ? selectedChange.id : undefined
+    const tool = this.toolFor(worktree)
+    const closeLabel = tool?.archives ? "Close (archive & merge)" : "Close (merge)"
     if (worktree.branch) {
       items.push({
         action: {
           id: "close",
-          label: "Close (archive & merge)",
+          label: closeLabel,
           enabled: worktree.accessible,
           blockers: worktree.accessible ? [] : ["the registered checkout path is missing — repair or prune it first"],
         },
@@ -617,7 +619,7 @@ export class SpecsBrowser {
       items.push({
         action: {
           id: "close",
-          label: "Close (archive & merge)",
+          label: closeLabel,
           enabled: false,
           blockers: ["the checkout has a detached HEAD — close needs an attached branch to name the source"],
         },
@@ -630,8 +632,8 @@ export class SpecsBrowser {
         action: {
           id: "archive",
           label: "Archive change",
-          enabled: worktree.accessible,
-          blockers: worktree.accessible ? [] : ["the registered checkout path is missing — repair or prune it first"],
+          enabled: worktree.accessible && tool?.archives === true,
+          blockers: !tool?.archives ? [tool?.archiveDisabledReason ?? "spec support is disabled"] : worktree.accessible ? [] : ["the registered checkout path is missing — repair or prune it first"],
         },
         dispatch: "archive",
       })
@@ -708,7 +710,7 @@ export class SpecsBrowser {
       case "archive": {
         const selectedChange = this.level === "root" ? this.selectedChange() : this.subject?.kind === "change" ? this.subject.change : undefined
         const inScope = selectedChange && selectedChange.checkout === worktree.path ? selectedChange : undefined
-        if (inScope) this.finish({ type: "archive-change", changeID: inScope.id, worktreeDir: worktree.path })
+        if (inScope && this.toolFor(worktree)?.archives) this.finish({ type: "archive-change", changeID: inScope.id, worktreeDir: worktree.path })
         return
       }
     }
@@ -728,7 +730,7 @@ export class SpecsBrowser {
       worktree: `${worktreeDisplayName(worktree)} (${worktree.path})`,
       branch: worktree.branch ?? "(no local branch)",
       base: this.view.baseBranch ?? "the base branch",
-      archiveSet: changeId ?? "none — zero selected changes",
+      ...(this.toolFor(worktree)?.archives ? { archiveSet: changeId ?? "none — zero selected changes" } : {}),
     }
     this.render()
   }
@@ -757,8 +759,13 @@ export class SpecsBrowser {
     const lines: StyledText[] = [
       t`${bold(fg(theme.text)("Close this worktree?"))}`,
       plain(""),
-      t`${fg(theme.faint)("Close runs sync → archive → landing: it archives the selected")}`,
-      t`${fg(theme.faint)("changes and lands ONE commit covering the WHOLE branch on the")}`,
+      ...(pending.archiveSet !== undefined ? [
+        t`${fg(theme.faint)("Close runs sync → archive → landing: it archives the selected")}`,
+        t`${fg(theme.faint)("changes and lands ONE commit covering the WHOLE branch on the")}`,
+      ] : [
+        t`${fg(theme.faint)("Close runs sync → landing and lands ONE commit covering the")}`,
+        t`${fg(theme.faint)("WHOLE branch on the")}`,
+      ]),
       t`${fg(theme.faint)("base — including edits outside the selected changes. Without")}`,
       t`${fg(theme.faint)("a linked open PR nothing is pushed or merged; when one exists")}`,
       t`${fg(theme.faint)("the landing is hosted and its remote steps are disclosed first.")}`,
@@ -766,7 +773,7 @@ export class SpecsBrowser {
       new StyledText([fg(theme.faint)("worktree "), fg(theme.text)(truncate(pending.worktree, innerWidth - 10))]),
       new StyledText([fg(theme.faint)("branch   "), fg(theme.dim)(pending.branch)]),
       new StyledText([fg(theme.faint)("base     "), fg(theme.dim)(pending.base)]),
-      new StyledText([fg(theme.faint)("archive  "), fg(theme.dim)(truncate(pending.archiveSet, innerWidth - 10))]),
+      ...(pending.archiveSet !== undefined ? [new StyledText([fg(theme.faint)("archive  "), fg(theme.dim)(truncate(pending.archiveSet, innerWidth - 10))])] : []),
       plain(""),
       t`${fg(theme.accent)("y")} ${fg(theme.text)("confirm")}   ${fg(theme.faint)("n/esc")} ${fg(theme.dim)("cancel")}`,
     ]
@@ -992,6 +999,10 @@ export class SpecsBrowser {
     return this.view.board.worktrees.find((worktree) => worktree.path === change.checkout)
   }
 
+  private toolFor(worktree: BoardWorktree) {
+    return specToolOf(worktree.specTool ?? this.view.specTool)
+  }
+
   /** Enters a change (its reading pane) or a spec (its rendered content). */
   private enterSelected() {
     const row = this.rows[this.selectedRow]
@@ -1077,7 +1088,8 @@ export class SpecsBrowser {
     // `specs` closes the board with the launch checkout's canonical specs,
     // opening immediately after the changes container — no gap row.
     if (this.view.specs.length > 0) {
-      rows.push({ kind: "header", label: "specs" })
+      const tool = specToolOf(this.view.specTool)
+      rows.push({ kind: "header", label: tool?.canonicalHeader ?? "specs" })
       for (const path of this.view.specs) rows.push({ kind: "spec", path })
       rows.push({ kind: "sectionEnd" })
     }
@@ -1262,6 +1274,8 @@ export class SpecsBrowser {
       if (name.replace(/[_/]/g, "-") !== branchLabel.replace(/[_/]/g, "-")) facts.push(branchLabel)
       const changes = this.view.changes.filter((entry) => entry.checkout === worktree.path)
       facts.push(changes.length > 0 ? `${changes.length} change${changes.length === 1 ? "" : "s"}` : "no changes")
+      const tool = this.toolFor(worktree)
+      if (worktree.archiveCount && tool) facts.push(`${worktree.archiveCount} ${tool.settledLabel}`)
       if (worktree.dirt?.kind === "known" && worktree.dirt.value.dirty) facts.push(`${worktree.dirt.value.fileCount} dirty`)
       if (worktree.activity?.kind === "known" && worktree.activity.value.total > 0) facts.push(`${worktree.activity.value.total} live`)
       if (!worktree.accessible) facts.push("inaccessible")

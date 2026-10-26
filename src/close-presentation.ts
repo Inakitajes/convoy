@@ -19,8 +19,8 @@ export type CloseChecklistState = {
 
 const closeSteps: readonly CloseStep[] = ["sync", "archive", "squash-merge"]
 
-export function initialCloseChecklistState(): CloseChecklistState {
-  return { rows: closeSteps.map((step) => ({ step, status: "pending" as const })) }
+export function initialCloseChecklistState(archives = true): CloseChecklistState {
+  return { rows: closeSteps.filter((step) => archives || step !== "archive").map((step) => ({ step, status: "pending" as const })) }
 }
 
 /** The pure reducer from close events to checklist state — one source of narration. */

@@ -24,6 +24,7 @@ import { readCommitLedger, readFinalizationRecord, readRunBoundary, type CommitL
 import { resolveRunTitleFor } from "./run-title"
 import type { RunnerExecutionRecord } from "./runners/provenance"
 import type { Workspace } from "./workspace"
+import type { SpecBundle } from "./spec-tools"
 
 export type PhaseMetadataStatus = "pending" | "running" | "completed" | "skipped" | "failed"
 
@@ -142,6 +143,8 @@ export type RunMetadata = {
    * history join by stable identity and never reinterpret a stored path.
    */
   feature?: FeaturePlanLink
+  /** The entire reviewed contract, including its tool; resume never reselects from config. */
+  specs?: SpecBundle
   /**
    * The run's human title (capability run-titles), resolved once at metadata
    * open — change proposal title → humanized branch slug → prompt first line —
@@ -208,6 +211,8 @@ export type RunMetadataStore = {
 }
 
 export type OpenRunMetadataOptions = {
+  /** Persisted once at open, before any step starts. */
+  specs?: SpecBundle
   gateway?: ModelGateway
   /** A CLI gateway override reroutes only phases that have not finished. */
   gatewayOverride?: boolean
@@ -248,6 +253,7 @@ export async function openRunMetadata(
   // for failed/aborted runs (capability feature-lifecycle: the link is
   // written before execution, not only after success).
   if (options.feature && !data.feature) data.feature = options.feature
+  if (options.specs && !data.specs) data.specs = structuredClone(options.specs)
   // Capability run-titles (design D2/D3): resolve the human title once at
   // open — change proposal title → humanized branch slug → prompt first line —
   // and persist it with the record. An existing record keeps its stored title:
@@ -262,8 +268,8 @@ export async function openRunMetadata(
     // the run plan (capability run-titles delta): the reviewed selection when
     // supplied, otherwise the reviewed contract set — never branch-to-change
     // inference.
-    const changeIds = options.selectedChangeIds ?? options.feature?.contracts ?? []
-    data.title = (await resolveRunTitleFor({ targetDir, changeIds, branch, prompt })) || undefined
+    const changeIds = data.specs?.changeIds ?? options.selectedChangeIds ?? options.feature?.contracts ?? []
+    data.title = (await resolveRunTitleFor({ targetDir, tool: data.specs?.tool, changeIds, branch, prompt })) || undefined
   }
   // Opening metadata means a new coordinator owns the run. It resumes from the
   // next pending batch; pausing/running crashes still use normal phase recovery.

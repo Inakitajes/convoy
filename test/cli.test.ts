@@ -5,7 +5,8 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import { describeHomeCloseArchiveSet, goalModeFor, homeWorkContext, parseArgs, parseCommand, resolveRunOptions, runHomeNavigationLoop, shouldLaunchHome } from "../src/cli"
+import { describeHomeCloseArchiveSet, homeCloseSpecLines, goalModeFor, homeWorkContext, parseArgs, parseCommand, resolveRunOptions, runHomeNavigationLoop, shouldLaunchHome } from "../src/cli"
+import { specTools } from "../src/spec-tools"
 import type { BoardSnapshot } from "../src/board-cache"
 import type { BoardSource } from "../src/board-refresh"
 import { modelGateways } from "../src/model-routing"
@@ -49,6 +50,17 @@ describe("home close archive disclosure", () => {
       }),
     ).toBe("feat-x (3/4 tasks), feat-y (no tasks file)")
     expect(describeHomeCloseArchiveSet({ kind: "unknown", reason: "permission denied" })).toBe("unknown (permission denied) — nothing will be archived")
+  })
+
+  test("Spec Kit close reviews sync and squash without archive inputs or task prerequisites", () => {
+    const active = { kind: "known" as const, value: [activeChange({ tasks: { done: 0, total: 4 } })] }
+    const lines = homeCloseSpecLines(specTools.speckit, active)
+    expect(lines[0]).toBe("steps    sync → landing (whole-branch squash)")
+    expect(lines.join("\n")).toContain("Spec Kit has no archive")
+    expect(lines.some((line) => line.startsWith("archive  ") || line.startsWith("note     "))).toBe(false)
+    expect(homeCloseSpecLines(undefined, active)).toEqual(["steps    sync → landing (whole-branch squash)"])
+    expect(homeCloseSpecLines(specTools.openspec, active).join("\n")).toContain("sync → archive → landing")
+    expect(homeCloseSpecLines(specTools.openspec, active).join("\n")).toContain("unknown or incomplete tasks blocks")
   })
 })
 
@@ -728,7 +740,7 @@ describe("parseCommand default prompt fallback", () => {
     if (implement.type === "run") {
       expect(implement.options.prompt).toBe("Implement the attached OpenSpec change.")
       expect(implement.options.changes).toEqual(["add-login"])
-      expect(implement.options.plan?.openspec?.changeIds).toEqual(["add-login"])
+      expect(implement.options.plan?.specs?.changeIds).toEqual(["add-login"])
     }
 
     const review = await parseCommand(["--dir", repo, "-p", "review", "--change", "add-login"])

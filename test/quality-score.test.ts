@@ -1,8 +1,29 @@
 import { describe, expect, test } from "bun:test"
+import { readFile } from "node:fs/promises"
+import { join } from "node:path"
 
 import { consensusStep, parseQualityRubricWeights, parseQualityScoreReport, qualityDimensions, qualityDimensionWeights, qualityVerdict, renderQualityScoreReport, weightedQualityScore, type QualityDimension, type QualityDimensionScores } from "../src/quality-score"
 
 const dimensions: QualityDimensionScores = { prd: 92, tests: 70, security: 95, maintainability: 88, operational: 90, scope: 85 }
+
+describe("spec-tool review contracts", () => {
+  for (const prompt of ["quality-scorer.md", "quality-score-report.md", "review-scope.md"]) {
+    test(`${prompt} grades against the attached tool's contract`, async () => {
+      const body = await readFile(join(import.meta.dir, "..", "prompts", prompt), "utf8")
+      const paragraphs = body.split(/\n\s*\n/)
+      const openspec = paragraphs.find((paragraph) => paragraph.startsWith("When the contract is an OpenSpec change"))
+      const speckit = paragraphs.find((paragraph) => paragraph.startsWith("When the contract is a Spec Kit feature"))
+      expect(openspec).toContain("Requirements/Scenarios")
+      expect(openspec).toContain("ADDED/MODIFIED/REMOVED")
+      expect(speckit).toContain("user-story acceptance scenarios")
+      expect(speckit).toContain("FR-")
+      expect(speckit).toContain("SC-")
+      expect(speckit).toContain("no delta operations")
+      expect(speckit).toContain("`prd`")
+      expect(speckit).toContain("`scope`")
+    })
+  }
+})
 
 describe("weighted quality score", () => {
   test("computes the rubric v1 weighted total", () => {

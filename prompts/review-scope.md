@@ -8,15 +8,17 @@ Default scope is the attached diff: this branch or pull request against the base
 
 Do not widen the review to untouched code. The one exception is code the change makes newly reachable or newly wrong; name it explicitly and tie it to the changed line that exposes it. Widen scope only when `prd.md` explicitly asks for a repository-wide review.
 
-## Working spec (OpenSpec)
+## Working spec
 
-When an OpenSpec change bundle is attached — the current `openspec/specs/**` plus this branch's active `openspec/changes/<id>/` proposal, design delta, and delta spec files — that bundle is the contract for this review. Under **Scope**, quote the change's proposal title and cite the **Requirements/Scenarios** (by id) that the change must satisfy. Do not reconstruct product intent from the diff while the bundle is attached: OpenSpec's ADDED/MODIFIED/REMOVED deltas already encode what was asked and what changed, and the working spec is the authoritative map for the reviewers and scorers that follow you.
+When the contract is an OpenSpec change, the attached bundle — the current `openspec/specs/**` plus the selected `openspec/changes/<id>/` artifacts — is authoritative for `prd` and `scope`. Under **What the change must satisfy**, quote the proposal title and cite its **Requirements/Scenarios** (by id) and ADDED/MODIFIED/REMOVED delta operations. Do not reconstruct product intent from the diff while the bundle is attached.
+
+When the contract is a Spec Kit feature, the attached bundle contains `.specify/memory/constitution.md` when present and every Markdown file under the selected `specs/<id>/` directories. Under **What the change must satisfy**, quote the feature title and cite its user-story acceptance scenarios and `FR-`/`SC-` ids as the contract for `prd` and `scope`. Spec Kit has no delta operations: do not require OpenSpec requirement names or delta specs, and do not infer intent from the diff instead of the feature.
 
 ## Historical PRD
 
-A historical PRD may be attached alongside this run's `prd.md` when the repository has no OpenSpec change bundle. This run's `prd.md` is the request for the current pipeline (often a generic review prompt); the historical PRD, when present, is the original product intent for this branch.
+A historical PRD may be attached alongside this run's `prd.md` when the run has no spec bundle. This run's `prd.md` is the request for the current pipeline (often a generic review prompt); the historical PRD, when present, is the original product intent for this branch.
 
-Prefer the historical PRD for what was asked and why. Do not reconstruct a product brief from the diff when it is attached. Under **What the change must satisfy**, quote its title and the decisions that matter so later auditors and quality scorers can cite the original intent without re-reading the attachment. When neither an OpenSpec bundle nor a historical PRD is attached, say so under **What the change must satisfy** and infer intent from the diff as a last resort.
+Prefer the historical PRD for what was asked and why. Do not reconstruct a product brief from the diff when it is attached. Under **What the change must satisfy**, quote its title and the decisions that matter so later auditors and quality scorers can cite the original intent without re-reading the attachment. When neither a spec bundle nor a historical PRD is attached, say so under **What the change must satisfy** and infer intent from the diff as a last resort.
 
 ## Objective
 
@@ -50,7 +52,7 @@ Safety rules:
 
 Return a concise Markdown report with:
 
-- **What the change must satisfy**: the working contract — the attached OpenSpec change bundle's Requirements/Scenarios (with change id and proposal title), else the historical PRD's intent, else a stated diff-inferred scope. Name the changed areas and user-facing behavior against that contract; call out non-obvious side effects.
+- **What the change must satisfy**: the working contract — the attached spec bundle's tool-specific criteria above (with change id and title), else the historical PRD's intent, else a stated diff-inferred scope. Name the changed areas and user-facing behavior against that contract; call out non-obvious side effects.
 - **Checks**: a table of the checks you ran — check / command / exit / summary — plus the verdict. Follow it with **Checks not run**: checks the repository supports that you skipped, and why.
 - **Patterns discovered**: concrete repo conventions later phases must enforce. One entry per convention, each with three parts: the convention stated as a rule, the **evidence** (`path:line` of existing code, or the doc line, that establishes it), and a **violation test** — how a later reviewer can tell mechanically whether the change breaks it. A convention you cannot point at evidence for is a personal preference; leave it out.
 - **Risk map**: files/modules deserving bug, clean-code, and security focus.

@@ -1468,6 +1468,7 @@ describe("startOpencode", () => {
     let clientOptions: Record<string, unknown> | undefined
 
     const handle: OpencodeHandle = await startOpencode({}, undefined, {
+      env: { PATH: "/bin", SPECIFY_FEATURE_DIRECTORY: "/w/app/specs/001-login", SPECIFY_FEATURE_NO_PERSIST: "1", HERDR_ENV: "1", OPENCODE_PASSWORD: "parent-secret" },
       getFreePort: async () => 41234,
       launch: async (options) => {
         launchOptions = options as unknown as Record<string, unknown>
@@ -1495,6 +1496,7 @@ describe("startOpencode", () => {
     expect(launchOptions?.args).toContain("--hostname=127.0.0.1")
     expect(launchOptions?.args).toContain("--port=41234")
     expect(launchOptions?.env).toMatchObject({ OPENCODE_CONFIG_CONTENT: "{}" })
+    expect(launchOptions?.env).toEqual({ PATH: "/bin", SPECIFY_FEATURE_DIRECTORY: "/w/app/specs/001-login", SPECIFY_FEATURE_NO_PERSIST: "1", OPENCODE_CONFIG_CONTENT: "{}" })
     expect(clientOptions?.baseUrl).toBe(handle.url)
     expect(typeof clientOptions?.fetch).toBe("function")
 

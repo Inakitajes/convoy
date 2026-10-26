@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test"
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { join } from "node:path"
+import { tmpdir } from "node:os"
 
 import type { OpencodeClient } from "../src/opencode-client"
 
@@ -54,12 +57,29 @@ mock.module("../src/opencode", () => ({
   connectOpencode: (url: string) => (harnessMockActive ? fakeClient : realConnectOpencode(url)),
 }))
 
-const { authoringClientArgv, openConversationExternal, openConversationForeground, sessionActivity } = await import(
+const { authoringClientArgv, listClaudeAuthoringCommands, openConversationExternal, openConversationForeground, sessionActivity } = await import(
   "../src/conversations"
 )
 
 const OPEN_SERVER = { url: "http://127.0.0.1:51021" }
 const SESSION = { harness: "opencode" as const, sessionId: "ses_1" }
+
+test("Claude discovers Spec Kit skills even without a commands directory", async () => {
+  const checkout = await mkdtemp(join(tmpdir(), "convoy-claude-skills-"))
+  try {
+    const skill = join(checkout, ".claude/skills/speckit.specify")
+    await mkdir(skill, { recursive: true })
+    await writeFile(join(skill, "SKILL.md"), "# Specify\n")
+    await writeFile(join(skill, "notes.md"), "not a command\n")
+    expect(await listClaudeAuthoringCommands(checkout)).toEqual(["speckit.specify"])
+    await mkdir(join(checkout, ".claude/commands/team"), { recursive: true })
+    await writeFile(join(checkout, ".claude/commands/team/propose.md"), "# Propose\n")
+    await writeFile(join(checkout, ".claude/commands/speckit.specify.md"), "# Specify\n")
+    expect(await listClaudeAuthoringCommands(checkout)).toEqual(["speckit.specify", "team:propose"])
+  } finally {
+    await rm(checkout, { recursive: true, force: true })
+  }
+})
 
 function resetHarness(): void {
   statusAnswer = undefined

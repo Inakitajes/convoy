@@ -14,6 +14,14 @@ import { isOpenSpecChangeId, openspecDirName } from "./openspec"
 
 export type BoardTasks = { done: number; total: number }
 
+/** Shared OpenSpec and Spec Kit checkbox syntax, including task-id suffixes. */
+export function countCheckboxTasks(body: string): BoardTasks {
+  return {
+    done: (body.match(/^\s*[-*+]\s+\[[xX]\]/gm) ?? []).length,
+    total: (body.match(/^\s*[-*+]\s+\[[ xX]\]/gm) ?? []).length,
+  }
+}
+
 /** `openspec list --json` when the CLI answers; checkbox parsing otherwise. */
 export async function openspecTaskCounts(dir: string): Promise<ReadonlyMap<string, BoardTasks>> {
   return (await taskCountsFromOpenspecCli(dir)) ?? (await taskCountsFromTasksFiles(dir))
@@ -58,9 +66,7 @@ async function taskCountsFromTasksFiles(dir: string): Promise<ReadonlyMap<string
   for (const id of ids.filter(isOpenSpecChangeId)) {
     const body = await readFile(join(dir, openspecDirName, "changes", id, "tasks.md"), "utf8").catch(() => undefined)
     if (body === undefined) continue
-    const total = (body.match(/^\s*[-*+]\s+\[[ xX]\]/gm) ?? []).length
-    const done = (body.match(/^\s*[-*+]\s+\[[xX]\]/gm) ?? []).length
-    out.set(id, { done, total })
+    out.set(id, countCheckboxTasks(body))
   }
   return out
 }

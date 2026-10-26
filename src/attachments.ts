@@ -43,7 +43,9 @@ const textExtensions = new Set([
   ".dart",
   ".diff",
   ".go",
+  ".gql",
   ".gradle",
+  ".graphql",
   ".h",
   ".hpp",
   ".html",
@@ -58,6 +60,7 @@ const textExtensions = new Set([
   ".patch",
   ".php",
   ".properties",
+  ".proto",
   ".py",
   ".rb",
   ".rs",
@@ -75,7 +78,8 @@ const textExtensions = new Set([
 const textFilenames = new Set(["dockerfile", "makefile", "readme", "license"])
 const textMimes = new Set(["application/json", "application/javascript", "application/xml", "application/x-ndjson"])
 
-function isTextAttachment(path: string, mime: string) {
+/** True when a file attaches as plain text; `mime` defaults to the type Bun infers from the name. */
+export function isTextAttachment(path: string, mime: string = Bun.file(path).type) {
   const baseMime = mime.split(";")[0]?.toLowerCase() ?? ""
   if (baseMime.startsWith("text/")) return true
   if (textMimes.has(baseMime)) return true

@@ -60,6 +60,8 @@ export type BootedOpencodeServer = {
 }
 
 type StartOpencodeDeps = {
+  /** Explicit child environment, including the run's frozen spec-tool selection. */
+  env?: Record<string, string | undefined>
   getFreePort(): Promise<number>
   createClient(options: Parameters<typeof createOpencodeClient>[0]): OpencodeClient
   /** Test seam: replaces the real owned spawn. */
@@ -272,8 +274,8 @@ async function freePort() {
 // A server child must generate its own per-boot password: given the user's
 // OPENCODE_PASSWORD/OPENCODE_SERVER_PASSWORD it adopts that one and never
 // prints the `server password` line its readiness waits for.
-function serverChildEnv(): Record<string, string | undefined> {
-  const { OPENCODE_PASSWORD: _client, OPENCODE_SERVER_PASSWORD: _server, ...env } = withoutHerdrEnv(process.env)
+function serverChildEnv(inherited: Record<string, string | undefined> = process.env): Record<string, string | undefined> {
+  const { OPENCODE_PASSWORD: _client, OPENCODE_SERVER_PASSWORD: _server, ...env } = withoutHerdrEnv(inherited)
   return env
 }
 
@@ -344,7 +346,7 @@ export async function startOpencode(
     command: resolveOpencodeBin(),
     args,
     cwd: process.cwd(),
-    env: { ...serverChildEnv(), OPENCODE_CONFIG_CONTENT: JSON.stringify(config ?? {}) },
+    env: { ...serverChildEnv(deps?.env), OPENCODE_CONFIG_CONTENT: JSON.stringify(config ?? {}) },
     lifetime,
     label: lifetime === "run" ? "opencode run server" : "opencode helper",
     timeoutMs: 30_000,
@@ -403,4 +405,3 @@ export function connectOpencode(url: string, password?: string): OpencodeClient 
 function fetchWithoutIdleTimeout(input: RequestInfo | URL, init?: RequestInit) {
   return fetch(input, { ...init, timeout: false } as RequestInit)
 }
-

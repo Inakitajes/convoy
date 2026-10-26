@@ -36,6 +36,33 @@ afterAll(async () => {
  */
 
 describe("assembleControlBoard", () => {
+  test("each checkout reads its configured tool without borrowing or falling back", async () => {
+    const fixture = await createFixtureRepo({ worktrees: [{ name: "kit", branch: "feat/kit" }, { name: "off", branch: "feat/off" }] })
+    fixtures.push(fixture)
+    const kit = fixture.worktrees.kit!
+    const off = fixture.worktrees.off!
+    await fixture.write(kit, ".convoy/config.yaml", "features:\n  specs: speckit\n")
+    await fixture.write(off, ".convoy/config.yaml", "features:\n  specs: false\n")
+    for (const checkout of [fixture.root, kit, off]) {
+      await fixture.write(checkout, "openspec/changes/open/proposal.md", "# Open\n")
+      await fixture.write(checkout, "specs/001-kit/spec.md", "# Feature Specification: Kit\n")
+      await fixture.write(checkout, "specs/001-kit/tasks.md", "- [ ] T001 do\n")
+    }
+    await fixture.write(kit, "specs/000-done/spec.md", "# Feature Specification: Done\n")
+    await fixture.write(kit, "specs/000-done/tasks.md", "- [x] T001 done\n")
+    await fixture.write(kit, ".specify/memory/constitution.md", "# Constitution\n")
+    const board = await assembleControlBoard(fixture.root, { listRuns: async () => [] })
+    expect(board.worktrees.find((row) => row.main)?.changes.map((change) => change.changeId)).toEqual(["open"])
+    const kitRow = board.worktrees.find((row) => row.branch === "feat/kit")!
+    expect(kitRow.changes.map((change) => change.changeId)).toEqual(["001-kit"])
+    expect(kitRow.archiveCount).toBe(1)
+    expect(kitRow.specCount).toBe(1)
+    expect(kitRow.specTool).toBe("speckit")
+    const offRow = board.worktrees.find((row) => row.branch === "feat/off")!
+    expect(offRow.changes).toEqual([])
+    expect(offRow.specTool).toBe(false)
+  })
+
   test("every registered checkout is a root entry, including spec-less and detached ones", async () => {
     const fixture = await createFixtureRepo({
       worktrees: [

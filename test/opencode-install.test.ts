@@ -70,6 +70,7 @@ describe("installSpinCommand", () => {
     expect(body).toContain("convoy spin")
     expect(body).toContain("verbatim")
     expect(body).toContain("--change")
+    expect(body).toContain("configured spec tool (OpenSpec or Spec Kit)")
     // It must not teach the agent to do convoy's work itself.
     expect(body).not.toMatch(/git worktree add/)
     expect(body).not.toMatch(/branch name is|derive the branch/i)

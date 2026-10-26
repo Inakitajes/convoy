@@ -189,8 +189,8 @@ const promptTask =
 /** The built-in pipelines that get a `/convoy-<pipeline>` command. */
 export const pipelineCommands: readonly PipelineCommand[] = [
   { pipeline: "review", summary: "findings plus a verified quality score for the current branch; it doesn't change code.", prompt: promptDefault, permissions: permissionsReadOnly, launch: launchReadOnly },
-  { pipeline: "implement", summary: "implement a task or an OpenSpec change, then audit it, with a one-page recap.", prompt: promptTask, permissions: permissionsWrites, launch: launchWrites },
-  { pipeline: "full-cycle", summary: "implement, audit, and test a task or an OpenSpec change, then score and fix it to 90/100.", prompt: promptTask, permissions: permissionsWrites, launch: launchWrites },
+  { pipeline: "implement", summary: "implement a task, OpenSpec change, or Spec Kit feature, then audit it, with a one-page recap.", prompt: promptTask, permissions: permissionsWrites, launch: launchWrites },
+  { pipeline: "full-cycle", summary: "implement, audit, and test a task, OpenSpec change, or Spec Kit feature, then score and fix it to 90/100.", prompt: promptTask, permissions: permissionsWrites, launch: launchWrites },
   { pipeline: "ship", summary: "sync the branch with its base, review it, fix the accepted findings, and reach 90/100.", prompt: promptDefault, permissions: permissionsWrites, launch: launchWrites },
   {
     pipeline: "fixer",
@@ -230,7 +230,7 @@ const skillCommandLayout: CommandLayout = {
   frontmatter: (name, description) => [
     `name: ${name}`,
     `description: ${JSON.stringify(description)}`,
-    `argument-hint: "[focus, task, or OpenSpec change id]"`,
+    `argument-hint: "[focus, task, or change id]"`,
     "disable-model-invocation: true",
   ],
 }

@@ -303,13 +303,19 @@ export async function invokeAuthoringCommand(input: {
 
 /**
  * A Claude project's authoring commands: the slash commands its checkout
- * defines (`.claude/commands/**.md`, `/a:b` for `a/b.md`). Absence is a real
+ * defines (`.claude/commands/**.md`, `/a:b` for `a/b.md`, and
+ * `.claude/skills/<name>/SKILL.md` as `<name>`). Absence is a real
  * outcome, as with OpenCode's command API.
  */
 export async function listClaudeAuthoringCommands(checkout: string): Promise<string[]> {
-  const root = join(checkout, ".claude", "commands")
-  if (!existsSync(root)) return []
-  const names: string[] = []
-  for await (const path of new Bun.Glob("**/*.md").scan({ cwd: root })) names.push(path.slice(0, -".md".length).split("/").join(":"))
-  return names.sort()
+  const names = new Set<string>()
+  const commands = join(checkout, ".claude", "commands")
+  if (existsSync(commands)) {
+    for await (const path of new Bun.Glob("**/*.md").scan({ cwd: commands })) names.add(path.slice(0, -".md".length).split("/").join(":"))
+  }
+  const skills = join(checkout, ".claude", "skills")
+  if (existsSync(skills)) {
+    for await (const path of new Bun.Glob("*/SKILL.md").scan({ cwd: skills })) names.add(path.split("/")[0]!)
+  }
+  return [...names].sort()
 }

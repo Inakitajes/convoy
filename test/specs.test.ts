@@ -18,6 +18,7 @@ import {
   type SpecGroup,
   type SpecsChangeEntry,
 } from "../src/specs"
+import { specTools } from "../src/spec-tools"
 
 let root: string
 let symlinkCreated = false
@@ -104,6 +105,34 @@ describe("classifySpecArtifact", () => {
 })
 
 describe("loadSpecsView", () => {
+  test("Spec Kit uses its own title, ordered reader groups, and constitution only", async () => {
+    const checkout = await mkdtemp(join(tmpdir(), "convoy-specs-kit-"))
+    try {
+      const feature = join(checkout, "specs", "001-login")
+      await mkdir(join(checkout, ".convoy"), { recursive: true })
+      await writeFile(join(checkout, ".convoy", "config.yaml"), "features:\n  specs: speckit\n")
+      await mkdir(join(feature, "contracts"), { recursive: true })
+      for (const file of ["spec.md", "plan.md", "tasks.md", "research.md", "data-model.md", "quickstart.md", "contracts/login.md", "notes.md"]) {
+        await writeFile(join(feature, file), file === "spec.md" ? "# Feature Specification: Login\n" : `# ${file}\n`)
+      }
+      await mkdir(join(checkout, ".specify", "memory"), { recursive: true })
+      await writeFile(join(checkout, ".specify", "memory", "constitution.md"), "# Constitution\n")
+      await mkdir(join(checkout, "openspec", "changes", "ignored"), { recursive: true })
+      await writeFile(join(checkout, "openspec", "changes", "ignored", "proposal.md"), "# Ignore\n")
+      const view = await loadSpecsView(checkout)
+      expect(view.changes.map((change) => change.id)).toEqual(["001-login"])
+      expect(view.changes[0]!.title).toBe("Login")
+      expect(view.specs).toEqual([".specify/memory/constitution.md"])
+      const groups = groupChangeArtifacts(view.changes[0]!)
+      expect(groups.map((group) => group.label)).toEqual(["Spec", "Plan", "Tasks", "Design Docs", "Other"])
+      const source = specGroupSource(groups[3]!, (file) => `BODY:${file}`)
+      for (const file of ["research.md", "data-model.md", "quickstart.md", "contracts/login.md"]) expect(source).toContain(`## ${file}\n\nBODY:`)
+      expect(source).not.toContain("Delta Specs")
+    } finally {
+      await rm(checkout, { recursive: true, force: true })
+    }
+  })
+
   test("lists active changes with titles, artifacts, and canonical specs", async () => {
     const view = await loadSpecsView(root)
 
@@ -173,6 +202,28 @@ describe("loadSpecsView", () => {
 })
 
 describe("printSpecsList", () => {
+  test("Spec Kit labels completed counts, Spec and Plan artifacts, and the constitution", () => {
+    const writes: string[] = []
+    const spy = spyOn(process.stdout, "write").mockImplementation(((chunk: unknown) => { writes.push(String(chunk)); return true }) as typeof process.stdout.write)
+    try {
+      printSpecsList({
+        specTool: "speckit",
+        board: { worktrees: [{ path: "/kit", branch: "main", detached: false, main: true, bare: false, accessible: true, specTool: "speckit", changes: [], archiveCount: 1, specCount: 1 }] },
+        changes: [{ kind: "change", id: "001-login", checkout: "/kit", title: "Login", specTool: "speckit", artifacts: [{ section: "spec", file: "/kit/specs/001-login/spec.md" }, { section: "plan", file: "/kit/specs/001-login/plan.md" }] }],
+        specs: [".specify/memory/constitution.md"],
+      })
+    } finally {
+      spy.mockRestore()
+    }
+    const output = writes.join("")
+    expect(output).toContain("completed: 1")
+    expect(output).toContain("spec: /kit/specs/001-login/spec.md")
+    expect(output).toContain("plan: /kit/specs/001-login/plan.md")
+    expect(output).toContain("constitution:")
+    expect(output).not.toContain("archive")
+    expect(output).not.toContain("canonical specs")
+  })
+
   test("prints changes with artifact inventory, then canonical specs, without control sequences", async () => {
     const view = await loadSpecsView(root)
     const writes: string[] = []
@@ -258,15 +309,22 @@ describe("specsIteratePrompt", () => {
       join("openspec", "changes", "add-login", "tasks.md"),
       join("openspec", "changes", "add-login", "specs", "cli", "spec.md"),
     ]
-    const prompt = specsIteratePrompt("add-login", files)
+    const prompt = specsIteratePrompt("add-login", files, specTools.openspec)
     expect(prompt).toContain("add-login")
     for (const file of files) expect(prompt).toContain(file)
     expect(prompt.split("\n")).toHaveLength(1)
   })
 
   test("falls back to the change directory when there are no files", () => {
-    const prompt = specsIteratePrompt("bare-change", [])
+    const prompt = specsIteratePrompt("bare-change", [], specTools.openspec)
     expect(prompt).toContain(join("openspec", "changes", "bare-change") + "/")
+  })
+
+  test("names no spec tool when specs are off", () => {
+    const prompt = specsIteratePrompt("bare-change", [], undefined)
+    expect(prompt).toContain("Continuing the change bare-change")
+    expect(prompt).not.toContain("OpenSpec")
+    expect(prompt).not.toContain("openspec/")
   })
 })
 
@@ -289,6 +347,14 @@ describe("buildIterateSessionInput", () => {
     const view = await loadSpecsView(root)
     const input = buildIterateSessionInput(root, view, "not-a-change")
     expect(input.prompt).toContain(join("openspec", "changes", "not-a-change") + "/")
+  })
+
+  test("a view with specs off never falls back to OpenSpec", async () => {
+    const { buildIterateSessionInput } = await import("../src/specs")
+    const view = { ...(await loadSpecsView(root)), specTool: false as const }
+    const input = buildIterateSessionInput(root, view, "not-a-change")
+    expect(input.prompt).not.toContain("OpenSpec")
+    expect(input.prompt).not.toContain("openspec/")
   })
 })
 

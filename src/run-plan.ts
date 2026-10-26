@@ -1,5 +1,5 @@
 import { resolveModel, type ModelGateway, type ModelRoutingOverrides, type ResolvedModel } from "./model-routing"
-import type { OpenSpecBundle } from "./openspec"
+import type { SpecBundle } from "./spec-tools"
 import type { PrdHistoryPreview } from "./prd-history"
 import { resolveBilling } from "./runners/billing"
 import type { AuthenticationMode, AuthenticationSelection } from "./runners/contracts"
@@ -28,8 +28,8 @@ export type BuildRunPlanInput = RunOptions & {
   resumeGateway?: ModelGateway
   /** Precomputed checkout preview; `buildRunPlan` does not touch the filesystem. */
   prdHistoryPreview?: PrdHistoryPreview
-  /** Precomputed OpenSpec contract; `buildRunPlan` does not touch the filesystem. */
-  openspec?: OpenSpecBundle
+  /** Precomputed spec-tool contract; `buildRunPlan` does not touch the filesystem. */
+  specs?: SpecBundle
   /** Precomputed feature link (verified by the caller); frozen into the plan for execution-time revalidation. */
   feature?: FeaturePlanLink
 }
@@ -107,7 +107,7 @@ export function buildRunPlan(input: BuildRunPlanInput): RunPlan {
     ...(input.commitMessageModel ? { commitMessageModel: input.commitMessageModel } : {}),
     hooks,
     attachments: [...input.files],
-    ...(input.openspec ? { openspec: input.openspec } : {}),
+    ...(input.specs ? { specs: structuredClone(input.specs) } : {}),
     ...(input.feature ? { feature: input.feature } : {}),
     ...(input.prdHistoryPreview ? { prdHistory: input.prdHistoryPreview } : {}),
     permissions: input.yolo ? "yolo" : input.smart ? "smart" : "interactive",

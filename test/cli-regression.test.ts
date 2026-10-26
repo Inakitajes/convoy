@@ -84,6 +84,94 @@ async function repoOn(branch: string): Promise<string> {
 }
 
 describe("CLI semantic regression coverage", () => {
+  test("Spec Kit plans freeze only active selected features and their complete contract", async () => {
+    const dir = await projectWithQuickPipeline()
+    await writeFile(join(dir, ".convoy", "config.yaml"), "features:\n  specs: speckit\n")
+    for (const id of ["001-login", "002-search", "000-setup"]) {
+      await mkdir(join(dir, "specs", id, "contracts"), { recursive: true })
+      await writeFile(join(dir, "specs", id, "spec.md"), `# Feature Specification: ${id}\n`)
+      await writeFile(join(dir, "specs", id, "tasks.md"), id === "000-setup" ? "- [x] T001 Done\n" : "- [ ] T001 Work\n")
+    }
+    await writeFile(join(dir, "specs", "001-login", "contracts", "api.md"), "# API\n")
+    await mkdir(join(dir, ".specify", "memory"), { recursive: true })
+    await writeFile(join(dir, ".specify", "memory", "constitution.md"), "# Constitution\n")
+    await mkdir(join(dir, "openspec", "changes", "other"), { recursive: true })
+    await writeFile(join(dir, "openspec", "changes", "other", "proposal.md"), "# Other tool\n")
+
+    const command = await parseCommand(["--dir", dir, "--change", "002-search", "--change", "001-login", "-p", "review", "--plan"])
+    if (command.type !== "run") throw new Error("expected run")
+    expect(command.options.prompt).toBe("Review the attached Spec Kit feature.")
+    expect(command.options.plan?.specs).toMatchObject({ tool: "speckit", changeIds: ["002-search", "001-login"] })
+    const files = command.options.plan?.specs?.specFiles ?? []
+    expect(files[0]).toBe(".specify/memory/constitution.md")
+    expect(files).toContain("specs/001-login/contracts/api.md")
+    expect(files.indexOf("specs/002-search/spec.md")).toBeLessThan(files.indexOf("specs/001-login/spec.md"))
+    expect(files.some((file) => file.startsWith("openspec/") || file.includes("000-setup"))).toBe(false)
+    await expect(parseCommand(["--dir", dir, "--change", "000-setup", "-p", "review"])).rejects.toThrow(/active.*Spec Kit feature|active change/)
+    await expect(parseCommand(["--dir", dir, "--change", "other", "-p", "review"])).rejects.toThrow(/specs\//)
+  })
+
+  test("an absent configured layout never reads the other tool and invalid config is not ignored", async () => {
+    const dir = await projectWithQuickPipeline()
+    await mkdir(join(dir, "openspec", "changes", "other"), { recursive: true })
+    await writeFile(join(dir, "openspec", "changes", "other", "proposal.md"), "# Other tool\n")
+    await writeFile(join(dir, ".convoy", "config.yaml"), "features:\n  specs: speckit\n")
+    const manual = await parseCommand(["--dir", dir, "--manual", "-p", "review"])
+    if (manual.type !== "run") throw new Error("expected run")
+    expect(manual.options.plan?.specs?.changeIds ?? []).toEqual([])
+    await expect(parseCommand(["--dir", dir, "--change", "other", "-p", "review"])).rejects.toThrow(/specs\//)
+    await writeFile(join(dir, ".convoy", "config.yaml"), "features:\n  specs: true\n")
+    await expect(parseCommand(["--dir", dir, "--manual", "-p", "review"])).rejects.toThrow(/features.specs.*openspec.*speckit.*false/)
+  })
+
+  test("the real CLI plans and lists a Spec Kit checkout without the specify CLI", async () => {
+    const dir = await repoOn("main")
+    await mkdir(join(dir, ".convoy"), { recursive: true })
+    await writeFile(join(dir, ".convoy", "config.yaml"), "features:\n  specs: speckit\n")
+    await mkdir(join(dir, "specs", "001-x", "contracts"), { recursive: true })
+    await mkdir(join(dir, "specs", "000-completed"), { recursive: true })
+    await mkdir(join(dir, ".specify", "memory"), { recursive: true })
+    await writeFile(join(dir, ".specify", "memory", "constitution.md"), "# Constitution\n")
+    await writeFile(join(dir, "specs", "001-x", "spec.md"), "# Feature Specification: Export records\n\n**Input**: User description: \"Export records as CSV\"\n")
+    await writeFile(join(dir, "specs", "001-x", "plan.md"), "# Plan\n")
+    await writeFile(join(dir, "specs", "001-x", "tasks.md"), "- [ ] T001 [P] [US1] Export\n")
+    await writeFile(join(dir, "specs", "001-x", "contracts", "api.md"), "# Contract\n")
+    await writeFile(join(dir, "specs", "000-completed", "spec.md"), "# Feature Specification: Setup\n")
+    await writeFile(join(dir, "specs", "000-completed", "tasks.md"), "- [x] T001 Setup\n")
+    const main = join(import.meta.dir, "..", "src", "main.ts")
+    const invoke = async (args: string[]) => {
+      const child = Bun.spawn([process.execPath, main, ...args], { cwd: dir, stdin: "ignore", stdout: "pipe", stderr: "pipe" })
+      const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
+      return { stdout, stderr, code }
+    }
+    const plan = await invoke(["--change", "001-x", "-p", "review", "--plan"])
+    expect(plan.code).toBe(0)
+    expect(plan.stdout).toContain("Spec Kit feature: 001-x")
+    expect(plan.stdout).toContain("5 spec files")
+    const listing = await invoke(["specs"])
+    expect(listing.code).toBe(0)
+    expect(listing.stdout).toContain("Export records")
+    expect(listing.stdout).toContain("001-x")
+    expect(listing.stdout.toLowerCase()).toContain("completed")
+    expect(listing.stdout).not.toContain("\u001b[")
+  })
+
+  test("resume retains the frozen spec tool and bundle after project config switches", async () => {
+    const dir = await projectWithQuickPipeline()
+    const initial = await parseCommand(["--dir", dir, "--manual", "-p", "review"])
+    if (initial.type !== "run") throw new Error("expected run")
+    const specs = { tool: "speckit" as const, changeIds: ["001-login"], specFiles: ["specs/001-login/spec.md"] }
+    const runID = "20260519-103045-spek"
+    const runDir = join(process.env.CONVOY_HOME!, ".convoy", "runs", runID)
+    await mkdir(runDir, { recursive: true })
+    await writeFile(join(runDir, "metadata.json"), JSON.stringify({ schemaVersion: 3, runID, targetDir: dir, createdAt: 0, updatedAt: 0, control: { state: "running" }, phases: {}, pipeline: initial.options.pipeline, specs }))
+    await writeFile(join(runDir, "prd.md"), "Review the attached Spec Kit feature.")
+    await writeFile(join(dir, ".convoy", "config.yaml"), "features:\n  specs: false\n")
+    const resumed = await parseCommand(["--dir", dir, "--resume", runID])
+    if (resumed.type !== "run") throw new Error("expected run")
+    expect(resumed.options.plan?.specs).toEqual(specs)
+  })
+
   test("resolves base, pipeline, and attachments through config and CLI precedence", async () => {
     const dir = await projectWithQuickPipeline()
 
@@ -432,7 +520,7 @@ describe("feature toggles", () => {
     expect(opened).toBe(1)
   })
 
-  test("OpenSpec-only commands refuse in a project that turned specs off", async () => {
+  test("spec-tool commands refuse in a project that turned specs off", async () => {
     const repo = await mkdtemp(join(tmpdir(), "convoy-specs-off-"))
     try {
       await mkdir(join(repo, ".convoy"), { recursive: true })
@@ -441,7 +529,7 @@ describe("feature toggles", () => {
         const proc = Bun.spawn([process.execPath, join(import.meta.dir, "..", "src", "main.ts"), command], { cwd: repo, stdin: "ignore", stdout: "pipe", stderr: "pipe" })
         const [stderr, code] = await Promise.all([new Response(proc.stderr).text(), proc.exited])
         expect(code).toBe(1)
-        expect(stderr).toContain(`convoy ${command} needs OpenSpec, which this project turned off (features.specs: false)`)
+        expect(stderr).toContain(`convoy ${command} needs specs, which this project turned off (features.specs: false)`)
       }
     } finally {
       await rm(repo, { recursive: true, force: true })

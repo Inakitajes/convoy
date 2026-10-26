@@ -1,7 +1,7 @@
 import type { AdvisorAuditPolicy } from "./advisor-events"
 import type { LoopGuardSettings } from "./loop-guard"
 import type { NotificationSettings } from "./notifications"
-import type { OpenSpecBundle } from "./openspec"
+import type { SpecBundle } from "./spec-tools"
 import type { PrdHistoryPreview } from "./prd-history"
 
 /**
@@ -375,12 +375,12 @@ export type RunPlan = {
   hooks: HookSet
   attachments: string[]
   /**
-   * The frozen OpenSpec contract for this run, resolved before confirmation so
+   * The frozen spec-tool contract for this run, resolved before confirmation so
    * the plan preview can name the active change and the runner can attach its
    * spec bundle in place of the oldest historical PRD. Absent when the repo has
-   * no `openspec/` (brownfield: exact today's behavior).
+   * no configured spec layout.
    */
-  openspec?: OpenSpecBundle
+  specs?: SpecBundle
   /**
    * Operator-facing preview of the checkout's historical PRD. Computed before
    * confirmation (never inside `buildRunPlan`) so the launcher and CLI review

@@ -281,6 +281,21 @@ describe("readRunMetadata", () => {
 })
 
 describe("openRunMetadata", () => {
+  test("persists the complete spec contract and keeps it when reopening with another tool", async () => {
+    const { dir, ws, cleanup } = await withDir("spec-contract")
+    const specs = { tool: "speckit" as const, changeIds: ["001-login"], specFiles: ["specs/001-login/spec.md"], rootDir: "/reviewed" }
+    try {
+      const store = await openRunMetadata(ws, "/target", validPipeline([]), { specs })
+      await store.flush()
+      expect((await readRunMetadata(join(dir, "metadata.json")))?.specs).toEqual(specs)
+      const reopened = await openRunMetadata(ws, "/target", validPipeline([]), { specs: { tool: "openspec", changeIds: ["other"], specFiles: [] } })
+      await reopened.flush()
+      expect((await readRunMetadata(join(dir, "metadata.json")))?.specs).toEqual(specs)
+    } finally {
+      await cleanup()
+    }
+  })
+
   test("creates metadata file with defaults for a new run", async () => {
     const { dir, ws, cleanup } = await withDir("new")
     const pipeline = validPipeline([validAgentStep("design")])

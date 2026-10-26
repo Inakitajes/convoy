@@ -16,7 +16,7 @@ import { stepRunnerFor } from "./step-runners"
 import { gatewayHint, gatewayLabel, modelGateways, type ModelGateway } from "./model-routing"
 import { consensusStep } from "./quality-score"
 import { prdHistoryFile, prdHistoryPreviewCopy, readPrdHistoryIndex, resolvePrdHistoryPreview, type PrdHistoryEntry, type PrdHistoryPreview } from "./prd-history"
-import { listOpenSpecChanges, openSpecPromptFor, type OpenSpecChangeSummary } from "./openspec"
+import { specPromptFor, specToolFor, specTools, type SpecToolDescriptor } from "./spec-tools"
 import { runReviewLines } from "./review-tui"
 import { chunksLength, clipChunks, displayWidth, fmtCountdown, formatMoney, hintsRow, joinLines, moreHintsMarker, padBetween, paletteForTerminal, plain, progressBar, raw, sectionLabel, setTheme, shortPath, spinnerFrame, terminalBackgroundHex, theme, truncate } from "./tui-theme"
 import { sceneForRoute, type TuiRoute, type TuiScene } from "./tui-session"
@@ -445,7 +445,7 @@ export type LauncherResources = {
   choices: PipelineChoice[]
   worktree: { isolate: boolean; reason: string }
   history: LaunchHistoryContext
-  specs: OpenSpecChangeSummary[]
+  specs: { id: string; title: string }[]
   insideWorktree?: InsideWorktree
 }
 
@@ -472,7 +472,8 @@ export async function loadLauncherResources(options: LaunchRunTuiOptions): Promi
       : { isolate: config.defaults.worktree, reason: "set by defaults.worktree" }
   const history = await loadLaunchHistory(resourceDir, config?.defaults.prdHistory ?? true)
   // With specs off the launcher offers no change selection at all.
-  const specs = features.specs ? await listOpenSpecChanges(resourceDir) : []
+  const specTool = specToolFor(config)
+  const specs = specTool ? await specTool.listChanges(resourceDir) : []
   const insideWorktree = await detectInsideWorktree(options.targetDir)
   return { config, choices, worktree, history, specs, ...(insideWorktree ? { insideWorktree } : {}) }
 }
@@ -486,7 +487,7 @@ export async function launchRunTui(options: LaunchRunTuiOptions, route?: TuiRout
 
   if (route) {
     const scene = sceneForRoute(route, "convoy-launch-scene")!
-    return new LaunchPicker(route.session.renderer, options.targetDir, choices, config?.modelRouting?.gateway ?? "configured", worktree, options, history, specs, options.presetChanges, options.presetFeature, insideWorktree, scene).result
+    return new LaunchPicker(route.session.renderer, options.targetDir, choices, config?.modelRouting?.gateway ?? "configured", worktree, options, history, specs, options.presetChanges, options.presetFeature, insideWorktree, scene, specToolFor(config)).result
   }
 
   // No backgroundColor yet: the palette is only chosen after the terminal
@@ -496,7 +497,7 @@ export async function launchRunTui(options: LaunchRunTuiOptions, route?: TuiRout
   const renderer = await createCliRenderer({ screenMode: "alternate-screen", consoleMode: "console-overlay", exitOnCtrlC: false })
   const mode = await renderer.waitForThemeMode(1_000).catch(() => null)
   setTheme(paletteForTerminal(mode, terminalBackgroundHex(renderer)))
-  return new LaunchPicker(renderer, options.targetDir, choices, config?.modelRouting?.gateway ?? "configured", worktree, options, history, specs, options.presetChanges, options.presetFeature, insideWorktree).result
+  return new LaunchPicker(renderer, options.targetDir, choices, config?.modelRouting?.gateway ?? "configured", worktree, options, history, specs, options.presetChanges, options.presetFeature, insideWorktree, undefined, specToolFor(config)).result
 }
 
 /** Where the launcher is running inside a feature worktree, for the nested-isolation warning. */
@@ -863,7 +864,7 @@ export class LaunchPicker {
     // Named `callbacks` rather than `hooks`: this file already uses "hooks" for the pipeline's shell hooks.
     private readonly callbacks: Pick<LaunchRunTuiOptions, "prepareRun" | "proposeBranchName" | "checkBranchName" | "readDirtyStatus" | "root" | "specsDestination">,
     private readonly history: LaunchHistoryContext = { enabled: true, entries: [] },
-    private readonly specs: readonly OpenSpecChangeSummary[] = [],
+    private readonly specs: readonly { id: string; title: string }[] = [],
     /** The operator's explicit change selection handed in pre-selected, in review order. */
     presetChanges?: readonly string[],
     /** A feature-row continue handoff: reuses the feature's worktree and branch (D7). */
@@ -871,6 +872,7 @@ export class LaunchPicker {
     /** Set when the launcher itself runs inside a worktree; drives the nested-isolation warning. */
     private readonly insideWorktree?: InsideWorktree,
     private readonly scene?: TuiScene,
+    private readonly specTool: SpecToolDescriptor = specTools.openspec,
   ) {
     this.toggleState.worktree = worktreeDefault.isolate
     // The preset pins the selection before anything renders, exactly as if the
@@ -1346,7 +1348,7 @@ export class LaunchPicker {
     this.selectedChangeIds = changeIds
     this.manualNoChanges = false
     this.markedChangeIds = []
-    this.applyPromptFieldState(cleanPromptField(openSpecPromptFor(this.currentChoice().name)))
+    this.applyPromptFieldState(cleanPromptField(specPromptFor(this.currentChoice().name, this.specTool)))
     this.cursor = this.prompt.length
     this.promptError = ""
     this.mode = "options"
@@ -1869,7 +1871,7 @@ export class LaunchPicker {
     const newChoice = this.currentChoice()
 
     if (this.selectedChangeIds.length > 0) {
-      this.applyPromptFieldState(cleanPromptField(openSpecPromptFor(newChoice.name)))
+      this.applyPromptFieldState(cleanPromptField(specPromptFor(newChoice.name, this.specTool)))
     } else {
       // Swap the default prompt cleanly when the field is empty or still holds
       // the previous pipeline's default; a user-typed prompt is preserved across
@@ -2313,7 +2315,8 @@ this.detailBox.title = reviewing ? " review " : " run setup "
     const lines: StyledText[] = []
     lines.push(new StyledText([fg(theme.faint)("pipeline "), bold(fg(theme.text)(choice.name))]))
     lines.push(plain(""))
-    const intro = wrapWords("An OpenSpec change is the contract. Mark one or more with space, or write a prompt by hand.", width)
+    const article = this.specTool.changeArticle === "an" ? "An" : "A"
+    const intro = wrapWords(`${article} ${this.specTool.changeNoun} is the contract. Mark one or more with space, or write a prompt by hand.`, width)
     for (const line of intro) lines.push(t`${fg(theme.dim)(line)}`)
     lines.push(plain(""))
 
@@ -2350,10 +2353,10 @@ this.detailBox.title = reviewing ? " review " : " run setup "
   }
 
   /** The selected local changes, in the reviewed order, resolved against this checkout's active specs. */
-  private selectedSpecs(): OpenSpecChangeSummary[] {
+  private selectedSpecs(): { id: string; title: string }[] {
     return this.selectedChangeIds
       .map((id) => this.specs.find((spec) => spec.id === id))
-      .filter((spec): spec is OpenSpecChangeSummary => spec !== undefined)
+      .filter((spec): spec is { id: string; title: string } => spec !== undefined)
   }
 
   private optionsDetail(width: number) {
@@ -2365,7 +2368,7 @@ this.detailBox.title = reviewing ? " review " : " run setup "
     // read as its whole ordered list, not just its first entry.
     this.selectedSpecs().forEach((spec, index) => {
       const label = spec.title === spec.id ? spec.id : `${spec.id} · ${spec.title}`
-      const prefix = index === 0 ? sectionLabel("openspec ") : raw("         ")
+      const prefix = index === 0 ? sectionLabel(`${this.specTool.label.toLowerCase()} `) : raw("         ")
       lines.push(new StyledText([prefix, fg(theme.teal)(truncate(label, Math.max(10, width - 9)))]))
     })
     // The continue handoff shows what is being reused, so "no new worktree"
@@ -2599,12 +2602,12 @@ this.detailBox.title = reviewing ? " review " : " run setup "
     if (this.missingPresetIds.length > 0) {
       const value = Math.max(8, width - 9)
       lines.push(plain(""))
-      lines.push(new StyledText([fg(theme.faint)("openspec "), fg(theme.yellow)(truncate(`preset ${this.missingPresetIds.join(", ")} ${this.missingPresetIds.length === 1 ? "is" : "are"} not active in this checkout — re-select the change or continue without it`, value))]))
+      lines.push(new StyledText([fg(theme.faint)(`${this.specTool.label.toLowerCase()} `), fg(theme.yellow)(truncate(`preset ${this.missingPresetIds.join(", ")} ${this.missingPresetIds.length === 1 ? "is" : "are"} not active in this checkout — re-select the change or continue without it`, value))]))
     }
     if (this.specs.length === 0 || this.selectedChangeIds.length > 0 || this.manualNoChanges) return
     const value = Math.max(8, width - 9)
     lines.push(plain(""))
-    lines.push(new StyledText([sectionLabel("openspec "), fg(theme.dim)(truncate(`${this.specs.length} active changes · pick one or more (esc), or Manual prompt for a no-change run`, value))]))
+    lines.push(new StyledText([sectionLabel(`${this.specTool.label.toLowerCase()} `), fg(theme.dim)(truncate(`${this.specs.length} active changes · pick one or more (esc), or Manual prompt for a no-change run`, value))]))
   }
 
   /**

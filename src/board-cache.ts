@@ -21,7 +21,7 @@ import type { ControlBoard } from "./control-board"
  * renders with honest freshness.
  */
 
-export const boardCacheSchemaVersion = 1
+export const boardCacheSchemaVersion = 2
 
 /** Per-checkout change-content fingerprint persisted with the snapshot. */
 export type CheckoutFingerprints = Record<string, string | undefined>

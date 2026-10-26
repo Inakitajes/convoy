@@ -131,25 +131,26 @@ describe("feature switches", () => {
   test("each switch reports its value and the file that decided it", async () => {
     expect(await featureStates(repo)).toEqual([
       { key: "worktrees", enabled: true, source: "default" },
-      { key: "specs", enabled: true, source: "default" },
+      { key: "specs", enabled: "openspec", source: "default" },
     ])
     await mkdir(join(home, ".convoy"), { recursive: true })
     await writeFile(join(home, ".convoy", "config.yaml"), "features:\n  worktrees: false\n  specs: false\n")
     await mkdir(join(repo, ".convoy"), { recursive: true })
-    await writeFile(join(repo, ".convoy", "config.yaml"), "features:\n  specs: true\n")
+    await writeFile(join(repo, ".convoy", "config.yaml"), "features:\n  specs: speckit\n")
     expect(await featureStates(repo)).toEqual([
       { key: "worktrees", enabled: false, source: "global" },
-      { key: "specs", enabled: true, source: "project" },
+      { key: "specs", enabled: "speckit", source: "project" },
     ])
   })
 
   test("setting a switch edits only its line and keeps the file's comments", () => {
-    const body = "# my notes\ndefaults:\n  prdHistory: true\n\nfeatures:\n  # keep this\n  specs: true\n\n# trailing comment\n"
+    const body = "# my notes\ndefaults:\n  prdHistory: true\n\nfeatures:\n  # keep this\n  specs: openspec\n\n# trailing comment\n"
     expect(withFeature(body, "specs", false)).toBe("# my notes\ndefaults:\n  prdHistory: true\n\nfeatures:\n  # keep this\n  specs: false\n\n# trailing comment\n")
-    expect(withFeature(body, "worktrees", false)).toBe("# my notes\ndefaults:\n  prdHistory: true\n\nfeatures:\n  # keep this\n  specs: true\n  worktrees: false\n\n# trailing comment\n")
+    expect(withFeature(body, "worktrees", false)).toBe("# my notes\ndefaults:\n  prdHistory: true\n\nfeatures:\n  # keep this\n  specs: openspec\n  worktrees: false\n\n# trailing comment\n")
+    expect(withFeature(body, "specs", "speckit")).toContain("  specs: speckit\n")
     // No block yet: appended at the end, after the template's commented example.
-    expect(withFeature("# features:\n#   specs: true\n", "specs", false)).toBe("# features:\n#   specs: true\n\nfeatures:\n  specs: false\n")
-    expect(() => withFeature("features: { specs: true }\n", "specs", false)).toThrow(/inline/)
+    expect(withFeature("# features:\n#   specs: openspec\n", "specs", false)).toBe("# features:\n#   specs: openspec\n\nfeatures:\n  specs: false\n")
+    expect(() => withFeature("features: { specs: openspec }\n", "specs", false)).toThrow(/inline/)
   })
 
   test("a missing project config starts from the template, and a broken one is never rewritten", async () => {
@@ -164,7 +165,7 @@ describe("feature switches", () => {
     expect(await readFile(path, "utf8")).toBe("defaults:\n  prdHistory: maybe\n")
   })
 
-  test("space toggles a switch from the config screen and saves it in the project", async () => {
+  test("space cycles OpenSpec → Spec Kit → off → OpenSpec and saves the project choice", async () => {
     const testRenderer = await createTestRenderer({ width: 120, height: 30, exitOnCtrlC: false })
     const session = new TuiSession(testRenderer.renderer)
     try {
@@ -174,16 +175,25 @@ describe("feature switches", () => {
       let frame = testRenderer.captureCharFrame()
       expect(frame).toContain("FEATURES")
       expect(frame).toMatch(/Worktrees\s+● on\s+default/)
+      expect(frame).toMatch(/Specs\s+● OpenSpec\s+default/)
       expect(frame).toContain("space toggle")
 
-      testRenderer.renderer.keyInput.emit("keypress", key("down"))
       testRenderer.renderer.keyInput.emit("keypress", key("space"))
       await Bun.sleep(50)
       await testRenderer.renderOnce()
-      frame = testRenderer.captureCharFrame()
-      expect(frame).toMatch(/Specs\s+○ off\s+set in this project/)
-      expect(frame).toContain("Specs off · saved in .convoy/config.yaml")
-      expect((await featureStates(repo))[1]).toEqual({ key: "specs", enabled: false, source: "project" })
+      expect(testRenderer.captureCharFrame()).toMatch(/Worktrees\s+○ off\s+set in this project/)
+      expect((await featureStates(repo))[0]).toEqual({ key: "worktrees", enabled: false, source: "project" })
+
+      testRenderer.renderer.keyInput.emit("keypress", key("down"))
+      for (const [value, label] of [["speckit", "Spec Kit"], [false, "off"], ["openspec", "OpenSpec"]] as const) {
+        testRenderer.renderer.keyInput.emit("keypress", key("space"))
+        await Bun.sleep(50)
+        await testRenderer.renderOnce()
+        frame = testRenderer.captureCharFrame()
+        expect(frame).toContain(`Specs ${label} · saved in .convoy/config.yaml`)
+        expect(frame).toMatch(new RegExp(`Specs\\s+[●○] ${label}\\s+set in this project`))
+        expect((await featureStates(repo))[1]).toEqual({ key: "specs", enabled: value, source: "project" })
+      }
 
       testRenderer.renderer.keyInput.emit("keypress", key("q"))
       await screen.result
@@ -192,4 +202,3 @@ describe("feature switches", () => {
     }
   })
 })
-

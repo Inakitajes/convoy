@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import { boardCacheDir, boardCacheKey, boardCachePath, loadBoardSnapshot, saveBoardSnapshot, snapshotMateriallyChanged, type BoardSnapshot } from "../src/board-cache"
+import { boardCacheDir, boardCacheKey, boardCachePath, boardCacheSchemaVersion, loadBoardSnapshot, saveBoardSnapshot, snapshotMateriallyChanged, type BoardSnapshot } from "../src/board-cache"
 import { repoCommonDir } from "../src/repo-store"
 import { createFixtureRepo, type FixtureRepo } from "./helpers/multi-worktree"
 
@@ -34,7 +34,7 @@ afterAll(async () => {
 
 function snapshot(commonDir: string, overrides: Partial<BoardSnapshot> = {}): BoardSnapshot {
   return {
-    schemaVersion: 1,
+    schemaVersion: boardCacheSchemaVersion,
     repoKey: boardCacheKey(commonDir),
     commonDir,
     builtAt: 1_000,
@@ -63,6 +63,14 @@ describe("board cache key", () => {
 })
 
 describe("loadBoardSnapshot", () => {
+  test("discards pre-tool snapshots instead of reusing an OpenSpec-only inventory", async () => {
+    const commonDir = join(home, "clone-old", ".git")
+    const path = boardCachePath(commonDir)
+    await mkdir(join(path, ".."), { recursive: true })
+    await writeFile(path, JSON.stringify(snapshot(commonDir, { schemaVersion: 1 })))
+    expect(await loadBoardSnapshot(commonDir)).toBeUndefined()
+  })
+
   test("missing, corrupt, unsupported, and unreadable all mean no cache and never throw", async () => {
     const commonDir = join(home, "clone", ".git")
     const path = boardCachePath(commonDir)
@@ -92,7 +100,7 @@ describe("loadBoardSnapshot", () => {
     const path = boardCachePath(commonDir)
     await mkdir(join(path, ".."), { recursive: true })
     const doc = (extra: Record<string, unknown>) => ({
-      schemaVersion: 1,
+      schemaVersion: boardCacheSchemaVersion,
       repoKey: "k",
       commonDir,
       builtAt: 1_000,

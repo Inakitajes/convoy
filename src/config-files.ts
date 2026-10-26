@@ -12,6 +12,7 @@ import { dirname, join } from "node:path"
 import { whichOnPath } from "./claude-code"
 import { defaultConvoyConfig, parseConvoyConfig, projectConfigPath, writeDefaultGlobalConfig, writeDefaultProjectConfig, type ConvoyConfig, type FeatureToggles } from "./config"
 import { convoyRoot, globalAgentsDir, globalConfigPath } from "./workspace"
+import type { SpecToolId } from "./spec-tools"
 
 export type ConfigFileScope = "global" | "project"
 
@@ -103,7 +104,7 @@ export type FeatureKey = keyof FeatureToggles
 
 export type FeatureState = {
   key: FeatureKey
-  enabled: boolean
+  enabled: boolean | SpecToolId
   /** Which file decided it: the project wins over the global config, else the built-in default. */
   source: "default" | "global" | "project"
 }
@@ -128,7 +129,7 @@ export async function featureStates(targetDir: string): Promise<FeatureState[]> 
     if (fromProject !== undefined) return { key, enabled: fromProject, source: "project" }
     const fromGlobal = global?.features?.[key]
     if (fromGlobal !== undefined) return { key, enabled: fromGlobal, source: "global" }
-    return { key, enabled: true, source: "default" }
+    return { key, enabled: key === "specs" ? "openspec" : true, source: "default" }
   })
 }
 
@@ -139,7 +140,7 @@ export async function featureStates(targetDir: string): Promise<FeatureState[]> 
  * appended. A missing file starts from the init template. The result must
  * load before anything is written.
  */
-export async function setProjectFeature(targetDir: string, key: FeatureKey, enabled: boolean): Promise<string> {
+export async function setProjectFeature<K extends FeatureKey>(targetDir: string, key: K, enabled: NonNullable<FeatureToggles[K]>): Promise<string> {
   const file = await configFileFor("project", targetDir)
   const before = file.body ?? defaultConvoyConfig
   if (file.body !== undefined) {
@@ -157,7 +158,7 @@ export async function setProjectFeature(targetDir: string, key: FeatureKey, enab
 }
 
 /** The YAML text with `features.<key>` set, touching only that line or appending the block. */
-export function withFeature(body: string, key: FeatureKey, enabled: boolean): string {
+export function withFeature<K extends FeatureKey>(body: string, key: K, enabled: NonNullable<FeatureToggles[K]>): string {
   const lines = body.split("\n")
   const value = `  ${key}: ${enabled}`
   const start = lines.findIndex((line) => /^features:\s*(#.*)?$/.test(line))

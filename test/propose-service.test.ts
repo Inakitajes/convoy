@@ -43,16 +43,42 @@ function recorder(overrides: Partial<ProposalCommandDeps> = {}) {
 
 const helper = { kind: "helper", url: "http://helper" } as const
 const independent = { kind: "independent", url: "http://service" } as const
+const proposalCommands = ["opsx-propose", "*propose"]
 
 describe("findProposalCommand", () => {
   test("prefers opsx-propose over any other propose-suffixed command", () => {
-    expect(findProposalCommand(["propose", "opsx-propose"])).toBe("opsx-propose")
-    expect(findProposalCommand(["help", "my-propose"])).toBe("my-propose")
-    expect(findProposalCommand(["help"])).toBeUndefined()
+    expect(findProposalCommand(["propose", "opsx-propose"], proposalCommands)).toBe("opsx-propose")
+    expect(findProposalCommand(["help", "my-propose"], proposalCommands)).toBe("my-propose")
+    expect(findProposalCommand(["help"], proposalCommands)).toBeUndefined()
+  })
+
+  test("uses the configured ordered commands, without falling back to another tool", () => {
+    const names = ["speckit.specify", "speckit-specify"]
+    expect(findProposalCommand(["opsx-propose", "speckit-specify", "speckit.specify"], names)).toBe("speckit.specify")
+    expect(findProposalCommand(["speckit-specify"], names)).toBe("speckit-specify")
+    expect(findProposalCommand(["opsx-propose"], names)).toBeUndefined()
   })
 })
 
 describe("startProposalCommand fallback ownership", () => {
+  test("missing configured commands names the attempted Spec Kit commands and releases the helper", async () => {
+    const { events, deps } = recorder()
+    const outcome = await startProposalCommand(helper, deps, ["speckit.specify", "speckit-specify"])
+    expect(outcome.status).toBe("blocked")
+    if (outcome.status === "blocked") {
+      expect(outcome.reason).toContain("speckit.specify, speckit-specify")
+      expect(outcome.reason).not.toContain("opsx-propose")
+    }
+    expect(events).toEqual(["list", "stopHelper"])
+  })
+
+  test("Spec Kit command runs only after transfer to the independently owned service", async () => {
+    const { events, deps } = recorder({ listCommands: async () => ["speckit-specify", "speckit.specify"] })
+    const outcome = await startProposalCommand(helper, deps, ["speckit.specify", "speckit-specify"])
+    expect(outcome.status).toBe("started")
+    expect(events).toEqual(["claim", "transfer", "stopHelper", "create", "invoke:speckit.specify"])
+  })
+
   test("unknown command discovery stops the helper and never claims or invokes", async () => {
     const { events, deps } = recorder({
       listCommands: async () => {
@@ -60,7 +86,7 @@ describe("startProposalCommand fallback ownership", () => {
         return "unknown"
       },
     })
-    const outcome = await startProposalCommand(helper, deps)
+    const outcome = await startProposalCommand(helper, deps, proposalCommands)
     expect(outcome.status).toBe("blocked")
     expect(events).toEqual(["list", "stopHelper"])
     if (outcome.status === "blocked") expect(outcome.reason).toContain("could not be discovered")
@@ -73,7 +99,7 @@ describe("startProposalCommand fallback ownership", () => {
         return ["help"]
       },
     })
-    const outcome = await startProposalCommand(helper, deps)
+    const outcome = await startProposalCommand(helper, deps, proposalCommands)
     expect(outcome.status).toBe("blocked")
     expect(events).toEqual(["list", "stopHelper"])
   })
@@ -85,7 +111,7 @@ describe("startProposalCommand fallback ownership", () => {
         return { status: "unavailable" as const, reason: "publish failed" }
       },
     })
-    const outcome = await startProposalCommand(helper, deps)
+    const outcome = await startProposalCommand(helper, deps, proposalCommands)
     expect(outcome.status).toBe("blocked")
     // The helper is stopped before the claim is released, and the command
     // never runs.
@@ -95,7 +121,7 @@ describe("startProposalCommand fallback ownership", () => {
 
   test("a successful transfer stops the unused helper and invokes under the independent service", async () => {
     const { events, deps } = recorder()
-    const outcome = await startProposalCommand(helper, deps)
+    const outcome = await startProposalCommand(helper, deps, proposalCommands)
     expect(outcome.status).toBe("started")
     // Transfer strictly precedes command invocation; the helper is stopped
     // before either the conversation is created or the command runs.
@@ -107,7 +133,7 @@ describe("startProposalCommand fallback ownership", () => {
 
   test("an independent service is used as-is: no transfer and no helper stop", async () => {
     const { events, deps } = recorder()
-    const outcome = await startProposalCommand(independent, deps)
+    const outcome = await startProposalCommand(independent, deps, proposalCommands)
     expect(outcome.status).toBe("started")
     expect(events).toEqual(["list", "claim", "create", "invoke:opsx-propose"])
     expect(events).not.toContain("transfer")
@@ -122,7 +148,7 @@ describe("startProposalCommand fallback ownership", () => {
         return { ok: false as const, reason: "a managed writer already owns this checkout", remediation: ["stop it first"] }
       },
     })
-    const outcome = await startProposalCommand(helper, deps)
+    const outcome = await startProposalCommand(helper, deps, proposalCommands)
     expect(outcome.status).toBe("blocked")
     expect(events).toEqual(["list", "claim", "stopHelper"])
     if (outcome.status === "blocked") {
@@ -141,7 +167,7 @@ describe("startProposalCommand fallback ownership", () => {
         stops += 1
       },
     })
-    await expect(startProposalCommand(helper, deps)).rejects.toThrow("command discovery exploded")
+    await expect(startProposalCommand(helper, deps, proposalCommands)).rejects.toThrow("command discovery exploded")
     // The pre-claim path now shares the function-level finally, so a throw
     // can never skip the owned helper's bounded stop.
     expect(stops).toBe(1)
@@ -157,7 +183,7 @@ describe("startProposalCommand fallback ownership", () => {
         stops += 1
       },
     })
-    await expect(startProposalCommand(helper, deps)).rejects.toThrow("claim store unavailable")
+    await expect(startProposalCommand(helper, deps, proposalCommands)).rejects.toThrow("claim store unavailable")
     expect(stops).toBe(1)
   })
 
@@ -173,7 +199,7 @@ describe("startProposalCommand fallback ownership", () => {
         throw new Error("session create failed")
       },
     })
-    const outcome = await startProposalCommand(helper, deps)
+    const outcome = await startProposalCommand(helper, deps, proposalCommands)
     expect(outcome.status).toBe("blocked")
     expect(stops).toBe(1)
     expect(events).toEqual(["list", "claim", "transfer", "stopHelper", "create", "releaseClaim"])

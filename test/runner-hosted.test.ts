@@ -7,7 +7,7 @@ import { join } from "node:path"
 import type { PermissionPromptInfo, PermissionReply, ProgressUI, RunOutcome } from "../src/progress"
 import type { AgentStep, RunOptions } from "../src/types"
 
-import { preparePhaseRun, run as realRun, hostedTeardownFromError, UserAbortError, compactRunRowName, type RunDeps } from "../src/runner"
+import { preparePhaseRun, specStepEnv, run as realRun, hostedTeardownFromError, UserAbortError, compactRunRowName, type RunDeps } from "../src/runner"
 import { buildRunPlan } from "../src/run-plan"
 import { noopProgress } from "../src/progress"
 import { serverAuthPath } from "../src/server-auth"
@@ -772,7 +772,7 @@ describe("run() with a hosted progress", () => {
       const bundle = await loadOpenSpecBundle({ targetDir: repo, explicitIds: ["add-login"] })
       expect(bundle).toBeDefined()
       const options = makeOptions(repo)
-      const plan = buildRunPlan({ ...options, openspec: bundle!, promptSource: "inline" })
+      const plan = buildRunPlan({ ...options, specs: { ...bundle!, tool: "openspec" }, promptSource: "inline" })
       const prepared = await preparePhaseRun({ dir: workspace, runID: "current" }, phase, { ...options, plan }, [], [])
 
       const filenames = prepared.attachments.map((part) => part.filename)
@@ -782,6 +782,86 @@ describe("run() with a hosted progress", () => {
       expect(filenames).not.toContain("original.prd.md")
     } finally {
       await rm(workspace, { recursive: true, force: true })
+      await rm(repo, { recursive: true, force: true })
+    }
+  })
+
+  test("prepares Spec Kit attachments, contract instructions, and feature env for every step", async () => {
+    const repo = await cleanRepo()
+    const workspace = await mkdtemp(join(tmpdir(), "convoy-speckit-phase-"))
+    const specFiles = [".specify/memory/constitution.md", "specs/001-login/spec.md", "specs/001-login/contracts/api.md"]
+    try {
+      for (const path of specFiles) {
+        await mkdir(join(repo, path, ".."), { recursive: true })
+        await writeFile(join(repo, path), "# Contract\n")
+      }
+      const options = makeOptions(repo)
+      const specs = { tool: "speckit" as const, changeIds: ["001-login"], specFiles }
+      const plan = buildRunPlan({ ...options, specs })
+      for (const prdHistory of [false, true]) {
+        const prepared = await preparePhaseRun({ dir: workspace, runID: "current" }, { ...skippedOpencodeStep, prdHistory }, { ...options, plan }, [], [])
+        expect(prepared.attachments.map((part) => part.filename)).toEqual(["constitution.md", "spec.md", "api.md"])
+        expect(prepared.prompt).toContain("Spec Kit spec bundle")
+        expect(prepared.prompt).toContain("When a Spec Kit feature is attached, those spec files are the contract")
+        expect(prepared.prompt).not.toContain("OpenSpec")
+        expect(prepared.env?.SPECIFY_FEATURE_DIRECTORY).toBe(join(repo, "specs", "001-login"))
+        expect(prepared.env?.SPECIFY_FEATURE_NO_PERSIST).toBe("1")
+      }
+    } finally {
+      await rm(workspace, { recursive: true, force: true })
+      await rm(repo, { recursive: true, force: true })
+    }
+  })
+
+  test("a run without a spec contract does not invent a tool in its attachment instructions", async () => {
+    const repo = await cleanRepo()
+    const workspace = await mkdtemp(join(tmpdir(), "convoy-no-spec-phase-"))
+    try {
+      const prepared = await preparePhaseRun({ dir: workspace, runID: "current" }, skippedOpencodeStep, makeOptions(repo), [], [])
+      expect(prepared.prompt).toContain("## Attachments")
+      expect(prepared.prompt).not.toContain("OpenSpec")
+      expect(prepared.prompt).not.toContain("Spec Kit")
+    } finally {
+      await rm(workspace, { recursive: true, force: true })
+      await rm(repo, { recursive: true, force: true })
+    }
+  })
+
+  test("isolates inherited feature selection without mutating the parent environment", () => {
+    const inherited = { PATH: "/bin", SPECIFY_FEATURE_DIRECTORY: "/wrong", SPECIFY_FEATURE_NO_PERSIST: "0" }
+    for (const tool of ["openspec", "speckit"] as const) {
+      for (const changeIds of [[], ["001-login", "002-search"]]) {
+        expect(specStepEnv("/w/app", { tool, changeIds, specFiles: [] }, inherited)).toEqual({ PATH: "/bin" })
+      }
+    }
+    expect(specStepEnv("/w/app", undefined, inherited)).toEqual({ PATH: "/bin" })
+    expect(specStepEnv("/w/app", { tool: "speckit", changeIds: ["001-login"], specFiles: [] }, inherited)).toEqual({
+      PATH: "/bin", SPECIFY_FEATURE_DIRECTORY: "/w/app/specs/001-login", SPECIFY_FEATURE_NO_PERSIST: "1",
+    })
+    expect(inherited.SPECIFY_FEATURE_DIRECTORY).toBe("/wrong")
+    expect(inherited.SPECIFY_FEATURE_NO_PERSIST).toBe("0")
+  })
+
+  test("passes the frozen feature environment to the run's OpenCode server", async () => {
+    const repo = await cleanRepo()
+    const dashboard = fakeDashboard()
+    const specs = { tool: "speckit" as const, changeIds: ["001-login"], specFiles: [] }
+    let serverEnv: Record<string, string | undefined> | undefined
+    try {
+      const options = makeOptions(repo, { smart: true, progress: dashboard.progress, pipeline: { name: "server-env", steps: [] } })
+      const plan = buildRunPlan({ ...options, specs })
+      const result = await realRun({ ...options, plan }, { startOpencode: async (_config, _signal, deps) => {
+        serverEnv = deps?.env
+        return fakeOpencodeHandle(fakeClient, "http://127.0.0.1:41234")
+      } })
+      try {
+        expect(serverEnv?.SPECIFY_FEATURE_DIRECTORY).toBe(join(repo, "specs", "001-login"))
+        expect(serverEnv?.SPECIFY_FEATURE_NO_PERSIST).toBe("1")
+        expect(JSON.parse(await readFile(join(result.dir, "metadata.json"), "utf8")).specs).toEqual(specs)
+      } finally {
+        await result.release?.()
+      }
+    } finally {
       await rm(repo, { recursive: true, force: true })
     }
   })
@@ -816,7 +896,7 @@ describe("run() with a hosted progress", () => {
       expect(bundle!.rootDir).toBe(launch)
       // The run executes in a checkout that does not carry the change files.
       const options = makeOptions(isolated)
-      const plan = buildRunPlan({ ...options, openspec: bundle!, promptSource: "inline" })
+      const plan = buildRunPlan({ ...options, specs: { ...bundle!, tool: "openspec" }, promptSource: "inline" })
       const prepared = await preparePhaseRun({ dir: workspace, runID: "current" }, phase, { ...options, plan }, [], [])
 
       const filenames = prepared.attachments.map((part) => part.filename)
@@ -855,7 +935,7 @@ describe("run() with a hosted progress", () => {
 
       const bundle = await loadOpenSpecBundle({ targetDir: repo, explicitIds: ["add-login"] })
       const options = makeOptions(repo)
-      const plan = buildRunPlan({ ...options, openspec: bundle!, promptSource: "inline" })
+      const plan = buildRunPlan({ ...options, specs: { ...bundle!, tool: "openspec" }, promptSource: "inline" })
       const prepared = await preparePhaseRun({ dir: workspace, runID: "current" }, phase, { ...options, plan }, [], [])
 
       const filenames = prepared.attachments.map((part) => part.filename)

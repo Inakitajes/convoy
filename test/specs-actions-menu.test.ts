@@ -139,6 +139,31 @@ test("the Actions menu archives the selected change", async () => {
   await expect(session.instance.result).resolves.toEqual({ type: "archive-change", changeID: "add-widget", worktreeDir: root })
 })
 
+test("Spec Kit keeps archive visibly disabled and close offers no archive selection", async () => {
+  const session = await openBrowser(viewWith(worktree({ specTool: "speckit" })))
+  try {
+    session.press("!")
+    await session.renderOnce()
+    expect(session.captureCharFrame()).toContain("Archive change — blocked")
+    expect(session.captureCharFrame()).toContain("Spec Kit has no archive")
+    expect(session.captureCharFrame()).toContain("Close (merge)")
+    session.press("down")
+    session.press("return")
+    await session.renderOnce()
+    expect(session.captureCharFrame()).toContain("Actions")
+    session.press("escape")
+    session.press("x")
+    await session.renderOnce()
+    const modal = session.captureCharFrame()
+    expect(modal).toContain("sync → landing")
+    expect(modal).not.toContain("archive  ")
+    expect(modal).not.toContain("sync → archive")
+    session.press("n")
+  } finally {
+    await close(session)
+  }
+})
+
 test("x on a change row opens the close confirmation with that archive selection", async () => {
   const session = await openBrowser(viewWith(worktree()))
   await selectChangeRow(session)

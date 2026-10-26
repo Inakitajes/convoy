@@ -1,17 +1,12 @@
-import { readdir, readFile, stat } from "node:fs/promises"
+import { readdir, readFile } from "node:fs/promises"
 import { join, resolve } from "node:path"
 import { stdin, stdout } from "node:process"
 
 import { assembleControlBoard, worktreeDisplayName, type ControlBoard, type BoardWorktree } from "./control-board"
-import { readCheckoutActiveChanges } from "./checkout-openspec"
+import { loadMergedConvoyConfig } from "./config"
+import { specToolFor, specToolOf, specTools, type SpecArtifactSection, type SpecToolDescriptor, type SpecToolId } from "./spec-tools"
 import type { BoardSource } from "./board-refresh"
 import type { TuiRoute } from "./tui-session"
-import {
-  collectDirRelativeMarkdown,
-  openspecDirName,
-  stripYamlFrontmatter,
-  titleFromProposal,
-} from "./openspec"
 
 /**
  * Read-only specs viewer data layer (change `worktree-control-center`, tasks
@@ -25,12 +20,14 @@ import {
  */
 
 /** The artifact groups a change's markdown files fall into. */
-export type SpecArtifactSection = "proposal" | "design" | "tasks" | "delta" | "other"
+export type { SpecArtifactSection }
 
 export type SpecArtifact = {
   section: SpecArtifactSection
   /** First path segment under the change's `specs/` — delta files group per capability. */
   capability?: string
+  /** Change-relative filename heading for a merged design-document group. */
+  heading?: string
   /** Markdown path (absolute when the entry carries its checkout). */
   file: string
 }
@@ -42,6 +39,7 @@ export type SpecsChangeEntry = {
   checkout: string
   /** First heading of this copy's proposal.md; falls back to the id when it's missing or unreadable. */
   title: string
+  specTool?: SpecToolId
   artifacts: SpecArtifact[]
 }
 
@@ -50,6 +48,8 @@ export type SpecsView = {
   targetDir: string
   /** False when the launch checkout has no `openspec/` directory at all. */
   present: boolean
+  /** The launch checkout's configured tool; false means no spec reads. */
+  specTool?: SpecToolId | false
   /** The worktree-rooted inventory: one entry per Git-registered checkout. */
   board: ControlBoard
   /**
@@ -62,9 +62,6 @@ export type SpecsView = {
   /** The repository's detected base branch, for the sync/close disclosures. */
   baseBranch?: string
 }
-
-/** Artifact order in the detail view: the named planning sections first, then deltas, then leftovers. */
-const sectionOrder: Record<SpecArtifactSection, number> = { proposal: 0, design: 1, tasks: 2, delta: 3, other: 4 }
 
 /**
  * What the specs browser can ask Convoy to do next. Every handoff names its
@@ -92,35 +89,20 @@ export type SpecsResolution =
  * Unmatched files land in the nearest fitting group (delta under `specs/`,
  * otherwise "Other") so nothing disappears from the view.
  */
-export function classifySpecArtifact(relativePath: string): { section: SpecArtifactSection; capability?: string } {
-  const base = relativePath.split("/").pop() ?? relativePath
-  if (base === "proposal.md") return { section: "proposal" }
-  if (base === "design.md") return { section: "design" }
-  if (base === "tasks.md") return { section: "tasks" }
-  const parts = relativePath.split("/")
-  if (parts[0] === "specs") {
-    // A capability needs a directory below `specs/`; a lone `specs/foo.md`
-    // still belongs to the delta view, just without a capability grouping.
-    const capability = parts.length >= 3 ? parts[1] : undefined
-    return { section: "delta", ...(capability ? { capability } : {}) }
+export function classifySpecArtifact(relativePath: string, tool: SpecToolDescriptor = specTools.openspec): Pick<SpecArtifact, "section" | "capability" | "heading"> {
+  const group = tool.groups.find((group) => group.files.includes(relativePath) || group.prefixes?.some((prefix) => relativePath.startsWith(prefix)))
+  if (!group) return { section: "other" }
+  if (group.kind === "delta") {
+    const parts = relativePath.split("/")
+    return { section: group.kind, ...(parts.length >= 3 ? { capability: parts[1] } : {}) }
   }
-  return { section: "other" }
+  return { section: group.kind, ...(group.headings ? { heading: relativePath } : {}) }
 }
 
 /** The label the detail view gives an artifact group. */
-export function specArtifactLabel(section: SpecArtifactSection, capability?: string): string {
-  switch (section) {
-    case "proposal":
-      return "Proposal"
-    case "design":
-      return "Design"
-    case "tasks":
-      return "Tasks"
-    case "delta":
-      return capability ? `Delta Specs (${capability})` : "Delta Specs"
-    case "other":
-      return "Other"
-  }
+export function specArtifactLabel(section: SpecArtifactSection, capability?: string, tool: SpecToolDescriptor = specTools.openspec): string {
+  const label = tool.groups.find((group) => group.kind === section)?.label ?? "Other"
+  return capability ? `${label} (${capability})` : label
 }
 
 /**
@@ -132,11 +114,12 @@ export function specArtifactLabel(section: SpecArtifactSection, capability?: str
  */
 export async function loadSpecsView(targetDir: string, prebuiltBoard?: ControlBoard): Promise<SpecsView> {
   targetDir = resolve(targetDir)
-  const openspecRoot = join(targetDir, openspecDirName)
-  const present = await dirExists(openspecRoot)
+  const tool = specToolFor(await loadMergedConvoyConfig(targetDir))
+  const present = tool ? (await Promise.all(tool.fingerprintRoots.map((root) => dirExists(join(targetDir, root))))).some(Boolean) : false
   let specs: string[] = []
-  if (present) {
-    specs = await collectDirRelativeMarkdown(join(openspecRoot, "specs"), join(openspecDirName, "specs"))
+  if (tool) {
+    const canonical = await tool.readCanonicalFiles(targetDir)
+    if (canonical.kind === "known") specs = canonical.value.slice().sort()
   }
 
   // The board join is additive: a failure (git missing, unreadable inventory)
@@ -156,8 +139,10 @@ export async function loadSpecsView(targetDir: string, prebuiltBoard?: ControlBo
   }
   const changes: SpecsChangeEntry[] = []
   for (const worktree of board.worktrees) {
+    if (worktree.specTool === false) continue
+    const localTool = specTools[worktree.specTool ?? "openspec"]
     for (const local of worktree.changes) {
-      changes.push(await loadSpecsChangeAt(local.sourcePath, local.changeId, local.checkout))
+      changes.push(await loadSpecsChangeAt(local.sourcePath, local.changeId, local.checkout, localTool))
     }
   }
   // The launch checkout is always a readable local source: when the inventory
@@ -167,11 +152,11 @@ export async function loadSpecsView(targetDir: string, prebuiltBoard?: ControlBo
   // symlink.
   const { realpathSafe } = await import("./git")
   const physicalTarget = await realpathSafe(targetDir).catch(() => targetDir)
-  if (!board.worktrees.some((worktree) => worktree.path === targetDir || worktree.path === physicalTarget)) {
-    const local = await readCheckoutActiveChanges(targetDir)
+  if (tool && !board.worktrees.some((worktree) => worktree.path === targetDir || worktree.path === physicalTarget)) {
+    const local = await tool.readActiveChanges(targetDir)
     if (local.kind === "known") {
       for (const change of local.value) {
-        changes.push(await loadSpecsChangeAt(change.sourcePath, change.changeId, targetDir))
+        changes.push(await loadSpecsChangeAt(change.sourcePath, change.changeId, targetDir, tool))
       }
     }
   }
@@ -180,6 +165,7 @@ export async function loadSpecsView(targetDir: string, prebuiltBoard?: ControlBo
   return {
     targetDir,
     present,
+    specTool: tool?.id ?? false,
     board,
     changes,
     specs,
@@ -192,23 +178,24 @@ export async function loadSpecsView(targetDir: string, prebuiltBoard?: ControlBo
  * checkout — the only source a change entry ever has (design D3: files are
  * local inputs, never ownership).
  */
-export async function loadSpecsChangeAt(changeRoot: string, id: string, checkout: string): Promise<SpecsChangeEntry> {
+export async function loadSpecsChangeAt(changeRoot: string, id: string, checkout: string, tool: SpecToolDescriptor = specTools.openspec): Promise<SpecsChangeEntry> {
   let title = id
   try {
-    const body = await readFile(join(changeRoot, "proposal.md"), "utf8")
-    title = titleFromProposal(body, id)
+    const body = await readFile(join(changeRoot, tool.proposalFile), "utf8")
+    title = tool.titleOf(body, id)
   } catch {
     // A change without a readable proposal still lists by its id.
   }
-  const relatives = await collectDirRelativeMarkdown(changeRoot, ".")
+  const relatives = await tool.changeFiles(changeRoot, ".")
   // Absolute so the browser's readFile resolves regardless of its cwd.
   const fileBase = resolve(changeRoot)
   const artifacts = relatives.map((relative) => ({
-    ...classifySpecArtifact(relative),
+    ...classifySpecArtifact(relative, tool),
     file: join(fileBase, relative),
   }))
-  artifacts.sort((a, b) => sectionOrder[a.section] - sectionOrder[b.section] || a.file.localeCompare(b.file))
-  return { kind: "change", id, checkout, title, artifacts }
+  const order = (section: SpecArtifactSection) => tool.groups.findIndex((group) => group.kind === section)
+  artifacts.sort((a, b) => order(a.section) - order(b.section) || a.file.localeCompare(b.file))
+  return { kind: "change", id, checkout, title, artifacts, specTool: tool.id }
 }
 
 /**
@@ -217,7 +204,7 @@ export async function loadSpecsChangeAt(changeRoot: string, id: string, checkout
  * changes and artifact inventories, then the launch checkout's canonical
  * specs. No colors, no control sequences, no global deduplicated change list.
  */
-export function printSpecsList(view: Pick<SpecsView, "board" | "changes" | "specs">): void {
+export function printSpecsList(view: Pick<SpecsView, "board" | "changes" | "specs" | "specTool">): void {
   stdout.write(`\nworktrees:\n`)
   for (const worktree of view.board.worktrees) {
     const branch = worktree.detached ? "detached HEAD" : (worktree.branch ?? "(no branch)")
@@ -241,11 +228,12 @@ export function printSpecsList(view: Pick<SpecsView, "board" | "changes" | "spec
       for (const change of local) {
         const heading = change.title === change.id ? change.id : `${change.id} — ${change.title}`
         stdout.write(`      ${heading}\n`)
-        for (const artifact of change.artifacts) stdout.write(`        ${specArtifactLabel(artifact.section, artifact.capability).toLowerCase()}: ${artifact.file}\n`)
+        for (const artifact of change.artifacts) stdout.write(`        ${specArtifactLabel(artifact.section, artifact.capability, specTools[change.specTool ?? "openspec"]).toLowerCase()}: ${artifact.file}\n`)
       }
     }
-    if (worktree.archiveCount) stdout.write(`    archived changes: ${worktree.archiveCount} (browsable on demand)\n`)
-    if (worktree.specCount) stdout.write(`    canonical specs: ${worktree.specCount}\n`)
+    const tool = specToolOf(worktree.specTool)
+    if (worktree.archiveCount && tool) stdout.write(`    ${tool.archives ? "archived changes" : tool.settledLabel}: ${worktree.archiveCount}\n`)
+    if (worktree.specCount && tool) stdout.write(`    ${tool.canonicalLabel.toLowerCase()}: ${worktree.specCount}\n`)
   }
   // Changes whose checkout the degraded inventory could not report still list
   // under their own checkout path — never silently dropped.
@@ -254,9 +242,10 @@ export function printSpecsList(view: Pick<SpecsView, "board" | "changes" | "spec
     stdout.write(`  ${change.checkout}\n`)
     const heading = change.title === change.id ? change.id : `${change.id} — ${change.title}`
     stdout.write(`    active changes:\n      ${heading}\n`)
-    for (const artifact of change.artifacts) stdout.write(`        ${specArtifactLabel(artifact.section, artifact.capability).toLowerCase()}: ${artifact.file}\n`)
+    for (const artifact of change.artifacts) stdout.write(`        ${specArtifactLabel(artifact.section, artifact.capability, specTools[change.specTool ?? "openspec"]).toLowerCase()}: ${artifact.file}\n`)
   }
-  stdout.write("\ncanonical specs:\n")
+  const tool = specToolOf(view.specTool)
+  stdout.write(`\n${tool?.canonicalLabel.toLowerCase() ?? "specs"}:\n`)
   if (view.specs.length === 0) {
     stdout.write("    (none)\n")
     return
@@ -326,10 +315,10 @@ export async function browseSpecs(targetDir: string, route?: TuiRoute, resume?: 
   if (view.board.worktrees.length === 0 && view.changes.length === 0 && view.specs.length === 0) {
     if (route) {
       const { showNoticeTui } = await import("./notice-tui")
-      await showNoticeTui(route, { title: "specs", message: `No worktrees or specs found under ${join(view.targetDir, openspecDirName)}` })
+      await showNoticeTui(route, { title: "specs", message: `No worktrees or specs found under ${view.targetDir}` })
       return { type: "exit" }
     }
-    stdout.write(`no worktrees or specs found under ${join(view.targetDir, openspecDirName)}\n`)
+    stdout.write(`no worktrees or specs found under ${view.targetDir}\n`)
     return { type: "exit" }
   }
   if (!stdin.isTTY || !stdout.isTTY) {
@@ -358,12 +347,12 @@ export async function browseSpecs(targetDir: string, route?: TuiRoute, resume?: 
  * context; edits happen through OpenSpec authoring commands inside the session,
  * not by Convoy. Single line because the whole command travels through `zsh -lc`.
  */
-export function specsIteratePrompt(changeID: string, files: readonly string[]): string {
-  const list = files.length > 0 ? files.join(", ") : `openspec/changes/${changeID}/`
+export function specsIteratePrompt(changeID: string, files: readonly string[], tool: SpecToolDescriptor | undefined): string {
+  const list = files.length > 0 ? files.join(", ") : tool ? `${tool.changeRoot}/${changeID}/` : "none found"
+  const authoring = tool ? ` with the ${tool.label} authoring commands` : ""
   return (
-    `Continuing the OpenSpec change ${changeID}. First read these planning files: ${list}. ` +
-    "proposal.md is the motivation, design.md the approach, tasks.md the checklist, and each delta spec under specs/ records what the change adds or modifies. " +
-    "Revise the change with the OpenSpec authoring commands where my instructions ask. After reading, give a one-line status and wait for my instructions."
+    `Continuing the ${tool?.changeNoun ?? "change"} ${changeID}. First read these planning files: ${list}. ` +
+    `Revise the change${authoring} where my instructions ask. After reading, give a one-line status and wait for my instructions.`
   )
 }
 
@@ -379,7 +368,8 @@ export function buildIterateSessionInput(targetDir: string, view: SpecsView, cha
   const change = view.changes.find((entry) => entry.id === changeID)
   const files = change?.artifacts.map((artifact) => artifact.file) ?? []
   const root = change?.checkout ?? targetDir
-  return { targetDir: root, prompt: specsIteratePrompt(changeID, files), runDir: root }
+  const tool = specToolOf(change?.specTool ?? view.specTool)
+  return { targetDir: root, prompt: specsIteratePrompt(changeID, files, tool), runDir: root }
 }
 
 async function dirExists(dir: string): Promise<boolean> {
@@ -403,7 +393,7 @@ export type SpecGroup = {
   label: string
   /** True when this group merges delta specs across capabilities. */
   delta: boolean
-  entries: Array<{ file: string; capability?: string }>
+  entries: Array<{ file: string; capability?: string; heading?: string }>
 }
 
 /**
@@ -412,19 +402,20 @@ export type SpecGroup = {
  * a single group hides the tab strip entirely in the browser.
  */
 export function groupChangeArtifacts(change: SpecsChangeEntry): SpecGroup[] {
+  const tool = specTools[change.specTool ?? "openspec"]
   const groups: SpecGroup[] = []
   const byLabel = new Map<string, SpecGroup>()
   for (const artifact of change.artifacts) {
-    const label = specArtifactLabel(artifact.section, artifact.section === "delta" ? undefined : artifact.capability)
+    const label = specArtifactLabel(artifact.section, undefined, tool)
     let group = byLabel.get(label)
     if (!group) {
       group = { label, delta: artifact.section === "delta", entries: [] }
       byLabel.set(label, group)
       groups.push(group)
     }
-    group.entries.push({ file: artifact.file, ...(artifact.capability ? { capability: artifact.capability } : {}) })
+    group.entries.push({ file: artifact.file, ...(artifact.capability ? { capability: artifact.capability } : {}), ...(artifact.heading ? { heading: artifact.heading } : {}) })
   }
-  return groups
+  return groups.sort((a, b) => tool.groups.findIndex((group) => group.label === a.label) - tool.groups.findIndex((group) => group.label === b.label))
 }
 
 /**
@@ -437,7 +428,8 @@ export function specGroupSource(group: SpecGroup, bodyOf: (file: string) => stri
   const parts: string[] = []
   for (const entry of group.entries) {
     const body = bodyOf(entry.file)
-    if (group.delta && entry.capability) parts.push(`## ${entry.capability}\n\n${body}`)
+    const heading = entry.heading ?? (group.delta ? entry.capability : undefined)
+    if (heading) parts.push(`## ${heading}\n\n${body}`)
     else parts.push(body)
   }
   return parts.join("\n\n")

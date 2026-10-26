@@ -1,7 +1,7 @@
 import { isAncestor, remoteBranchTip, resolveCommit, statusPorcelain } from "./git"
 import { readPrMergeState } from "./pr-merge-state"
-import { readCheckoutActiveChanges, readCheckoutArchives } from "./checkout-openspec"
-import { openspecDirName } from "./openspec"
+import { loadMergedConvoyConfig } from "./config"
+import { specToolFor } from "./spec-tools"
 import type { OperationRecord, OperationStep } from "./operation-journal"
 import type { ReconcileFinding } from "./operation-recovery"
 
@@ -59,6 +59,10 @@ const landingKinds = new Set(["close", "squash"])
  */
 export async function reconcileStepReality(step: OperationStep, record: OperationRecord, gitCwd: string): Promise<ReconcileFinding> {
   const intent = intentOf(step, record)
+  const archiveTool = record.kind === "archive" ? specToolFor(await loadMergedConvoyConfig(typeof intent.checkout === "string" ? intent.checkout : gitCwd)) : undefined
+  if (record.kind === "archive" && !archiveTool?.archives) {
+    return { finding: "unexplained", reason: archiveTool?.archiveDisabledReason ?? "archive is unavailable with features.specs: false" }
+  }
 
   if (landingKinds.has(record.kind) && typeof intent.candidateSha === "string" && typeof intent.base === "string") {
     const candidate = await resolveCommit(intent.candidateSha, gitCwd)
@@ -85,7 +89,7 @@ export async function reconcileStepReality(step: OperationStep, record: Operatio
   }
 
   if (record.kind === "archive" && typeof intent.changeId === "string" && typeof intent.checkout === "string") {
-    const local = await readCheckoutActiveChanges(intent.checkout)
+    const local = await archiveTool!.readActiveChanges(intent.checkout)
     if (local.kind !== "known") {
       return { finding: "pending", reason: `the checkout's active changes could not be read: ${local.reason}` }
     }
@@ -100,7 +104,7 @@ export async function reconcileStepReality(step: OperationStep, record: Operatio
   // output remains — archived-but-uncommitted output is pending, never done.
   if (record.kind === "archive" && Array.isArray(intent.changes) && typeof intent.checkout === "string") {
     const changes = intent.changes.filter((entry): entry is string => typeof entry === "string")
-    const local = await readCheckoutActiveChanges(intent.checkout)
+    const local = await archiveTool!.readActiveChanges(intent.checkout)
     if (local.kind !== "known") {
       return { finding: "pending", reason: `the checkout's active changes could not be read: ${local.reason}` }
     }
@@ -112,7 +116,7 @@ export async function reconcileStepReality(step: OperationStep, record: Operatio
     if (status === undefined) {
       return { finding: "pending", reason: "the checkout's working-tree state could not be read" }
     }
-    const uncommitted = status.split("\n").filter((line) => line.trim() !== "" && line.slice(3).trim().startsWith(`${openspecDirName}/`))
+    const uncommitted = status.split("\n").filter((line) => line.trim() !== "" && line.slice(3).trim().startsWith(archiveTool!.dirtyRoot))
     if (uncommitted.length > 0) {
       return { finding: "pending", reason: "the archive output is still uncommitted in the checkout — the commit step has not completed" }
     }
@@ -120,7 +124,7 @@ export async function reconcileStepReality(step: OperationStep, record: Operatio
     // proves the archive ran (design D7, task 6.2). A change that left the
     // active set but appears in no dated archive destination was removed
     // externally rather than archived; that is not a completed operation.
-    const archives = await readCheckoutArchives(intent.checkout)
+    const archives = await archiveTool!.readSettled(intent.checkout)
     if (archives.kind !== "known") {
       return { finding: "pending", reason: `the checkout's archives could not be read: ${archives.reason}` }
     }

@@ -41,6 +41,15 @@ function planWith(steps: Step[], extra: Partial<RunPlan> = {}): RunPlan {
 }
 
 describe("run review TUI", () => {
+  test("names the frozen spec tool without changing the contract row layout", () => {
+    for (const [tool, label] of [["openspec", "openspec"], ["speckit", "spec kit"]] as const) {
+      const plan = planWith([], { specs: { tool, changeIds: ["001-login"], specFiles: ["specs/001-login/spec.md"] } })
+      const lines = plain(runReviewLines(plan, 100))
+      expect(lines.some((line) => line.includes(label) && line.includes("001-login · contract attached (1 spec file)"))).toBe(true)
+      expect(lines.some((line) => line.includes(tool === "openspec" ? "spec kit" : "openspec"))).toBe(false)
+    }
+  })
+
   test("collapses identical logical/target models and shows routed pairs with an arrow", () => {
     const plan = planWith([
       agentStep({ name: "implementer", stepName: "implementer", groupId: "g1", resolvedModel: resolved("openai/gpt-5.6-sol", "openai/gpt-5.6-sol") }),

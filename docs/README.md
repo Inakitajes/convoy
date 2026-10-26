@@ -12,7 +12,7 @@ Start with installation, choose a pipeline, then use the guides below as you wor
 | [Pipelines](pipelines.md) | Choose a built-in workflow and understand its models, advisors, and outputs. |
 | [Quality and goal loops](quality-and-goals.md) | Read the scoring rubric and configure bounded improve-and-measure loops. |
 | [Worktrees and delivery](worktrees.md) | Manage work in isolated checkouts, from planning through close. |
-| [OpenSpec workflows](openspec.md) | Use a living specification as the contract for implementation and review. |
+| [Spec-tool workflows](openspec.md) | Choose OpenSpec or Spec Kit as the contract for implementation and review. |
 | [Running Convoy](running.md) | Launch, observe, resume, and inspect runs from the CLI or TUI. |
 | [Agent sessions](agents.md) | Let Claude Code, OpenCode, or Codex compose, launch, and monitor pipelines through the Convoy skill. |
 | [Configuration](configuration.md) | Configure pipelines, agents, advisors, hooks, and project context. |
@@ -24,7 +24,7 @@ Start with installation, choose a pipeline, then use the guides below as you wor
 ## Common tasks
 
 - **Start a new feature:** [choose a pipeline](pipelines.md#built-in-pipelines) and [create an isolated worktree](worktrees.md#isolating-a-run-in-a-worktree).
-- **Work from a spec:** [select an OpenSpec change](openspec.md#openspec-native-runs) and [browse its artifacts](openspec.md#the-specs-reader-convoy-specs).
+- **Work from a spec:** [select an OpenSpec change or Spec Kit feature](openspec.md#selecting-the-contract) and [browse its artifacts](openspec.md#the-specs-reader-convoy-specs).
 - **Review an existing branch:** run `convoy -p review`; [interpret the score](quality-and-goals.md#quality-scoring).
 - **Prepare a branch for delivery:** [run `ship`](pipelines.md#built-in-pipelines), [publish the PR](safety.md#publishing-a-run), then [close the worktree](worktrees.md#closing-a-worktree-convoy-close).
 - **Run Convoy from Claude Code, OpenCode, or Codex:** [install the agent skill](agents.md#install-the-skill) with `convoy skill install`.

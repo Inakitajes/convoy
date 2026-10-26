@@ -5,6 +5,7 @@ import { LaunchPicker, branchActionForKey, branchProposalNote, compactLaunchMaxW
 import type { GoalPreview, LaunchRunSelection, LaunchRunTuiOptions } from "../src/launch-tui"
 import { ensureRepoReady, statusPorcelain } from "../src/git"
 import type { OpenSpecChangeSummary } from "../src/openspec"
+import { specTools, type SpecToolId } from "../src/spec-tools"
 
 import { parseArgs, resolveRunOptions } from "../src/cli"
 import { runReviewLines } from "../src/review-tui"
@@ -66,6 +67,7 @@ async function createLauncher(
   specs: readonly OpenSpecChangeSummary[] = [],
   presetChanges?: readonly string[],
   callbacks: Partial<Pick<LaunchRunTuiOptions, "readDirtyStatus" | "prepareRun" | "root" | "specsDestination">> = {},
+  tool: SpecToolId = "openspec",
 ) {
   const testRenderer = await createTestRenderer({ width, height })
   const picker = new LaunchPicker(
@@ -83,6 +85,10 @@ async function createLauncher(
     { enabled: true, entries: [] },
     specs,
     presetChanges,
+    undefined,
+    undefined,
+    undefined,
+    specTools[tool],
   )
   return { ...testRenderer, picker }
 }
@@ -449,6 +455,22 @@ describe("launch TUI narrow-width row budgets", () => {
 })
 
 describe("launch TUI prompt input", () => {
+  test("the Spec Kit picker names its contract and injects the backend's default prompt", async () => {
+    const launcher = await createLauncher(110, 30, 1, [{ id: "001-login", title: "Passwordless login" }], undefined, {}, "speckit")
+    try {
+      launcher.mockInput.pressEnter()
+      await launcher.renderOnce()
+      const frame = launcher.captureCharFrame()
+      expect(frame).toContain("A Spec Kit feature is the contract")
+      expect(frame).not.toContain("OpenSpec")
+      launcher.mockInput.pressEnter()
+      await launcher.renderOnce()
+      expect(launchView(launcher.picker).prompt).toBe("Implement the attached Spec Kit feature.")
+    } finally {
+      await closeLauncher(launcher)
+    }
+  })
+
   test("sanitizes pasted prompt text while preserving unlimited multi-line content", () => {
     const longLine = "x".repeat(5_000)
     const pasted = `first\r\nsecond\rthird\t${longLine}\u0000\u001b[31mred\u001b[0m`

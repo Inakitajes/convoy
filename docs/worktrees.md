@@ -28,6 +28,8 @@ convoy worktrees delete-branch --branch <name>
 convoy worktrees recover --operation <id>
 ```
 
+Spec actions use only the [configured tool](openspec.md#choose-one-spec-tool). With Spec Kit, `convoy worktrees archive` refuses before any effect with **"Spec Kit has no archive"**; archive actions remain visible but disabled. Convoy never moves a feature to an invented archive directory.
+
 The retired `convoy feature` subcommands (`show`, `adopt`, `bind`, `revise`, `recover`, `new-work`) and feature-ID flags fail non-zero with worktree-selection guidance before any effect: checkouts are selected explicitly per action, never adopted, bound, or registered. Legacy registry files under `<git-common-dir>/convoy/` stay inert — they create no rows, no lifecycle, and no cleanup authority — and an explicit previewed cleanup can remove them only after proving no unresolved operation depends on them.
 
 ### Work-first Home: create work, talk, then run
@@ -39,7 +41,7 @@ Selecting a work item opens its detail, whose rows are grouped into labeled sect
 - **work** — the OpenCode authoring actions:
   - **Open conversation** (`v`) opens (or resumes the exactly linked) OpenCode authoring conversation in the work's verified checkout, foreground: Convoy hands the terminal over and returns to the same selected work when the client exits, with artifacts and observations refreshed. Linked sessions survive Convoy restarts — the durable reference is the harness id + session id, stored as a non-authoritative navigation hint and re-verified against live Git and the harness before every resume, so any server of the same repository reopens the exact conversation; an unavailable session is reported and replaced by an explicit new conversation, never silently.
   - **Open in window** (`w`) is the explicit external presentation: it opens the same session in a Herdr/Zellij pane or a new terminal window. Pane creation and session availability are reported independently — a created pane whose session cannot be verified never reads as a running conversation, and because pane backends expose no child handle, Convoy cannot observe the pane's client: it asks you to confirm the conversation started there rather than claiming it.
-  - **Propose** (`p`) runs the project's own authoring workflow (`opsx-propose` in this repo) inside the work's checkout through OpenCode's command API. If the project has no supported proposal command, Propose says so and ordinary conversation stays usable. Newly authored changes appear under that checkout on return — review them in the Worktrees control center before archiving or running; a differing change id never renames the worktree's branch.
+  - **Propose** (`p`) runs the configured spec tool's installed authoring workflow inside the work's checkout: `opsx-propose` (then another command ending in `propose`) for OpenSpec; `speckit.specify`, then `speckit-specify`, for Spec Kit. Claude discovery also reads `.claude/skills/<name>/SKILL.md`. If no supported command is available, Propose names what it looked for and ordinary conversation stays usable; it never silently installs commands. Newly authored active changes appear under that checkout on return — review them before running or archiving (OpenSpec only); a differing change id never renames the worktree's branch.
   - **Execute pipeline** (`e`) launches the worktree-scoped pipeline, reusing that checkout's own configuration, spec sources, and explicitly selected local changes.
 - **git** — the guarded publication operations (`fetch` `f`, `sync` `y`, `push` `u`, `pr` `g`, `squash` `m`), each delegating to the same CLI command surface with the same guards (inaccessible checkout, detached HEAD, active managed writer).
 - **destructive** — the dangerous cluster stays together at the end of the actions, never scattered between the safe ones, led by the deliberate composition: **Close review** (`x`) with its guarded base destination, then **Remove worktree** (`d`) and **Delete branch** (`z`, projected blocked here because this worktree holds the branch).
@@ -56,7 +58,7 @@ convoy spin --change add-login  # pin the change
 convoy spin --prefix fix        # override the inferred conventional prefix
 ```
 
-Given an uncommitted OpenSpec change on the base checkout, spin creates an isolated worktree on a branch named `<prefix>/<change-id>`, the prefix inferred deterministically from the change's own delta specs: any `ADDED` requirement → `feat`, every requirement `MODIFIED`/`RENAMED` → `change`, only `REMOVED` → `fix` (mixed without an addition, or no deltas yet → `feat`). The worktree location follows the repository's documented worktree convention exactly like launcher-isolated runs. The uncommitted change files move into the worktree (untracked only — committed files stay put and arrive via the base ref), nothing is committed, and the handoff names the directory, the branch, and the next step:
+Given an uncommitted active change of the configured tool on the base checkout, spin creates an isolated worktree on a branch named `<prefix>/<change-id>`. For OpenSpec the prefix follows its delta specs: any `ADDED` requirement → `feat`, every requirement `MODIFIED`/`RENAMED` → `change`, only `REMOVED` → `fix` (mixed without an addition, or no deltas yet → `feat`). For Spec Kit it defaults to `feat`, because there are no delta operations; completed features are not selectable. `--prefix` overrides either default. The worktree location follows the repository's documented convention exactly like launcher-isolated runs. Only the selected directory moves — `openspec/changes/<id>/` or `specs/<id>/` (including nested contracts/checklists); committed files stay put and arrive via the base ref. Spec Kit's `.specify/` stays untouched, including `.specify/feature.json`. Nothing is committed, and the handoff names the directory, the branch, and the next step:
 
 ```text
 spun out add-login → ~/.convoy/worktrees/feat-add-login
@@ -64,7 +66,7 @@ branch: feat/add-login
 continue the same OpenCode conversation: run /move and pick the worktree above
 ```
 
-The operator's OpenCode session relocates with `/move` (OpenCode's own command — Convoy never forks or summarizes a session). If `/move`'s picker doesn't list the fresh worktree, open a session in the printed directory instead. A tree dirty outside `openspec/` refuses to spin; a change already committed on the base branch spins with nothing moved. Spin registers nothing: the created worktree appears through the Git worktree inventory like any other checkout, and no feature record, association, or adoption is involved. If the transfer stops partway, the pending transfer keeps its source/destination evidence until reconciled — moved versus remaining files are reported, and neither copy is overwritten.
+The operator's OpenCode session relocates with `/move` (OpenCode's own command — Convoy never forks or summarizes a session). If `/move`'s picker doesn't list the fresh worktree, open a session in the printed directory instead. Dirt outside `openspec/` for OpenSpec or `specs/` for Spec Kit refuses to spin — `.specify/` is not part of Spec Kit's tolerated dirty tree. A change already committed on the base branch spins with nothing moved. Spin registers nothing: the created worktree appears through the Git worktree inventory like any other checkout, and no feature record, association, or adoption is involved. If the transfer stops partway, the pending transfer keeps its source/destination evidence until reconciled — moved versus remaining files are reported, and neither copy is overwritten.
 
 The global `/convoy-spin` OpenCode command is opt-in: run `convoy opencode install` once and the thin wrapper at `~/.config/opencode/commands/convoy-spin.md` tells the agent to run `convoy spin` and relay its output, touching no other command files (spin never writes into your global config).
 
@@ -73,10 +75,10 @@ The global `/convoy-spin` OpenCode command is opt-in: run `convoy opencode insta
 ```bash
 convoy close --worktree <path> --base <local-branch>
 convoy close --branch feat/add-login
-convoy close --change add-widget          # archive exactly this local change first
+convoy close --change add-widget          # OpenSpec: archive exactly this local change first
 ```
 
-One reviewed composition of the independent worktree operations, each step checked before it runs:
+One reviewed composition of the independent worktree operations, each step checked before it runs. With **Spec Kit**, close offers **no archive inputs or archive step**: review covers **sync and whole-branch squash only**, leaving feature directories in place. Task completion is not archiving, and active features do not become close prerequisites. The archive-specific parts below apply only to OpenSpec:
 
 1. **Review** — the explicit checkout, its actual branch, the selected base, and the explicitly selected archive set (zero is valid) are disclosed before any mutation; selecting changes controls what is archived, never the whole-branch squash scope.
 2. **Sync** — merge the base branch into the source branch inside the worktree when the base is not already contained. Conflicts stop with the conflict listed; resolve, commit, and re-run close.

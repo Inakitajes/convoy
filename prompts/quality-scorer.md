@@ -11,14 +11,18 @@ A reviewer is asked to find problems; an open-ended question gets an open-ended 
 ## Inputs
 
 1. **The working contract**, in priority order:
-   - The attached **OpenSpec change bundle** — the current `openspec/specs/**` plus the active `openspec/changes/<id>/` proposal, design delta, and delta specs — when an active change resolved on this checkout. Its **Requirements/Scenarios** (cited by id) are the contract for `prd`, and its scope is the contract for `scope`.
+   - The attached **spec bundle**, when changes were explicitly selected on this checkout. The attachment names its tool; apply the matching contract paragraph below for `prd` and `scope`.
    - Otherwise `prd.md` — the task brief (and the checkout's historical PRD, when attached). This is the contract for *what* was asked.
 2. The attached reports from previous phases — evidence about what happened, never a substitute for inspecting the artifact yourself. The scope report's **Checks** section (when attached) is real execution evidence: the scope step ran the repo's checks once and recorded command, exit code, and output — grade `operational`/`tests` against it rather than rerunning anything.
 3. The cumulative diff against the base branch, plus the repository around it.
 4. `.convoy/quality-rubric.md`, when present in the repository — it **overrides** the rubric embedded in this prompt. If the file exists, use it as the authoritative rubric (same dimension names, same 0–100 anchors, same severity definitions; it may adjust weights or deduction values).
 5. `.convoy/quality-bar.md`, when present — a concrete comparison target (reference implementation, target test suite, latency/throughput target, or a known-good example). See "The bar rule" below.
 
-Inspect the actual artifact: the diff, the files it touches, the tests that exercise it. **Never grade a summary written by the builder.** Never infer intent from the diff when an OpenSpec bundle or a PRD is attached — the contract names what was asked; the diff only answers whether it is met. If a claim in a previous report is load-bearing for a dimension, verify it against the artifact before scoring that dimension.
+When the contract is an OpenSpec change, the bundle contains the current `openspec/specs/**` plus the selected `openspec/changes/<id>/` artifacts. Grade `prd` against its **Requirements/Scenarios** (cited by id) and `scope` against its declared scope and ADDED/MODIFIED/REMOVED delta operations.
+
+When the contract is a Spec Kit feature, the bundle contains `.specify/memory/constitution.md` when present and every Markdown file under the selected `specs/<id>/` directories. Grade `prd` and `scope` against the feature's user-story acceptance scenarios and `FR-`/`SC-` ids, citing them in findings. Spec Kit has no delta operations: do not require OpenSpec requirement names or delta specs.
+
+Inspect the actual artifact: the diff, the files it touches, the tests that exercise it. **Never grade a summary written by the builder.** Never infer intent from the diff when a spec bundle or a PRD is attached — the contract names what was asked; the diff only answers whether it is met. If a claim in a previous report is load-bearing for a dimension, verify it against the artifact before scoring that dimension.
 
 ## The rubric (v1)
 
@@ -26,16 +30,16 @@ Score six dimensions from 0 to 100, then combine by weight. The anchors apply pe
 
 | Dimension | Weight | What it measures |
 |---|---|---|
-| `prd` | 30% | The working contract is implemented: with an OpenSpec change attached, every **Requirement/Scenario** (by id) in the change's spec, including edge cases and non-happy paths; otherwise every promise of the PRD. |
+| `prd` | 30% | Every promise of the working contract is implemented, using the attached tool's criteria above, including edge cases and non-happy paths; otherwise every promise of the PRD. |
 | `tests` | 20% | Behavioral coverage of the working contract's promises, not line coverage. |
 | `security` | 15% | Security and robustness of the touched code only: input validation, authorization, injection, secrets, unsafe deserialization, error handling. |
 | `maintainability` | 15% | Pattern alignment with this repository (cite establishing evidence), complexity, duplication, naming, dead code, boundaries. |
 | `operational` | 10% | Build, typecheck, lint, and tests are green; i18n, migrations, no debug code, no accidental churn. |
-| `scope` | 10% | Only what the working contract asked changed: with an OpenSpec bundle, the change's declared scope; otherwise the PRD. No unrelated refactors, dependency churn, or file churn. |
+| `scope` | 10% | Only what the working contract asked changed: with a spec bundle, its declared scope; otherwise the PRD. No unrelated refactors, dependency churn, or file churn. |
 
 ### Anchored scales
 
-- **`prd`** — 100: every contract promise implemented (the change's Requirements/Scenarios when an OpenSpec bundle is attached; otherwise the PRD's), plausible edge cases handled. 90: every contract promise implemented, a minor edge case untested or unresolved. 75: one promise missing or a real edge case broken. 60: multiple promises missing or a core flow broken. Below 60: core promises unfulfilled.
+- **`prd`** — 100: every contract promise implemented (the attached tool's criteria above, otherwise the PRD's), plausible edge cases handled. 90: every contract promise implemented, a minor edge case untested or unresolved. 75: one promise missing or a real edge case broken. 60: multiple promises missing or a core flow broken. Below 60: core promises unfulfilled.
 - **`tests`** — 100: every promise has a test that would fail if the implementation were reverted, edge cases included, suite green. 90: every promise protected, some edge cases uncovered. 75: a central promise unprotected, or tests that assert nothing (superficial). 60: most new behavior untested. Below 60: no meaningful tests for the change. Line coverage is reported as a datum, never as a score.
 - **`security`** — 100: nothing exploitable in the touched code. 90: minor hardening opportunities only. 75: a real but non-exploitable robustness gap. 60: an exploitable issue in the touched code. Below 60: a critical vulnerability.
 - **`maintainability`** — 100: the change looks like it was written by someone who already works in this repository. 90: minor cleanup only. 75: a pattern violation with establishing evidence, or avoidable complexity. 60: systemic misalignment. Below 60: the change fights the repository.
@@ -46,7 +50,7 @@ Score six dimensions from 0 to 100, then combine by weight. The anchors apply pe
 
 Classify every finding against these definitions, **never by the worst thing you happened to find**. A change with only minor findings cannot be scored as failing, no matter how many minors exist.
 
-- **`critical`** — breaks a core promise of the working contract (the change's Requirements/Scenarios when an OpenSpec bundle is attached, else the PRD); exploitable in touched code; corrupts data; or breaks the build/tests of the main path. Deduction: **−15** from the affected dimension.
+- **`critical`** — breaks a core promise of the working contract (the attached tool's criteria above, else the PRD); exploitable in touched code; corrupts data; or breaks the build/tests of the main path. Deduction: **−15** from the affected dimension.
 - **`major`** — breaks an edge case or a non-core path; a central promise has no protecting test; or a repo-pattern violation with establishing evidence. Deduction: **−8**.
 - **`minor`** — style, consistency, optional improvements, or speculation. Deduction: **−2**.
 

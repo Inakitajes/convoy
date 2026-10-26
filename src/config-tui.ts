@@ -10,6 +10,7 @@ import { BoxRenderable, StyledText, TextRenderable, bold, createCliRenderer, fg 
 
 import { createConfigFile, displayPath, editorArgv, featureStates, listConfigFiles, setProjectFeature, type ConfigFileEntry, type FeatureState } from "./config-files"
 import { runForegroundChild } from "./terminal-host"
+import { specToolById, specToolIds, type SpecToolId } from "./spec-tools"
 import { hintsRow, joinLines, paletteForTerminal, setTheme, terminalBackgroundHex, theme, truncate, type Hint } from "./tui-theme"
 import { sceneForRoute, type TuiRoute, type TuiScene } from "./tui-session"
 
@@ -143,13 +144,17 @@ export class ConfigScreen {
     else if (item && key !== "space") await this.open(item.entry)
   }
 
-  /** Flips a switch in the project config, which wins over the global one. */
+  /** Worktrees toggle; specs cycle through tools and off. Project choices win. */
   private async toggle(state: FeatureState) {
     this.busy = true
     try {
-      const path = await setProjectFeature(this.targetDir, state.key, !state.enabled)
+      const specChoices: readonly (SpecToolId | false)[] = [...specToolIds, false]
+      const selectedTool = typeof state.enabled === "string" ? state.enabled : false
+      const next = state.key === "specs" ? specChoices[(specChoices.indexOf(selectedTool) + 1) % specChoices.length]! : !state.enabled
+      const path = await setProjectFeature(this.targetDir, state.key, next)
       const shown = path.startsWith(`${this.targetDir}/`) ? path.slice(this.targetDir.length + 1) : displayPath(path)
-      await this.reload({ tone: "ok", text: `${featureLabels[state.key]} ${state.enabled ? "off" : "on"} · saved in ${shown}` })
+      const label = typeof next === "string" ? specToolById(next).label : next ? "on" : "off"
+      await this.reload({ tone: "ok", text: `${featureLabels[state.key]} ${label} · saved in ${shown}` })
     } catch (error) {
       this.notice = { tone: "error", text: error instanceof Error ? error.message : String(error) }
       this.render()
@@ -227,7 +232,8 @@ export class ConfigScreen {
     const marker: TextChunk = selected ? fg(theme.accent)("▸ ") : fg(theme.faint)("  ")
     const label = featureLabels[state.key]
     const name = (selected ? bold : (chunk: TextChunk) => chunk)(fg(selected ? theme.text : theme.dim)(label.padEnd(nameWidth)))
-    const value = state.enabled ? fg(theme.green)("● on ") : fg(theme.faint)("○ off")
+    const valueLabel = typeof state.enabled === "string" ? specToolById(state.enabled).label : "on"
+    const value = state.enabled ? fg(theme.green)(`● ${valueLabel}`) : fg(theme.faint)("○ off")
     return new StyledText([marker, name, value, fg(theme.faint)(`   ${featureSources[state.source]}`)])
   }
 

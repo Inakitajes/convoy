@@ -7,7 +7,7 @@ Ask Claude Code, OpenCode, or Codex to run a pipeline for you, from the session 
 - [Install the skill](#install-the-skill)
 - [Pipeline commands](#pipeline-commands)
 - [What the agent does](#what-the-agent-does)
-- [OpenSpec changes](#openspec-changes)
+- [Spec-tool changes](#spec-tool-changes)
 - [Ad hoc pipelines](#ad-hoc-pipelines)
 - [Safety](#safety)
 
@@ -43,7 +43,7 @@ The installed skill describes the binary that installed it, so run `convoy skill
 | `/convoy-fixer` | `convoy -p fixer` | yes |
 | `/convoy-hunter` | `convoy -p hunter` | no |
 
-Whatever follows the command is the request: a focus for a review (`/convoy-review the payments module`), the task to implement, the findings to fix, or an OpenSpec change id (`/convoy-implement add-login`). The agent then runs the usual loop below with the pipeline already chosen: plan, launch detached in the background, monitor, relay questions, report. A read-only pipeline launches straight after the plan, with `--yolo`; one that changes code waits for your go-ahead and runs with `--smart`. A project pipeline with the same name replaces the built-in, as it does for `convoy -p`.
+Whatever follows the command is the request: a focus for a review (`/convoy-review the payments module`), the task to implement, the findings to fix, or a configured-tool change id (`/convoy-implement add-login` for OpenSpec, `/convoy-implement 001-login` for Spec Kit). The agent then runs the usual loop below with the pipeline already chosen: plan, launch detached in the background, monitor, relay questions, report. A read-only pipeline launches straight after the plan, with `--yolo`; one that changes code waits for your go-ahead and runs with `--smart`. A project pipeline with the same name replaces the built-in, as it does for `convoy -p`.
 
 Claude Code and Codex get them as user-invoked skills (`disable-model-invocation: true`) in the skills directory above, `~/.claude/skills/convoy-review/SKILL.md`; OpenCode as global commands, `~/.config/opencode/commands/convoy-review.md`. The `convoy-` prefix keeps them clear of the harnesses' own `/review` and of commands you wrote; a `convoy-<pipeline>` command without Convoy's marker is left untouched, and the install exits 1 to say so.
 
@@ -53,22 +53,29 @@ The skill teaches a fixed loop on top of the [headless CLI](running.md#driving-c
 
 1. **Discover.** `convoy pipelines` lists every runnable pipeline (built-in, global, project) and the agents a pipeline can use; `convoy pipelines show <name>` prints one pipeline's resolved steps: agent, model, runner, advisor, read-only, parallel groups, and goal loop. Both take `--json`.
 2. **Choose or compose.** A built-in, a project pipeline, or a new [pipeline file](pipelines.md#pipeline-files) for the task, validated with `convoy pipelines show --pipeline-file <path>`.
-3. **Pick the contract.** In an OpenSpec repository, the change to run against, or none ([below](#openspec-changes)).
+3. **Pick the contract.** Resolve the global/project spec tool choice, then ask which of its active changes to run against, or none ([below](#spec-tool-changes)).
 4. **Plan.** It writes the prompt to a file, prints the resolved plan with `--plan`, and summarizes it for you before anything starts.
-5. **Launch detached.** `convoy … --manual --yolo --detach < /dev/null` (`--smart` for a pipeline that writes code) returns `run <id> started` while the run continues in the background. The agent tells you the run id and roughly how long it takes, and the session stays yours.
+5. **Launch detached.** `convoy … <--change <id> … | --manual> --yolo --detach < /dev/null` (`--smart` for a pipeline that writes code) returns `run <id> started` while the run continues in the background. The agent tells you the run id and roughly how long it takes, and the session stays yours.
 6. **Monitor.** `convoy runs <id> --wait --timeout <n>`: in the background where the harness notifies the agent when a command exits (Claude Code), otherwise in short waits under the shell timeout, spaced to the run, with a progress line per wait. The exit code tells it whether the run completed (0), ended otherwise (1), is still going (2), or needs an answer (3).
 7. **Relay questions.** A permission request the smart judge escalated is shown to you; the agent answers it with `convoy runs <id> approve|deny <request>` only after you decide.
 8. **Report.** It reads `SUMMARY.md` and the reports, and tells you the outcome, score trajectory, cost, and where the work landed, with next steps (review the diff, `convoy publish --dry-run`, or `convoy --resume <id>` after a failure).
 
-## OpenSpec changes
+## Spec-tool changes
 
-In a repository that uses [OpenSpec](openspec.md), every launch must name its contract: `--change <id>` (one or more active changes, attached to every step) or `--manual` (no change; the prompt is the brief). Convoy never picks one for you, and the skill doesn't either:
+Before listing contracts, the skill resolves `features.specs` from the global `~/.convoy/config.yaml` or `~/.convoy/config.yml` (under `$CONVOY_HOME/.convoy/` when set) and the target project's `.convoy/config.yaml` or `.convoy/config.yml`. At each level, use only the first readable file: `config.yaml` before `config.yml`; do not merge both filenames. The project value wins; the default is `openspec`. The accepted values are `openspec`, `speckit`, or `false`; `true` is rejected. Invalid or unreadable configuration stops selection rather than inventing a tool or a manual run. Neither Convoy nor the skill auto-detects from files, combines layouts, or falls back to the other layout.
 
-- If your request names a change (`/convoy-implement add-login`, "review this branch against add-login"), the agent passes `--change add-login`.
-- If it doesn't, the agent lists the active changes under `openspec/changes/` with their proposal titles, points out the one that looks right (the one named like your branch, or the only one), and asks you: that change, others, or none (`--manual`).
-- Without OpenSpec, or with `features.specs: false`, it passes `--manual`.
+Only the configured tool's active changes are listed, sorted by id (hidden entries, symlinks, and stray files are ignored):
 
-The plan it summarizes before launching names the attached changes on its `OpenSpec change:` line. With a change attached, the spec is the contract and no prompt is needed.
+- **OpenSpec:** real directories under `openspec/changes/` except `archive`, with their proposal titles.
+- **Spec Kit:** real directories directly under `specs/` containing `spec.md`, with their `# Feature Specification:` titles stripped of that prefix (or ids). Tasks missing, empty, unreadable, or still unchecked keep a feature active. Completed means at least one checkbox task and every task checked (`[x]` or `[X]`); completed features are excluded.
+
+With active changes, the skill requires your contract choice: `--change <id>` (one or more, attached to every step) or `--manual` (no change; the prompt is the brief):
+
+- If your request names changes, the agent passes each `--change <id>` in your order, keeping Spec Kit's full directory id (for example, `001-login`).
+- Otherwise it lists the active changes, suggests the one named like your branch or the only one, and asks: that change, others, or none (`--manual`). It waits for your answer before planning — it never selects a suggestion or silently falls back to `--manual`.
+- With no active changes in the configured layout (including an absent root), or `features.specs: false`, it passes `--manual`. Unreadable discovery remains unknown and is reported, not treated as an empty list.
+
+The plan names the attached OpenSpec change or Spec Kit feature. With a change attached, no prompt is needed. The [spec bundle](openspec.md) is OpenSpec's current specs plus change artifacts, or Spec Kit's constitution (when present) plus every feature Markdown file, including nested contracts and checklists, and the text contract schemas under `contracts/`. Every agent step receives it, and grading follows that tool's acceptance criteria.
 
 ## Ad hoc pipelines
 

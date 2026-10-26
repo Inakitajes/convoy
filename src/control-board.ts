@@ -1,11 +1,11 @@
-import { join } from "node:path"
-
 import type { CheckoutFingerprints } from "./board-cache"
 import { mapBounded } from "./concurrency"
+import { loadMergedConvoyConfig } from "./config"
 import { detectBaseRef, execFile } from "./git"
 import { listRuns, type RunEntry } from "./runs"
 import { listWorktrees, type WorktreeInventory } from "./worktree-inventory"
-import { readCheckoutActiveChanges, readCheckoutArchives, readCheckoutCanonicalSpecs, type LocalActiveChange } from "./checkout-openspec"
+import type { LocalActiveChange } from "./checkout-openspec"
+import { specToolFor, type SpecToolId } from "./spec-tools"
 import { observeBaseDivergence, observeDirt, observeExecutionActivity, observeUpstreamDivergence, observeWriterClaim, type ManagedWriter, type Observed } from "./worktree-observations"
 import { PrCache, type PrAdapter, type PrFacts, type PrObservation } from "./pr-observations"
 
@@ -66,6 +66,8 @@ export type BoardWorktree = {
   pr?: PrObservation
   /** This checkout's own local active changes (never borrowed from another checkout). */
   changes: LocalActiveChange[]
+  /** This checkout's configured tool, or false when spec support is disabled. */
+  specTool?: SpecToolId | false
   /** Set when the local changes could not be read — unknown, not empty. */
   changesUnknown?: string
   /** Local archive count (browsable on demand; never a lifecycle summary). */
@@ -155,20 +157,29 @@ export async function assembleControlBoard(targetDir: string, options: AssembleB
     }
     if (!entry.accessible || entry.bare) return row
 
+    let tool: ReturnType<typeof specToolFor>
+    try {
+      tool = specToolFor(await loadMergedConvoyConfig(entry.path))
+      row.specTool = tool?.id ?? false
+    } catch (error) {
+      row.changesUnknown = `spec tool configuration is unreadable: ${error instanceof Error ? error.message : String(error)}`
+    }
+
     // Reuse only when the prior cycle's fingerprint for this checkout is
     // identical: unchanged change content means the OpenSpec readers (and the
     // CLI task query behind them) are not run at all.
-    const reusable = reusableWorktree(options, entry.path)
+    const prior = reusableWorktree(options, entry.path)
+    const reusable = !row.changesUnknown && prior?.specTool === row.specTool ? prior : undefined
     if (reusable) {
       row.changes = reusable.changes
       if (reusable.changesUnknown) row.changesUnknown = reusable.changesUnknown
       if (reusable.archiveCount !== undefined) row.archiveCount = reusable.archiveCount
       if (reusable.specCount !== undefined) row.specCount = reusable.specCount
-    } else {
+    } else if (tool) {
       const [changes, archives, specs] = await Promise.all([
-        readCheckoutActiveChanges(entry.path, options.taskCounts ? { taskCounts: options.taskCounts } : {}),
-        readCheckoutArchives(entry.path),
-        readCheckoutCanonicalSpecs(entry.path),
+        tool.readActiveChanges(entry.path, options.taskCounts ? { taskCounts: options.taskCounts } : {}),
+        tool.readSettled(entry.path),
+        tool.readCanonical(entry.path),
       ])
       if (changes.kind === "known") row.changes = changes.value
       else row.changesUnknown = changes.reason

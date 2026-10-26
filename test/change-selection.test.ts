@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { mkdir, rm, writeFile } from "node:fs/promises"
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -45,6 +45,19 @@ function selected(...ids: string[]): SelectedChangeInput[] {
 }
 
 describe("validateChangeSelection", () => {
+  test("uses the execution checkout's configured root, not a same-id OpenSpec directory", async () => {
+    const fixture = await createFixtureRepo({ worktrees: [{ name: "feature", branch: "feat/001-login" }] })
+    fixtures.push(fixture)
+    const checkout = fixture.worktrees.feature!
+    await fixture.write(checkout, ".convoy/config.yaml", "features:\n  specs: speckit\n")
+    await fixture.write(checkout, "specs/001-login/spec.md", "# Feature Specification: Login\n")
+    await seedChanges(checkout, ["001-login"])
+    const sourcePath = join(checkout, "specs/001-login")
+    expect(await expectedSourcePath(checkout, "001-login")).toBe(sourcePath)
+    expect(await validateChangeSelection(checkout, { mode: "selected", changes: [{ changeId: "001-login", sourcePath }] })).toMatchObject({ ok: true })
+    expect(await validateChangeSelection(checkout, { mode: "selected", changes: [{ changeId: "001-login", sourcePath: join(checkout, "openspec/changes/001-login") }] })).toMatchObject({ ok: false })
+  })
+
   test("manual mode is explicit; an empty selected list is not manual", async () => {
     const checkout = tmpdir()
     expect(await validateChangeSelection(checkout, { mode: "manual" })).toMatchObject({ ok: true, mode: "manual" })
@@ -60,7 +73,7 @@ describe("validateChangeSelection", () => {
     await seedChanges(checkout, ["change-a", "change-b", "change-c"])
     const input: ChangeSelectionInput = {
       mode: "selected",
-      changes: [selected("change-b", "change-a")].flat().map((entry) => ({ ...entry, sourcePath: expectedSourcePath(checkout, entry.changeId) })),
+      changes: await Promise.all(selected("change-b", "change-a").map(async (entry) => ({ ...entry, sourcePath: await expectedSourcePath(checkout, entry.changeId) }))),
     }
     const result = await validateChangeSelection(checkout, input)
     expect(result).toMatchObject({ ok: true, mode: "selected" })
@@ -77,8 +90,8 @@ describe("validateChangeSelection", () => {
     const input: ChangeSelectionInput = {
       mode: "selected",
       changes: [
-        { changeId: "change-present", sourcePath: expectedSourcePath(checkout, "change-present") },
-        { changeId: "change-gone", sourcePath: expectedSourcePath(checkout, "change-gone") },
+        { changeId: "change-present", sourcePath: await expectedSourcePath(checkout, "change-present") },
+        { changeId: "change-gone", sourcePath: await expectedSourcePath(checkout, "change-gone") },
       ],
     }
     const result = await validateChangeSelection(checkout, input)
@@ -106,7 +119,7 @@ describe("validateChangeSelection", () => {
     fixtures.push(fixture)
     const checkout = fixture.worktrees["dupe"]!
     await seedChanges(checkout, ["change-dup"])
-    const path = expectedSourcePath(checkout, "change-dup")
+    const path = await expectedSourcePath(checkout, "change-dup")
     const result = await validateChangeSelection(checkout, { mode: "selected", changes: [{ changeId: "change-dup", sourcePath: path }, { changeId: "change-dup", sourcePath: path }] })
     expect(result.ok).toBe(false)
     if (!result.ok) expect(result.reason).toContain("more than once")
@@ -156,13 +169,24 @@ describe("singleton suggestions require explicit acceptance", () => {
 })
 
 describe("freezeSelectedInputs", () => {
+  test("freezes the configured feature's spec.md instead of proposal.md", async () => {
+    const fixture = await createFixtureRepo()
+    fixtures.push(fixture)
+    await fixture.write(fixture.root, ".convoy/config.yaml", "features:\n  specs: speckit\n")
+    await fixture.write(fixture.root, "specs/001-login/spec.md", "# Feature Specification: Login\n")
+    const read = async (path: string) => readFile(path, "utf8")
+    const result = await freezeSelectedInputs(fixture.root, [{ changeId: "001-login", sourcePath: join(fixture.root, "specs/001-login") }], read)
+    expect(result.ok).toBe(true)
+    if (result.ok) expect(result.frozen[0]?.snapshot?.content).toContain("Feature Specification: Login")
+  })
+
   test("proposals are snapshotted with content hashes for unresolved-operation reuse", async () => {
     const fixture = await createFixtureRepo({ worktrees: [{ name: "freeze", branch: "feat/freeze" }] })
     fixtures.push(fixture)
     const checkout = fixture.worktrees["freeze"]!
     await seedChanges(checkout, ["frozen-change"])
     const read = async (path: string) => (await import("node:fs/promises")).readFile(path, "utf8")
-    const result = await freezeSelectedInputs([{ changeId: "frozen-change", sourcePath: expectedSourcePath(checkout, "frozen-change") }], read)
+    const result = await freezeSelectedInputs(checkout, [{ changeId: "frozen-change", sourcePath: await expectedSourcePath(checkout, "frozen-change") }], read)
     expect(result.ok).toBe(true)
     if (result.ok) {
       const frozen = result.frozen[0]!
@@ -177,7 +201,7 @@ describe("freezeSelectedInputs", () => {
     const checkout = fixture.worktrees["nofreeze"]!
     await mkdir(join(checkout, "openspec", "changes", "no-proposal"), { recursive: true })
     const read = async (path: string) => (await import("node:fs/promises")).readFile(path, "utf8")
-    const result = await freezeSelectedInputs([{ changeId: "no-proposal", sourcePath: expectedSourcePath(checkout, "no-proposal") }], read)
+    const result = await freezeSelectedInputs(checkout, [{ changeId: "no-proposal", sourcePath: await expectedSourcePath(checkout, "no-proposal") }], read)
     expect(result.ok).toBe(false)
     if (!result.ok) expect(result.changeId).toBe("no-proposal")
   })

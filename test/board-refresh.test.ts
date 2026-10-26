@@ -34,6 +34,27 @@ function board(paths: string[]): ControlBoard {
 }
 
 describe("fingerprintCheckout", () => {
+  test("tracks the configured tool, both Spec Kit roots, and never the unselected tree", async () => {
+    const fixture = await createFixtureRepo({})
+    fixtures.push(fixture)
+    await fixture.write(fixture.root, "specs/001-kit/spec.md", "# Feature Specification: Kit\n")
+    const open = await fingerprintCheckout(fixture.root)
+    await fixture.write(fixture.root, ".convoy/config.yaml", "features:\n  specs: speckit\n")
+    const kit = await fingerprintCheckout(fixture.root)
+    expect(kit).not.toBe(open)
+    expect(await fingerprintCheckout(fixture.root)).toBe(kit)
+    await fixture.write(fixture.root, ".specify/memory/constitution.md", "# Rules\n")
+    const constitution = await fingerprintCheckout(fixture.root)
+    expect(constitution).not.toBe(kit)
+    await fixture.write(fixture.root, "specs/001-kit/tasks.md", "- [ ] T001 do\n")
+    const tasks = await fingerprintCheckout(fixture.root)
+    expect(tasks).not.toBe(constitution)
+    await fixture.write(fixture.root, "openspec/changes/ignored/proposal.md", "# Ignore\n")
+    expect(await fingerprintCheckout(fixture.root)).toBe(tasks)
+    await fixture.write(fixture.root, ".convoy/config.yaml", "features:\n  specs: false\n")
+    expect(await fingerprintCheckout(fixture.root)).not.toBe(tasks)
+  })
+
   test("is stable when the OpenSpec tree is untouched and changes when content changes", async () => {
     const fixture = await createFixtureRepo({ worktrees: [{ name: "wt", branch: "feat/wt" }] })
     fixtures.push(fixture)
@@ -48,6 +69,25 @@ describe("fingerprintCheckout", () => {
 })
 
 describe("BoardSource", () => {
+  test("cached evidence is invalidated when a checkout changes its configured tool", async () => {
+    const fixture = await createFixtureRepo({})
+    fixtures.push(fixture)
+    const disk: BoardSnapshot = {
+      schemaVersion: 2, repoKey: "k", commonDir: "/repo/.git", builtAt: 42,
+      board: { worktrees: [{ path: fixture.root, detached: false, main: true, bare: false, accessible: true, specTool: "openspec", changes: [] }] },
+      fingerprints: {},
+    }
+    let assemblies = 0
+    const source = new BoardSource({
+      targetDir: fixture.root, commonDir: async () => "/repo/.git", load: async () => disk,
+      assemble: async () => { assemblies++; return disk.board },
+    })
+    expect(await source.cached()).toEqual(disk)
+    await fixture.write(fixture.root, ".convoy/config.yaml", "features:\n  specs: speckit\n")
+    expect(await source.cached()).toBeUndefined()
+    expect(assemblies).toBe(0)
+  })
+
   test("cached() reads memory then disk and never assembles", async () => {
     let assembleCalls = 0
     const disk: BoardSnapshot = {

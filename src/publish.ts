@@ -3,7 +3,10 @@ import { join } from "node:path"
 
 import { capSubjectWithin, maxCommitSubjectLength } from "./commit-text"
 import { execFile } from "./git"
-import { branchIdFromBranch, openspecDirName, stripYamlFrontmatter, titleFromProposal } from "./openspec"
+import { branchIdFromBranch } from "./openspec"
+import { loadMergedConvoyConfig } from "./config"
+import { readRunMetadata } from "./metadata"
+import { specToolFor, specTools, type SpecToolDescriptor } from "./spec-tools"
 import { conventionalTypeFromBranch, humanizeBranchSlug } from "./run-title"
 
 /**
@@ -366,14 +369,18 @@ const recapReportNames = ["reports/run-report.md", "reports/run-reporter.md"] as
  * when a document is absent and equal state composes equal text.
  */
 async function composePrText(input: { cwd: string; runDir?: string; branch: string }): Promise<{ title: string; text: string }> {
-  const changeId = branchIdFromBranch(input.branch)
-  const proposal = changeId ? await readProposal(input.cwd, changeId) : undefined
+  const metadata = input.runDir && input.runDir !== "/" ? await readRunMetadata(join(input.runDir, "metadata.json")) : undefined
+  const bundle = metadata?.specs
+  const tool = bundle ? specTools[bundle.tool] : specToolFor(await loadMergedConvoyConfig(input.cwd))
+  const branchChangeId = branchIdFromBranch(input.branch)
+  const changeIds = bundle?.changeIds ?? (branchChangeId ? [branchChangeId] : [])
+  const proposal = tool ? await readSelectedProposal(input.cwd, changeIds, tool) : undefined
 
   // Title: the branch's conventional prefix supplies the type (never a
   // fabricated one) and the change's proposal title — the same
-  // `titleFromProposal` reader the control board uses — else the humanized
+   // descriptor reader the control board uses — else the humanized
   // slug supplies the subject. The prompt's first line is never consulted.
-  const proposalTitle = proposal && changeId ? titleFromProposal(proposal.body, changeId) : ""
+  const proposalTitle = proposal && tool ? tool.titleOf(proposal.body, proposal.id) : ""
   const subject = proposalTitle || humanizeBranchSlug(input.branch) || input.branch
   const type = conventionalTypeFromBranch(input.branch)
   // The whole line — prefix and subject together — stays inside the shared
@@ -385,8 +392,10 @@ async function composePrText(input: { cwd: string; runDir?: string; branch: stri
 
   // Why: the proposal's Why section; else the prompt document's opening
   // paragraph — the operator's stated intent is the why for non-change runs.
-  const why = (proposal ? proposalWhySection(proposal.body) : "") || firstParagraph(await readOptional(input.runDir, "prd.md"))
-  sections.push(renderSection("Why", why ? capProse(why, whyMaxChars) : notDocumented))
+  const why = proposal && tool ? tool.whyOf(proposal.body) : undefined
+  const allowWhyFallback = !tool || tool.promptWhyFallback
+  const fallbackWhy = allowWhyFallback ? firstParagraph(await readOptional(input.runDir, "prd.md")) : ""
+  if (why || allowWhyFallback) sections.push(renderSection("Why", why ? capProse(why, whyMaxChars) : fallbackWhy ? capProse(fallbackWhy, whyMaxChars) : notDocumented))
 
   // What: the run's distilled recap; else the compacted run commit's message
   // body; else the SUMMARY.md excerpt as the historical last fallback. Embedded
@@ -407,12 +416,16 @@ async function composePrText(input: { cwd: string; runDir?: string; branch: stri
 }
 
 /** The change's proposal body read against the target checkout; `undefined` when absent or unreadable — never a blocker. */
-async function readProposal(cwd: string, changeId: string): Promise<{ body: string } | undefined> {
-  try {
-    return { body: await readFile(join(cwd, openspecDirName, "changes", changeId, "proposal.md"), "utf8") }
-  } catch {
-    return undefined
+async function readSelectedProposal(cwd: string, changeIds: readonly string[], tool: SpecToolDescriptor): Promise<{ id: string; body: string } | undefined> {
+  for (const id of changeIds) {
+    if (!tool.isChangeId(id)) continue
+    try {
+      return { id, body: await readFile(join(cwd, tool.changeRoot, id, tool.proposalFile), "utf8") }
+    } catch {
+      // Display metadata is optional; try the next explicitly selected source.
+    }
   }
+  return undefined
 }
 
 /** The distilled-recap report from the run workspace; `undefined` when the pipeline produced none. */
@@ -422,15 +435,6 @@ async function readRecapReport(runDir: string | undefined): Promise<string | und
     if (body) return body
   }
   return undefined
-}
-
-/** The proposal's `## Why` section text, up to the next heading; empty when the proposal carries none. */
-function proposalWhySection(proposalBody: string): string {
-  const lines = stripYamlFrontmatter(proposalBody).split(/\r?\n/)
-  const start = lines.findIndex((line) => /^##\s+why\b/i.test(line.trim()))
-  if (start === -1) return ""
-  const end = lines.findIndex((line, index) => index > start && /^##\s/.test(line.trim()))
-  return lines.slice(start + 1, end === -1 ? lines.length : end).join("\n").trim()
 }
 
 /** The prompt document's opening paragraph — its stated intent — with heading markers stripped. */

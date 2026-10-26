@@ -15,7 +15,7 @@ import { helperModel } from "./helper-routes"
 import { defaultCommitMessageModel } from "./commit-message"
 import { confirmRunPlan, renderRunPlan } from "./run-review"
 import { loadPrdHistoryPreview } from "./prd-history"
-import { loadOpenSpecBundle, openSpecPromptFor } from "./openspec"
+import { specPromptFor, specToolFor, specTools } from "./spec-tools"
 import { isModelGateway, modelGatewayChoices, modelGateways, type ModelGateway } from "./model-routing"
 import { browseRuns, isControlLive, isServerLive } from "./runs"
 import { browseSpecs, buildIterateSessionInput, loadSpecsView, type SpecsResolution, type SpecsResumeSelection } from "./specs"
@@ -83,7 +83,7 @@ export type ParsedArgs = {
   noConfirm?: boolean
   /** --detach: return once the coordinator is up instead of streaming the run to its end. */
   detach?: boolean
-  /** --change: explicit OpenSpec change ids, in review order (repeatable); selection is explicit only. */
+  /** --change: explicit configured-tool change ids, in review order. */
   changes: string[]
   /** --manual: the explicit no-change run mode (valid with zero selected changes). */
   manual?: boolean
@@ -376,10 +376,10 @@ export async function runRootLauncherLoop(launch: () => Promise<"quit" | "contin
   }
 }
 
-/** Refuses an OpenSpec-only command in a project that turned specs off. */
+/** Refuses a spec-tool command in a project that turned specs off. */
 async function assertSpecsEnabled(targetDir: string, command: string): Promise<void> {
-  if (featuresOf(await loadMergedConvoyConfig(targetDir).catch(() => undefined)).specs) return
-  throw new Error(`${command} needs OpenSpec, which this project turned off (features.specs: false)`)
+  if (specToolFor(await loadMergedConvoyConfig(targetDir))) return
+  throw new Error(`${command} needs specs, which this project turned off (features.specs: false)`)
 }
 
 async function runHomeSession(targetDir: string): Promise<void> {
@@ -407,14 +407,16 @@ async function runHomeSession(targetDir: string): Promise<void> {
   // was viewing, by verified identity; the first open passes none and selects
   // New worktree. Persisted hints stay non-authoritative and never drive this.
   let lastSelection: { path: string; branch?: string } | undefined
-  const features = featuresOf(await loadMergedConvoyConfig(targetDir).catch(() => undefined))
+  const config = await loadMergedConvoyConfig(targetDir)
+  const features = featuresOf(config)
+  const specsEnabled = Boolean(specToolFor(config))
 
   try {
     // Without worktree management the session opens on Pipelines: the
     // launcher is the root screen, reaching Runs, Config, and (when on) Specs,
     // and its q ends the session.
     if (!features.worktrees) {
-      await runRootLauncherLoop(() => launchInteractiveRun(targetDir, undefined, undefined, route, { root: true, specsDestination: features.specs }), () => interrupted)
+      await runRootLauncherLoop(() => launchInteractiveRun(targetDir, undefined, undefined, route, { root: true, specsDestination: specsEnabled }), () => interrupted)
       return
     }
     await runHomeNavigationLoop({
@@ -435,7 +437,7 @@ async function runHomeSession(targetDir: string): Promise<void> {
           onWorktreeSelected: (selection) => {
             lastSelection = selection
           },
-          specs: features.specs,
+          specs: specToolFor(config)?.id ?? false,
         }),
       openWork: async (worktree, action) => {
         await dispatchWorkAction(targetDir, route, worktree, action)
@@ -606,13 +608,13 @@ export async function dispatchWorkAction(targetDir: string, route: TuiRoute, wor
     // The archive set is the checkout's own active changes, read fresh here and
     // disclosed in the confirmation before any effect (capability feature-close:
     // an explicit archive set, never a silent zero-archive from the menu path).
-    const { readCheckoutActiveChanges } = await import("./checkout-openspec")
-    const archive = await readCheckoutActiveChanges(worktree)
+    const tool = specToolFor(await loadMergedConvoyConfig(worktree))
+    const archive: ReadResult<LocalActiveChange[]> = tool?.archives ? await tool.readActiveChanges(worktree) : { kind: "known", value: [] }
     // Launch-time pre-mutation confirmation (task 10.1), same contract the
     // specs browser shows: name source worktree/path/branch, selected base,
     // the explicit archive set (empty allowed), whole-branch scope, and the
     // source/base diff-stat (task 10.5) before any sync/archive/squash effect.
-    if (!(await confirmHomeClose({ route, worktree, branch: branch ?? "", base, targetDir, archive }))) return
+    if (!(await confirmHomeClose({ route, worktree, branch: branch ?? "", base, targetDir, archive, tool }))) return
     // A refused close shows its blockers in a visible notice (task 7.9)
     // instead of writing them to stderr behind the TUI and returning to Home
     // as if nothing happened.
@@ -624,9 +626,13 @@ export async function dispatchWorkAction(targetDir: string, route: TuiRoute, wor
   if (action === "archive") {
     // Archive acts on explicitly selected changes (never by discovery), so the
     // operator marks one or more of the checkout's own active changes first.
-    const { readCheckoutActiveChanges } = await import("./checkout-openspec")
     const { showNoticeTui } = await import("./notice-tui")
-    const active = await readCheckoutActiveChanges(worktree)
+    const tool = specToolFor(await loadMergedConvoyConfig(worktree))
+    if (!tool?.archives) {
+      await showNoticeTui(route, { title: "archive change", message: tool?.archiveDisabledReason ?? "specs are off (features.specs: false)" })
+      return
+    }
+    const active = await tool.readActiveChanges(worktree)
     if (active.kind === "unknown") {
       await showNoticeTui(route, { title: "archive change", message: `this checkout's active changes could not be read: ${active.reason}` })
       return
@@ -693,28 +699,22 @@ async function confirmHomeClose(input: {
   base: string
   targetDir: string
   archive: ReadResult<LocalActiveChange[]>
+  tool: import("./spec-tools").SpecToolDescriptor | undefined
 }): Promise<boolean> {
   const { showRemovalConfirmTui } = await import("./removal-confirm-tui")
   const { execFile } = await import("./git")
   const displayName = input.worktree.split("/").pop() || input.worktree
   const stat = await execFile("git", ["diff", "--stat", `${input.base}...HEAD`, "--", "."], { cwd: input.worktree, allowFailure: true })
   const diffStat = stat.exitCode === 0 && stat.stdout.trim() ? stat.stdout.trim().split("\n").slice(0, 8).join("\n") : "unavailable"
-  // The same facts validateArchiveInputs enforces at execution: a change
-  // without a known-complete tasks file blocks the ordinary archive, so the
-  // confirmation discloses that before the operator commits to the run.
-  const incomplete =
-    input.archive.kind === "known" &&
-    input.archive.value.some((change) => change.tasks === undefined || change.tasks === "unknown" || change.tasks.done < change.tasks.total)
   const message = [
     `Close ${displayName} (${input.worktree})?`,
     "",
-    "Close runs sync → archive → landing: it archives the checkout's active changes and lands ONE commit covering the WHOLE branch on the base — including edits outside the selected changes. Without a linked open pull request nothing is pushed or merged; when close detects one, the landing is hosted (push the branch, GitHub squash-merges that PR with the reviewed message, fast-forward the base) and the review gate names those steps before any effect. Push and cleanup stay separate otherwise.",
+    "Close lands ONE commit covering the WHOLE branch on the base — including edits outside the selected changes. Without a linked open pull request nothing is pushed or merged; when close detects one, the landing is hosted (push the branch, GitHub squash-merges that PR with the reviewed message, fast-forward the base) and the review gate names those steps before any effect. Push and cleanup stay separate otherwise.",
     "",
     `branch   ${input.branch || "(no local branch)"}`,
     `base     ${input.base}`,
-    `archive  ${describeHomeCloseArchiveSet(input.archive)}`,
+    ...homeCloseSpecLines(input.tool, input.archive),
     "scope    whole-branch (selecting changes never narrows publication or squash scope)",
-    ...(incomplete ? ["note     a change with unknown or incomplete tasks blocks the archive step — cancel to complete it first"] : []),
     "",
     `diffstat ${diffStat}`,
     "",
@@ -722,6 +722,19 @@ async function confirmHomeClose(input: {
   ].join("\n")
   const choice = await showRemovalConfirmTui(input.route, { title: "close worktree", message, mode: "confirm", confirmLabel: "confirm" })
   return choice === "confirm"
+}
+
+/** Review only the spec operations the selected checkout's tool supports. */
+export function homeCloseSpecLines(tool: import("./spec-tools").SpecToolDescriptor | undefined, archive: ReadResult<LocalActiveChange[]>): string[] {
+  if (!tool?.archives) {
+    return ["steps    sync → landing (whole-branch squash)", ...(tool?.archiveDisabledReason ? [`specs    ${tool.archiveDisabledReason}; no feature directories are moved`] : [])]
+  }
+  const incomplete = archive.kind === "known" && archive.value.some((change) => change.tasks === undefined || change.tasks === "unknown" || change.tasks.done < change.tasks.total)
+  return [
+    "steps    sync → archive → landing (whole-branch squash)",
+    `archive  ${describeHomeCloseArchiveSet(archive)}`,
+    ...(incomplete ? ["note     a change with unknown or incomplete tasks blocks the archive step — cancel to complete it first"] : []),
+  ]
 }
 
 /**
@@ -1019,26 +1032,26 @@ async function buildReviewedPlan(input: BuildRunPlanInput): Promise<RunPlan> {
   })
   // `features.specs: false` keeps OpenSpec out of the plan entirely: nothing
   // attached, no change selection required, and an explicit --change refused.
-  const specsEnabled = featuresOf(await loadMergedConvoyConfig(input.targetDir).catch(() => undefined)).specs
-  if (!specsEnabled && (input.changes?.length ?? 0) > 0) {
-    throw new Error("--change needs OpenSpec, which this project turned off (features.specs: false)")
+  const tool = input.specs ? specTools[input.specs.tool] : specToolFor(await loadMergedConvoyConfig(input.targetDir))
+  if (!input.specs && !tool && (input.changes?.length ?? 0) > 0) {
+    throw new Error("--change needs specs, which this project turned off (features.specs: false)")
   }
   // An OpenSpec contract, when the repo has one: discovered against the launch
   // checkout (before any worktree isolate), so the launcher and `--change`
   // resolve the change the same way the runtime attaches it later.
-  const openspec = specsEnabled
-    ? await loadOpenSpecBundle({
+  const specs = input.specs ?? (tool
+    ? await tool.loadBundle({
         targetDir: input.targetDir,
         explicitIds: input.changes,
       })
-    : undefined
+    : undefined)
   // Every explicitly requested id must resolve: a typo or an archived id
   // refuses the run naming it, rather than silently dropping that contract.
   const requested = input.changes ?? []
   if (requested.length > 0) {
-    const missing = openspec ? requested.filter((id) => !openspec.changeIds.includes(id)) : requested
+    const missing = specs ? requested.filter((id) => !specs.changeIds.includes(id)) : requested
     if (missing.length > 0) {
-      throw new Error(`--change "${missing.join('", "')}" matched no active change under openspec/changes/ (archived or absent)`)
+      throw new Error(`--change "${missing.join('", "')}" matched no active ${tool?.changeNoun ?? "change"} under ${tool?.changeRoot ?? "the configured change root"}/ (settled or absent)`)
     }
   }
   // Selection is explicit only (run-launcher delta): a launch with zero
@@ -1046,12 +1059,11 @@ async function buildReviewedPlan(input: BuildRunPlanInput): Promise<RunPlan> {
   // `--manual` headless, or the launcher's Manual-prompt decision. Nothing
   // auto-attaches a singleton, a branch match, or a diff composition, and a
   // resume/retry keeps its frozen context instead of re-selecting.
-  if (openspec && openspec.changeIds.length === 0 && !input.manual && !input.resumeRunID) {
-    const { listChangeIds } = await import("./openspec")
-    const activeCount = (await listChangeIds(join(input.targetDir, "openspec", "changes"))).length
+  if (specs && specs.changeIds.length === 0 && !input.manual && !input.resumeRunID && tool) {
+    const activeCount = (await tool.listChanges(input.targetDir)).length
     throw new Error(
       activeCount === 0
-        ? "no active change under openspec/changes/: run /opsx:propose first, or pass --manual for an explicit no-change run"
+        ? `no active ${tool.changeNoun} under ${tool.changeRoot}/: run /${tool.proposalCommands[0]} first, or pass --manual for an explicit no-change run`
         : "no change is selected: pass --change <id> (repeatable, in review order) or --manual for an explicit no-change run; in the launcher, esc at the prompt opens the change list to pick from",
     )
   }
@@ -1059,7 +1071,7 @@ async function buildReviewedPlan(input: BuildRunPlanInput): Promise<RunPlan> {
   // feature-lifecycle retirement): the reviewed plan carries the explicit
   // checkout and ordered local changes, and execution validates those Git
   // facts — never a feature association.
-  return buildRunPlan({ ...input, prdHistoryPreview: preview, ...(openspec ? { openspec } : {}) })
+  return buildRunPlan({ ...input, prdHistoryPreview: preview, ...(specs ? { specs } : {}) })
 }
 
 /** The result of deciding whether goal mode applies to a resolved run. */
@@ -1563,7 +1575,8 @@ async function dispatchSpecsResolution(targetDir: string, resolution: SpecsResol
       if (!base) throw new Error("no base could be detected for close — pass an explicit base")
       // A refused close surfaces its blockers through the launching browser's
       // notice (task 7.9) rather than returning silently.
-      await runMenuGuarded(route, () => runWorktreeClose({ checkout: resolution.worktreeDir, base, changes: [resolution.changeID] }, targetDir))
+      const tool = specToolFor(await loadMergedConvoyConfig(resolution.worktreeDir))
+      await runMenuGuarded(route, () => runWorktreeClose({ checkout: resolution.worktreeDir, base, changes: tool?.archives ? [resolution.changeID] : [] }, targetDir))
       return { changeId: resolution.changeID, checkout: resolution.worktreeDir }
     }
     case "archive-change": {
@@ -1765,7 +1778,12 @@ async function openCheckoutConversationExternal(input: { launchDir: string; chec
  * never renames the worktree's branch.
  */
 async function proposeInCheckout(input: { launchDir: string; route: TuiRoute; checkout: string; branch: string; displayName: string }): Promise<void> {
-  const authoring = await authoringRouteFor(input.launchDir)
+  const tool = specToolFor(await loadMergedConvoyConfig(input.checkout))
+  if (!tool) {
+    await reportHandoffBlocker("Propose is unavailable (features.specs: false)", ["open an ordinary conversation in the worktree instead"], input.route)
+    return
+  }
+  const authoring = await authoringRouteFor(input.checkout)
   if (authoring.harness === "claude-code") {
     await proposeInCheckoutWithClaude(input, authoring.auth)
     return
@@ -1846,7 +1864,7 @@ async function proposeInCheckout(input: { launchDir: string; route: TuiRoute; ch
     },
     createConversation: (server) => createAuthoringConversation({ checkout: input.checkout, title: input.displayName, server }) as Promise<{ harness: "opencode"; sessionId: string }>,
     invokeCommand: ({ ref, server, command }) => invokeAuthoringCommand({ ref, server, command }),
-  })
+  }, tool.proposalCommands)
 
   if (outcome.status === "blocked") {
     await reportHandoffBlocker(outcome.reason, outcome.remediation, input.route)
@@ -1880,11 +1898,16 @@ async function proposeInCheckoutWithClaude(
 ): Promise<void> {
   const { createAuthoringConversation, listClaudeAuthoringCommands, openConversationForeground } = await import("./conversations")
   const { findProposalCommand } = await import("./propose-service")
-  const command = findProposalCommand(await listClaudeAuthoringCommands(input.checkout))
+  const tool = specToolFor(await loadMergedConvoyConfig(input.checkout))
+  if (!tool) {
+    await reportHandoffBlocker("Propose is unavailable (features.specs: false)", ["open an ordinary conversation in the worktree instead"], input.route)
+    return
+  }
+  const command = findProposalCommand(await listClaudeAuthoringCommands(input.checkout), tool.proposalCommands)
   if (!command) {
     await reportHandoffBlocker(
-      "this project has no supported proposal workflow command (looked for opsx:propose under .claude/commands/)",
-      ["check the project's .claude/commands/ directory — Convoy does not install commands into it", "open an ordinary conversation in the worktree instead"],
+      `this project has no supported proposal workflow command (looked for ${tool.proposalCommands.join(", ")} under .claude/commands/ and .claude/skills/)`,
+      ["check the project's .claude/commands/ and .claude/skills/ directories — Convoy does not install commands into them", "open an ordinary conversation in the worktree instead"],
       input.route,
     )
     return
@@ -2033,7 +2056,7 @@ async function resumeOptions(runID: string, targetDir?: string): Promise<RunOpti
   } catch {
     // Legacy/incomplete workspace.
   }
-  options.plan = await buildReviewedPlan({ ...options, promptSource: "resume" })
+  options.plan = await buildReviewedPlan({ ...options, promptSource: "resume", ...(metadata?.specs ? { specs: metadata.specs } : {}) })
   return options
 }
 
@@ -2059,7 +2082,7 @@ async function retryOptions(runID: string, targetDir?: string): Promise<RunOptio
   } catch {
     // Legacy/incomplete workspace.
   }
-  options.plan = await buildReviewedPlan({ ...options, promptSource: "retry" })
+  options.plan = await buildReviewedPlan({ ...options, promptSource: "retry", ...(metadata?.specs ? { specs: metadata.specs } : {}) })
   return options
 }
 
@@ -2291,7 +2314,9 @@ export async function parseCommand(argv: string[]): Promise<CliCommand> {
     // A pinned OpenSpec change is the contract: inject a short canned prompt
     // so `convoy --change add-login -p implement` does not require a brief.
     if (parsed.changes.length > 0) {
-      prompt = openSpecPromptFor(resolvedOptions.pipeline.name)
+      const tool = specToolFor(await loadMergedConvoyConfig(resolvedOptions.targetDir))
+      if (!tool) throw new Error("--change needs specs, which this project turned off (features.specs: false)")
+      prompt = specPromptFor(resolvedOptions.pipeline.name, tool)
     } else if (!hasInlinePrompt && !hasPromptFile && resolvedOptions.pipeline.defaultPrompt) {
       // A concrete-action pipeline (review, ship, hunter, ...) may carry a
       // defaultPrompt so `convoy -p review` runs without typing one. Anything
@@ -2305,6 +2330,7 @@ export async function parseCommand(argv: string[]): Promise<CliCommand> {
   const options: RunOptions = { ...resolvedOptions, prompt }
   // The gateway the run froze at launch, for the review's resume-override banner.
   let resumeGateway: ModelGateway | undefined
+  let resumeSpecs: RunPlan["specs"]
   if (hasResume) {
     const workspace = await resumeWorkspace(parsed.resumeRunID!)
     const metadata = await readRunMetadata(resolve(workspace.dir, "metadata.json"))
@@ -2312,6 +2338,7 @@ export async function parseCommand(argv: string[]): Promise<CliCommand> {
     // legacy goal-fix record as a resume would start an unbriefed improvement
     // flow. The record stays readable in history, but never continuable.
     assertResumableRun(metadata, parsed.resumeRunID!)
+    resumeSpecs = metadata?.specs
     if (metadata?.pipeline) options.pipeline = metadata.pipeline
     if (parsed.gateway === undefined) options.gateway = metadata?.modelRouting?.gateway ?? "configured"
     else resumeGateway = metadata?.modelRouting?.gateway ?? "configured"
@@ -2329,6 +2356,7 @@ export async function parseCommand(argv: string[]): Promise<CliCommand> {
     ...options,
     promptSource,
     ...(resumeGateway ? { resumeGateway } : {}),
+    ...(resumeSpecs ? { specs: resumeSpecs } : {}),
   })
   return { type: "run", options }
 }
@@ -2918,14 +2946,14 @@ Commands:
                            a session can compose, launch, and monitor pipelines itself
                            ("convoy skill --help"; "convoy skill show" prints it)
   worktrees                The worktree control center: every registered checkout with
-                           its independent Git/OpenSpec facts, plus guarded fetch, sync,
+                           its independent Git/spec facts, plus guarded fetch, sync,
                            push, archive, remove, delete-branch, and recover actions
                            ("convoy worktrees --help" for the full surface)
   specs                     The artifact-focused reader: each checkout's local active
                             changes, archives, and canonical specs, with read, apply,
                             iterate, archive, and close-review actions
                             ("convoy control" opens the worktree control board instead)
-  spin                      Spin an uncommitted OpenSpec change out of the base checkout into
+  spin                      Spin an uncommitted configured-tool change out of the base checkout into
                             an isolated worktree on a conventionally named branch (feat/…, fix/…,
                             change/…) and print the /move handoff for the current OpenCode session
   close                     The optional composition of the worktree operations: review an
@@ -2989,7 +3017,8 @@ Flags:
   --no-worktree            Run in the current working tree instead
                            (default: worktree on a trunk branch, current tree on any other)
   --branch <name>          Name for the worktree branch, instead of asking the naming model
-  --change <id>            OpenSpec change id to review/implement (openspec/changes/<id>).
+  --change <id>            Active configured-tool change id to review/implement (repeatable).
+                          features.specs: openspec (default), speckit, or false; true is invalid.
                            Repeatable and order-significant: the reviewed plan freezes the
                            selected ids in the order given, and the spec bundle (current
                            specs + those changes) attaches to every step. Selection is
@@ -3033,7 +3062,7 @@ Config keys:
   pipelines:               named step lists mixing agents and human gates
   permissions:             allow/deny additions to the bash policy (deny always wins)
   hooks:                   pre/post shell commands, globally or per pipeline
-  features:                worktrees and specs switches (each on unless set to false)
+  features:                worktrees boolean; specs: openspec (default), speckit, or false
   attachments:             files attached to every step
   The same schema lives globally at ~/.convoy/config.yaml; project config merges on top.
   Precedence: CLI flags > project config > global config > built-in defaults.
@@ -3065,7 +3094,7 @@ Flags:
 Without --yes (or with --dry-run) the command only prints the disclosed branch,
 remote, base, title, and body, so the default is safe. Unlike
 \`convoy worktrees pr\`, it uses the run-aware composer: the branch's conventional
-prefix and the OpenSpec proposal title, and a Why / What / How-tested body
+prefix and the selected spec title, and a Why / What / How-tested body
 grounded in the proposal, the run recap, and validation reports.
 `
 }

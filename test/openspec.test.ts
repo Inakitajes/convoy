@@ -248,12 +248,13 @@ describe("OpenSpec change discovery", () => {
       hooks: { pre: [], post: [], pipelines: {} },
     }
     const bundle = {
+      tool: "openspec" as const,
       changeIds: ["add-login"],
       specFiles: ["openspec/specs/auth/spec.md", "openspec/changes/add-login/proposal.md"],
     }
-    const plan = buildRunPlan({ ...options, openspec: bundle })
-    expect(plan.openspec).toEqual(bundle)
-    expect(Object.isFrozen(plan.openspec)).toBe(true)
+    const plan = buildRunPlan({ ...options, specs: bundle })
+    expect(plan.specs).toEqual(bundle)
+    expect(Object.isFrozen(plan.specs)).toBe(true)
 
     const rendered = renderRunPlan(plan)
     expect(rendered).toContain("OpenSpec change: add-login")
@@ -288,8 +289,8 @@ describe("OpenSpec change discovery", () => {
       permissions: { allow: [], deny: [] },
       hooks: { pre: [], post: [], pipelines: {} },
     }
-    const plan = buildRunPlan({ ...options, openspec: { changeIds: [], specFiles: [] } })
-    expect(plan.openspec?.changeIds).toEqual([])
+    const plan = buildRunPlan({ ...options, specs: { tool: "openspec", changeIds: [], specFiles: [] } })
+    expect(plan.specs?.changeIds).toEqual([])
     expect(renderRunPlan(plan)).toContain("no active change — scope falls back to the diff")
   })
 })
@@ -343,10 +344,11 @@ describe("--change wiring through the reviewed run plan", () => {
     const repo = await repoWithTwoChanges("main")
 
     const plan = await runPlanFor(["--dir", repo, "--change", "add-foo", "review this"])
-    expect(plan?.openspec?.changeIds).toEqual(["add-foo"])
-    expect(plan?.openspec?.specFiles).toContain("openspec/specs/auth/spec.md")
-    expect(plan?.openspec?.specFiles).toContain("openspec/changes/add-foo/proposal.md")
-    expect(plan?.openspec?.specFiles).not.toContain("openspec/changes/add-bar/proposal.md")
+    expect(plan?.specs?.changeIds).toEqual(["add-foo"])
+    expect(plan?.specs?.tool).toBe("openspec")
+    expect(plan?.specs?.specFiles).toContain("openspec/specs/auth/spec.md")
+    expect(plan?.specs?.specFiles).toContain("openspec/changes/add-foo/proposal.md")
+    expect(plan?.specs?.specFiles).not.toContain("openspec/changes/add-bar/proposal.md")
   })
 
   test("features.specs: false keeps OpenSpec out of the plan and refuses --change", async () => {
@@ -356,7 +358,7 @@ describe("--change wiring through the reviewed run plan", () => {
 
     // No selection is required and nothing is attached, though changes exist.
     const plan = await runPlanFor(["--dir", repo, "review this"])
-    expect(plan?.openspec).toBeUndefined()
+    expect(plan?.specs).toBeUndefined()
     await expect(runPlanFor(["--dir", repo, "--change", "add-foo", "review this"])).rejects.toThrow("features.specs: false")
   })
 
@@ -370,11 +372,11 @@ describe("--change wiring through the reviewed run plan", () => {
     await expect(runPlanFor(["--dir", repo, "review this"])).rejects.toThrow("no change is selected")
     // The explicit no-change mode is valid with zero selected changes.
     const manual = await runPlanFor(["--dir", repo, "--manual", "review this"])
-    expect(manual?.openspec?.changeIds).toEqual([])
+    expect(manual?.specs?.changeIds).toEqual([])
     // And the explicit selection still freezes the singleton's bundle.
     const explicit = await runPlanFor(["--dir", repo, "--change", "add-login", "review this"])
-    expect(explicit?.openspec?.changeIds).toEqual(["add-login"])
-    expect(explicit?.openspec?.specFiles).toContain("openspec/changes/add-login/proposal.md")
+    expect(explicit?.specs?.changeIds).toEqual(["add-login"])
+    expect(explicit?.specs?.specFiles).toContain("openspec/changes/add-login/proposal.md")
   })
 
   test("a matching branch name never picks its change; the explicit selection does", async () => {
@@ -387,23 +389,23 @@ describe("--change wiring through the reviewed run plan", () => {
 
     await expect(runPlanFor(["--dir", repo, "review this"])).rejects.toThrow("no change is selected")
     const plan = await runPlanFor(["--dir", repo, "--change", "add-foo", "review this"])
-    expect(plan?.openspec?.changeIds).toEqual(["add-foo"])
+    expect(plan?.specs?.changeIds).toEqual(["add-foo"])
   })
 
   test("the full ordered --change list freezes into the durable plan (B then A)", async () => {
     const repo = await repoWithTwoChanges("main")
 
     const plan = await runPlanFor(["--dir", repo, "--change", "add-bar", "--change", "add-foo", "review this"])
-    expect(plan?.openspec?.changeIds).toEqual(["add-bar", "add-foo"])
-    expect(plan?.openspec?.specFiles).toContain("openspec/changes/add-bar/proposal.md")
-    expect(plan?.openspec?.specFiles).toContain("openspec/changes/add-foo/proposal.md")
+    expect(plan?.specs?.changeIds).toEqual(["add-bar", "add-foo"])
+    expect(plan?.specs?.specFiles).toContain("openspec/changes/add-bar/proposal.md")
+    expect(plan?.specs?.specFiles).toContain("openspec/changes/add-foo/proposal.md")
   })
 
-  test("a checkout without openspec/ keeps plan.openspec undefined (today's behavior)", async () => {
+  test("a checkout without openspec/ keeps plan.specs undefined (today's behavior)", async () => {
     const repo = await repoOn("main")
 
     const plan = await runPlanFor(["--dir", repo, "review this"])
-    expect(plan?.openspec).toBeUndefined()
+    expect(plan?.specs).toBeUndefined()
   })
 
   test("--change with an unknown id refuses instead of silently reviewing without a contract", async () => {
@@ -420,7 +422,7 @@ describe("--change wiring through the reviewed run plan", () => {
     await mkdir(join(repo, openspecDirName, "changes"), { recursive: true })
     await writeFile(join(repo, openspecDirName, "changes", "README.md"), "# changes\n")
 
-    await expect(runPlanFor(["--dir", repo, "build it"])).rejects.toThrow("/opsx:propose")
+    await expect(runPlanFor(["--dir", repo, "build it"])).rejects.toThrow("/opsx-propose")
   })
 
   test("review accepts the explicit no-change mode when openspec/ is present but no change is active", async () => {
@@ -428,9 +430,9 @@ describe("--change wiring through the reviewed run plan", () => {
     await mkdir(join(repo, openspecDirName, "changes"), { recursive: true })
     await writeFile(join(repo, openspecDirName, "changes", "README.md"), "# changes\n")
 
-    await expect(runPlanFor(["--dir", repo, "-p", "review", "review this"])).rejects.toThrow("/opsx:propose")
+    await expect(runPlanFor(["--dir", repo, "-p", "review", "review this"])).rejects.toThrow("/opsx-propose")
     const plan = await runPlanFor(["--dir", repo, "-p", "review", "--manual", "review this"])
-    expect(plan?.openspec?.changeIds).toEqual([])
+    expect(plan?.specs?.changeIds).toEqual([])
   })
 
 describe("the launcher's explicit selection through prepareInteractiveRun", () => {
@@ -452,9 +454,9 @@ describe("the launcher's explicit selection through prepareInteractiveRun", () =
       isolateWorktree: false,
       changes: ["add-bar", "add-foo"],
     } as never)
-    expect(preparation.plan.openspec?.changeIds).toEqual(["add-bar", "add-foo"])
-    expect(preparation.plan.openspec?.specFiles).toContain("openspec/changes/add-bar/proposal.md")
-    expect(preparation.plan.openspec?.specFiles).toContain("openspec/changes/add-foo/proposal.md")
+    expect(preparation.plan.specs?.changeIds).toEqual(["add-bar", "add-foo"])
+    expect(preparation.plan.specs?.specFiles).toContain("openspec/changes/add-bar/proposal.md")
+    expect(preparation.plan.specs?.specFiles).toContain("openspec/changes/add-foo/proposal.md")
   })
 
   test("proceeding without a pick or the manual decision refuses; the manual decision is valid", async () => {
@@ -478,7 +480,7 @@ describe("the launcher's explicit selection through prepareInteractiveRun", () =
     }
     await expect(prepareInteractiveRun(repo, { ...base, changes: [] } as never)).rejects.toThrow("no change is selected")
     const manual = await prepareInteractiveRun(repo, { ...base, changes: [], manualNoChanges: true } as never)
-    expect(manual.plan.openspec?.changeIds).toEqual([])
+    expect(manual.plan.specs?.changeIds).toEqual([])
   })
 })
 })

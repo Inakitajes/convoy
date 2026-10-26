@@ -4,8 +4,9 @@ import { join } from "node:path"
 
 import { boardCacheKey, boardCacheSchemaVersion, loadBoardSnapshot, normalizeCommonDir, saveBoardSnapshot, snapshotMateriallyChanged, type BoardSnapshot, type CheckoutFingerprints } from "./board-cache"
 import { mapBounded } from "./concurrency"
+import { loadMergedConvoyConfig } from "./config"
 import { assembleControlBoard, defaultBoardConcurrency, type ControlBoard } from "./control-board"
-import { openspecDirName } from "./openspec"
+import { specToolFor } from "./spec-tools"
 import { repoCommonDir } from "./repo-store"
 import { listRuns, type RunEntry } from "./runs"
 import { listWorktrees, type WorktreeInventory } from "./worktree-inventory"
@@ -30,19 +31,20 @@ export const defaultFreshnessBoundMs = 15_000
 
 const fingerprintWalkLimit = 5_000
 
-/** A serializable token for one checkout's change-relevant mtimes (`openspec/`). */
+/** Tool identity and that checkout's configured artifact roots gate expensive reads. */
 export async function fingerprintCheckout(checkout: string): Promise<string | undefined> {
-  const root = join(checkout, openspecDirName)
   const tokens: string[] = []
   let truncated = false
   const walk = async (dir: string, relative: string): Promise<void> => {
     let entries
     try {
       entries = await readdir(dir, { withFileTypes: true })
-    } catch {
-      // An absent openspec dir is a stable, known-empty fingerprint.
-      tokens.push(`${relative || "."}:absent`)
-      return
+    } catch (error) {
+      if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") {
+        tokens.push(`${relative}:absent`)
+        return
+      }
+      throw error
     }
     for (const entry of entries) {
       if (tokens.length >= fingerprintWalkLimit) {
@@ -62,7 +64,9 @@ export async function fingerprintCheckout(checkout: string): Promise<string | un
     }
   }
   try {
-    await walk(root, "")
+    const tool = specToolFor(await loadMergedConvoyConfig(checkout))
+    tokens.push(`tool:${tool?.id ?? "off"}`)
+    for (const root of tool?.fingerprintRoots ?? []) await walk(join(checkout, root), root.replace(/\/+$/, ""))
   } catch {
     return undefined
   }
@@ -197,13 +201,24 @@ export class BoardSource {
    * beyond resolving the repository's common dir on the first read.
    */
   async cached(): Promise<BoardSnapshot | undefined> {
-    if (this.snapshot) return this.snapshot
-    const commonDir = await (this.options.commonDir ?? repoCommonDir)(this.targetDir)
-    if (!commonDir) return undefined
-    const load = this.options.load ?? loadBoardSnapshot
-    const disk = await load(await normalizeCommonDir(commonDir))
-    if (disk) this.snapshot = disk
-    return this.snapshot
+    if (!this.snapshot) {
+      const commonDir = await (this.options.commonDir ?? repoCommonDir)(this.targetDir)
+      if (!commonDir) return undefined
+      this.snapshot = await (this.options.load ?? loadBoardSnapshot)(await normalizeCommonDir(commonDir))
+    }
+    const snapshot = this.snapshot
+    if (!snapshot) return undefined
+    // Config reads are cheap; never paint artifacts for a tool this checkout
+    // no longer selects. Retain the snapshot internally for gated refresh reuse.
+    const matches = await mapBounded(snapshot.board.worktrees, defaultBoardConcurrency, async (row) => {
+      if (!row.accessible || row.bare || row.specTool === undefined) return true
+      try {
+        return (specToolFor(await loadMergedConvoyConfig(row.path))?.id ?? false) === row.specTool
+      } catch {
+        return false
+      }
+    })
+    return matches.every(Boolean) ? snapshot : undefined
   }
 
   /**

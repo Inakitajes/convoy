@@ -2,6 +2,7 @@ import { bg, BoxRenderable, decodePasteBytes, StyledText, stripAnsiSequences, Te
 
 import { detectBaseRef } from "./git"
 import { worktreeDotColor } from "./specs-browser"
+import { specToolOf, specTools, type SpecToolDescriptor, type SpecToolId } from "./spec-tools"
 import {
   displayWidth,
   hintsRow,
@@ -226,7 +227,7 @@ export async function launchHomeTui(
     /** Poll cadence override (defaults to the shared 5s). */
     pollMs?: number
     /** False when `features.specs` is off: no Specs destination, OpenSpec actions, or linked specs. */
-    specs?: boolean
+    specs?: SpecToolId | false
   } = {},
 ): Promise<HomeResolution> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
@@ -264,7 +265,7 @@ export async function launchHomeTui(
 export class HomeLauncher {
   readonly result: Promise<HomeResolution>
   /** Whether OpenSpec surfaces show (`features.specs`). */
-  private readonly specs: boolean
+  private readonly specs: SpecToolDescriptor | undefined
 
   private resolveResult!: (resolution: HomeResolution) => void
   private finished = false
@@ -428,11 +429,11 @@ export class HomeLauncher {
       /** Poll cadence override. */
       pollMs?: number
       /** False hides every OpenSpec surface (`features.specs: false`). */
-      specs?: boolean
+      specs?: SpecToolId | false
     } = {},
   ) {
     this.scene = options.scene
-    this.specs = options.specs ?? true
+    this.specs = specToolOf(options.specs)
     this.proposeBranchName = options.proposeBranchName
     this.boardSource = options.source
     this.onWorktreeSelected = options.onWorktreeSelected
@@ -880,7 +881,13 @@ export class HomeLauncher {
     this.finish({ type: "destination", destination: row.destination })
   }
 
+  private toolFor(worktree: BoardWorktree): SpecToolDescriptor | undefined {
+    if (worktree.specTool === false) return undefined
+    return worktree.specTool ? specTools[worktree.specTool] : this.specs
+  }
+
   private actionsFor(worktree: BoardWorktree): DetailAction[] {
+    const tool = this.toolFor(worktree)
     // Shared per-action guards, projected as advisory enabled states: a
     // blocked action stays inspectable with its reason (design D4). The
     // handlers revalidate the same guards before any effect. The actions ride
@@ -999,19 +1006,19 @@ export class HomeLauncher {
         section: "openspec",
         key: "a",
         label: "Archive change",
-        enabled: verified && !writerBusy,
-        blocker: !verified ? inaccessible : writerBusy ? busy : undefined,
+        enabled: tool?.archives === true && verified && !writerBusy,
+        blocker: !tool?.archives ? tool?.archiveDisabledReason : !verified ? inaccessible : writerBusy ? busy : undefined,
       },
       {
         id: "close",
         section: "openspec",
         key: "x",
-        label: "Close (archive & merge)",
+        label: tool?.archives ? "Close (archive & merge)" : "Close (merge)",
         enabled: verified && attached && !writerBusy,
         blocker: !verified ? inaccessible : !attached ? detached : writerBusy ? busy : undefined,
       },
     ]
-    if (this.specs) return actions
+    if (tool) return actions
     // Without specs, proposing and archiving changes go, and close is only
     // the squash merge, so it joins the git operations.
     return actions
@@ -1041,7 +1048,7 @@ export class HomeLauncher {
       for (const run of runs) entries.push({ kind: "run", run })
     }
     entries.push(...inSection("openspec"))
-    if (this.specs && !worktree.changesUnknown) {
+    if (this.toolFor(worktree) && !worktree.changesUnknown) {
       for (const change of worktree.changes) entries.push({ kind: "change", change })
     }
     entries.push(...inSection("git"))
@@ -1933,7 +1940,8 @@ export class HomeLauncher {
         const counts: string[] = []
         if (worktree.changes.length > 0) counts.push(`${worktree.changes.length} active`)
         if (worktree.specCount) counts.push(`${worktree.specCount} spec${worktree.specCount === 1 ? "" : "s"}`)
-        if (worktree.archiveCount) counts.push(`${worktree.archiveCount} archived`)
+        const tool = this.toolFor(worktree)
+        if (worktree.archiveCount && tool) counts.push(`${worktree.archiveCount} ${tool.archives ? "archived" : tool.settledLabel}`)
         if (worktree.activity?.kind === "known" && worktree.activity.value.total > 0) counts.push(`${worktree.activity.value.total} live`)
         fact("changes", counts.join(" · ") || "none")
         const items = worktree.changes.slice(0, 6)
@@ -2112,8 +2120,9 @@ export class HomeLauncher {
     }
     for (const { section, label } of DETAIL_SECTIONS) {
       // Without specs the OpenSpec section and its linked specs are gone.
-      if (section === "openspec" && !this.specs) continue
-      lines.push(...this.headingLines(label, width))
+      const tool = this.toolFor(worktree)
+      if (section === "openspec" && !tool) continue
+      lines.push(...this.headingLines(section === "openspec" ? tool!.label : label, width))
       for (const entry of entryRows(section)) pushEntry(entry)
       // The Runs section lists the checkout's recent runs (or an honest empty
       // line) beneath its New run row; every other section is actions only.

@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises"
 import { join } from "node:path"
 
 import { firstMeaningfulLine, stripControlBytes } from "./commit-text"
-import { isOpenSpecChangeId, openspecDirName, titleFromProposal } from "./openspec"
+import { specTools, type SpecToolId } from "./spec-tools"
 
 /**
  * One dependency-light title-resolution module for every human title a run
@@ -76,11 +76,12 @@ export function resolveRunTitle(input: { changeTitle?: string; branch?: string; 
  * to the id inside that reader. `undefined` when the change or proposal is
  * missing or unreadable — never an invented title.
  */
-export async function readChangeTitle(targetDir: string, changeId: string): Promise<string | undefined> {
-  if (!isOpenSpecChangeId(changeId)) return undefined
+export async function readChangeTitle(targetDir: string, changeId: string, tool: SpecToolId = "openspec"): Promise<string | undefined> {
+  const descriptor = specTools[tool]
+  if (!descriptor.isChangeId(changeId)) return undefined
   try {
-    const body = await readFile(join(targetDir, openspecDirName, "changes", changeId, "proposal.md"), "utf8")
-    return titleFromProposal(body, changeId)
+    const body = await readFile(join(targetDir, descriptor.changeRoot, changeId, descriptor.proposalFile), "utf8")
+    return descriptor.titleOf(body, changeId)
   } catch {
     return undefined
   }
@@ -96,17 +97,10 @@ export async function readChangeTitle(targetDir: string, changeId: string): Prom
  * validation, not here. `undefined` when no selected proposal supplies a
  * usable title.
  */
-export async function firstSelectedChangeTitle(targetDir: string, changeIds: readonly string[] | undefined): Promise<string | undefined> {
+export async function firstSelectedChangeTitle(targetDir: string, changeIds: readonly string[] | undefined, tool: SpecToolId = "openspec"): Promise<string | undefined> {
   for (const changeId of changeIds ?? []) {
-    if (!isOpenSpecChangeId(changeId)) continue
-    let title: string | undefined
-    try {
-      const body = await readFile(join(targetDir, openspecDirName, "changes", changeId, "proposal.md"), "utf8")
-      title = titleFromProposal(body, changeId)
-    } catch {
-      continue
-    }
-    if (title && title !== changeId) return title
+    const title = await readChangeTitle(targetDir, changeId, tool)
+    if (title && (title !== changeId || specTools[tool].fallbackTitleIsUsable)) return title
   }
   return undefined
 }
@@ -118,8 +112,8 @@ export async function firstSelectedChangeTitle(targetDir: string, changeIds: rea
  * degrades to the next one. The selected ids come only from the accepted run
  * plan — never from the branch spelling.
  */
-export async function resolveRunTitleFor(input: { targetDir: string; changeIds?: readonly string[]; branch?: string; prompt?: string }): Promise<string | undefined> {
-  const changeTitle = await firstSelectedChangeTitle(input.targetDir, input.changeIds)
+export async function resolveRunTitleFor(input: { targetDir: string; tool?: SpecToolId; changeIds?: readonly string[]; branch?: string; prompt?: string }): Promise<string | undefined> {
+  const changeTitle = await firstSelectedChangeTitle(input.targetDir, input.changeIds, input.tool)
   return resolveRunTitle({ changeTitle, branch: input.branch, prompt: input.prompt })
 }
 

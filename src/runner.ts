@@ -57,6 +57,7 @@ import { log } from "./log"
 import { LoopGuard, LoopGuardError, observationFromSessionEvent, resolveLoopGuard, type LoopGuardConfig, type LoopGuardObservation } from "./loop-guard"
 import { openRunMetadata, recordProgress, type RunMetadataStore } from "./metadata"
 import { openOpencodeSessionWindow, startOpencode } from "./opencode"
+import { specTools, type SpecBundle } from "./spec-tools"
 import { clearServerAuth, writeServerAuth } from "./server-auth"
 import { defaultStopPolicy, type StopOutcome, type StopPolicy } from "./process-stop"
 import { HerdrReporter } from "./herdr"
@@ -706,9 +707,7 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
       // The accepted ordered local changes feed the run-title precedence
       // (capability run-titles, task 10.3): proposal title → humanized branch
       // → prompt line, resolved once at open and persisted.
-      ...(options.plan?.openspec?.changeIds && options.plan.openspec.changeIds.length > 0
-        ? { selectedChangeIds: options.plan.openspec.changeIds }
-        : {}),
+      ...(options.plan?.specs ? { specs: options.plan.specs } : {}),
       ...(runBranch ? { branch: runBranch } : {}),
     })
     const pipeline = metadata.pipeline
@@ -912,7 +911,7 @@ export async function run(options: RunOptions, deps: RunDeps = defaultRunDeps) {
           // default to their own short-lived lifetime class. The run id rides the
           // lifetime record so a later orphan recovery can tie the child back to
           // its run (design D6).
-          { lifetime: "run", runId: workspace.runID },
+          { lifetime: "run", runId: workspace.runID, env: specStepEnv(options.targetDir, options.plan?.specs) },
         )
       } finally {
         shutdown.signal.removeEventListener("abort", abortBoot)
@@ -1757,7 +1756,15 @@ async function runPhase(
   }
 }
 
+/** Clear ambient feature routing before applying the reviewed bundle's tool. Never mutates its input. */
+export function specStepEnv(checkout: string, bundle?: SpecBundle, inherited: Record<string, string | undefined> = process.env): Record<string, string | undefined> {
+  const { SPECIFY_FEATURE_DIRECTORY: _directory, SPECIFY_FEATURE_NO_PERSIST: _persist, ...env } = inherited
+  return { ...env, ...(bundle ? specTools[bundle.tool].stepEnv(checkout, bundle.changeIds) : {}) }
+}
+
 type PreparedPhaseRun = {
+  /** A per-run copy: retries and every runner inherit the frozen spec selection. */
+  env?: Record<string, string | undefined>
   attachments: FilePartInput[]
   /** The overflow fallback: the prompt lists the attachments by path instead of inlining them. */
   attachmentsByPath?: boolean
@@ -1800,12 +1807,13 @@ export async function preparePhaseRun(
   // falls back to the historical PRD.
   const historyCoversBundle = Boolean(options.prdHistory && phase.prdHistory)
   const historyFiles = historyCoversBundle ? await scopeContractFiles(options, workspace.runID) : []
-  const specFiles = historyCoversBundle ? [] : await openSpecBundleFileParts(options)
+  const specFiles = historyCoversBundle ? [] : await specBundleFileParts(options)
   const attachments = [...contextFiles, ...phaseFiles, ...historyFiles, ...specFiles, ...extraFiles]
-  const prompt = buildPhasePrompt(workspace, phase)
+  const prompt = buildPhasePrompt(workspace, phase, options.plan?.specs)
   const model = selectedModel(phase, options.modelOverride)
 
   return {
+    env: specStepEnv(options.targetDir, options.plan?.specs),
     attachments,
     prompt,
     model,
@@ -1844,24 +1852,23 @@ async function historicalPrdFileParts(targetDir: string, excludeRunID: string): 
 }
 
 /**
- * The scope contract for a prdHistory-opted phase: the OpenSpec spec bundle when
+ * The scope contract for a prdHistory-opted phase: the selected spec bundle when
  * an active change resolved on this checkout, else the single oldest historical
  * PRD. The bundle supersedes history only on detection — a repo without
- * `openspec/`, or one with no active change, keeps today's behavior exactly.
+ * a configured spec layout, or one with no active change, keeps today's behavior.
  */
 async function scopeContractFiles(options: RunOptions, excludeRunID: string): Promise<FilePartInput[]> {
-  const bundle = options.plan?.openspec
-  if (bundle && bundle.changeIds.length > 0) return openSpecBundleFileParts(options)
+  const bundle = options.plan?.specs
+  if (bundle && bundle.changeIds.length > 0) return specBundleFileParts(options)
   return historicalPrdFileParts(options.targetDir, excludeRunID)
 }
 
 /**
- * Attaches every markdown file of the resolved OpenSpec change (proposal,
- * design, tasks, delta specs) plus the current `openspec/specs/**`. Empty when
+ * Attaches every file of the frozen contract bundle. Empty when
  * no change resolved, so callers can always concatenate it.
  */
-async function openSpecBundleFileParts(options: RunOptions): Promise<FilePartInput[]> {
-  const bundle = options.plan?.openspec
+async function specBundleFileParts(options: RunOptions): Promise<FilePartInput[]> {
+  const bundle = options.plan?.specs
   if (!bundle || bundle.changeIds.length === 0) return []
   try {
     // The run's checkout is the only artifact source (delta run-launcher:
@@ -1874,11 +1881,11 @@ async function openSpecBundleFileParts(options: RunOptions): Promise<FilePartInp
       if (existsSync(inRun)) paths.push(inRun)
     }
     if (paths.length < bundle.specFiles.length) {
-      log.warn(`OpenSpec spec bundle: ${bundle.specFiles.length - paths.length} of ${bundle.specFiles.length} spec files are missing from the run's checkout; skipped — no other checkout was consulted`)
+      log.warn(`${specTools[bundle.tool].label} spec bundle: ${bundle.specFiles.length - paths.length} of ${bundle.specFiles.length} spec files are missing from the run's checkout; skipped — no other checkout was consulted`)
     }
     return await fileParts(paths, options.targetDir, "skip")
   } catch (error) {
-    log.warn(`couldn't attach OpenSpec spec bundle: ${formatSdkError(error)}`)
+    log.warn(`couldn't attach ${specTools[bundle.tool].label} spec bundle: ${formatSdkError(error)}`)
     return []
   }
 }
@@ -2397,7 +2404,8 @@ async function runPhaseAttempt(
   // One composition per run directory, reused across the run's attempts. It
   // carries the Claude enforcement plan (this Convoy's hook and permission host
   // unless the environment overrides them).
-  const composition = attemptCompositionFor({ runId: workspace.runID, cwd: targetDir, env: process.env })
+  const env = prepared.env ?? specStepEnv(targetDir)
+  const composition = attemptCompositionFor({ runId: workspace.runID, cwd: targetDir, env })
 
   const registration = composition.registry.require(runnerId)
   const capabilities = await registration.execution.capabilities()
@@ -2519,7 +2527,7 @@ async function runPhaseAttempt(
     ...(prepared.auth ? { auth: prepared.auth } : {}),
     // A process-owned session tees its raw stream (`logs/<step>.<attempt>.<runner>.jsonl`).
     ...(!serverSession ? { streamLogPath: join(workspace.dir, "logs", `${phase.name}.${attempt}.${stepRunnerFor(phase.runner).sessionName}.jsonl`) } : {}),
-    env: process.env,
+    env,
     client,
   }
 
@@ -2781,10 +2789,11 @@ export function withAttachmentsByPath(prompt: string, attachments: readonly File
   ].join("\n")
 }
 
-function buildPhasePrompt(workspace: Workspace, phase: AgentStep) {
+function buildPhasePrompt(workspace: Workspace, phase: AgentStep, specs?: SpecBundle) {
   // Every runner submits through Convoy's write_report tool: OpenCode's plugin,
   // the CLI runners' MCP tool, named the way each runner lists it.
   const tool = runnerDescriptor(stepRunnerFor(phase.runner).id).reportTool
+  const specTool = specs ? specTools[specs.tool] : undefined
   return [
     `# Pipeline phase: ${phase.name}`,
     "",
@@ -2811,7 +2820,7 @@ function buildPhasePrompt(workspace: Workspace, phase: AgentStep) {
         : `This phase may edit the target repository when the phase-specific instructions call for it. Call ${tool} to persist the final report rather than writing a report file directly.`,
     "",
     "## Attachments",
-    "You will receive as file attachments: project context files when present, the original PRD, the OpenSpec spec bundle (proposal, design, tasks, and delta specs) when an active change is attached, the project's historical PRD for this branch when present, previous phase reports, the cumulative diff against the base branch (or, when it is too large to attach, an overview that inlines what fits and points to the full diff; read the omitted files from it), and any `--file` passed by the user. Read them before acting. When an OpenSpec change is attached, those spec files are the contract — implement and grade against them, not a reconstructed brief.",
+    `You will receive as file attachments: project context files when present, the original PRD, ${specTool ? `the ${specTool.label} spec bundle when an active change is attached, ` : ""}the project's historical PRD for this branch when present, previous phase reports, the cumulative diff against the base branch (or, when it is too large to attach, an overview that inlines what fits and points to the full diff; read the omitted files from it), and any \`--file\` passed by the user. Read them before acting.${specTool ? ` When ${specTool.changeArticle} ${specTool.changeNoun} is attached, those spec files are the contract — implement and grade against them, not a reconstructed brief.` : ""}`,
     "",
     "## Project context",
     "Convoy automatically attaches these target-repo files when they exist: `.convoy/rules.md`, `AGENTS.md`, and `CLAUDE.md`.",

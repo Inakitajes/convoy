@@ -1,17 +1,13 @@
-import { cp, mkdir, readFile, rename, rm, rmdir, stat } from "node:fs/promises"
+import { cp, mkdir, rename, rm, rmdir, stat } from "node:fs/promises"
 import { dirname, join, relative, sep } from "node:path"
 import { stdout } from "node:process"
 
 import { detectBaseRef, execFile, statusPorcelain } from "./git"
-import {
-  collectDirRelativeMarkdown,
-  isOpenSpecChangeId,
-  listChangeIds,
-  openspecDirName,
-} from "./openspec"
+import { loadMergedConvoyConfig } from "./config"
+import { specToolFor, type SpecToolDescriptor } from "./spec-tools"
 import { repoCommonDir } from "./repo-store"
 import { acknowledgeStep, createOperation, ensureOperationsRoot, recordStepIntent, resolveOperation } from "./operation-journal"
-import { branchNameForChange, branchNameTaken, createIsolatedWorktree, detectSpinPrefixOverride, inferChangePrefix } from "./worktree"
+import { branchNameForChange, branchNameTaken, createIsolatedWorktree, detectSpinPrefixOverride } from "./worktree"
 
 /**
  * `convoy spin` — the retained legacy proposal-transfer utility (capability
@@ -53,24 +49,25 @@ export type SpinResult = {
  */
 export async function runSpin(options: SpinOptions): Promise<SpinResult> {
   const { targetDir } = options
+  const tool = specToolFor(await loadMergedConvoyConfig(targetDir))
+  if (!tool) throw new Error("spin is unavailable with features.specs: false")
 
   // 1. Refuse rather than interact with unrelated changes. Only dirt inside
   //    openspec/ is spin's business; anything else stops the sequence.
   const porcelain = await statusPorcelain(targetDir)
-  const outside = dirtyOutsideOpenspec(porcelain)
+  const outside = dirtyOutsideSpecRoot(porcelain, tool.dirtyRoot)
   if (outside.length > 0) {
     throw new Error(
-      `the working tree has changes outside ${openspecDirName}/; commit or stash them first so spin doesn't interact with unrelated work\n  ${outside.join("\n  ")}`,
+      `the working tree has changes outside ${tool.dirtyRoot}; commit or stash them first so spin doesn't interact with unrelated work\n  ${outside.join("\n  ")}`,
     )
   }
 
   // 2. Resolve the change: --change wins; a single uncommitted change is auto;
   //    several uncommitted changes stop for a choice instead of guessing.
-  const changeID = await resolveChangeID(targetDir, options.changeID)
+  const changeID = await resolveChangeID(targetDir, options.changeID, tool)
 
   // 3. Derive the branch name from the change's own delta operations.
-  const deltaBodies = await readDeltaBodies(targetDir, changeID)
-  const prefix = options.prefix ? detectSpinPrefixOverride(options.prefix) : inferChangePrefix(deltaBodies)
+  const prefix = options.prefix ? detectSpinPrefixOverride(options.prefix) : await tool.branchPrefix(join(targetDir, tool.changeRoot, changeID))
   const branch = branchNameForChange(changeID, prefix)
   const baseRef = await spinBaseRef(targetDir)
 
@@ -116,14 +113,14 @@ export async function runSpin(options: SpinOptions): Promise<SpinResult> {
   // 6. Carry the uncommitted files over. Committed files stay exactly where
   //    they are — the worktree's base ref carries them, and overlap resolves
   //    at merge time.
-  const untracked = await listUntrackedFilesUnder(targetDir, join(openspecDirName, "changes", changeID))
+  const untracked = await listUntrackedFilesUnder(targetDir, join(tool.changeRoot, changeID))
   // `committedOnBase` must be verified against the base ref, not inferred from
   // "no untracked files": a change committed on some *other* branch has no
   // untracked files here, and the worktree's base ref would not carry it (SC-9).
-  const seenOnBase = await changePresentAtRef(baseRef, changeID, targetDir)
+  const seenOnBase = await changePresentAtRef(baseRef, join(tool.changeRoot, changeID), targetDir)
   const movedFiles =
     untracked.length > 0
-      ? await moveFilesIntoWorktree(targetDir, worktree.dir, untracked, join(targetDir, openspecDirName, "changes", changeID))
+      ? await moveFilesIntoWorktree(targetDir, worktree.dir, untracked, join(targetDir, tool.changeRoot, changeID))
       : []
   const committedOnBase = seenOnBase && movedFiles.length === 0
   if (!seenOnBase && untracked.length === 0) {
@@ -171,13 +168,14 @@ export function printSpinHandoff(result: SpinResult): void {
 export function spinHelp(): string {
   return `convoy spin [--change <id>] [--prefix <type>]
 
-Spin an uncommitted OpenSpec change out of the base checkout into an isolated
+Spin an uncommitted change of the configured spec tool out of the base checkout into an isolated
 worktree on a conventionally named branch (<prefix>/<change-id>), move the
 change files in, and print the /move handoff for the current OpenCode session.
 
-The prefix is inferred from the change's own delta specs: any ADDED requirement
+For OpenSpec the prefix is inferred from the change's own delta specs: any ADDED requirement
 → feat, only MODIFIED → change, only REMOVED → fix, no delta specs yet → feat.
-A tree dirty outside openspec/ refuses to spin; a change already committed on
+For Spec Kit the prefix is feat. A tree dirty outside openspec/ (OpenSpec) or
+specs/ (Spec Kit) refuses to spin; .specify/feature.json is never moved. A change already committed on
 the base branch spins with nothing moved. The /convoy-spin OpenCode command is
 opt-in: run \`convoy opencode install\` once to install the thin wrapper that
 runs this command from a session (spin never touches your global config).
@@ -186,20 +184,20 @@ Usage:
   convoy spin [--change <id>] [--prefix <type>]
 
 Options:
-  --change <id>    Pin the OpenSpec change (default: the single uncommitted one)
+  --change <id>    Pin the active change (default: the single uncommitted one)
   --prefix <type>  Override the inferred conventional prefix (change, feat, fix, …)
 `
 }
 
 // ── resolution helpers ───────────────────────────────────────────────────
 
-/** Porcelain entries whose path is outside `openspec/`. */
-export function dirtyOutsideOpenspec(porcelain: string): string[] {
+/** Porcelain entries whose path is outside the configured spec tree. */
+export function dirtyOutsideSpecRoot(porcelain: string, dirtyRoot: string): string[] {
   const out: string[] = []
   for (const line of porcelain.split("\n")) {
     if (line.trim() === "") continue
     const path = porcelainPath(line)
-    if (path && !path.startsWith(`${openspecDirName}/`)) out.push(line.trim())
+    if (path && !path.startsWith(dirtyRoot)) out.push(line.trim())
   }
   return out
 }
@@ -219,16 +217,18 @@ function porcelainPath(line: string): string | undefined {
  * several stop with a list and a non-zero exit, and none (everything already
  * committed) falls back to a single active change — the committed-on-base path.
  */
-async function resolveChangeID(targetDir: string, explicit: string | undefined): Promise<string> {
-  const active = await listActiveChangeIds(targetDir)
+async function resolveChangeID(targetDir: string, explicit: string | undefined, tool: SpecToolDescriptor): Promise<string> {
+  const local = await tool.readActiveChanges(targetDir)
+  if (local.kind !== "known") throw new Error(`the active ${tool.changeNoun} list could not be read: ${local.reason}`)
+  const active = local.value.map((change) => change.changeId)
   if (explicit) {
     if (!active.includes(explicit)) {
-      throw new Error(`--change "${explicit}" matched no active change under ${openspecDirName}/changes/ (archived or absent)`)
+      throw new Error(`--change "${explicit}" matched no active ${tool.changeNoun} under ${tool.changeRoot}/ (settled or absent)`)
     }
     return explicit
   }
 
-  const uncommitted = await listUncommittedChangeIds(targetDir)
+  const uncommitted = await listUncommittedChangeIds(targetDir, tool.changeRoot, active)
   if (uncommitted.length === 1) return uncommitted[0]!
   if (uncommitted.length > 1) {
     throw new Error(
@@ -236,22 +236,18 @@ async function resolveChangeID(targetDir: string, explicit: string | undefined):
     )
   }
   if (active.length === 1) return active[0]!
-  if (active.length === 0) throw new Error(`no active change under ${openspecDirName}/changes/; propose one first (openspec)`)
+  if (active.length === 0) throw new Error(`no active ${tool.changeNoun} under ${tool.changeRoot}/; propose one first (${tool.proposalCommands[0]})`)
   throw new Error(`several committed changes and no uncommitted one; pick one with --change:\n  ${active.join("\n  ")}`)
 }
 
-async function listActiveChangeIds(targetDir: string): Promise<string[]> {
-  return listChangeIds(join(targetDir, openspecDirName, "changes"))
-}
-
-/** Change ids with at least one untracked file under `openspec/changes/<id>/`. */
-async function listUncommittedChangeIds(targetDir: string): Promise<string[]> {
-  const untracked = await listUntrackedFilesUnder(targetDir, join(openspecDirName, "changes"))
+/** Active change ids with at least one untracked file in their configured tree. */
+async function listUncommittedChangeIds(targetDir: string, changeRoot: string, active: readonly string[]): Promise<string[]> {
+  const untracked = await listUntrackedFilesUnder(targetDir, changeRoot)
   const ids = new Set<string>()
   for (const file of untracked) {
-    const rest = relative(join(targetDir, openspecDirName, "changes"), join(targetDir, file))
+    const rest = relative(join(targetDir, changeRoot), join(targetDir, file))
     const id = rest.split("/")[0]
-    if (id && isOpenSpecChangeId(id)) ids.add(id)
+    if (id && active.includes(id)) ids.add(id)
   }
   return [...ids].sort()
 }
@@ -266,21 +262,6 @@ async function listUntrackedFilesUnder(targetDir: string, pathPrefix: string): P
   return result.stdout.split("\n").map((line) => line.trim()).filter(Boolean)
 }
 
-/** The delta-spec bodies of a change (empty when it has none yet → `feat`). */
-async function readDeltaBodies(targetDir: string, changeID: string): Promise<string[]> {
-  const changeRoot = join(targetDir, openspecDirName, "changes", changeID)
-  const relatives = await collectDirRelativeMarkdown(join(changeRoot, "specs"), "specs")
-  const bodies: string[] = []
-  for (const relativePath of relatives) {
-    try {
-      bodies.push(await readFile(join(changeRoot, relativePath), "utf8"))
-    } catch {
-      // A delta that vanished mid-read contributes nothing to the inference.
-    }
-  }
-  return bodies
-}
-
 /** The base ref a launcher-isolated run would use: detected base, else HEAD. */
 async function spinBaseRef(targetDir: string): Promise<string> {
   const detected = await detectBaseRef(targetDir).catch(() => undefined)
@@ -288,10 +269,10 @@ async function spinBaseRef(targetDir: string): Promise<string> {
 }
 
 /** Whether the change's directory exists in the tree of `ref` (committed on that ref). */
-async function changePresentAtRef(ref: string, changeID: string, targetDir: string): Promise<boolean> {
+async function changePresentAtRef(ref: string, changePath: string, targetDir: string): Promise<boolean> {
   const result = await execFile(
     "git",
-    ["ls-tree", "-d", "--name-only", ref, "--", join(openspecDirName, "changes", changeID)],
+    ["ls-tree", "-d", "--name-only", ref, "--", changePath],
     { cwd: targetDir, allowFailure: true },
   )
   return result.exitCode === 0 && result.stdout.trim() !== ""

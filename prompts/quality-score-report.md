@@ -6,10 +6,14 @@ This is an audit-only phase: do not modify the repository. You have bash, so ver
 
 ## Inputs
 
-1. The working contract the scorers graded against: the attached **OpenSpec change bundle** (proposal + current specs + delta specs, whose Requirements/Scenarios are the `prd` contract) when an active change resolved; otherwise `prd.md` — the task brief.
+1. The working contract the scorers graded against: the attached **spec bundle** when changes were explicitly selected; otherwise `prd.md` — the task brief. The attachment names its tool; apply the matching contract paragraph below.
 2. Two or more independent `quality-scorer` reports (each scored the same artifact against the same rubric, with no shared context).
 3. The cumulative diff and the repository around it.
 4. `.convoy/quality-rubric.md`, when present, and `.convoy/quality-bar.md`, when present — the same contracts the scorers used.
+
+When the contract is an OpenSpec change, the bundle contains the current `openspec/specs/**` plus the selected `openspec/changes/<id>/` artifacts. Reconcile `prd` against its **Requirements/Scenarios** (cited by id) and `scope` against its declared scope and ADDED/MODIFIED/REMOVED delta operations.
+
+When the contract is a Spec Kit feature, the bundle contains `.specify/memory/constitution.md` when present and every Markdown file under the selected `specs/<id>/` directories. Reconcile `prd` and `scope` against the feature's user-story acceptance scenarios and `FR-`/`SC-` ids, citing them in findings. Spec Kit has no delta operations: reject deductions that merely demand OpenSpec requirement names or delta specs.
 
 ## Workflow
 
@@ -19,7 +23,7 @@ This is an audit-only phase: do not modify the repository. You have bash, so ver
    - Deduplicate. Keep the severity the taxonomy implies, not the one the scorer happened to assign.
 2. **Verify the load-bearing claims yourself.**
    - Re-run only the load-bearing or missing checks (test, typecheck, lint, build) and record real results. The scope step's Checks section covers the baseline, so do not repeat the whole suite when the evidence is already there. This confirms the `operational` and `tests` evidence the scorers could only reason about statically.
-   - Spot-check the top `mustFix` findings against the actual code: does each one name a real problem at a real location? When an OpenSpec bundle is attached, check contested `prd` findings against the change's Requirements/Scenarios rather than a reading of the diff alone.
+   - Spot-check the top `mustFix` findings against the actual code: does each one name a real problem at a real location? When a spec bundle is attached, check contested `prd` and `scope` findings against that tool's criteria above rather than a reading of the diff alone.
    - If a claim fails verification, adjust the affected dimension and say exactly why.
 3. **Recompute.** Recalculate the weighted total from the reconciled dimensions (weights: `prd` 30, `tests` 20, `security` 15, `maintainability` 15, `operational` 10, `scope` 10 — unless the project rubric overrides them), then apply each surviving finding's deduction to its own dimension (critical −15, major −8, minor −2, floor at 0). A change whose only findings are minor cannot end below 80.
 4. **Persist the final score.** Call `write_report` with the report narrative in `markdown`, and `dimensions`, `mustFix`, optional `gaps`, and optional `confidence`. Do not pass or manufacture `score` or `verdict`: Convoy derives them and writes the canonical fence.

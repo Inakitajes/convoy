@@ -94,6 +94,16 @@ async function selectFirstChange(session: Awaited<ReturnType<typeof openBoard>>)
 }
 
 describe("the worktree-rooted board (delta specs-viewer)", () => {
+  test("Spec Kit shows completed features as a count and the constitution in its canonical slot", async () => {
+    const view = viewWith([worktree({ path: mainDir, branch: "main", specTool: "speckit", archiveCount: 2 })], [change("001-login", mainDir)], [".specify/memory/constitution.md"])
+    view.specTool = "speckit"
+    const frame = await frameOf(view)
+    expect(frame).toContain("2 completed")
+    expect(frame).toContain("╭─ constitution")
+    expect(frame).toContain("constitution.md")
+    expect(frame).not.toContain("archived")
+  })
+
   test("every registered checkout is a root entry with its local changes as children", async () => {
     const wt = worktree({ path: worktreeDir, branch: "feat/add-foo" })
     const frame = await frameOf(
@@ -946,4 +956,3 @@ describe("the open reading pane survives a background refresh", () => {
     }
   })
 })
-

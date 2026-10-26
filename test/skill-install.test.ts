@@ -61,6 +61,29 @@ describe("the embedded skill", () => {
     }
   })
 
+  test("the skill resolves the configured spec tool before listing contracts", () => {
+    const contract = skillFiles["SKILL.md"]!.split("## 3. Choose the contract")[1]!.split("## 4.")[0]!
+    expect(contract).toContain("features.specs")
+    expect(contract).toContain("~/.convoy/config.yaml")
+    expect(contract).toContain("~/.convoy/config.yml")
+    expect(contract).toContain(".convoy/config.yaml")
+    expect(contract).toContain(".convoy/config.yml")
+    expect(contract).toContain("first readable file: `config.yaml` before `config.yml`")
+    expect(contract).toContain("do not merge both filenames")
+    expect(contract).toContain("project value wins")
+    expect(contract).toContain("default `openspec`")
+    expect(contract).toContain("`true` is invalid")
+    expect(contract.indexOf("features.specs")).toBeLessThan(contract.indexOf("openspec/changes/"))
+    expect(contract).toContain("Never auto-detect")
+    expect(contract).toContain("never fall back to the other layout")
+    expect(contract).toContain("`specs/<id>/spec.md`")
+    expect(contract).toContain("missing, empty, or unreadable")
+    expect(contract).toContain("at least one task and every task is checked")
+    expect(contract).toContain("exclude completed features")
+    expect(contract).toContain("Don't choose silently, and don't fall back to `--manual` without asking")
+    expect(contract).toContain("in their order")
+  })
+
   test("show prints SKILL.md or a named reference", () => {
     expect(skillFileText()).toBe(skillFiles["SKILL.md"]!.endsWith("\n") ? skillFiles["SKILL.md"]! : `${skillFiles["SKILL.md"]!}\n`)
     expect(skillFileText("references/pipeline-files.md")).toContain("# Pipeline files")
@@ -106,6 +129,41 @@ describe("installSkill", () => {
 })
 
 describe("pipeline commands", () => {
+  test("every harness command resolves the tool and asks before selecting active contracts", () => {
+    for (const target of ["claude", "opencode", "codex"] as const) {
+      for (const command of pipelineCommands) {
+        const text = pipelineCommandText(target, command)
+        expect(text).toContain("features.specs")
+        expect(text).toContain("~/.convoy/config.yaml")
+        expect(text).toContain("~/.convoy/config.yml")
+        expect(text).toContain(".convoy/config.yaml")
+        expect(text).toContain(".convoy/config.yml")
+        expect(text).toContain("first readable file: `config.yaml` before `config.yml`")
+        expect(text).toContain("do not merge both filenames")
+        expect(text).toContain("project value wins")
+        expect(text).toContain("default `openspec`")
+        expect(text).toContain("`true` is invalid")
+        expect(text.indexOf("features.specs")).toBeLessThan(text.indexOf("openspec/changes/"))
+        expect(text).toContain("Never auto-detect")
+        expect(text).toContain("never fall back to the other layout")
+        expect(text).toContain("`specs/<id>/spec.md`")
+        expect(text).toContain("missing, empty, or unreadable")
+        expect(text).toContain("at least one task and every task is checked")
+        expect(text).toContain("exclude completed features")
+        expect(text).toContain("Never pick a change or fall back to `--manual` without asking")
+        expect(text).toContain("repeatable, in that order")
+      }
+    }
+  })
+
+  test("implementation command descriptions include both supported spec tools", () => {
+    for (const command of pipelineCommands.filter((entry) => ["implement", "full-cycle"].includes(entry.pipeline))) {
+      expect(command.summary).toContain("OpenSpec change")
+      expect(command.summary).toContain("Spec Kit feature")
+      expect(pipelineCommandText("claude", command)).toContain("task, or change id")
+    }
+  })
+
   test("each command names a built-in pipeline and launches it with -p", () => {
     for (const command of pipelineCommands) {
       expect(builtInPipelines[command.pipeline]).toBeDefined()

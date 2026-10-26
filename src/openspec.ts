@@ -101,6 +101,23 @@ export function titleFromProposal(body: string, fallback: string): string {
   return line || fallback
 }
 
+/** Proposal rationale up to the next section, without YAML metadata. */
+export function whyFromProposal(body: string): string | undefined {
+  const lines = stripYamlFrontmatter(body).split(/\r?\n/)
+  const start = lines.findIndex((line) => /^##\s+why\b/i.test(line.trim()))
+  if (start === -1) return undefined
+  const end = lines.findIndex((line, index) => index > start && /^##\s/.test(line.trim()))
+  return lines.slice(start + 1, end === -1 ? lines.length : end).join("\n").trim() || undefined
+}
+
+/** OpenSpec alone infers branch types from its delta operations. */
+export async function openSpecBranchPrefix(changeDir: string): Promise<string> {
+  const files = await collectDirRelativeMarkdown(join(changeDir, "specs"), ".")
+  const bodies = await Promise.all(files.map((file) => readFile(join(changeDir, "specs", file), "utf8")))
+  const { inferChangePrefix } = await import("./worktree")
+  return inferChangePrefix(bodies)
+}
+
 /**
  * Lists active (non-archived) changes for the launcher picker. Cheap: only
  * reads each change's `proposal.md` for a title. Returns `[]` when `openspec/`
@@ -274,6 +291,11 @@ async function collectMarkdownFiles(root: string): Promise<string[]> {
  * humans instead of building a runner bundle.
  */
 export async function collectDirRelativeMarkdown(root: string, relativeRoot: string): Promise<string[]> {
+  return collectDirRelativeFiles(root, relativeRoot, (name) => name.endsWith(".md"))
+}
+
+/** The same walk as `collectDirRelativeMarkdown`, keeping the files whose name `include` accepts. */
+export async function collectDirRelativeFiles(root: string, relativeRoot: string, include: (name: string) => boolean): Promise<string[]> {
   let dirents
   try {
     // lstat, not stat/readdir: a symlinked root is not a directory here, so the
@@ -289,8 +311,8 @@ export async function collectDirRelativeMarkdown(root: string, relativeRoot: str
     if (entry.isSymbolicLink()) continue
     const relative = join(relativeRoot, entry.name)
     if (entry.isDirectory()) {
-      out.push(...(await collectDirRelativeMarkdown(join(root, entry.name), relative)))
-    } else if (entry.name.endsWith(".md")) {
+      out.push(...(await collectDirRelativeFiles(join(root, entry.name), relative, include)))
+    } else if (entry.isFile() && include(entry.name)) {
       out.push(relative)
     }
   }

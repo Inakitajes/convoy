@@ -4,12 +4,14 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { parseAndRun, parseCommand, retiredFeatureDiagnostic } from "../src/cli"
-import { parseWorktreesArgs, renderInventory, runWorktreesCommand, worktreesHelp, parseCloseCommandArgs, runCloseCommandFromArgs, closeCommandHelp, withBlockedReporter, formatBlockers, reportBlocked, driveClose } from "../src/worktree-commands"
+import { parseWorktreesArgs, renderInventory, runWorktreesCommand, worktreesHelp, parseCloseCommandArgs, runCloseCommandFromArgs, closeCommandHelp, withBlockedReporter, formatBlockers, reportBlocked, driveClose, validateRunSelection } from "../src/worktree-commands"
 import { pushCommittedRevision, assertNonForceRefspec, reviewOperation } from "../src/operation-handlers"
 import { createOperation, listPendingOperations, operationsRoot, recordStepIntent } from "../src/operation-journal"
 import { acquireWriterClaim, writerClaimPath } from "../src/writer-claims"
 import { execFile } from "../src/git"
 import { repoCommonDir } from "../src/repo-store"
+import { reconcileStepReality } from "../src/operation-reconcile"
+import type { CloseEvent } from "../src/close-events"
 import { createFixtureRepo, type FixtureRepo } from "./helpers/multi-worktree"
 
 /**
@@ -22,6 +24,104 @@ import { createFixtureRepo, type FixtureRepo } from "./helpers/multi-worktree"
 
 const fixtures: FixtureRepo[] = []
 const scratch: string[] = []
+
+describe("Spec Kit lifecycle capability", () => {
+  test("inventory and run selection read only active features from each checkout's configured tool", async () => {
+    const fixture = await createFixtureRepo({ worktrees: [{ name: "speckit", branch: "feat/001-export" }] })
+    fixtures.push(fixture)
+    const checkout = fixture.worktrees.speckit!
+    await fixture.write(checkout, ".convoy/config.yaml", "features:\n  specs: speckit\n")
+    await fixture.write(checkout, "specs/001-export/spec.md", "# Feature Specification: Export\n")
+    await fixture.write(checkout, "specs/002-finished/spec.md", "# Feature Specification: Finished\n")
+    await fixture.write(checkout, "specs/002-finished/tasks.md", "- [x] T001 Done\n")
+    await fixture.write(checkout, ".specify/memory/constitution.md", "# Constitution\n")
+    await fixture.write(checkout, "openspec/changes/other-tool/proposal.md", "# Unselected tool\n")
+    await expect(validateRunSelection(checkout, ["001-export"])).resolves.toBeUndefined()
+    await expect(validateRunSelection(checkout, ["002-finished"])).rejects.toThrow("002-finished")
+    await expect(validateRunSelection(checkout, ["other-tool"])).rejects.toThrow("other-tool")
+    const listing = await renderInventory(fixture.root)
+    expect(listing).toContain("001-export — Export")
+    expect(listing).toContain("completed: 1")
+    expect(listing).toContain("Constitution: 1")
+    expect(listing).not.toContain("other-tool")
+  })
+
+  test("close rejects explicit archive inputs even in dry-run, before any effect", async () => {
+    const fixture = await createFixtureRepo({ worktrees: [{ name: "speckit", branch: "feat/001-export" }] })
+    fixtures.push(fixture)
+    const checkout = fixture.worktrees.speckit!
+    await fixture.write(checkout, ".convoy/config.yaml", "features:\n  specs: speckit\n")
+    await fixture.write(checkout, "specs/001-export/spec.md", "# Export\n")
+    await fixture.write(checkout, "openspec/changes/001-export/proposal.md", "# Same-id OpenSpec change\n")
+    await fixture.write(checkout, "openspec/changes/001-export/tasks.md", "- [x] Complete\n")
+    await fixture.commitAll("feat: export", checkout)
+    await fixture.write(fixture.root, "base-advanced.txt", "must not sync\n")
+    await fixture.commitAll("chore: advance base")
+    const before = await fixture.git(["rev-parse", "main"])
+    const sourceBefore = await fixture.git(["rev-parse", "feat/001-export"])
+    await expect(runWorktreesCommand({ kind: "close", worktree: checkout, base: "main", changes: ["001-export"] }, fixture.root)).rejects.toThrow("Spec Kit has no archive")
+    await expect(runCloseCommandFromArgs({ worktree: checkout, base: "main", changes: ["001-export"], dryRun: true }, fixture.root)).rejects.toThrow("Spec Kit has no archive")
+    expect(await fixture.git(["rev-parse", "main"])).toBe(before)
+    expect(await fixture.git(["rev-parse", "feat/001-export"])).toBe(sourceBefore)
+    expect(await readFile(join(checkout, "openspec/changes/001-export/proposal.md"), "utf8")).toContain("Same-id")
+    expect(await listPendingOperations((await repoCommonDir(checkout))!)).toEqual([])
+  })
+
+  test("close with no archive inputs lands Spec Kit features in place and emits no archive step", async () => {
+    const fixture = await createFixtureRepo({ worktrees: [{ name: "speckit", branch: "feat/001-export" }] })
+    fixtures.push(fixture)
+    const checkout = fixture.worktrees.speckit!
+    await fixture.write(checkout, ".convoy/config.yaml", "features:\n  specs: speckit\n")
+    await fixture.write(checkout, "specs/001-export/spec.md", "# Export\n")
+    await fixture.write(checkout, "specs/001-export/tasks.md", "- [ ] T001 Work in progress\n")
+    await fixture.commitAll("feat: export", checkout)
+    const commonDir = (await repoCommonDir(checkout))!
+    const review = await reviewOperation({ action: "close", checkout, base: "main", commonDir })
+    if (!review.ok) throw new Error(review.blockers.map((blocker) => blocker.reason).join("\n"))
+    const events: CloseEvent[] = []
+    const binDir = await mkdtemp(join(tmpdir(), "convoy-speckit-close-bin-"))
+    scratch.push(binDir)
+    await symlink(Bun.which("git")!, join(binDir, "git"))
+    const previousPath = process.env.PATH
+    try {
+      process.env.PATH = binDir
+      const result = await driveClose({ kind: "close", worktree: checkout, base: "main", changes: [], message: "feat: export", localLanding: true }, commonDir, review.review, { onEvent: (event) => events.push(event) })
+      expect(result.ok).toBe(true)
+    } finally {
+      process.env.PATH = previousPath
+    }
+    expect(events.some((event) => "step" in event && event.step === "archive")).toBe(false)
+    expect(await readFile(join(checkout, "specs/001-export/tasks.md"), "utf8")).toContain("[ ]")
+    expect(await fixture.git(["ls-tree", "-r", "--name-only", "main", "specs/"])).toContain("specs/001-export/spec.md")
+  })
+
+  test("archive refuses using the target checkout config before recovering or changing a pending journal", async () => {
+    const fixture = await createFixtureRepo({ worktrees: [{ name: "speckit", branch: "feat/001-export" }] })
+    fixtures.push(fixture)
+    const checkout = fixture.worktrees.speckit!
+    await fixture.write(checkout, ".convoy/config.yaml", "features:\n  specs: speckit\n")
+    await fixture.write(checkout, "specs/001-export/spec.md", "# Feature Specification: Export\n")
+    await fixture.write(checkout, "specs/001-export/tasks.md", "- [x] T001 Done\n")
+    await fixture.write(checkout, "openspec/changes/001-export/proposal.md", "# Other tool must not archive\n")
+    await fixture.write(checkout, "openspec/changes/001-export/tasks.md", "- [x] Complete\n")
+    const commonDir = (await repoCommonDir(fixture.root))!
+    const created = await createOperation(commonDir, { kind: "archive", intent: { checkout, changes: ["001-export"] }, steps: ["archive:001-export", "commit"] })
+    if (!created.ok) throw new Error(created.reason)
+    const operationId = created.operation.operationId
+    await recordStepIntent(commonDir, operationId, "archive:001-export", { checkout, changeId: "001-export" })
+    const before = await readFile(join(operationsRoot(commonDir), operationId, "operation.json"), "utf8")
+    const head = (await execFile("git", ["rev-parse", "HEAD"], { cwd: checkout })).stdout
+
+    await expect(runWorktreesCommand({ kind: "archive", worktree: checkout, changes: ["001-export"] }, fixture.root)).rejects.toThrow("Spec Kit has no archive")
+    expect(await readFile(join(operationsRoot(commonDir), operationId, "operation.json"), "utf8")).toBe(before)
+    expect(await listPendingOperations(commonDir)).toEqual([operationId])
+    expect((await execFile("git", ["rev-parse", "HEAD"], { cwd: checkout })).stdout).toBe(head)
+    expect(await readFile(join(checkout, "specs/001-export/spec.md"), "utf8")).toContain("Export")
+    expect(await readFile(join(checkout, "openspec/changes/001-export/proposal.md"), "utf8")).toContain("must not archive")
+    const finding = await reconcileStepReality(created.operation.steps[0]!, created.operation, fixture.root)
+    expect(finding).toMatchObject({ finding: "unexplained", reason: "Spec Kit has no archive" })
+  })
+})
 
 afterEach(async () => {
   for (const fixture of fixtures.splice(0)) await fixture.cleanup()

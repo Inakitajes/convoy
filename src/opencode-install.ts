@@ -28,10 +28,11 @@ const spinCommandMarkerFamily = "convoy:spin"
 
 const spinCommandBody = `${spinCommandMarker}
 ---
-description: Spin the current OpenSpec change out into an isolated worktree
+description: Spin the current change of the configured spec tool into an isolated worktree
 ---
 
 Run \`convoy spin\` in the repository with the shell and report its output verbatim.
+Convoy uses the configured spec tool (OpenSpec or Spec Kit).
 
 Do not run git commands yourself, do not infer or name branches, and do not create
 worktrees — convoy owns all of that. If the output lists several changes to pick

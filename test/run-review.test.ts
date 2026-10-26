@@ -222,7 +222,7 @@ describe("renderRunPlan", () => {
     const plan = samplePlan()
     plan.target.worktree = true
     plan.target.branch = "feat/login"
-    plan.openspec = { changeIds: ["add-login"], specFiles: ["specs/cli/spec.md"] }
+    plan.specs = { tool: "openspec", changeIds: ["add-login"], specFiles: ["specs/cli/spec.md"] }
     const output = renderRunPlan(plan, false)
     expect(output).toContain("Scope: the selected changes scope this run's diff and OpenSpec inputs")
     expect(output).toContain("they never narrow whole-branch publication or squash scope")
@@ -233,7 +233,7 @@ describe("renderRunPlan", () => {
     expect(plain).not.toContain("they never narrow whole-branch publication or squash scope")
     const worktreeNoChange = samplePlan()
     worktreeNoChange.target.worktree = true
-    worktreeNoChange.openspec = { changeIds: [], specFiles: [] }
+    worktreeNoChange.specs = { tool: "openspec", changeIds: [], specFiles: [] }
     expect(renderRunPlan(worktreeNoChange, false)).not.toContain("they never narrow whole-branch publication or squash scope")
   })
 
@@ -242,6 +242,18 @@ describe("renderRunPlan", () => {
     plan.target.worktreeDir = "/tmp/convoy-worktree/feat-login"
     const output = renderRunPlan(plan, false)
     expect(output).toContain("Worktree directory: /tmp/convoy-worktree/feat-login")
+  })
+
+  test("names the frozen Spec Kit contract in both review formats", () => {
+    const plan = samplePlan()
+    plan.target.worktree = true
+    plan.specs = { tool: "speckit", changeIds: ["001-login"], specFiles: ["specs/001-login/spec.md"] }
+    for (const compact of [false, true]) {
+      const output = renderRunPlan(plan, compact)
+      expect(output).toContain("Spec Kit feature: 001-login · contract attached (1 spec files)")
+      expect(output).toContain("diff and Spec Kit inputs")
+      expect(output).not.toContain("OpenSpec")
+    }
   })
 
   test("renders dirty working tree info", () => {

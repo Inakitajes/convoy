@@ -34,6 +34,7 @@ import type { AdvisorAuditPolicy } from "./advisor-events"
 import type { AgentSpec, HookSet, HookSpec, HooksConfig, HookWhen, PermissionAdditions, AdvisorAuthOverride, RunnerAuthSelections } from "./types"
 import { isModelGateway, logicalModel, modelGatewayChoices, modelGateways, type ModelRoutingConfig, type ModelRoutingOverrides } from "./model-routing"
 import { convoyHome, convoyRoot, globalConfigPath } from "./workspace"
+import { isSpecToolId, specToolIds, type SpecToolId } from "./spec-tools"
 
 /**
  * Project configuration loaded from .convoy/config.yaml. Everything is
@@ -98,12 +99,12 @@ export function runnerAuthOf(config: Pick<ConvoyConfig, "defaults" | "runners"> 
  */
 export type FeatureToggles = {
   worktrees?: boolean
-  specs?: boolean
+  specs?: SpecToolId | false
 }
 
 /** The effective switches, each on unless a config turned it off. */
 export function featuresOf(config: Pick<ConvoyConfig, "features"> | undefined): Required<FeatureToggles> {
-  return { worktrees: config?.features?.worktrees ?? true, specs: config?.features?.specs ?? true }
+  return { worktrees: config?.features?.worktrees ?? true, specs: config?.features?.specs ?? "openspec" }
 }
 
 /** TUI motion preferences; see the loading-transition capability. */
@@ -390,10 +391,10 @@ defaults:
 
 # Turn off areas you don't use. worktrees: false opens the TUI on Pipelines
 # and stops isolating runs automatically (--worktree still works). specs:
-# false removes OpenSpec from the TUI and from run plans.
+# false removes spec tools from the TUI and from run plans.
 # features:
 #   worktrees: true
-#   specs: true
+#   specs: openspec # openspec | speckit | false
 
 # Agents are matched by name with Markdown prompts next to this config:
 #   agents/<name>.md
@@ -695,7 +696,10 @@ function validateFeatures(v: Validator, raw: unknown): FeatureToggles {
   v.knownKeys(record, "features", ["worktrees", "specs"])
   const features: FeatureToggles = {}
   if (record.worktrees !== undefined) features.worktrees = v.boolean(record.worktrees, "features.worktrees")
-  if (record.specs !== undefined) features.specs = v.boolean(record.specs, "features.specs")
+  if (record.specs !== undefined) {
+    if (!isSpecToolId(record.specs) && record.specs !== false) v.fail("features.specs", `must be ${specToolIds.join(", ")}, or false`)
+    features.specs = record.specs
+  }
   return features
 }
 

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { promisify } from "node:util"
 
-import { dirtyOutsideOpenspec, printSpinHandoff, runSpin } from "../src/spin"
+import { dirtyOutsideSpecRoot, printSpinHandoff, runSpin } from "../src/spin"
 
 const exec = promisify(nodeExecFile)
 const dirs: string[] = []
@@ -70,6 +70,33 @@ afterAll(async () => {
 })
 
 describe("spin", () => {
+  test("Spec Kit spin moves only the active feature and preserves feature.json", async () => {
+    await freshEnv()
+    const repo = await makeRepo()
+    await mkdir(join(repo, ".convoy"), { recursive: true })
+    await writeFile(join(repo, ".convoy/config.yaml"), "features:\n  specs: speckit\n")
+    await mkdir(join(repo, ".specify"), { recursive: true })
+    const pointer = '{"feature":"003-export"}\n'
+    await writeFile(join(repo, ".specify/feature.json"), pointer)
+    await git(repo, "add", ".")
+    await git(repo, "commit", "-m", "chore: configure spec tool")
+    const active = join(repo, "specs/003-export")
+    await mkdir(join(active, "contracts"), { recursive: true })
+    await writeFile(join(active, "spec.md"), "# Feature Specification: Export\n")
+    await writeFile(join(active, "contracts/api.md"), "## MODIFIED Requirements\n")
+    await mkdir(join(repo, "specs/002-completed"), { recursive: true })
+    await writeFile(join(repo, "specs/002-completed/spec.md"), "# Finished\n")
+    await writeFile(join(repo, "specs/002-completed/tasks.md"), "- [x] T001 Done\n")
+
+    const result = await runSpin({ targetDir: repo })
+    expect(result.branch).toBe("feat/003-export")
+    expect(result.movedFiles).toEqual(["specs/003-export/contracts/api.md", "specs/003-export/spec.md"])
+    expect(await pathExists(active)).toBe(false)
+    expect(await pathExists(join(repo, "specs/002-completed/spec.md"))).toBe(true)
+    expect(await readFile(join(repo, ".specify/feature.json"), "utf8")).toBe(pointer)
+    expect(await readFile(join(result.worktreeDir, "specs/003-export/contracts/api.md"), "utf8")).toContain("MODIFIED")
+  })
+
   test("happy path: worktree on the inferred branch, change moved, base clean", async () => {
     await freshEnv()
     const repo = await makeRepo()
@@ -301,19 +328,19 @@ describe("spin", () => {
   })
 })
 
-describe("dirtyOutsideOpenspec", () => {
+describe("dirtyOutsideSpecRoot", () => {
   test("flags paths outside openspec/ and tolerates quoted paths", () => {
     const porcelain = [
       "?? openspec/changes/add-foo/proposal.md",
       '?? "weird dir/file.md"',
       " M src/cli.ts",
     ].join("\n")
-    const flagged = dirtyOutsideOpenspec(porcelain)
+    const flagged = dirtyOutsideSpecRoot(porcelain, "openspec/")
     expect(flagged).toHaveLength(2)
     expect(flagged[0]).toContain("weird dir")
   })
 
   test("empty porcelain flags nothing", () => {
-    expect(dirtyOutsideOpenspec("")).toEqual([])
+    expect(dirtyOutsideSpecRoot("", "openspec/")).toEqual([])
   })
 })

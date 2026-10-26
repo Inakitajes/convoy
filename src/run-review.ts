@@ -8,6 +8,7 @@ import { plannedStepAdvisor, plannedStepModel } from "./run-plan"
 import { stepRunnerFor, stepRunnerIds, type StepRunnerId } from "./step-runners"
 import { runnerDescriptor } from "./runners/descriptors"
 import type { ReviewedRunnerAuth, RunPlan } from "./types"
+import { specTools } from "./spec-tools"
 
 const controlCharacters = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g
 const ansiSequences = /\u001b\[[0-?]*[ -/]*[@-~]/g
@@ -28,9 +29,9 @@ export function renderRunPlan(plan: RunPlan, compact = false, options: RunPlanRe
     `  Diff base: ${sanitizeInline(plan.target.baseRef)} · working tree: ${plan.target.dirty ? "include dirty" : "clean required"}`,
     `  Worktree: ${plan.target.worktree ? `yes · branch ${plan.target.branch ? sanitizeInline(plan.target.branch) : "named at start"}` : "no"}`,
     ...prdHistoryPlanLines(plan),
-    ...openspecPlanLines(plan),
-    ...(plan.target.worktree && plan.openspec && plan.openspec.changeIds.length > 0
-      ? ["Scope: the selected changes scope this run's diff and OpenSpec inputs — they never narrow whole-branch publication or squash scope; those act on the entire branch."]
+    ...specPlanLines(plan),
+    ...(plan.target.worktree && plan.specs && plan.specs.changeIds.length > 0
+      ? [`Scope: the selected changes scope this run's diff and ${specTools[plan.specs.tool].label} inputs — they never narrow whole-branch publication or squash scope; those act on the entire branch.`]
       : []),
     `Pipeline: ${sanitizeInline(plan.pipeline.name)} · ${plan.pipeline.steps.length} steps`,
     `Gateway: ${gatewayLabel(plan.modelRouting.gateway)}${plan.modelRouting.gateway === "nitro" ? " · every OpenRouter model routed by throughput (injected for this run only)" : ""}`,
@@ -115,9 +116,9 @@ export async function confirmRunPlan(plan: RunPlan): Promise<boolean> {
 }
 
 function prdHistoryPlanLines(plan: RunPlan): string[] {
-  // An active OpenSpec change is the contract; do not also claim the historical
+  // An active spec change is the contract; do not also claim the historical
   // PRD will attach (the runner supersedes it).
-  if (plan.openspec && plan.openspec.changeIds.length > 0) return []
+  if (plan.specs && plan.specs.changeIds.length > 0) return []
   if (!plan.prdHistory) return []
   const copy = prdHistoryPreviewCopy(plan.prdHistory)
   if (!copy) return []
@@ -126,14 +127,15 @@ function prdHistoryPlanLines(plan: RunPlan): string[] {
   return [`PRD history: ${headline}`]
 }
 
-function openspecPlanLines(plan: RunPlan): string[] {
-  if (!plan.openspec) return []
-  if (plan.openspec.changeIds.length === 0) {
-    return ["OpenSpec: openspec/ present but no active change — scope falls back to the diff"]
+function specPlanLines(plan: RunPlan): string[] {
+  if (!plan.specs) return []
+  const tool = specTools[plan.specs.tool]
+  if (plan.specs.changeIds.length === 0) {
+    return [`${tool.label}: ${tool.dirtyRoot} present but no active change — scope falls back to the diff`]
   }
-  const ids = sanitizeInline(plan.openspec.changeIds.join(", "))
-  const count = plan.openspec.specFiles.length
-  return [`OpenSpec change: ${ids} · contract attached (${count} spec files)`]
+  const ids = sanitizeInline(plan.specs.changeIds.join(", "))
+  const count = plan.specs.specFiles.length
+  return [`${tool.changeNoun}: ${ids} · contract attached (${count} spec files)`]
 }
 
 function sanitize(value: string) {

@@ -106,6 +106,26 @@ describe("resolveRunTitle precedence", () => {
 })
 
 describe("firstSelectedChangeTitle / resolveRunTitleFor", () => {
+  test("reads only the selected backend's local title", async () => {
+    const dir = await changeTree("001-login", "# Wrong OpenSpec title\n")
+    await mkdir(join(dir, "specs", "001-login"), { recursive: true })
+    await writeFile(join(dir, "specs", "001-login", "spec.md"), "# Feature Specification: Passwordless login\n")
+    expect(await resolveRunTitleFor({ targetDir: dir, tool: "speckit", changeIds: ["001-login"], branch: "feat/other" })).toBe("Passwordless login")
+    expect(await resolveRunTitleFor({ targetDir: dir, tool: "speckit", changeIds: ["missing"], branch: "feat/other" })).toBe("other")
+  })
+
+  test("Spec Kit keeps verbatim feature ids and uses the id when its spec has no heading", async () => {
+    const dir = await changeTree("unused", undefined)
+    for (const id of ["archive", "feature.md", "001-untitled"]) {
+      await mkdir(join(dir, "specs", id), { recursive: true })
+      await writeFile(join(dir, "specs", id, "spec.md"), "## User Scenarios\nStill planning.\n")
+      expect(await resolveRunTitleFor({ targetDir: dir, tool: "speckit", changeIds: [id], branch: "feat/other" })).toBe(id)
+    }
+    await writeFile(join(dir, "specs", "archive", "spec.md"), "# Feature Specification: Archive exports\n")
+    expect(await firstSelectedChangeTitle(dir, ["archive"], "speckit")).toBe("Archive exports")
+    expect(await firstSelectedChangeTitle(dir, ["../archive", "feature.md/.."], "speckit")).toBeUndefined()
+  })
+
   test("a readable proposal resolves its heading title with frontmatter stripped", async () => {
     const dir = await changeTree(
       "add-attach-flow",

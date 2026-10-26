@@ -7,6 +7,7 @@ import { CloseTui, type CloseFollowUpItem, type CloseFollowUpsView, type CloseTu
 import { showCloseOutcome } from "../src/worktree-commands"
 import { TuiSession, type TuiRoute } from "../src/tui-session"
 import type { CloseLandingDecision } from "../src/close-events"
+import { initialCloseChecklistState } from "../src/close-presentation"
 
 function keyEvent(name: string, options: { ctrl?: boolean; shift?: boolean } = {}) {
   return {
@@ -49,6 +50,19 @@ async function openClose(width = 100, height = 30, input = new EventEmitter(), o
 }
 
 describe("close TUI progress", () => {
+  test("a tool without archives reviews only sync and squash in the unchanged layout", async () => {
+    const renderer = await createTestRenderer({ width: 100, height: 30 })
+    const instance = new CloseTui(renderer.renderer, "/workspace/convoy", initialCloseChecklistState(false), new EventEmitter())
+    try {
+      await renderer.renderOnce()
+      expect(instance.snapshot().rows.map((row) => row.step)).toEqual(["sync", "squash-merge"])
+      expect(renderer.captureCharFrame()).not.toContain("archive")
+      expect(renderer.captureCharFrame()).toContain("convoy close")
+    } finally {
+      instance.destroy()
+    }
+  })
+
   test("renders the event stream as a real full-screen checklist", async () => {
     const session = await openClose()
     try {

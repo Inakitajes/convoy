@@ -959,27 +959,37 @@ describe("loopGuard config", () => {
 
 describe("features config", () => {
   test("every area is on unless a config turns it off", () => {
-    expect(featuresOf(undefined)).toEqual({ worktrees: true, specs: true })
-    expect(featuresOf(parse("defaults:\n  prdHistory: true"))).toEqual({ worktrees: true, specs: true })
+    expect(featuresOf(undefined)).toEqual({ worktrees: true, specs: "openspec" })
+    expect(featuresOf(parse("defaults:\n  prdHistory: true"))).toEqual({ worktrees: true, specs: "openspec" })
     expect(featuresOf(parse("features:\n  specs: false"))).toEqual({ worktrees: true, specs: false })
     expect(featuresOf(parse("features:\n  worktrees: false\n  specs: false"))).toEqual({ worktrees: false, specs: false })
   })
 
-  test("rejects non-boolean switches and unknown areas warn like other keys", () => {
-    expect(() => parse("features:\n  specs: maybe")).toThrow("features.specs")
+  test("accepts tool ids, rejecting all other specs values with the accepted choices", () => {
+    for (const tool of ["openspec", "speckit"] as const) {
+      const config = parse(`features:\n  specs: ${tool}`)
+      expect(featuresOf(config).specs).toBe(tool)
+      expect(parse(serializeConvoyConfig(config)).features?.specs).toBe(tool)
+    }
+    for (const value of ["true", "maybe", "1", "null", "[]", "{}"] as const) {
+      expect(() => parse(`features:\n  specs: ${value}`)).toThrow("features.specs must be openspec, speckit, or false")
+    }
     expect(() => parse("features:\n  worktrees: 1")).toThrow("features.worktrees")
   })
 
   test("the project switch wins over the global one, per area", () => {
     const global = parse("features:\n  worktrees: false\n  specs: false")
-    const project = parse("features:\n  specs: true")
-    expect(featuresOf(mergeConvoyConfigs(global, project))).toEqual({ worktrees: false, specs: true })
+    const project = parse("features:\n  specs: speckit")
+    expect(featuresOf(mergeConvoyConfigs(global, project))).toEqual({ worktrees: false, specs: "speckit" })
+    expect(featuresOf(mergeConvoyConfigs(project, parse("features:\n  specs: openspec"))).specs).toBe("openspec")
+    expect(featuresOf(mergeConvoyConfigs(project, parse("features:\n  specs: false"))).specs).toBe(false)
   })
 
   test("round-trips through serialize and is documented in the template", () => {
     const config = parse("features:\n  worktrees: false")
     expect(parse(serializeConvoyConfig(config)).features).toEqual({ worktrees: false })
     expect(defaultConvoyConfig).toContain("# features:")
+    expect(defaultConvoyConfig).toContain("#   specs: openspec # openspec | speckit | false")
   })
 })
 

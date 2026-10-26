@@ -20,6 +20,10 @@ A project can reshape convoy entirely from one file. Everything is optional — 
 ```yaml
 version: 1
 
+features:
+  worktrees: true                  # boolean, on by default
+  specs: openspec                  # openspec (default), speckit, or false; true is invalid
+
 defaults:
   model: openai/gpt-5.6-terra#xhigh     # provider/model[#variant], used by steps with no model of their own
   baseRef: main                    # optional; auto-detected when unset (origin default branch, else main/master/develop/trunk, else current branch)
@@ -166,9 +170,9 @@ Both files are merged before a run, with the project winning: `defaults`, `agent
 
 ## Config files (`convoy config`)
 
-`convoy config` (or **Config** in the TUI) shows the [feature switches](#turning-off-worktrees-or-specs-features) as toggles, then lists the files that shape the current project and opens them in your own editor. Apart from the switches, Convoy doesn't edit YAML through forms; your editor is better at it.
+`convoy config` (or **Config** in the TUI) shows the [worktree switch and spec tool choice](#turning-off-worktrees-or-specs-features), then lists the files that shape the current project and opens them in your own editor. Apart from those settings, Convoy doesn't edit YAML through forms; your editor is better at it.
 
-The **Features** rows show each switch's value and where it comes from (default, the global config, or this project). `space` flips one and saves it in the project's `.convoy/config.yaml`, which wins over the global config. Only that line changes, so the file keeps its comments; a missing project config is created from the `convoy init` template first, and one that doesn't load is left alone until you fix it.
+The **Features** rows show each value and where it comes from (default, the global config, or this project). `space` flips worktrees or cycles the spec tool choice and saves it in the project's `.convoy/config.yaml`, which wins over the global config. Only that line changes, so the file keeps its comments; a missing project config is created from the `convoy init` template first, and one that doesn't load is left alone until you fix it.
 
 - **Global:** `~/.convoy/config.yaml` and any agent prompt overrides in `~/.convoy/agents/`.
 - **Project:** `.convoy/config.yaml` (or `config.yml`) and any agent prompt overrides in `.convoy/agents/`.
@@ -177,16 +181,18 @@ Each row says whether the file loads, and a file that doesn't load shows the par
 
 ## Turning off worktrees or specs (`features`)
 
-Both areas are on by default. Turn off the ones you don't use from the Features toggles in `convoy config`, or in YAML, globally or per project (the project wins, per switch):
+Worktrees are on by default; specs default to `openspec`. Choose the spec tool or turn off an area in `convoy config`, or in YAML, globally or per project (the project wins for each value):
 
 ```yaml
 features:
   worktrees: false   # open the TUI on Pipelines, and don't isolate runs automatically
-  specs: false       # no OpenSpec in the TUI or in run plans
+  specs: speckit     # openspec (default), speckit, or false to disable specs
 ```
 
+- **`specs: openspec`** reads only `openspec/changes/` and `openspec/specs/`; **`specs: speckit`** reads only `specs/<id>/` features and `.specify/memory/constitution.md`. Convoy never auto-detects the tool, merges layouts, or falls back to the other layout when the configured one is absent. See [Spec-tool workflows](openspec.md).
+- **Breaking change:** `specs: true` is rejected. Replace it with `specs: openspec`; the accepted values are `openspec`, `speckit`, and `false`. `worktrees` remains a boolean.
 - **`worktrees: false`** drops the worktree board. The TUI opens on the run launcher, which becomes the first screen: `r` opens Runs, `c` Config, `o` Specs (when specs are on), and `q` quits. Runs no longer get their own worktree by default. An explicit `--worktree` or `defaults.worktree: true` still isolates, and `convoy worktrees` still works when you call it.
-- **`specs: false`** removes the Specs destination, the OpenSpec actions and linked specs from a worktree's detail, and the launcher's change picker. Run plans attach no OpenSpec bundle and don't ask for `--change` or `--manual`, even in a repo with an `openspec/` folder. `--change`, `convoy specs`, and `convoy spin` refuse with a message that names the switch. The close action stays, as the squash merge it still is.
+- **`specs: false`** removes the Specs destination, spec-tool actions and linked specs from a worktree's detail, and the launcher's change picker. Run plans attach no spec bundle and don't ask for `--change` or `--manual`, even in a repo with an `openspec/` or `specs/` folder. `--change`, `convoy specs`, and `convoy spin` refuse with a message that names the switch. The close action stays, as a sync/squash Git operation with no archive inputs.
 
 ## Initializing config files (`convoy init`)
 

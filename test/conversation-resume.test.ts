@@ -43,6 +43,8 @@ const events: string[] = []
 const authoringCommandsEvents: string[] = []
 /** The reference the foreground client was handed. */
 const foregroundRefs: Array<{ harness: string; sessionId: string }> = []
+/** The first message each foreground client was started with. */
+const foregroundPrompts: Array<string | undefined> = []
 const notices: Array<{ title: string; message: string }> = []
 
 const fakeRoute = {
@@ -56,15 +58,17 @@ mock.module("../src/conversations", () => ({
     events.push(`validate:${input.ref.sessionId}`)
     return linkedValidation
   },
-  createAuthoringConversation: async (input: { checkout: string; title?: string; server?: unknown }) => {
+  createAuthoringConversation: async (input: { checkout: string; title?: string; server?: unknown; harness?: string }) => {
     if (!capturing) return realCreateAuthoringConversation(input as never)
     events.push("create")
+    if (input.harness === "claude-code") return { harness: "claude-code" as const, sessionId: "claude_new_minted" }
     return { harness: "opencode" as const, sessionId: "ses_new_minted" }
   },
-  openConversationForeground: async (input: { checkout: string; ref: { harness: string; sessionId: string } }) => {
+  openConversationForeground: async (input: { checkout: string; ref: { harness: string; sessionId: string }; prompt?: string }) => {
     if (!capturing) return realOpenConversationForeground(input as never)
     events.push("foreground")
     foregroundRefs.push(input.ref)
+    foregroundPrompts.push(input.prompt)
     return 0
   },
   sessionActivity: async (input: { checkout: string; ref: { sessionId: string } }) => {
@@ -144,6 +148,7 @@ function resetCapture(): void {
   events.length = 0
   authoringCommandsEvents.length = 0
   foregroundRefs.length = 0
+  foregroundPrompts.length = 0
   notices.length = 0
 }
 
@@ -318,5 +323,26 @@ describe("task 4.5 harness-qualified authoring session navigation", () => {
     expect(foregroundRefs).toEqual([{ harness: "opencode", sessionId: "ses_new_minted" }])
     expect(authoringCommandsEvents).toEqual([])
     expect(notices).toEqual([])
+  })
+})
+
+describe("Claude propose under Spec Kit (add-speckit-backend, design D5)", () => {
+  test("the Spec Kit skill is discovered and started as the conversation's first message", async () => {
+    await makeFixture()
+    resetCapture()
+    await mkdir(join(wt, ".convoy"), { recursive: true })
+    await writeFile(join(wt, ".convoy", "config.yaml"), "features:\n  specs: speckit\ndefaults:\n  authoring:\n    runner: claude-code\n")
+    await mkdir(join(wt, ".claude", "skills", "speckit-specify"), { recursive: true })
+    await writeFile(join(wt, ".claude", "skills", "speckit-specify", "SKILL.md"), "# speckit-specify\n")
+
+    const { dispatchWorkAction } = await import("../src/cli")
+    await dispatchWorkAction(main, fakeRoute, wt, "propose")
+
+    expect(notices).toEqual([])
+    expect(events).toEqual(["create", "foreground"])
+    expect(foregroundRefs).toEqual([{ harness: "claude-code", sessionId: "claude_new_minted" }])
+    expect(foregroundPrompts).toEqual(["/speckit-specify"])
+    // Claude needs no server: the OpenCode command API is never consulted.
+    expect(authoringCommandsEvents).toEqual([])
   })
 })

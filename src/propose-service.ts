@@ -49,8 +49,12 @@ const manualRemediation = ["open an ordinary conversation in the worktree instea
 const discoverCommandRemediation = ["author the change manually in a conversation"]
 
 /** The proposal workflow command the fallback looks for. */
-export function findProposalCommand(commands: readonly string[]): string | undefined {
-  return commands.find((name) => name === "opsx-propose") ?? commands.find((name) => name.endsWith("propose"))
+export function findProposalCommand(commands: readonly string[], orderedNames: readonly string[]): string | undefined {
+  for (const name of orderedNames) {
+    const command = name.startsWith("*") ? commands.find((candidate) => candidate.endsWith(name.slice(1))) : commands.find((candidate) => candidate === name)
+    if (command) return command
+  }
+  return undefined
 }
 
 /**
@@ -60,7 +64,7 @@ export function findProposalCommand(commands: readonly string[]): string | undef
  * every path that does not need it, including just before a command runs under
  * the transferred service.
  */
-export async function startProposalCommand(server: ProposalServer, deps: ProposalCommandDeps): Promise<ProposalCommandOutcome> {
+export async function startProposalCommand(server: ProposalServer, deps: ProposalCommandDeps, orderedNames: readonly string[]): Promise<ProposalCommandOutcome> {
   const owned = server.kind === "helper"
   let helperStopped = false
   const stopOwnedHelper = async () => {
@@ -80,12 +84,12 @@ export async function startProposalCommand(server: ProposalServer, deps: Proposa
       await stopOwnedHelper()
       return { status: "blocked", reason: "the project's authoring commands could not be discovered", remediation: checkCommandsRemediation }
     }
-    const command = findProposalCommand(commands)
+    const command = findProposalCommand(commands, orderedNames)
     if (!command) {
       await stopOwnedHelper()
       return {
         status: "blocked",
-        reason: "this project has no supported proposal workflow command (looked for opsx-propose under .opencode/commands/)",
+        reason: `this project has no supported proposal workflow command (looked for ${orderedNames.join(", ")} under .opencode/commands/)`,
         remediation: discoverCommandRemediation,
       }
     }

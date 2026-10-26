@@ -8,6 +8,8 @@ import { SpecsBrowser } from "../src/specs-browser"
 import type { ClipboardResult } from "../src/clipboard"
 import type { SpecsChangeEntry, SpecsResolution, SpecsView } from "../src/specs"
 import type { ControlBoard } from "../src/control-board"
+import { loadSpecsChangeAt } from "../src/specs"
+import { specTools } from "../src/spec-tools"
 
 function keyEvent(name: string, options: { ctrl?: boolean; shift?: boolean; sequence?: string } = {}) {
   return {
@@ -117,6 +119,30 @@ async function closeSession(session: Awaited<ReturnType<typeof openReader>>) {
 }
 
 describe("the fullscreen reader", () => {
+  test("Spec Kit Design Docs share per-file headings between the reader and clipboard", async () => {
+    const feature = join(root, "specs", "001-login")
+    await mkdir(join(feature, "contracts"), { recursive: true })
+    for (const file of ["spec.md", "plan.md", "tasks.md", "research.md", "data-model.md", "contracts/login.md", "contracts/openapi.yaml"]) {
+      await writeFile(join(feature, file), file === "spec.md" ? "# Feature Specification: Login\n" : `Content for ${file}\n`)
+    }
+    const entry = await loadSpecsChangeAt(feature, "001-login", root, specTools.speckit)
+    const session = await openReader({ view: { ...sampleView(), specTool: "speckit", changes: [entry] } })
+    try {
+      session.press("4")
+      await Bun.sleep(30)
+      await session.renderOnce()
+      expect(session.captureCharFrame()).toContain("design docs")
+      expect(session.captureCharFrame()).toContain("contracts/login.md")
+      session.press("c")
+      await Bun.sleep(20)
+      const copied = session.clipboard.copied[0]!
+      for (const file of ["research.md", "data-model.md", "contracts/login.md", "contracts/openapi.yaml"]) expect(copied).toContain(`## ${file}\n\nContent for ${file}`)
+      expect(copied).not.toContain("Delta Specs")
+    } finally {
+      await closeSession(session)
+    }
+  })
+
   test("replaces the chrome with one title bar naming the subject and tab", async () => {
     const session = await openReader()
     const frame = session.captureCharFrame()
